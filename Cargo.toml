@@ -13,8 +13,8 @@ categories = ["command-line-utilities","git"]
 
 [dependencies]
 clap = { version = "4.1.6", features = ["derive"] }
-nostr = { version = "0.21" }
-nostr-sdk = { version = "0.21", features = ["blocking"] }
+nostr = { version = "0.22" }
+nostr-sdk = { version = "0.22", features = ["blocking"] }
 serde = { version = "1.0.147", features = ["derive"] }
 serde_json = "1.0.91"
 dialoguer = "0.10.4"
@@ -22,7 +22,3 @@ indicatif = "0.17.3"
 thiserror = "1.0"
 confy = "0.5.1"
 git2 = "0.17.1"
-
-[patch.crates-io]
-nostr = { git = 'https://github.com/DanConwayDev/nostr.git', features = ["blocking"] }
-

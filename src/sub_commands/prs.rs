@@ -75,7 +75,7 @@ pub fn prs(
         println!(
             "{}\n raised: {}",
             outstanding_prs[i].content,
-            outstanding_prs[i].created_at, //.to_human_datetime(), in v0.22
+            outstanding_prs[i].created_at.to_human_datetime(),
         );
 
         let branch_id = tag_extract_value(
