@@ -181,7 +181,7 @@ pub fn fetch_pull_push(
                     ) {
                         None => {
                             // TODO you should still be able to check it out -  find the easliest commit, check it out as branch, find the latest commit and set the branch to that commit.
-                            println!("You are pulling a branch that has been merged or you have delete. ngit doesnt currently support this.");
+                            println!("No new commits were found. Not pulling the branch.");
                         },
                         Some(name) => {
                             println!("exists as a local branch named '{}'. check it out and then fetch /pull.",name);
