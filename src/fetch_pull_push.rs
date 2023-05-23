@@ -317,7 +317,16 @@ pub fn fetch_pull_push(
                             "you are a repo maintainer and have the permission to push to '{}'!",
                             &confirmed_branch_name,
                         )
-                    } else {
+                    } if match branch_refs.is_authorized(Some(&branch_id), &keys.public_key()) {
+                        None => false,
+                        Some(authorized) => authorized,
+                    } {
+                        println!(
+                            "you have the permission to push to '{}'!",
+                            &confirmed_branch_name,
+                        )
+                    } 
+                    else {                        
                         panic!(
                             "You are not a repo maintainer so you  don't have permission to push to '{}' branch :(",
                             &confirmed_branch_name,
