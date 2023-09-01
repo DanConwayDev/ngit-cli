@@ -2,7 +2,7 @@
 name = "ngit"
 version = "0.0.1"
 edition = "2021"
-description = "a proof of concept cli for a nostr based github alternative"
+description = "cli for code collaboration over nostr"
 authors = ["DanConwayDev <DanConwayDev@protonmail.com>"]
 readme = "README.md"
 homepage = "https://github.com/DanConwayDev/ngit-cli"
@@ -12,17 +12,21 @@ keywords = ["nostr", "git"]
 categories = ["command-line-utilities","git"]
 
 [dependencies]
-clap = { version = "4.1.6", features = ["derive"] }
-nostr = { version = "0.21" }
-nostr-sdk = { version = "0.21", features = ["blocking"] }
-serde = { version = "1.0.147", features = ["derive"] }
-serde_json = "1.0.91"
+anyhow = "1.0.75"
+clap = { version = "4.3.19", features = ["derive"] }
 dialoguer = "0.10.4"
-indicatif = "0.17.3"
-thiserror = "1.0"
-confy = "0.5.1"
-git2 = "0.17.1"
+directories = "5.0.1"
+serde = { version = "1.0.181", features = ["derive"] }
+serde_json = "1.0.105"
 
-[patch.crates-io]
-nostr = { git = 'https://github.com/DanConwayDev/nostr.git', features = ["blocking"] }
+[dev-dependencies]
+assert_cmd = "2.0.12"
+duplicate = "1.0.0"
+mockall = "0.11.4"
+serial_test = "2.0.0"
+test_utils = { path = "test_utils" }
 
+[workspace]
+members = [
+    "test_utils",
+]
