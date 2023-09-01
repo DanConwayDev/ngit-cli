@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 #[cfg(test)]
 use mockall::*;
+use nostr::secp256k1::XOnlyPublicKey;
 use serde::{self, Deserialize, Serialize};
 
 #[derive(Default)]
@@ -59,7 +60,7 @@ impl ConfigManagement for ConfigManager {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::module_name_repetitions)]
 pub struct MyConfig {
     pub version: u8,
@@ -68,16 +69,37 @@ pub struct MyConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRef {
-    pub nsec: String,
+    pub public_key: XOnlyPublicKey,
+    pub encrypted_key: String,
 }
 
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
     use serial_test::serial;
-    use test_utils::*;
 
     use super::*;
+
+    fn backup_existing_config() -> Result<()> {
+        let config_path = get_dirs()?.config_dir().join("config.json");
+        let backup_config_path = get_dirs()?.config_dir().join("config-backup.json");
+        if config_path.exists() {
+            std::fs::rename(config_path, backup_config_path)?;
+        }
+        Ok(())
+    }
+
+    fn restore_config_backup() -> Result<()> {
+        let config_path = get_dirs()?.config_dir().join("config.json");
+        let backup_config_path = get_dirs()?.config_dir().join("config-backup.json");
+        if config_path.exists() {
+            std::fs::remove_file(&config_path)?;
+        }
+        if backup_config_path.exists() {
+            std::fs::rename(backup_config_path, config_path)?;
+        }
+        Ok(())
+    }
 
     mod load {
         use super::*;
@@ -85,27 +107,26 @@ mod tests {
         #[test]
         #[serial]
         fn when_config_file_doesnt_exist_defaults_are_returned() -> Result<()> {
-            with_fresh_config(|| {
-                assert_eq!(ConfigManager.load()?, MyConfig::default());
-
-                Ok(())
-            })
+            backup_existing_config()?;
+            let c = ConfigManager;
+            assert_eq!(c.load()?, MyConfig::default());
+            restore_config_backup()?;
+            Ok(())
         }
 
         #[test]
         #[serial]
         fn when_config_file_exists_it_is_returned() -> Result<()> {
-            with_fresh_config(|| {
-                let c = ConfigManager;
-                let new_config = MyConfig {
-                    version: 255,
-                    ..MyConfig::default()
-                };
-                c.save(&new_config)?;
-                assert_eq!(c.load()?, new_config);
-
-                Ok(())
-            })
+            backup_existing_config()?;
+            let c = ConfigManager;
+            let new_config = MyConfig {
+                version: 255,
+                ..MyConfig::default()
+            };
+            c.save(&new_config)?;
+            assert_eq!(c.load()?, new_config);
+            restore_config_backup()?;
+            Ok(())
         }
     }
 
@@ -115,38 +136,36 @@ mod tests {
         #[test]
         #[serial]
         fn when_config_file_doesnt_config_is_saved() -> Result<()> {
-            with_fresh_config(|| {
-                let c = ConfigManager;
-                let new_config = MyConfig {
-                    version: 255,
-                    ..MyConfig::default()
-                };
-                c.save(&new_config)?;
-                assert_eq!(c.load()?, new_config);
-
-                Ok(())
-            })
+            backup_existing_config()?;
+            let c = ConfigManager;
+            let new_config = MyConfig {
+                version: 255,
+                ..MyConfig::default()
+            };
+            c.save(&new_config)?;
+            assert_eq!(c.load().unwrap(), new_config);
+            restore_config_backup()?;
+            Ok(())
         }
 
         #[test]
         #[serial]
         fn when_config_file_exists_new_config_is_saved() -> Result<()> {
-            with_fresh_config(|| {
-                let c = ConfigManager;
-                let config = MyConfig {
-                    version: 255,
-                    ..MyConfig::default()
-                };
-                c.save(&config)?;
-                let new_config = MyConfig {
-                    version: 254,
-                    ..MyConfig::default()
-                };
-                c.save(&new_config)?;
-                assert_eq!(c.load()?, new_config);
-
-                Ok(())
-            })
+            backup_existing_config()?;
+            let c = ConfigManager;
+            let config = MyConfig {
+                version: 255,
+                ..MyConfig::default()
+            };
+            c.save(&config)?;
+            let new_config = MyConfig {
+                version: 254,
+                ..MyConfig::default()
+            };
+            c.save(&new_config)?;
+            assert_eq!(c.load().unwrap(), new_config);
+            restore_config_backup()?;
+            Ok(())
         }
     }
 }

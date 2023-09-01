@@ -18,19 +18,13 @@
         devShells.default = mkShell {
 
           nativeBuildInputs = [
-            # stable to be introduced when the following issue is resolved
+            # override rustfmt with nightly toolchain version to support unstable features
+            # ideally this wouldn't be pinned to a specific nightly version but
+            # selectLatestNightlyWith isn't support with mixed toolchains
             # https://github.com/oxalica/rust-overlay/issues/136
-            # rust-bin.stable.latest.default
-            # nightly for rustfmt
-            (
-              rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
-                extensions = [
-                  "rust-src"
-                  "rustfmt"
-                  "clippy"
-                ];
-              })
-            )
+            (lib.hiPrio rust-bin.nightly."2023-09-01".rustfmt)
+            rust-bin.stable.latest.default
+
           ];
 
           buildInputs = [

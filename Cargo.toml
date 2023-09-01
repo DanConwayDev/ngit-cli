@@ -13,16 +13,24 @@ categories = ["command-line-utilities","git"]
 
 [dependencies]
 anyhow = "1.0.75"
+chacha20poly1305 = "0.10.1"
 clap = { version = "4.3.19", features = ["derive"] }
 dialoguer = "0.10.4"
 directories = "5.0.1"
+keyring = "2.0.5"
+nostr = "0.23.0"
+passwords = "3.1.13"
+scrypt = "0.11.0"
 serde = { version = "1.0.181", features = ["derive"] }
 serde_json = "1.0.105"
+zeroize = "1.6.0"
 
 [dev-dependencies]
 assert_cmd = "2.0.12"
 duplicate = "1.0.0"
 mockall = "0.11.4"
+once_cell = "1.18.0"
+rexpect = "0.5.0"
 serial_test = "2.0.0"
 test_utils = { path = "test_utils" }
 

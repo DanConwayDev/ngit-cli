@@ -3,14 +3,38 @@ use std::ffi::OsStr;
 use anyhow::{ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
+use nostr::{self, prelude::FromSkStr};
+use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
 
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
+pub static TEST_KEY_1_SK_HEX: &str =
+    "08608a436aee4c07ea5c36f85cb17c58f52b3ad7094f9318cc777771f0bf218b";
+pub static TEST_KEY_1_NPUB: &str =
+    "npub175lyhnt6nn00qjw0v3navw9pxgv43txnku0tpxprl4h6mvpr6a5qlphudg";
+pub static TEST_KEY_1_DISPLAY_NAME: &str = "bob";
+pub static TEST_KEY_1_ENCRYPTED: &str = "ncryptsec1qyq607h3cykxc3f2a44u89cdk336fptccn3fm5pf3nmf93d3c86qpunc7r6klwcn6lyszjy72wxwqq9aljg4pm6atvjrds9e248yhv76xfnt464265kgnjsvg8rlg06wg4sp9uljzfpu8zuaztcvfn2j8ggdrg8mldh850cy75efsyqqansert9wqmn4e6khpgvfz7h5le9";
+pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qy8ke0tjqnn8wt3w6lnc86c27ry3qrptxctjfcgruryxy0at238kwyjwsswd7z88thysruzw3awlrsxjvw5uptcd7vt70ft9rtkx00m8cgy3khm4hxa5d2gfnc6athnfruy2eyl6pkas8k34jg85z7xjqqadzfzh9rp0fzxqtw0tvxksac3n8yc98uksvuf93e0lcvqy8j6";
+pub static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
+    Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_1_NSEC).unwrap());
 
 pub static TEST_KEY_2_NSEC: &str =
     "nsec1ypglg6nj6ep0g2qmyfqcv2al502gje3jvpwye6mthmkvj93tqkesknv6qm";
+pub static TEST_KEY_2_NPUB: &str =
+    "npub1h2yz2eh0798nh25hvypenrz995nla9dktfuk565ljf3ghnkhdljsul834e";
+
+pub static TEST_KEY_2_DISPLAY_NAME: &str = "carole";
+pub static TEST_KEY_2_ENCRYPTED: &str = "...2";
+pub static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
+    Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_2_NSEC).unwrap());
+
+pub static TEST_INVALID_NSEC: &str = "nsec1ppsg5sm2aex";
+pub static TEST_PASSWORD: &str = "769dfd£pwega8SHGv3!#Bsfd5t";
+pub static TEST_INVALID_PASSWORD: &str = "INVALID769dfd£pwega8SHGv3!";
+pub static TEST_WEAK_PASSWORD: &str = "fhaiuhfwe";
+pub static TEST_RANDOM_TOKEN: &str = "lkjh2398HLKJ43hrweiJ6FaPfdssgtrg";
 
 /// wrapper for a cli testing tool - currently wraps rexpect and dialoguer
 ///
@@ -39,6 +63,16 @@ impl CliTester {
             prompt: prompt.to_string(),
         };
         i.prompt(true).context("initial input prompt")?;
+        Ok(i)
+    }
+
+    pub fn expect_password(&mut self, prompt: &str) -> Result<CliTesterPasswordPrompt> {
+        let mut i = CliTesterPasswordPrompt {
+            tester: self,
+            prompt: prompt.to_string(),
+            confirmation_prompt: "".to_string(),
+        };
+        i.prompt().context("initial password prompt")?;
         Ok(i)
     }
 }
@@ -101,6 +135,70 @@ impl CliTesterInputPrompt<'_> {
     }
 }
 
+pub struct CliTesterPasswordPrompt<'a> {
+    tester: &'a mut CliTester,
+    prompt: String,
+    confirmation_prompt: String,
+}
+
+impl CliTesterPasswordPrompt<'_> {
+    fn prompt(&mut self) -> Result<&mut Self> {
+        let p = match self.confirmation_prompt.is_empty() {
+            true => self.prompt.as_str(),
+            false => self.confirmation_prompt.as_str(),
+        };
+
+        let mut s = String::new();
+        self.tester
+            .formatter
+            .format_password_prompt(&mut s, p)
+            .expect("diagluer theme formatter should succeed");
+
+        ensure!(s.contains(p), "dialoguer must be broken");
+
+        self.tester
+            .expect(format!("\r{}", sanatize(s)).as_str())
+            .context("expect password input prompt")?;
+        Ok(self)
+    }
+
+    pub fn with_confirmation(&mut self, prompt: &str) -> Result<&mut Self> {
+        self.confirmation_prompt = prompt.to_string();
+        Ok(self)
+    }
+
+    pub fn succeeds_with(&mut self, password: &str) -> Result<&mut Self> {
+        self.tester.send_line(password)?;
+
+        self.tester
+            .expect("\r\n")
+            .context("expect new lines after password input")?;
+
+        if !self.confirmation_prompt.is_empty() {
+            self.prompt()
+                .context("expect password confirmation prompt")?;
+            self.tester.send_line(password)?;
+            self.tester
+                .expect("\r\n\r")
+                .context("expect new lines after password confirmation input")?;
+        }
+
+        let mut s = String::new();
+        self.tester
+            .formatter
+            .format_password_prompt_selection(&mut s, self.prompt.as_str())
+            .expect("diagluer theme formatter should succeed");
+
+        ensure!(s.contains(self.prompt.as_str()), "dialoguer must be broken");
+
+        self.tester
+            .expect(format!("\r{}\r\n", sanatize(s)).as_str())
+            .context("expect password prompt success")?;
+
+        Ok(self)
+    }
+}
+
 impl CliTester {
     pub fn new<I, S>(args: I) -> Self
     where
@@ -108,7 +206,17 @@ impl CliTester {
         S: AsRef<OsStr>,
     {
         Self {
-            rexpect_session: rexpect_with(args).expect("rexpect to spawn new process"),
+            rexpect_session: rexpect_with(args, 2000).expect("rexpect to spawn new process"),
+            formatter: ColorfulTheme::default(),
+        }
+    }
+    pub fn new_with_timeout<I, S>(timeout_ms: u64, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Self {
+            rexpect_session: rexpect_with(args, timeout_ms).expect("rexpect to spawn new process"),
             formatter: ColorfulTheme::default(),
         }
     }
@@ -122,7 +230,7 @@ impl CliTester {
             .process
             .exit()
             .expect("process to exit");
-        self.rexpect_session = rexpect_with(args).expect("rexpect to spawn new process");
+        self.rexpect_session = rexpect_with(args, 2000).expect("rexpect to spawn new process");
         self
     }
 
@@ -213,7 +321,7 @@ fn sanatize(s: String) -> String {
         .collect::<String>()
 }
 
-pub fn rexpect_with<I, S>(args: I) -> Result<PtySession, rexpect::error::Error>
+pub fn rexpect_with<I, S>(args: I, timeout_ms: u64) -> Result<PtySession, rexpect::error::Error>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -224,7 +332,7 @@ where
     rexpect::session::spawn_with_options(
         cmd,
         Options {
-            timeout_ms: Some(2000),
+            timeout_ms: Some(timeout_ms),
             strip_ansi_escape_codes: true,
         },
     )

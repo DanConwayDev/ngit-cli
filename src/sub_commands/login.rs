@@ -7,5 +7,6 @@ use crate::{login, Cli};
 pub struct SubCommandArgs;
 
 pub fn launch(args: &Cli, _command_args: &SubCommandArgs) -> Result<()> {
-    login::launch(&args.nsec)
+    let _ = login::launch(&args.nsec, &args.password)?;
+    Ok(())
 }
