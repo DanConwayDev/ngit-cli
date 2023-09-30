@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 
 mod cli_interactor;
 mod config;
+mod git;
 mod key_handling;
 mod login;
 mod sub_commands;
@@ -28,11 +29,14 @@ pub struct Cli {
 enum Commands {
     /// save encrypted nsec for future use
     Login(sub_commands::login::SubCommandArgs),
+    /// create and issue Prs
+    Prs(sub_commands::prs::SubCommandArgs),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Commands::Login(args) => sub_commands::login::launch(&cli, args),
+        Commands::Prs(args) => sub_commands::prs::launch(&cli, args),
     }
 }

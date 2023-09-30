@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::{ffi::OsStr, path::PathBuf};
 
 use anyhow::{ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
@@ -7,6 +7,8 @@ use nostr::{self, prelude::FromSkStr};
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
+
+pub mod git;
 
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
@@ -73,6 +75,34 @@ impl CliTester {
             confirmation_prompt: "".to_string(),
         };
         i.prompt().context("initial password prompt")?;
+        Ok(i)
+    }
+
+    pub fn expect_confirm(
+        &mut self,
+        prompt: &str,
+        default: Option<bool>,
+    ) -> Result<CliTesterConfirmPrompt> {
+        let mut i = CliTesterConfirmPrompt {
+            tester: self,
+            prompt: prompt.to_string(),
+            default,
+        };
+        i.prompt(false, default).context("initial confirm prompt")?;
+        Ok(i)
+    }
+
+    pub fn expect_confirm_eventually(
+        &mut self,
+        prompt: &str,
+        default: Option<bool>,
+    ) -> Result<CliTesterConfirmPrompt> {
+        let mut i = CliTesterConfirmPrompt {
+            tester: self,
+            prompt: prompt.to_string(),
+            default,
+        };
+        i.prompt(true, default).context("initial confirm prompt")?;
         Ok(i)
     }
 }
@@ -199,6 +229,71 @@ impl CliTesterPasswordPrompt<'_> {
     }
 }
 
+pub struct CliTesterConfirmPrompt<'a> {
+    tester: &'a mut CliTester,
+    prompt: String,
+    default: Option<bool>,
+}
+
+impl CliTesterConfirmPrompt<'_> {
+    fn prompt(&mut self, eventually: bool, default: Option<bool>) -> Result<&mut Self> {
+        let mut s = String::new();
+        self.tester
+            .formatter
+            .format_confirm_prompt(&mut s, self.prompt.as_str(), default)
+            .expect("diagluer theme formatter should succeed");
+        ensure!(
+            s.contains(self.prompt.as_str()),
+            "dialoguer must be broken as formatted prompt success doesnt contain prompt"
+        );
+
+        if eventually {
+            self.tester
+                .expect_eventually(sanatize(s).as_str())
+                .context("expect input prompt eventually")?;
+        } else {
+            self.tester
+                .expect(sanatize(s).as_str())
+                .context("expect confirm prompt")?;
+        }
+
+        Ok(self)
+    }
+
+    pub fn succeeds_with(&mut self, input: Option<bool>) -> Result<&mut Self> {
+        self.tester.send_line(match input {
+            None => "",
+            Some(true) => "y",
+            Some(false) => "n",
+        })?;
+        self.tester
+            .expect("\r")
+            .context("expect new line after confirm input to be printed")?;
+
+        let mut s = String::new();
+        self.tester
+            .formatter
+            .format_confirm_prompt_selection(
+                &mut s,
+                self.prompt.as_str(),
+                match input {
+                    None => self.default,
+                    Some(_) => input,
+                },
+            )
+            .expect("diagluer theme formatter should succeed");
+        if !s.contains(self.prompt.as_str()) {
+            panic!("dialoguer must be broken as formatted prompt success doesnt contain prompt");
+        }
+        let formatted_success = format!("{}\r\n", sanatize(s));
+
+        self.tester
+            .expect(formatted_success.as_str())
+            .context("expect immediate prompt success")?;
+        Ok(self)
+    }
+}
+
 impl CliTester {
     pub fn new<I, S>(args: I) -> Self
     where
@@ -207,6 +302,17 @@ impl CliTester {
     {
         Self {
             rexpect_session: rexpect_with(args, 2000).expect("rexpect to spawn new process"),
+            formatter: ColorfulTheme::default(),
+        }
+    }
+    pub fn new_from_dir<I, S>(dir: &PathBuf, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Self {
+            rexpect_session: rexpect_with_from_dir(dir, args, 2000)
+                .expect("rexpect to spawn new process"),
             formatter: ColorfulTheme::default(),
         }
     }
@@ -327,6 +433,28 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ngit"));
+    cmd.args(args);
+    // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
+    rexpect::session::spawn_with_options(
+        cmd,
+        Options {
+            timeout_ms: Some(timeout_ms),
+            strip_ansi_escape_codes: true,
+        },
+    )
+}
+
+pub fn rexpect_with_from_dir<I, S>(
+    dir: &PathBuf,
+    args: I,
+    timeout_ms: u64,
+) -> Result<PtySession, rexpect::error::Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ngit"));
+    cmd.current_dir(dir);
     cmd.args(args);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
     rexpect::session::spawn_with_options(

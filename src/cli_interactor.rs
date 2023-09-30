@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dialoguer::{theme::ColorfulTheme, Input, Password};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 #[cfg(test)]
 use mockall::*;
 
@@ -12,6 +12,7 @@ pub struct Interactor {
 pub trait InteractorPrompt {
     fn input(&self, parms: PromptInputParms) -> Result<String>;
     fn password(&self, parms: PromptPasswordParms) -> Result<String>;
+    fn confirm(&self, params: PromptConfirmParms) -> Result<bool>;
 }
 impl InteractorPrompt for Interactor {
     fn input(&self, parms: PromptInputParms) -> Result<String> {
@@ -28,6 +29,13 @@ impl InteractorPrompt for Interactor {
         }
         let pass: String = p.interact()?;
         Ok(pass)
+    }
+    fn confirm(&self, params: PromptConfirmParms) -> Result<bool> {
+        let confirm: bool = Confirm::with_theme(&self.theme)
+            .with_prompt(params.prompt)
+            .default(params.default)
+            .interact()?;
+        Ok(confirm)
     }
 }
 
@@ -56,6 +64,23 @@ impl PromptPasswordParms {
     }
     pub const fn with_confirm(mut self) -> Self {
         self.confirm = true;
+        self
+    }
+}
+
+#[derive(Default)]
+pub struct PromptConfirmParms {
+    pub prompt: String,
+    pub default: bool,
+}
+
+impl PromptConfirmParms {
+    pub fn with_prompt<S: Into<String>>(mut self, prompt: S) -> Self {
+        self.prompt = prompt.into();
+        self
+    }
+    pub fn with_default(mut self, default: bool) -> Self {
+        self.default = default;
         self
     }
 }
