@@ -15,8 +15,8 @@ pub enum Commands {
     Create(create::SubCommandArgs),
 }
 
-pub fn launch(cli_args: &Cli, pr_args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(cli_args: &Cli, pr_args: &SubCommandArgs) -> Result<()> {
     match &pr_args.prs_command {
-        Commands::Create(args) => create::launch(cli_args, pr_args, args),
+        Commands::Create(args) => create::launch(cli_args, pr_args, args).await,
     }
 }

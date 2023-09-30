@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod cli_interactor;
+mod client;
 mod config;
 mod git;
 mod key_handling;
@@ -33,10 +34,11 @@ enum Commands {
     Prs(sub_commands::prs::SubCommandArgs),
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Commands::Login(args) => sub_commands::login::launch(&cli, args),
-        Commands::Prs(args) => sub_commands::prs::launch(&cli, args),
+        Commands::Prs(args) => futures::executor::block_on(sub_commands::prs::launch(&cli, args)),
     }
 }

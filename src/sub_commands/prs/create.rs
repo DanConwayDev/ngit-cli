@@ -3,6 +3,7 @@ use nostr::{prelude::sha1::Hash as Sha1Hash, EventBuilder, Marker, Tag, TagKind}
 
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms},
+    client::{Client, Connect, Params as ClientParams},
     git::{Repo, RepoActions},
     login, Cli,
 };
@@ -23,7 +24,7 @@ pub struct SubCommandArgs {
     to_branch: Option<String>,
 }
 
-pub fn launch(
+pub async fn launch(
     cli_args: &Cli,
     _pr_args: &super::SubCommandArgs,
     args: &SubCommandArgs,
@@ -81,6 +82,7 @@ pub fn launch(
     let root_commit = git_repo
         .get_root_commit(to_branch.as_str())
         .context("failed to get root commit of the repository")?;
+
     // create PR event
 
     let keys = login::launch(&cli_args.nsec, &cli_args.password)?;
@@ -138,7 +140,23 @@ pub fn launch(
         );
     }
 
+    let client = Client::new(ClientParams::default().with_keys(keys));
+
+    println!("connecting...");
+    client.connect().await?;
+    println!("connected...");
+
     // TODO check if there is already a similarly named PR
+    let _ = client
+        .send_event_to("ws://localhost:8080", pr_event)
+        .await?;
+    // TODO post each PR
+    // TODO report
+    println!("posted successfully to 4/5 of your relays and 0/4 of maintainers relays");
+    // should we have a relays in Repository event?
+    // yes
+    //
+
     // TODO connect to relays and post
 
     Ok(())

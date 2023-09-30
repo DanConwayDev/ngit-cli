@@ -13,17 +13,21 @@ categories = ["command-line-utilities","git"]
 
 [dependencies]
 anyhow = "1.0.75"
+async-trait = "0.1.73"
 chacha20poly1305 = "0.10.1"
 clap = { version = "4.3.19", features = ["derive"] }
 dialoguer = "0.10.4"
 directories = "5.0.1"
+futures = "0.3.28"
 git2 = "0.18.1"
 keyring = "2.0.5"
-nostr = "0.23.0"
+nostr = "0.24.0"
+nostr-sdk = "0.24.0"
 passwords = "3.1.13"
 scrypt = "0.11.0"
 serde = { version = "1.0.181", features = ["derive"] }
 serde_json = "1.0.105"
+tokio = "1.33.0"
 zeroize = "1.6.0"
 
 [dev-dependencies]
