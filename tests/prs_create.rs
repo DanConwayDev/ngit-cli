@@ -121,12 +121,36 @@ mod when_commits_behind_ask_to_proceed {
     }
 }
 
-mod when_no_commits_behind {
+#[test]
+#[serial]
+fn cli_message_creating_patches() -> Result<()> {
+    let test_repo = GitTestRepo::default();
+    test_repo.populate()?;
+    // create feature branch with 2 commit ahead
+    test_repo.create_branch("feature")?;
+    test_repo.checkout("feature")?;
+    std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+    test_repo.stage_and_commit("add t3.md")?;
+    std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+    test_repo.stage_and_commit("add t4.md")?;
+
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+
+    p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'")?;
+    p.exit()?;
+    Ok(())
+}
+
+mod sends_pr_and_2_patches_to_3_relays {
+    use futures::join;
+    use test_utils::relay::Relay;
+
     use super::*;
 
-    #[test]
-    #[serial]
-    fn message_for_creating_patches() -> Result<()> {
+    static PR_KIND: u64 = 318;
+    static PATCH_KIND: u64 = 317;
+
+    fn prep_git_repo() -> Result<GitTestRepo> {
         let test_repo = GitTestRepo::default();
         test_repo.populate()?;
         // create feature branch with 2 commit ahead
@@ -136,28 +160,417 @@ mod when_no_commits_behind {
         test_repo.stage_and_commit("add t3.md")?;
         std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
         test_repo.stage_and_commit("add t4.md")?;
+        Ok(test_repo)
+    }
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+    fn cli_tester_create_pr(git_repo: &GitTestRepo) -> CliTester {
+        CliTester::new_from_dir(
+            &git_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--disable-cli-spinners",
+                "prs",
+                "create",
+                "--title",
+                "example",
+                "--description",
+                "example",
+            ],
+        )
+    }
 
-        p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'")?;
-        p.exit()?;
+    fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
+        p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
+        p.expect(
+            "logged in as npub175lyhnt6nn00qjw0v3navw9pxgv43txnku0tpxprl4h6mvpr6a5qlphudg\r\n",
+        )?;
+        p.expect("connecting to relays...\r\n")?;
+        p.expect("\r")?;
+        p.expect("posting 1 pull request with 2 commits...\r\n")?;
         Ok(())
     }
+
+    async fn prep_run_create_pr() -> Result<(Relay<'static>, Relay<'static>, Relay<'static>)> {
+        let git_repo = prep_git_repo()?;
+
+        let (mut r51, mut r52, mut r53) = (
+            Relay::new(8051, None),
+            Relay::new(8052, None),
+            Relay::new(8053, None),
+        );
+
+        // // check relay had the right number of events
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = cli_tester_create_pr(&git_repo);
+            p.expect_end_eventually()?;
+            Ok(())
+        });
+
+        // launch relay
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+        );
+        cli_tester_handle.join().unwrap()?;
+        Ok((r51, r52, r53))
+    }
+
+    #[test]
+    #[serial]
+    fn only_1_pr_kind_event_sent_to_each_relay() -> Result<()> {
+        let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r51, &r52, &r53] {
+            assert_eq!(
+                relay
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .count(),
+                1,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn only_2_patch_kind_events_sent_to_each_relay() -> Result<()> {
+        let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r51, &r52, &r53] {
+            assert_eq!(
+                relay
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.as_u64().eq(&PATCH_KIND))
+                    .count(),
+                2,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn patch_content_contains_patch_in_email_format() -> Result<()> {
+        let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r51, &r52, &r53] {
+            let patch_events: Vec<&nostr::Event> = relay
+                .events
+                .iter()
+                .filter(|e| e.kind.as_u64().eq(&PATCH_KIND))
+                .collect();
+
+            assert_eq!(
+                patch_events[0].content,
+                "\
+                    From fe973a840fba2a8ab37dd505c154854a69a6505c Mon Sep 17 00:00:00 2001\n\
+                    From: Joe Bloggs <joe.bloggs@pm.me>\n\
+                    Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
+                    Subject: [PATCH] add t4.md\n\
+                    \n\
+                    ---\n \
+                    t4.md | 1 +\n \
+                    1 file changed, 1 insertion(+)\n \
+                    create mode 100644 t4.md\n\
+                    \n\
+                    diff --git a/t4.md b/t4.md\n\
+                    new file mode 100644\n\
+                    index 0000000..f0eec86\n\
+                    --- /dev/null\n\
+                    +++ b/t4.md\n\
+                    @@ -0,0 +1 @@\n\
+                    +some content\n\\ \
+                    No newline at end of file\n\
+                    --\n\
+                    libgit2 1.7.1\n\
+                    \n\
+                    ",
+            );
+            assert_eq!(
+                patch_events[1].content,
+                "\
+                    From 232efb37ebc67692c9e9ff58b83c0d3d63971a0a Mon Sep 17 00:00:00 2001\n\
+                    From: Joe Bloggs <joe.bloggs@pm.me>\n\
+                    Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
+                    Subject: [PATCH] add t3.md\n\
+                    \n\
+                    ---\n \
+                    t3.md | 1 +\n \
+                    1 file changed, 1 insertion(+)\n \
+                    create mode 100644 t3.md\n\
+                    \n\
+                    diff --git a/t3.md b/t3.md\n\
+                    new file mode 100644\n\
+                    index 0000000..f0eec86\n\
+                    --- /dev/null\n\
+                    +++ b/t3.md\n\
+                    @@ -0,0 +1 @@\n\
+                    +some content\n\\ \
+                    No newline at end of file\n\
+                    --\n\
+                    libgit2 1.7.1\n\
+                    \n\
+                    ",
+            );
+        }
+        Ok(())
+    }
+
+    mod pr_tags {
+        use super::*;
+        #[test]
+        #[serial]
+        fn pr_tags_repo_commit() -> Result<()> {
+            let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r51, &r52, &r53] {
+                let pr_event: &nostr::Event = relay
+                    .events
+                    .iter()
+                    .find(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .unwrap();
+
+                // root commit 't' tag
+                assert!(pr_event.tags.iter().any(|t| t.as_vec()[0].eq("t")
+                    && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+            }
+            Ok(())
+        }
+    }
+
+    mod patch_tags {
+        use super::*;
+        #[test]
+        #[serial]
+        fn patch_tags_correctly_formatted() -> Result<()> {
+            let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r51, &r52, &r53] {
+                let patch_events: Vec<&nostr::Event> = relay
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.as_u64().eq(&PATCH_KIND))
+                    .collect();
+
+                static COMMIT_ID: &str = "fe973a840fba2a8ab37dd505c154854a69a6505c";
+                let most_recent_patch = patch_events[0];
+
+                // commit 't' and 'commit' tag
+                assert!(
+                    most_recent_patch
+                        .tags
+                        .iter()
+                        .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq(COMMIT_ID))
+                );
+                assert!(
+                    most_recent_patch
+                        .tags
+                        .iter()
+                        .any(|t| t.as_vec()[0].eq("commit") && t.as_vec()[1].eq(COMMIT_ID))
+                );
+
+                // commit parent 't' and 'parent-commit' tag
+                static COMMIT_PARENT_ID: &str = "232efb37ebc67692c9e9ff58b83c0d3d63971a0a";
+                assert!(
+                    most_recent_patch
+                        .tags
+                        .iter()
+                        .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq(COMMIT_PARENT_ID))
+                );
+                assert!(most_recent_patch.tags.iter().any(
+                    |t| t.as_vec()[0].eq("parent-commit") && t.as_vec()[1].eq(COMMIT_PARENT_ID)
+                ));
+
+                // root commit 't' tag
+                assert!(most_recent_patch.tags.iter().any(|t| t.as_vec()[0].eq("t")
+                    && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+            }
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn patch_tags_pr_event_as_root() -> Result<()> {
+            let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r51, &r52, &r53] {
+                let patch_events: Vec<&nostr::Event> = relay
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.as_u64().eq(&PATCH_KIND))
+                    .collect();
+
+                let most_recent_patch = patch_events[0];
+                let pr_event = relay
+                    .events
+                    .iter()
+                    .find(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .unwrap();
+
+                let root_event_tag = most_recent_patch
+                    .tags
+                    .iter()
+                    .find(|t| {
+                        t.as_vec()[0].eq("e") && t.as_vec().len().eq(&4) && t.as_vec()[3].eq("root")
+                    })
+                    .unwrap();
+
+                assert_eq!(root_event_tag.as_vec()[1], pr_event.id.to_string());
+            }
+            Ok(())
+        }
+    }
+
+    mod cli_ouput {
+        use super::*;
+
+        async fn run_test_async() -> Result<()> {
+            let git_repo = prep_git_repo()?;
+
+            let (mut r51, mut r52, mut r53) = (
+                Relay::new(8051, None),
+                Relay::new(8052, None),
+                Relay::new(8053, None),
+            );
+
+            // // check relay had the right number of events
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                let mut p = cli_tester_create_pr(&git_repo);
+                expect_msgs_first(&mut p)?;
+                relay::expect_send_with_progress(
+                    &mut p,
+                    vec![
+                        (" [my-relay] [repo-relay] ws://localhost:8051", true, ""),
+                        (" [my-relay] ws://localhost:8052", true, ""),
+                        (" [repo-relay] ws://localhost:8053", true, ""),
+                    ],
+                    3,
+                )?;
+                p.expect_end_with_whitespace()?;
+                Ok(())
+            });
+
+            // launch relay
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn check_cli_output() -> Result<()> {
+            futures::executor::block_on(run_test_async())?;
+            Ok(())
+        }
+    }
+
+    mod first_event_rejected_by_1_relay {
+        use super::*;
+
+        mod only_first_rejected_event_sent_to_relay {
+            use super::*;
+
+            async fn run_test_async() -> Result<()> {
+                let git_repo = prep_git_repo()?;
+
+                let (mut r51, mut r52, mut r53) = (
+                    Relay::new(8051, None),
+                    Relay::new(
+                        8052,
+                        Some(&|relay, client_id, event| -> Result<()> {
+                            relay.respond_ok(client_id, event, Some("Payment Required"))?;
+                            Ok(())
+                        }),
+                    ),
+                    Relay::new(8053, None),
+                );
+
+                // // check relay had the right number of events
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    let mut p = cli_tester_create_pr(&git_repo);
+                    p.expect_end_eventually()?;
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+
+                assert_eq!(r52.events.len(), 1);
+
+                Ok(())
+            }
+
+            #[test]
+            #[serial]
+            fn only_first_rejected_event_sent_to_relay() -> Result<()> {
+                futures::executor::block_on(run_test_async())?;
+                Ok(())
+            }
+        }
+
+        mod cli_show_rejection_with_comment {
+            use super::*;
+
+            async fn run_test_async() -> Result<(Relay<'static>, Relay<'static>, Relay<'static>)> {
+                let git_repo = prep_git_repo()?;
+
+                let (mut r51, mut r52, mut r53) = (
+                    Relay::new(8051, None),
+                    Relay::new(
+                        8052,
+                        Some(&|relay, client_id, event| -> Result<()> {
+                            relay.respond_ok(client_id, event, Some("Payment Required"))?;
+                            Ok(())
+                        }),
+                    ),
+                    Relay::new(8053, None),
+                );
+
+                // // check relay had the right number of events
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    let mut p = cli_tester_create_pr(&git_repo);
+                    expect_msgs_first(&mut p)?;
+                    relay::expect_send_with_progress(
+                        &mut p,
+                        vec![
+                            (" [my-relay] [repo-relay] ws://localhost:8051", true, ""),
+                            (
+                                " [my-relay] ws://localhost:8052",
+                                false,
+                                "error: Payment Required",
+                            ),
+                            (" [repo-relay] ws://localhost:8053", true, ""),
+                        ],
+                        3,
+                    )?;
+                    p.expect_end_with_whitespace()?;
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+                Ok((r51, r52, r53))
+            }
+
+            #[test]
+            #[serial]
+            fn cli_show_rejection_with_comment() -> Result<()> {
+                futures::executor::block_on(run_test_async())?;
+                Ok(())
+            }
+        }
+    }
 }
-
-// #[test]
-// #[serial]
-// fn succeeds_with_text_logged_in_as_npub() -> Result<()> {
-//     with_fresh_config(|| {
-//         let mut p = CliTester::new(["login"]);
-
-//         p.expect_input(EXPECTED_NSEC_PROMPT)?
-//             .succeeds_with(TEST_KEY_1_NSEC)?;
-
-//         p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-//             .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-//             .succeeds_with(TEST_PASSWORD)?;
-
-//         p.expect_end_with(format!("logged in as {}\r\n",
-// TEST_KEY_1_NPUB).as_str())     })
-// }

@@ -9,6 +9,7 @@ use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
 
 pub mod git;
+pub mod relay;
 
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
@@ -353,7 +354,12 @@ impl CliTester {
     }
 
     /// returns what came before expected message
-    pub fn expect_eventually(&mut self, message: &str) -> Result<String> {
+    pub fn expect_eventually<S>(&mut self, message: S) -> Result<String>
+    where
+        S: Into<String>,
+    {
+        let message_string = message.into();
+        let message = message_string.as_str();
         let before = self
             .rexpect_session
             .exp_string(message)
@@ -361,8 +367,27 @@ impl CliTester {
         Ok(before)
     }
 
-    pub fn expect(&mut self, message: &str) -> Result<&mut Self> {
+    pub fn expect_after_whitespace<S>(&mut self, message: S) -> Result<&mut Self>
+    where
+        S: Into<String>,
+    {
+        assert_eq!("", self.expect_eventually(message)?.trim());
+        Ok(self)
+    }
+
+    pub fn expect<S>(&mut self, message: S) -> Result<&mut Self>
+    where
+        S: Into<String>,
+    {
+        let message_string = message.into();
+        let message = message_string.as_str();
         let before = self.expect_eventually(message)?;
+        if !before.is_empty() {
+            std::fs::write("aaaaaaaaaaaa.txt", before.clone())?;
+
+            // let mut output = std::fs::File::create("aaaaaaaaaaa.txt")?;
+            // write!(output, "{}", *before);
+        }
         ensure!(
             before.is_empty(),
             format!(
@@ -397,6 +422,16 @@ impl CliTester {
         assert_eq!(before, message);
         Ok(())
     }
+
+    pub fn expect_end_with_whitespace(&mut self) -> Result<()> {
+        let before = self
+            .rexpect_session
+            .exp_eof()
+            .context("expected immediate end but got timed out")?;
+        assert_eq!(before.trim(), "");
+        Ok(())
+    }
+
     pub fn expect_end_eventually(&mut self) -> Result<String> {
         self.rexpect_session
             .exp_eof()

@@ -1,4 +1,9 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
+use console::Term;
+use futures::future::join_all;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nostr::{prelude::sha1::Hash as Sha1Hash, EventBuilder, Marker, Tag, TagKind};
 
 use crate::{
@@ -79,13 +84,244 @@ pub async fn launch(
             .input(PromptInputParms::default().with_prompt("description (Optional)"))?,
     };
 
-    let root_commit = git_repo
-        .get_root_commit(to_branch.as_str())
-        .context("failed to get root commit of the repository")?;
-
     // create PR event
 
     let keys = login::launch(&cli_args.nsec, &cli_args.password)?;
+
+    let events =
+        generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, keys)?;
+
+    let my_write_relays: Vec<String> = vec![
+        "ws://localhost:8051".to_string(),
+        "ws://localhost:8052".to_string(),
+    ];
+
+    let repo_read_relays: Vec<String> = vec![
+        "ws://localhost:8051".to_string(),
+        "ws://localhost:8053".to_string(),
+    ];
+
+    send_events(
+        events,
+        keys,
+        my_write_relays,
+        repo_read_relays,
+        !cli_args.disable_cli_spinners,
+    )
+    .await?;
+    // TODO check if there is already a similarly named PR
+
+    // println!("failures:");
+    // println!("ws://relay.anon.io    Error: Payment Required");
+
+    // should we have a relays in Repository event?
+    // yes
+    //
+
+    // TODO connect to relays and post
+
+    Ok(())
+}
+
+async fn send_events(
+    events: Vec<nostr::Event>,
+    keys: nostr::Keys,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<String>,
+    animate: bool,
+) -> Result<()> {
+    let (_, _, _, all) = unique_and_duplicate_all(&my_write_relays, &repo_read_relays);
+
+    let client = Client::new(
+        ClientParams::default()
+            .with_keys(keys)
+            // .with_fallback_relays(vec!["ws://localhost:8080".to_string()]),
+            .with_fallback_relays(all.iter().map(std::string::ToString::to_string).collect()),
+    );
+
+    let term = Term::stdout();
+    term.write_line("connecting to relays...")?;
+    client.connect().await?;
+    term.clear_last_lines(1)?;
+
+    println!(
+        "posting 1 pull request with {} commits...",
+        events.len() - 1
+    );
+
+    let m = MultiProgress::new();
+    let pb_style = ProgressStyle::with_template(if animate {
+        " {spinner} {prefix} {bar} {pos}/{len} {msg}"
+    } else {
+        " - {prefix} {bar} {pos}/{len} {msg}"
+    })?
+    .progress_chars("##-");
+
+    let pb_after_style =
+        |symbol| ProgressStyle::with_template(format!(" {symbol} {}", "{prefix} {msg}",).as_str());
+    let pb_after_style_succeeded = pb_after_style(if animate {
+        console::style("✔".to_string())
+            .for_stderr()
+            .green()
+            .to_string()
+    } else {
+        "y".to_string()
+    })?;
+
+    let pb_after_style_failed = pb_after_style(if animate {
+        console::style("✘".to_string())
+            .for_stderr()
+            .red()
+            .to_string()
+    } else {
+        "x".to_string()
+    })?;
+
+    join_all(all.iter().map(|&relay| async {
+        let details = format!(
+            "{}{} {}",
+            if my_write_relays.iter().any(|r| relay.eq(r)) {
+                " [my-relay]"
+            } else {
+                ""
+            },
+            if repo_read_relays.iter().any(|r| relay.eq(r)) {
+                " [repo-relay]"
+            } else {
+                ""
+            },
+            *relay,
+        );
+        let pb = m.add(
+            ProgressBar::new(events.len() as u64)
+                .with_prefix(details.to_string())
+                .with_style(pb_style.clone()),
+        );
+        if animate {
+            pb.enable_steady_tick(Duration::from_millis(300));
+        }
+        pb.inc(0); // need to make pb display intially
+        let mut failed = false;
+        for event in &events {
+            match client.send_event_to(relay.as_str(), event.clone()).await {
+                Ok(_) => pb.inc(1),
+                Err(e) => {
+                    pb.set_style(pb_after_style_failed.clone());
+                    pb.finish_with_message(
+                        console::style(
+                            e.to_string()
+                                .replace("relay pool error:", "error:")
+                                .replace("event not published: ", ""),
+                        )
+                        .for_stderr()
+                        .red()
+                        .to_string(),
+                    );
+                    failed = true;
+                    break;
+                }
+            };
+        }
+        if !failed {
+            pb.set_style(pb_after_style_succeeded.clone());
+            pb.finish_with_message("");
+        }
+    }))
+    .await;
+    client.disconnect().await?;
+    Ok(())
+}
+
+/// returns `(unique_vec1, unique_vec2, duplicates, all)`
+fn unique_and_duplicate_all<'a, S>(
+    vec1: &'a Vec<S>,
+    vec2: &'a Vec<S>,
+) -> (Vec<&'a S>, Vec<&'a S>, Vec<&'a S>, Vec<&'a S>)
+where
+    S: PartialEq,
+{
+    let mut vec1_u = vec![];
+    let mut vec2_u = vec![];
+    let mut dup = vec![];
+    let mut all = vec![];
+    for s1 in vec1 {
+        if vec2.iter().any(|s2| s1.eq(s2)) {
+            dup.push(s1);
+        } else {
+            vec1_u.push(s1);
+        }
+    }
+    for s2 in vec2 {
+        if !vec1.iter().any(|s1| s2.eq(s1)) {
+            vec2_u.push(s2);
+        }
+    }
+    for a in [&dup, &vec1_u, &vec2_u] {
+        for e in a {
+            all.push(&**e);
+        }
+    }
+    (vec1_u, vec2_u, dup, all)
+}
+
+mod tests_unique_and_duplicate {
+
+    #[test]
+    fn correct_number_of_unique_and_duplicate_items() {
+        let v1 = vec![
+            "t1".to_string(),
+            "t2".to_string(),
+            "t3".to_string(),
+            "t4".to_string(),
+            "t5".to_string(),
+        ];
+        let v2 = vec![
+            "t3".to_string(),
+            "t4".to_string(),
+            "t5".to_string(),
+            "t6".to_string(),
+        ];
+
+        let (v1_u, v2_u, d, a) = super::unique_and_duplicate_all(&v1, &v2);
+
+        assert_eq!(v1_u.len(), 2);
+        assert_eq!(v2_u.len(), 1);
+        assert_eq!(d.len(), 3);
+        assert_eq!(a.len(), 6);
+    }
+    #[test]
+    fn all_begins_with_duplicates() {
+        let v1 = vec![
+            "t1".to_string(),
+            "t2".to_string(),
+            "t3".to_string(),
+            "t4".to_string(),
+            "t5".to_string(),
+        ];
+        let v2 = vec![
+            "t3".to_string(),
+            "t4".to_string(),
+            "t5".to_string(),
+            "t6".to_string(),
+        ];
+
+        let (_, _, d, a) = super::unique_and_duplicate_all(&v1, &v2);
+
+        assert_eq!(a[0], d[0]);
+    }
+}
+
+fn generate_pr_and_patch_events(
+    title: &String,
+    description: &String,
+    to_branch: &str,
+    git_repo: &Repo,
+    commits: &Vec<Sha1Hash>,
+    keys: nostr::Keys,
+) -> Result<Vec<nostr::Event>> {
+    let root_commit = git_repo
+        .get_root_commit(to_branch)
+        .context("failed to get root commit of the repository")?;
 
     let pr_event = EventBuilder::new(
         nostr::event::Kind::Custom(318),
@@ -103,12 +339,14 @@ pub async fn launch(
     .to_event(&keys)
     .context("failed to create pr event")?;
 
-    let mut patch_events = vec![];
-    for commit in &ahead {
+    let pr_event_id = pr_event.id;
+
+    let mut events = vec![pr_event];
+    for commit in commits {
         let commit_parent = git_repo
             .get_commit_parent(commit)
             .context("failed to create patch event")?;
-        patch_events.push(
+        events.push(
             EventBuilder::new(
                 nostr::event::Kind::Custom(317),
                 git_repo
@@ -119,7 +357,7 @@ pub async fn launch(
                     Tag::Hashtag(commit.to_string()),
                     Tag::Hashtag(commit_parent.to_string()),
                     Tag::Event(
-                        pr_event.id,
+                        pr_event_id,
                         None, // TODO: add relay
                         Some(Marker::Root),
                     ),
@@ -136,32 +374,11 @@ pub async fn launch(
                     // TODO: add relay tags
                 ],
             )
-            .to_event(&keys),
+            .to_event(&keys)?,
         );
     }
-
-    let client = Client::new(ClientParams::default().with_keys(keys));
-
-    println!("connecting...");
-    client.connect().await?;
-    println!("connected...");
-
-    // TODO check if there is already a similarly named PR
-    let _ = client
-        .send_event_to("ws://localhost:8080", pr_event)
-        .await?;
-    // TODO post each PR
-    // TODO report
-    println!("posted successfully to 4/5 of your relays and 0/4 of maintainers relays");
-    // should we have a relays in Repository event?
-    // yes
-    //
-
-    // TODO connect to relays and post
-
-    Ok(())
+    Ok(events)
 }
-
 // TODO
 // - find profile
 // - file relays

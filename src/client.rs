@@ -18,6 +18,7 @@ use nostr::Event;
 
 pub struct Client {
     client: nostr_sdk::Client,
+    pub fallback_relays: Vec<String>,
 }
 
 #[async_trait]
@@ -26,6 +27,7 @@ pub trait Connect {
     fn default() -> Self;
     fn new(opts: Params) -> Self;
     async fn connect(&self) -> Result<()>;
+    async fn disconnect(&self) -> Result<()>;
     async fn send_event_to(&self, url: &str, event: nostr::event::Event) -> Result<nostr::EventId>;
 }
 
@@ -34,19 +36,31 @@ impl Connect for Client {
     fn default() -> Self {
         Client {
             client: nostr_sdk::Client::new(&nostr::Keys::generate()),
+            fallback_relays: vec![
+                "ws://localhost:8080".to_string(),
+                "ws://localhost:8052".to_string(),
+            ],
         }
     }
     fn new(opts: Params) -> Self {
         Client {
             client: nostr_sdk::Client::new(&opts.keys.unwrap_or(nostr::Keys::generate())),
+            fallback_relays: opts.fallback_relays,
         }
     }
     async fn connect(&self) -> Result<()> {
-        self.client.add_relay("ws://localhost:8080", None).await?;
+        for relay in &self.fallback_relays {
+            self.client.add_relay(relay.as_str(), None).await?;
+        }
         self.client.connect().await;
-        // self.client.s
         Ok(())
     }
+
+    async fn disconnect(&self) -> Result<()> {
+        self.client.disconnect().await?;
+        Ok(())
+    }
+
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
         Ok(self.client.send_event_to(url, event).await?)
     }
@@ -55,11 +69,16 @@ impl Connect for Client {
 #[derive(Default)]
 pub struct Params {
     pub keys: Option<nostr::Keys>,
+    pub fallback_relays: Vec<String>,
 }
 
 impl Params {
     pub fn with_keys(mut self, keys: nostr::Keys) -> Self {
         self.keys = Some(keys);
+        self
+    }
+    pub fn with_fallback_relays(mut self, fallback_relays: Vec<String>) -> Self {
+        self.fallback_relays = fallback_relays;
         self
     }
 }

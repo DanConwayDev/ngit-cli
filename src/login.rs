@@ -81,5 +81,8 @@ pub fn launch(nsec: &Option<String>, password: &Option<String>) -> Result<nostr:
             .to_bech32()
             .context("public key should always produce bech32")?
     );
+
+    // fetching metdata
+
     Ok(key)
 }

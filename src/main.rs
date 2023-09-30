@@ -24,6 +24,9 @@ pub struct Cli {
     /// password to decrypt nsec
     #[arg(short, long, global = true)]
     password: Option<String>,
+    /// disable spinner animations
+    #[arg(long, action)]
+    disable_cli_spinners: bool,
 }
 
 #[derive(Subcommand)]

@@ -245,6 +245,23 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn get_commit_parent() -> Result<()> {
+        let test_repo = GitTestRepo::default();
+        let parent_oid = test_repo.populate()?;
+        std::fs::write(test_repo.dir.join("t100.md"), "some content")?;
+        let child_oid = test_repo.stage_and_commit("add t100.md")?;
+
+        let git_repo = Repo::from_path(&test_repo.dir)?;
+
+        assert_eq!(
+            // Sha1Hash::from_byte_array("bla".to_string().as_bytes()),
+            oid_to_sha1(&parent_oid),
+            git_repo.get_commit_parent(&oid_to_sha1(&child_oid))?,
+        );
+        Ok(())
+    }
+
     mod make_patch_from_commit {
         use super::*;
         #[test]
