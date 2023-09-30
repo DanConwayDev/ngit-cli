@@ -5,26 +5,36 @@ use nostr::{ClientMessage, RelayMessage};
 
 use crate::CliTester;
 
-type ListenerFunc<'a> = &'a dyn Fn(&mut Relay, u64, nostr::Event) -> Result<()>;
+type ListenerEventFunc<'a> = &'a dyn Fn(&mut Relay, u64, nostr::Event) -> Result<()>;
+pub type ListenerReqFunc<'a> =
+    &'a dyn Fn(&mut Relay, u64, nostr::SubscriptionId, Vec<nostr::Filter>) -> Result<()>;
 
 pub struct Relay<'a> {
     port: u16,
     event_hub: simple_websockets::EventHub,
     clients: HashMap<u64, simple_websockets::Responder>,
     pub events: Vec<nostr::Event>,
-    event_listener: Option<ListenerFunc<'a>>,
+    pub reqs: Vec<Vec<nostr::Filter>>,
+    event_listener: Option<ListenerEventFunc<'a>>,
+    req_listener: Option<ListenerReqFunc<'a>>,
 }
 
 impl<'a> Relay<'a> {
-    pub fn new(port: u16, event_listener: Option<ListenerFunc<'a>>) -> Self {
+    pub fn new(
+        port: u16,
+        event_listener: Option<ListenerEventFunc<'a>>,
+        req_listener: Option<ListenerReqFunc<'a>>,
+    ) -> Self {
         let event_hub = simple_websockets::launch(port)
             .unwrap_or_else(|_| panic!("failed to listen on port {port}"));
         Self {
             port,
             events: vec![],
+            reqs: vec![],
             event_hub,
             clients: HashMap::new(),
             event_listener,
+            req_listener,
         }
     }
     pub fn respond_ok(
@@ -44,11 +54,54 @@ impl<'a> Relay<'a> {
         // bail!(format!("{}", &ok_json));
         Ok(responder.send(simple_websockets::Message::Text(ok_json)))
     }
+
+    pub fn respond_eose(
+        &self,
+        client_id: u64,
+        subscription_id: nostr::SubscriptionId,
+    ) -> Result<bool> {
+        let responder = self.clients.get(&client_id).unwrap();
+
+        Ok(responder.send(simple_websockets::Message::Text(
+            RelayMessage::EndOfStoredEvents(subscription_id).as_json(),
+        )))
+    }
+
+    /// send events and eose
+    pub fn respond_events(
+        &self,
+        client_id: u64,
+        subscription_id: &nostr::SubscriptionId,
+        events: &Vec<nostr::Event>,
+    ) -> Result<bool> {
+        let responder = self.clients.get(&client_id).unwrap();
+
+        for event in events {
+            let res = responder.send(simple_websockets::Message::Text(
+                RelayMessage::Event {
+                    subscription_id: subscription_id.clone(),
+                    event: Box::new(event.clone()),
+                }
+                .as_json(),
+            ));
+            if !res {
+                return Ok(false);
+            }
+        }
+        self.respond_eose(client_id, subscription_id.clone())
+    }
+
+    pub fn shutdown(&mut self) -> Result<()> {
+        let (mut socket, _) = tungstenite::connect(format!("ws://localhost:{}", self.port))?;
+        socket.write(tungstenite::Message::text("shut me down"))?;
+        socket.close(None)?;
+        Ok(())
+    }
     /// listen, collect events and responds with event_listener to events or
     /// Ok(eventid) if event_listner is None
     pub async fn listen_until_close(&mut self) -> Result<()> {
         loop {
-            println!("polling");
+            println!("{} polling", self.port);
             match self.event_hub.poll_async().await {
                 simple_websockets::Event::Connect(client_id, responder) => {
                     // add their Responder to our `clients` map:
@@ -65,8 +118,13 @@ impl<'a> Relay<'a> {
                         "Received a message from client #{}: {:?}",
                         client_id, message
                     );
-
-                    if let Ok(event) = get_nevent(message) {
+                    if let simple_websockets::Message::Text(s) = message.clone() {
+                        if s.eq("shut me down") {
+                            println!("{} recieved shut me down", self.port);
+                            break;
+                        }
+                    }
+                    if let Ok(event) = get_nevent(&message) {
                         self.events.push(event.clone());
                         if let Some(listner) = self.event_listener {
                             listner(self, client_id, event)?;
@@ -74,16 +132,40 @@ impl<'a> Relay<'a> {
                             self.respond_ok(client_id, event, None)?;
                         }
                     }
+
+                    if let Ok((subscription_id, filters)) = get_nreq(&message) {
+                        self.reqs.push(filters.clone());
+                        if let Some(listner) = self.req_listener {
+                            listner(self, client_id, subscription_id, filters)?;
+                        } else {
+                            self.respond_eose(client_id, subscription_id)?;
+                        }
+                        // respond with events
+                        // respond with EOSE
+                    }
+                    if is_nclose(&message) {
+                        println!("{} recieved nostr close", self.port);
+                        break;
+                    }
                 }
             }
         }
-        println!("stop polling");
-        println!("we may not be polling but the tcplistner is still listening");
+        println!(
+            "{} stop polling. we may not be polling but the tcplistner is still listening",
+            self.port
+        );
         Ok(())
     }
 }
 
-fn get_nevent(message: simple_websockets::Message) -> Result<nostr::Event> {
+pub fn shutdown_relay(port: u64) -> Result<()> {
+    let (mut socket, _) = tungstenite::connect(format!("ws://localhost:{}", port))?;
+    socket.write(tungstenite::Message::text("shut me down"))?;
+    socket.close(None)?;
+    Ok(())
+}
+
+fn get_nevent(message: &simple_websockets::Message) -> Result<nostr::Event> {
     if let simple_websockets::Message::Text(s) = message.clone() {
         let cm_result = ClientMessage::from_json(s);
         if let Ok(ClientMessage::Event(event)) = cm_result {
@@ -92,6 +174,32 @@ fn get_nevent(message: simple_websockets::Message) -> Result<nostr::Event> {
         }
     }
     bail!("not nostr event")
+}
+
+fn get_nreq(
+    message: &simple_websockets::Message,
+) -> Result<(nostr::SubscriptionId, Vec<nostr::Filter>)> {
+    if let simple_websockets::Message::Text(s) = message.clone() {
+        let cm_result = ClientMessage::from_json(s);
+        if let Ok(ClientMessage::Req {
+            subscription_id,
+            filters,
+        }) = cm_result
+        {
+            return Ok((subscription_id, filters));
+        }
+    }
+    bail!("not nostr event")
+}
+
+fn is_nclose(message: &simple_websockets::Message) -> bool {
+    if let simple_websockets::Message::Text(s) = message.clone() {
+        let cm_result = ClientMessage::from_json(s);
+        if let Ok(ClientMessage::Close(_)) = cm_result {
+            return true;
+        }
+    }
+    false
 }
 
 pub enum Message {

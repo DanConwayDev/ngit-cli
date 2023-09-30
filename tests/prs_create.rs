@@ -195,9 +195,9 @@ mod sends_pr_and_2_patches_to_3_relays {
         let git_repo = prep_git_repo()?;
 
         let (mut r51, mut r52, mut r53) = (
-            Relay::new(8051, None),
-            Relay::new(8052, None),
-            Relay::new(8053, None),
+            Relay::new(8051, None, None),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
         );
 
         // // check relay had the right number of events
@@ -427,9 +427,9 @@ mod sends_pr_and_2_patches_to_3_relays {
             let git_repo = prep_git_repo()?;
 
             let (mut r51, mut r52, mut r53) = (
-                Relay::new(8051, None),
-                Relay::new(8052, None),
-                Relay::new(8053, None),
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
             );
 
             // // check relay had the right number of events
@@ -477,15 +477,16 @@ mod sends_pr_and_2_patches_to_3_relays {
                 let git_repo = prep_git_repo()?;
 
                 let (mut r51, mut r52, mut r53) = (
-                    Relay::new(8051, None),
+                    Relay::new(8051, None, None),
                     Relay::new(
                         8052,
                         Some(&|relay, client_id, event| -> Result<()> {
                             relay.respond_ok(client_id, event, Some("Payment Required"))?;
                             Ok(())
                         }),
+                        None,
                     ),
-                    Relay::new(8053, None),
+                    Relay::new(8053, None, None),
                 );
 
                 // // check relay had the right number of events
@@ -523,15 +524,16 @@ mod sends_pr_and_2_patches_to_3_relays {
                 let git_repo = prep_git_repo()?;
 
                 let (mut r51, mut r52, mut r53) = (
-                    Relay::new(8051, None),
+                    Relay::new(8051, None, None),
                     Relay::new(
                         8052,
                         Some(&|relay, client_id, event| -> Result<()> {
                             relay.respond_ok(client_id, event, Some("Payment Required"))?;
                             Ok(())
                         }),
+                        None,
                     ),
-                    Relay::new(8053, None),
+                    Relay::new(8053, None, None),
                 );
 
                 // // check relay had the right number of events

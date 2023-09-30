@@ -2717,6 +2717,7 @@ dependencies = [
  "rexpect 0.5.0 (git+https://github.com/phaer/rexpect.git?branch=skip-ansi-escape-codes)",
  "simple-websockets",
  "strip-ansi-escapes",
+ "tungstenite 0.20.1",
 ]
 
 [[package]]

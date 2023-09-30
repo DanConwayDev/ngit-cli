@@ -10,25 +10,32 @@
 // which is currently in nightly. alternatively we can use nightly as it looks
 // certain that the implementation is going to make it to stable but we don't
 // want to inadvertlty use other features of nightly that might be removed.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::future::join_all;
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
 
 pub struct Client {
     client: nostr_sdk::Client,
-    pub fallback_relays: Vec<String>,
+    fallback_relays: Vec<String>,
 }
 
-#[async_trait]
 #[cfg_attr(test, automock)]
+#[async_trait]
 pub trait Connect {
     fn default() -> Self;
     fn new(opts: Params) -> Self;
     async fn connect(&self) -> Result<()>;
     async fn disconnect(&self) -> Result<()>;
+    fn get_fallback_relays(&self) -> &Vec<String>;
     async fn send_event_to(&self, url: &str, event: nostr::event::Event) -> Result<nostr::EventId>;
+    async fn get_events(
+        &self,
+        relays: Vec<String>,
+        filters: Vec<nostr::Filter>,
+    ) -> Result<Vec<nostr::Event>>;
 }
 
 #[async_trait]
@@ -37,7 +44,7 @@ impl Connect for Client {
         Client {
             client: nostr_sdk::Client::new(&nostr::Keys::generate()),
             fallback_relays: vec![
-                "ws://localhost:8080".to_string(),
+                "ws://localhost:8051".to_string(),
                 "ws://localhost:8052".to_string(),
             ],
         }
@@ -61,8 +68,51 @@ impl Connect for Client {
         Ok(())
     }
 
+    fn get_fallback_relays(&self) -> &Vec<String> {
+        &self.fallback_relays
+    }
+
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
         Ok(self.client.send_event_to(url, event).await?)
+    }
+
+    async fn get_events(
+        &self,
+        relays: Vec<String>,
+        filters: Vec<nostr::Filter>,
+    ) -> Result<Vec<nostr::Event>> {
+        // add relays
+        for relay in &relays {
+            self.client
+                .add_relay(relay.as_str(), None)
+                .await
+                .context("cannot add relay")?;
+        }
+
+        let relays_map = self.client.relays().await;
+
+        let relay_results = join_all(
+            relays
+                .clone()
+                .iter()
+                .map(|r| {
+                    (
+                        relays_map.get(&nostr::Url::parse(r).unwrap()).unwrap(),
+                        filters.clone(),
+                    )
+                })
+                .map(|(relay, filters)| {
+                    relay.get_events_of(
+                        filters,
+                        // 20 is nostr_sdk default
+                        std::time::Duration::from_secs(20),
+                        nostr_sdk::FilterOptions::ExitOnEOSE,
+                    )
+                }),
+        )
+        .await;
+
+        Ok(get_dedup_events(relay_results))
     }
 }
 
@@ -81,4 +131,18 @@ impl Params {
         self.fallback_relays = fallback_relays;
         self
     }
+}
+
+fn get_dedup_events(
+    relay_results: Vec<Result<Vec<nostr::Event>, nostr_sdk::relay::Error>>,
+) -> Vec<Event> {
+    let mut dedup_events: Vec<Event> = vec![];
+    for events in relay_results.into_iter().flatten() {
+        for event in events {
+            if !dedup_events.iter().any(|e| event.id.eq(&e.id)) {
+                dedup_events.push(event);
+            }
+        }
+    }
+    dedup_events
 }

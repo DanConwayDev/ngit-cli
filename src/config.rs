@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 #[cfg(test)]
 use mockall::*;
-use nostr::secp256k1::XOnlyPublicKey;
+use nostr::{secp256k1::XOnlyPublicKey, ToBech32};
 use serde::{self, Deserialize, Serialize};
 
 #[derive(Default)]
@@ -71,6 +71,66 @@ pub struct MyConfig {
 pub struct UserRef {
     pub public_key: XOnlyPublicKey,
     pub encrypted_key: String,
+    pub metadata: UserMetadata,
+    pub relays: UserRelays,
+    pub last_checked: u64,
+}
+
+impl UserRef {
+    pub fn new(public_key: XOnlyPublicKey, encrypted_key: String) -> Self {
+        Self {
+            public_key,
+            encrypted_key,
+            relays: UserRelays {
+                relays: vec![],
+                created_at: 0,
+            },
+            metadata: UserMetadata {
+                #[allow(clippy::expect_used)]
+                name: public_key
+                    .to_bech32()
+                    .expect("public key should always produce bech32"),
+                // name: format!(
+                //     "{}",
+                //     public_key
+                //         .to_bech32()
+                //         .expect("public key should always produce bech32"),
+                // )
+                // .as_str()[..10].to_string(),
+                created_at: 0,
+            },
+            last_checked: 0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserMetadata {
+    pub name: String,
+    pub created_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserRelays {
+    pub relays: Vec<UserRelayRef>,
+    pub created_at: u64,
+}
+
+impl UserRelays {
+    pub fn write(&self) -> Vec<String> {
+        self.relays
+            .iter()
+            .filter(|r| r.write)
+            .map(|r| r.url.clone())
+            .collect()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserRelayRef {
+    pub url: String,
+    pub read: bool,
+    pub write: bool,
 }
 
 #[cfg(test)]

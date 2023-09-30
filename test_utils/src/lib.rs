@@ -23,6 +23,39 @@ pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qy8ke0tjqnn8wt3w6lnc86c2
 pub static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_1_NSEC).unwrap());
 
+pub fn generate_test_key_1_metadata_event(name: &str) -> nostr::Event {
+    nostr::event::EventBuilder::set_metadata(nostr::Metadata::new().name(name))
+        .to_event(&TEST_KEY_1_KEYS)
+        .unwrap()
+}
+pub fn generate_test_key_1_metadata_event_old(name: &str) -> nostr::Event {
+    make_event_old_or_change_user(
+        generate_test_key_1_metadata_event(name),
+        &TEST_KEY_1_KEYS,
+        10000,
+    )
+}
+
+pub fn generate_test_key_1_relay_list_event() -> nostr::Event {
+    nostr::event::EventBuilder::new(
+        nostr::Kind::RelayList,
+        "",
+        &[
+            nostr::Tag::RelayMetadata(
+                "ws://localhost:8053".into(),
+                Some(nostr::RelayMetadata::Write),
+            ),
+            nostr::Tag::RelayMetadata(
+                "ws://localhost:8054".into(),
+                Some(nostr::RelayMetadata::Read),
+            ),
+            nostr::Tag::RelayMetadata("ws://localhost:8055".into(), None),
+        ],
+    )
+    .to_event(&TEST_KEY_1_KEYS)
+    .unwrap()
+}
+
 pub static TEST_KEY_2_NSEC: &str =
     "nsec1ypglg6nj6ep0g2qmyfqcv2al502gje3jvpwye6mthmkvj93tqkesknv6qm";
 pub static TEST_KEY_2_NPUB: &str =
@@ -33,11 +66,40 @@ pub static TEST_KEY_2_ENCRYPTED: &str = "...2";
 pub static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_2_NSEC).unwrap());
 
+pub fn generate_test_key_2_metadata_event(name: &str) -> nostr::Event {
+    nostr::event::EventBuilder::set_metadata(nostr::Metadata::new().name(name))
+        .to_event(&TEST_KEY_2_KEYS)
+        .unwrap()
+}
+
 pub static TEST_INVALID_NSEC: &str = "nsec1ppsg5sm2aex";
 pub static TEST_PASSWORD: &str = "769dfd£pwega8SHGv3!#Bsfd5t";
 pub static TEST_INVALID_PASSWORD: &str = "INVALID769dfd£pwega8SHGv3!";
 pub static TEST_WEAK_PASSWORD: &str = "fhaiuhfwe";
 pub static TEST_RANDOM_TOKEN: &str = "lkjh2398HLKJ43hrweiJ6FaPfdssgtrg";
+
+pub fn make_event_old_or_change_user(
+    event: nostr::Event,
+    keys: &nostr::Keys,
+    how_old_in_secs: u64,
+) -> nostr::Event {
+    let mut unsigned = nostr::event::EventBuilder::new(event.kind, event.content, &event.tags)
+        .to_unsigned_event(keys.public_key());
+
+    unsigned.created_at = nostr::types::Timestamp::try_from(
+        nostr::types::Timestamp::now().as_u64() - how_old_in_secs,
+    )
+    .unwrap();
+    unsigned.id = nostr::EventId::new(
+        &keys.public_key(),
+        unsigned.created_at,
+        &unsigned.kind,
+        &unsigned.tags,
+        &unsigned.content,
+    );
+
+    unsigned.sign(keys).unwrap()
+}
 
 /// wrapper for a cli testing tool - currently wraps rexpect and dialoguer
 ///

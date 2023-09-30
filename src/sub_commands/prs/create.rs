@@ -86,7 +86,8 @@ pub async fn launch(
 
     // create PR event
 
-    let keys = login::launch(&cli_args.nsec, &cli_args.password)?;
+    // TODO add client here
+    let keys = login::launch(&cli_args.nsec, &cli_args.password, None).await?;
 
     let events =
         generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, keys)?;

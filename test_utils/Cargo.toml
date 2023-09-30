@@ -15,3 +15,4 @@ rand = "0.8"
 rexpect = { git = "https://github.com/phaer/rexpect.git", branch= "skip-ansi-escape-codes" }
 simple-websockets = "0.1.6"
 strip-ansi-escapes = "0.2.0"
+tungstenite = "0.20.1"
