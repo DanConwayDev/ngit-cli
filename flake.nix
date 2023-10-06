@@ -23,13 +23,14 @@
             # selectLatestNightlyWith isn't support with mixed toolchains
             # https://github.com/oxalica/rust-overlay/issues/136
             (lib.hiPrio rust-bin.nightly."2023-09-01".rustfmt)
+            # (rust-bin.stable.latest.override { extensions = [ "rust-analyzer" ]; })
             rust-bin.stable.latest.default
-
           ];
 
           buildInputs = [
-            rust-analyzer
+            pkg-config # required by git2
             gitlint
+            openssl
           ];
           shellHook = ''
             # auto-install git hooks
