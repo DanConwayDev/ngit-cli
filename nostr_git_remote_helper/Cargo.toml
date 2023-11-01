@@ -1,0 +1,16 @@
+[package]
+name = "nostr-git-remote-helper"
+version = "0.0.1"
+edition = "2021"
+description = "git remote helper for nostr protocol"
+authors = ["DanConwayDev <DanConwayDev@protonmail.com>"]
+readme = "README.md"
+license = "MIT"
+keywords = ["nostr", "git"]
+categories = ["command-line-utilities","git", "git-remote-helper"]
+
+[dependencies]
+anyhow = "1.0.75"
+clap = { version = "4.3.19", features = ["derive"] }
+futures = "0.3.28"
+tokio = "1.33.0"
