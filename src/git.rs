@@ -33,6 +33,7 @@ pub trait RepoActions {
     fn get_checked_out_branch_name(&self) -> Result<String>;
     fn get_tip_of_local_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
     fn get_root_commit(&self, branch_name: &str) -> Result<Sha1Hash>;
+    fn does_commit_exist(&self, commit: &str) -> Result<bool>;
     fn get_head_commit(&self) -> Result<Sha1Hash>;
     fn get_commit_parent(&self, commit: &Sha1Hash) -> Result<Sha1Hash>;
     fn get_commits_ahead_behind(
@@ -41,6 +42,8 @@ pub trait RepoActions {
         latest_commit: &Sha1Hash,
     ) -> Result<(Vec<Sha1Hash>, Vec<Sha1Hash>)>;
     fn make_patch_from_commit(&self, commit: &Sha1Hash) -> Result<String>;
+    fn checkout(&self, ref_name: &str) -> Result<()>;
+    fn create_branch_at_commit(&self, branch_name: &str, commit: &str) -> Result<()>;
 }
 
 impl RepoActions for Repo {
@@ -116,6 +119,14 @@ impl RepoActions for Repo {
                 .context("revwalk from tip should be at least contain the tip oid")?
                 .context("revwalk iter from branch tip should not result in an error")?,
         ))
+    }
+
+    fn does_commit_exist(&self, commit: &str) -> Result<bool> {
+        if let Ok(c) = self.git_repo.find_commit(Oid::from_str(commit)?) {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn get_head_commit(&self) -> Result<Sha1Hash> {
@@ -213,6 +224,31 @@ impl RepoActions for Repo {
             });
         Ok((ahead, behind))
     }
+
+    fn checkout(&self, ref_name: &str) -> Result<()> {
+        let (object, reference) = self.git_repo.revparse_ext(ref_name)?;
+
+        self.git_repo.checkout_tree(&object, None)?;
+
+        match reference {
+            // gref is an actual reference like branches or tags
+            Some(gref) => self.git_repo.set_head(gref.name().unwrap()),
+            // this is a commit, not a reference
+            None => self.git_repo.set_head_detached(object.id()),
+        }?;
+        Ok(())
+    }
+
+    fn create_branch_at_commit(&self, branch_name: &str, commit: &str) -> Result<()> {
+        self.git_repo
+            .branch(
+                branch_name,
+                &self.git_repo.find_commit(Oid::from_str(commit)?)?,
+                false,
+            )
+            .context("branch could not be created")?;
+        Ok(())
+    }
 }
 
 fn oid_to_u8_20_bytes(oid: &Oid) -> [u8; 20] {
@@ -270,6 +306,42 @@ mod tests {
             git_repo.get_commit_parent(&oid_to_sha1(&child_oid))?,
         );
         Ok(())
+    }
+
+    mod does_commit_exist {
+        use super::*;
+
+        #[test]
+        fn existing_commits_results_in_true() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let oid = test_repo.populate()?;
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert!(git_repo.does_commit_exist(&"431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?);
+            Ok(())
+        }
+
+        #[test]
+        fn correctly_formatted_hash_that_doesnt_correspond_to_an_existing_commit_results_in_false()
+        -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let oid = test_repo.populate()?;
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert!(!git_repo.does_commit_exist(&"000004edc0d2fa118d63faa3c2db9c73d630a5ae")?);
+            Ok(())
+        }
+
+        #[test]
+        fn incorrectly_formatted_hash_that_doesnt_correspond_to_an_existing_commit_results_in_error()
+        -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let oid = test_repo.populate()?;
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert!(!git_repo.does_commit_exist(&"00").is_err());
+            Ok(())
+        }
     }
 
     mod make_patch_from_commit {
@@ -519,6 +591,71 @@ mod tests {
                 );
                 Ok(())
             }
+        }
+    }
+
+    mod create_branch_at_commit {
+        use super::*;
+        #[test]
+        fn doesnt_error() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+            // create feature branch and add 2 commits
+            test_repo.create_branch("feature")?;
+            test_repo.checkout("feature")?;
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            let ahead_1_oid = test_repo.stage_and_commit("add t3.md")?;
+            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+            test_repo.stage_and_commit("add t4.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            let branch_name = "test-name-1";
+            git_repo.create_branch_at_commit(branch_name, &ahead_1_oid.to_string())?;
+
+            Ok(())
+        }
+
+        #[test]
+        fn branch_gets_created() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+            // create feature branch and add 2 commits
+            test_repo.create_branch("feature")?;
+            test_repo.checkout("feature")?;
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            let ahead_1_oid = test_repo.stage_and_commit("add t3.md")?;
+            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+            test_repo.stage_and_commit("add t4.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            let branch_name = "test-name-1";
+            git_repo.create_branch_at_commit(branch_name, &ahead_1_oid.to_string())?;
+
+            assert!(test_repo.checkout(&branch_name).is_ok());
+            Ok(())
+        }
+
+        #[test]
+        fn branch_created_with_correct_commit() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+            // create feature branch and add 2 commits
+            test_repo.create_branch("feature")?;
+            test_repo.checkout("feature")?;
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            let ahead_1_oid = test_repo.stage_and_commit("add t3.md")?;
+            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+            test_repo.stage_and_commit("add t4.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            let branch_name = "test-name-1";
+            git_repo.create_branch_at_commit(branch_name, &ahead_1_oid.to_string())?;
+
+            assert_eq!(test_repo.checkout(&branch_name)?, ahead_1_oid);
+            Ok(())
         }
     }
 }
