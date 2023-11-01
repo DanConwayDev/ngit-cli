@@ -105,12 +105,12 @@ impl<'a> Relay<'a> {
                     // remove the disconnected client from the clients map:
                     println!("{} disconnected", self.port);
                     self.clients.remove(&client_id);
-                    break;
+                    // break;
                 }
                 simple_websockets::Event::Message(client_id, message) => {
                     println!(
-                        "Received a message from client #{}: {:?}",
-                        client_id, message
+                        "{} Received a message from client #{}: {:?}",
+                        self.port, client_id, message
                     );
                     if let simple_websockets::Message::Text(s) = message.clone() {
                         if s.eq("shut me down") {
@@ -139,7 +139,7 @@ impl<'a> Relay<'a> {
                     }
                     if is_nclose(&message) {
                         println!("{} recieved nostr close", self.port);
-                        break;
+                        // break;
                     }
                 }
             }
