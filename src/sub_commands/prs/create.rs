@@ -298,6 +298,9 @@ mod tests_unique_and_duplicate {
     }
 }
 
+pub static PR_KIND: u64 = 318;
+pub static PATCH_KIND: u64 = 317;
+
 fn generate_pr_and_patch_events(
     title: &String,
     description: &String,
@@ -311,9 +314,9 @@ fn generate_pr_and_patch_events(
         .context("failed to get root commit of the repository")?;
 
     let pr_event = EventBuilder::new(
-        nostr::event::Kind::Custom(318),
+        nostr::event::Kind::Custom(PR_KIND),
         format!("{title}\r\n\r\n{description}"),
-        &[Tag::Hashtag(format!("r-{root_commit}"))],
+        &[Tag::Reference(format!("r-{root_commit}"))],
         // TODO: suggested branch name
         // Tag::Generic(
         //     TagKind::Custom("suggested-branch-name".to_string()),
@@ -335,14 +338,14 @@ fn generate_pr_and_patch_events(
             .context("failed to create patch event")?;
         events.push(
             EventBuilder::new(
-                nostr::event::Kind::Custom(317),
+                nostr::event::Kind::Custom(PATCH_KIND),
                 git_repo
                     .make_patch_from_commit(commit)
                     .context(format!("cannot make patch for commit {commit}"))?,
                 &[
-                    Tag::Hashtag(format!("r-{root_commit}")),
-                    Tag::Hashtag(commit.to_string()),
-                    Tag::Hashtag(commit_parent.to_string()),
+                    Tag::Reference(format!("r-{root_commit}")),
+                    Tag::Reference(commit.to_string()),
+                    Tag::Reference(commit_parent.to_string()),
                     Tag::Event(
                         pr_event_id,
                         None, // TODO: add relay

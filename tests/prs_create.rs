@@ -420,8 +420,8 @@ mod sends_pr_and_2_patches_to_3_relays {
                     .find(|e| e.kind.as_u64().eq(&PR_KIND))
                     .unwrap();
 
-                // root commit 't' tag
-                assert!(pr_event.tags.iter().any(|t| t.as_vec()[0].eq("t")
+                // root commit 'r' tag
+                assert!(pr_event.tags.iter().any(|t| t.as_vec()[0].eq("r")
                     && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
             }
             Ok(())
@@ -444,12 +444,12 @@ mod sends_pr_and_2_patches_to_3_relays {
                 static COMMIT_ID: &str = "fe973a840fba2a8ab37dd505c154854a69a6505c";
                 let most_recent_patch = patch_events[0];
 
-                // commit 't' and 'commit' tag
+                // commit 'r' and 'commit' tag
                 assert!(
                     most_recent_patch
                         .tags
                         .iter()
-                        .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq(COMMIT_ID))
+                        .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq(COMMIT_ID))
                 );
                 assert!(
                     most_recent_patch
@@ -464,14 +464,14 @@ mod sends_pr_and_2_patches_to_3_relays {
                     most_recent_patch
                         .tags
                         .iter()
-                        .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq(COMMIT_PARENT_ID))
+                        .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq(COMMIT_PARENT_ID))
                 );
                 assert!(most_recent_patch.tags.iter().any(
                     |t| t.as_vec()[0].eq("parent-commit") && t.as_vec()[1].eq(COMMIT_PARENT_ID)
                 ));
 
                 // root commit 't' tag
-                assert!(most_recent_patch.tags.iter().any(|t| t.as_vec()[0].eq("t")
+                assert!(most_recent_patch.tags.iter().any(|t| t.as_vec()[0].eq("r")
                     && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
             }
             Ok(())
