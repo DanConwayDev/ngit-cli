@@ -67,12 +67,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     println!("publishing repostory reference...");
 
-    let repo_event = RepoRef::default()
-        .set_name(name)
-        .set_description(description)
-        .set_root_commit(root_commit.to_string())
-        .set_relays(repo_relays.clone())
-        .to_event(&keys)?;
+    let repo_event = RepoRef {
+        name,
+        description,
+        root_commit: root_commit.to_string(),
+        relays: repo_relays.clone(),
+    }
+    .to_event(&keys)?;
 
     send_events(
         &client,

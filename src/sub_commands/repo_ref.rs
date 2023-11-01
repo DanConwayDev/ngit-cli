@@ -3,36 +3,16 @@ use nostr::Tag;
 
 #[derive(Default)]
 pub struct RepoRef {
-    name: String,
-    description: String,
-    root_commit: String,
-    relays: Vec<String>,
+    pub name: String,
+    pub description: String,
+    pub root_commit: String,
+    pub relays: Vec<String>,
     // git_server: String,
     // other maintainers
     // code languages and hashtags
 }
 
 impl RepoRef {
-    pub fn set_name(&mut self, name: String) -> &mut Self {
-        self.name = name;
-        self
-    }
-
-    pub fn set_description(&mut self, description: String) -> &mut Self {
-        self.description = description;
-        self
-    }
-
-    pub fn set_root_commit(&mut self, root_commit: String) -> &mut Self {
-        self.root_commit = root_commit;
-        self
-    }
-
-    pub fn set_relays(&mut self, relays: Vec<String>) -> &mut Self {
-        self.relays = relays;
-        self
-    }
-
     pub fn to_event(&self, keys: &nostr::Keys) -> Result<nostr::Event> {
         nostr_sdk::EventBuilder::new(
             nostr::event::Kind::Custom(30017),
@@ -62,22 +42,21 @@ mod tests {
 
     use super::*;
 
+    fn create() -> nostr::Event {
+        RepoRef {
+            name: "test name".to_string(),
+            description: "test description".to_string(),
+            root_commit: "23471389461".to_string(),
+            relays: vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
+        }
+        .to_event(&TEST_KEY_1_KEYS)
+        .unwrap()
+    }
+
     mod to_event {
         use super::*;
         mod tags {
             use super::*;
-            fn create() -> nostr::Event {
-                RepoRef::default()
-                    .set_name("test name".to_string())
-                    .set_description("test description".to_string())
-                    .set_root_commit("23471389461".to_string())
-                    .set_relays(vec![
-                        "ws://relay1.io".to_string(),
-                        "ws://relay2.io".to_string(),
-                    ])
-                    .to_event(&TEST_KEY_1_KEYS)
-                    .unwrap()
-            }
 
             #[test]
             fn name() {
