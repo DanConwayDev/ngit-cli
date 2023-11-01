@@ -101,19 +101,30 @@ impl Connect for Client {
                         filters.clone(),
                     )
                 })
-                .map(|(relay, filters)| {
-                    relay.get_events_of(
-                        filters,
-                        // 20 is nostr_sdk default
-                        std::time::Duration::from_secs(20),
-                        nostr_sdk::FilterOptions::ExitOnEOSE,
-                    )
-                }),
+                .map(|(relay, filters)| get_events_of(relay, filters)),
         )
         .await;
 
         Ok(get_dedup_events(relay_results))
     }
+}
+
+async fn get_events_of(
+    relay: &nostr_sdk::Relay,
+    filters: Vec<nostr::Filter>,
+) -> Result<Vec<Event>> {
+    if !relay.is_connected().await {
+        relay.connect(true).await;
+    }
+    relay
+        .get_events_of(
+            filters,
+            // 20 is nostr_sdk default
+            std::time::Duration::from_secs(20),
+            nostr_sdk::FilterOptions::ExitOnEOSE,
+        )
+        .await
+        .context("failed to get events from relay")
 }
 
 #[derive(Default)]
@@ -133,9 +144,7 @@ impl Params {
     }
 }
 
-fn get_dedup_events(
-    relay_results: Vec<Result<Vec<nostr::Event>, nostr_sdk::relay::Error>>,
-) -> Vec<Event> {
+fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event> {
     let mut dedup_events: Vec<Event> = vec![];
     for events in relay_results.into_iter().flatten() {
         for event in events {

@@ -56,6 +56,25 @@ pub fn generate_test_key_1_relay_list_event() -> nostr::Event {
     .unwrap()
 }
 
+pub fn generate_test_key_1_relay_list_event_same_as_fallback() -> nostr::Event {
+    nostr::event::EventBuilder::new(
+        nostr::Kind::RelayList,
+        "",
+        &[
+            nostr::Tag::RelayMetadata(
+                "ws://localhost:8051".into(),
+                Some(nostr::RelayMetadata::Write),
+            ),
+            nostr::Tag::RelayMetadata(
+                "ws://localhost:8052".into(),
+                Some(nostr::RelayMetadata::Write),
+            ),
+        ],
+    )
+    .to_event(&TEST_KEY_1_KEYS)
+    .unwrap()
+}
+
 pub static TEST_KEY_2_NSEC: &str =
     "nsec1ypglg6nj6ep0g2qmyfqcv2al502gje3jvpwye6mthmkvj93tqkesknv6qm";
 pub static TEST_KEY_2_NPUB: &str =

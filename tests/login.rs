@@ -27,229 +27,20 @@ mod with_relays {
 
     use super::*;
 
-    mod when_first_time_login {
+    mod when_user_relay_list_aligns_with_fallback_relays {
+        // this simplifies testing
         use super::*;
 
-        // falls_back_to_fallback_relays - this is implict in the tests
-
-        mod dislays_logged_in_with_correct_name {
-
+        mod when_first_time_login {
             use super::*;
 
-            async fn run_test_displays_correct_name(
-                relay_listener1: Option<ListenerReqFunc<'_>>,
-                relay_listener2: Option<ListenerReqFunc<'_>>,
-            ) -> Result<()> {
-                let (mut r51, mut r52) = (
-                    Relay::new(8051, None, relay_listener1),
-                    Relay::new(8052, None, relay_listener2),
-                );
+            // falls_back_to_fallback_relays - this is implict in the tests
 
-                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    with_fresh_config(|| {
-                        let mut p = CliTester::new(["login"]);
+            mod dislays_logged_in_with_correct_name {
 
-                        p.expect_input(EXPECTED_NSEC_PROMPT)?
-                            .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                        p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                            .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                            .succeeds_with(TEST_PASSWORD)?;
-
-                        p.expect("searching for your details...\r\n")?;
-                        p.expect("\r")?;
-
-                        p.expect_end_with("logged in as fred\r\n")?;
-                        for p in [51, 52] {
-                            shutdown_relay(8000 + p)?;
-                        }
-                        Ok(())
-                    })
-                });
-
-                // launch relay
-                let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
-
-                cli_tester_handle.join().unwrap()?;
-                Ok(())
-            }
-
-            #[test]
-            #[serial]
-            fn when_latest_metadata_and_relay_list_on_all_relays() -> Result<()> {
-                futures::executor::block_on(run_test_displays_correct_name(
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
-                        Ok(())
-                    }),
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
-                        Ok(())
-                    }),
-                ))
-            }
-
-            #[test]
-            #[serial]
-            fn when_latest_metadata_and_relay_list_on_some_relays_but_others_have_none()
-            -> Result<()> {
-                futures::executor::block_on(run_test_displays_correct_name(
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
-                        Ok(())
-                    }),
-                    None,
-                ))
-            }
-
-            #[test]
-            #[serial]
-            fn when_latest_metadata_only_on_relay_and_relay_list_on_another() -> Result<()> {
-                futures::executor::block_on(run_test_displays_correct_name(
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![generate_test_key_1_metadata_event("fred")],
-                        )?;
-                        Ok(())
-                    }),
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![generate_test_key_1_relay_list_event()],
-                        )?;
-                        Ok(())
-                    }),
-                ))
-            }
-
-            #[test]
-            #[serial]
-            fn when_some_relays_return_old_metadata_event() -> Result<()> {
-                futures::executor::block_on(run_test_displays_correct_name(
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
-                        Ok(())
-                    }),
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![generate_test_key_1_metadata_event_old("fred old")],
-                        )?;
-                        Ok(())
-                    }),
-                ))
-            }
-
-            #[test]
-            #[serial]
-            fn when_some_relays_return_other_users_metadata() -> Result<()> {
-                futures::executor::block_on(run_test_displays_correct_name(
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![generate_test_key_2_metadata_event("carole")],
-                        )?;
-                        Ok(())
-                    }),
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event_old("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
-                        Ok(())
-                    }),
-                ))
-            }
-
-            #[test]
-            #[serial]
-            fn when_some_relays_return_other_event_kinds() -> Result<()> {
-                futures::executor::block_on(run_test_displays_correct_name(
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        let mut event = generate_test_key_1_metadata_event("Fred");
-                        event.kind = nostr::Kind::TextNote;
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![make_event_old_or_change_user(event, &TEST_KEY_1_KEYS, 0)],
-                        )?;
-                        Ok(())
-                    }),
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event_old("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
-                        Ok(())
-                    }),
-                ))
-            }
-
-            mod when_specifying_command_line_nsec_only {
                 use super::*;
 
-                #[test]
-                #[serial]
-                fn displays_correct_name() -> Result<()> {
-                    futures::executor::block_on(
-                        run_test_when_specifying_command_line_nsec_only_displays_correct_name(
-                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        generate_test_key_1_metadata_event("fred"),
-                                        generate_test_key_1_relay_list_event(),
-                                    ],
-                                )?;
-                                Ok(())
-                            }),
-                            None,
-                        ),
-                    )
-                }
-                async fn run_test_when_specifying_command_line_nsec_only_displays_correct_name(
+                async fn run_test_displays_correct_name(
                     relay_listener1: Option<ListenerReqFunc<'_>>,
                     relay_listener2: Option<ListenerReqFunc<'_>>,
                 ) -> Result<()> {
@@ -260,7 +51,14 @@ mod with_relays {
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         with_fresh_config(|| {
-                            let mut p = CliTester::new(["login", "--nsec", TEST_KEY_1_NSEC]);
+                            let mut p = CliTester::new(["login"]);
+
+                            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                                .succeeds_with(TEST_KEY_1_NSEC)?;
+
+                            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
+                                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
+                                .succeeds_with(TEST_PASSWORD)?;
 
                             p.expect("searching for your details...\r\n")?;
                             p.expect("\r")?;
@@ -279,14 +77,220 @@ mod with_relays {
                     cli_tester_handle.join().unwrap()?;
                     Ok(())
                 }
-            }
-            mod when_specifying_command_line_password_only {
-                use super::*;
 
                 #[test]
                 #[serial]
-                fn displays_correct_name() -> Result<()> {
-                    futures::executor::block_on(
+                fn when_latest_metadata_and_relay_list_on_all_relays() -> Result<()> {
+                    futures::executor::block_on(run_test_displays_correct_name(
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                    ))
+                }
+
+                #[test]
+                #[serial]
+                fn when_latest_metadata_and_relay_list_on_some_relays_but_others_have_none()
+                -> Result<()> {
+                    futures::executor::block_on(run_test_displays_correct_name(
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                        None,
+                    ))
+                }
+
+                #[test]
+                #[serial]
+                fn when_latest_metadata_only_on_relay_and_relay_list_on_another() -> Result<()> {
+                    futures::executor::block_on(run_test_displays_correct_name(
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_test_key_1_metadata_event("fred")],
+                            )?;
+                            Ok(())
+                        }),
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_test_key_1_relay_list_event_same_as_fallback()],
+                            )?;
+                            Ok(())
+                        }),
+                    ))
+                }
+
+                #[test]
+                #[serial]
+                fn when_some_relays_return_old_metadata_event() -> Result<()> {
+                    futures::executor::block_on(run_test_displays_correct_name(
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_test_key_1_metadata_event_old("fred old")],
+                            )?;
+                            Ok(())
+                        }),
+                    ))
+                }
+
+                #[test]
+                #[serial]
+                fn when_some_relays_return_other_users_metadata() -> Result<()> {
+                    futures::executor::block_on(run_test_displays_correct_name(
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_test_key_2_metadata_event("carole")],
+                            )?;
+                            Ok(())
+                        }),
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event_old("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                    ))
+                }
+
+                #[test]
+                #[serial]
+                fn when_some_relays_return_other_event_kinds() -> Result<()> {
+                    futures::executor::block_on(run_test_displays_correct_name(
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            let mut event = generate_test_key_1_metadata_event("Fred");
+                            event.kind = nostr::Kind::TextNote;
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![make_event_old_or_change_user(event, &TEST_KEY_1_KEYS, 0)],
+                            )?;
+                            Ok(())
+                        }),
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event_old("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                    ))
+                }
+
+                mod when_specifying_command_line_nsec_only {
+                    use super::*;
+
+                    #[test]
+                    #[serial]
+                    fn displays_correct_name() -> Result<()> {
+                        futures::executor::block_on(
+                            run_test_when_specifying_command_line_nsec_only_displays_correct_name(
+                                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                                    relay.respond_events(
+                                        client_id,
+                                        &subscription_id,
+                                        &vec![
+                                            generate_test_key_1_metadata_event("fred"),
+                                            generate_test_key_1_relay_list_event_same_as_fallback(),
+                                        ],
+                                    )?;
+                                    Ok(())
+                                }),
+                                None,
+                            ),
+                        )
+                    }
+                    async fn run_test_when_specifying_command_line_nsec_only_displays_correct_name(
+                        relay_listener1: Option<ListenerReqFunc<'_>>,
+                        relay_listener2: Option<ListenerReqFunc<'_>>,
+                    ) -> Result<()> {
+                        let (mut r51, mut r52) = (
+                            Relay::new(8051, None, relay_listener1),
+                            Relay::new(8052, None, relay_listener2),
+                        );
+
+                        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                            with_fresh_config(|| {
+                                let mut p = CliTester::new(["login", "--nsec", TEST_KEY_1_NSEC]);
+
+                                p.expect("searching for your details...\r\n")?;
+                                p.expect("\r")?;
+
+                                p.expect_end_with("logged in as fred\r\n")?;
+                                for p in [51, 52] {
+                                    shutdown_relay(8000 + p)?;
+                                }
+                                Ok(())
+                            })
+                        });
+
+                        // launch relay
+                        let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
+
+                        cli_tester_handle.join().unwrap()?;
+                        Ok(())
+                    }
+                }
+                mod when_specifying_command_line_password_only {
+                    use super::*;
+
+                    #[test]
+                    #[serial]
+                    fn displays_correct_name() -> Result<()> {
+                        futures::executor::block_on(
                         run_test_when_specifying_command_line_password_only_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
@@ -294,7 +298,7 @@ mod with_relays {
                                     &subscription_id,
                                     &vec![
                                         generate_test_key_1_metadata_event("fred"),
-                                        generate_test_key_1_relay_list_event(),
+                                        generate_test_key_1_relay_list_event_same_as_fallback(),
                                     ],
                                 )?;
                                 Ok(())
@@ -302,8 +306,123 @@ mod with_relays {
                             None,
                         ),
                     )
+                    }
+                    async fn run_test_when_specifying_command_line_password_only_displays_correct_name(
+                        relay_listener1: Option<ListenerReqFunc<'_>>,
+                        relay_listener2: Option<ListenerReqFunc<'_>>,
+                    ) -> Result<()> {
+                        let (mut r51, mut r52) = (
+                            Relay::new(8051, None, relay_listener1),
+                            Relay::new(8052, None, relay_listener2),
+                        );
+
+                        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                            with_fresh_config(|| {
+                                CliTester::new([
+                                    "login",
+                                    "--offline",
+                                    "--nsec",
+                                    TEST_KEY_1_NSEC,
+                                    "--password",
+                                    TEST_PASSWORD,
+                                ])
+                                .expect_end_eventually()?;
+
+                                let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
+
+                                p.expect("searching for your details...\r\n")?;
+                                p.expect("\r")?;
+
+                                p.expect_end_with("logged in as fred\r\n")?;
+                                for p in [51, 52] {
+                                    shutdown_relay(8000 + p)?;
+                                }
+                                Ok(())
+                            })
+                        });
+
+                        // launch relay
+                        let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
+
+                        cli_tester_handle.join().unwrap()?;
+                        Ok(())
+                    }
                 }
-                async fn run_test_when_specifying_command_line_password_only_displays_correct_name(
+
+                mod when_specifying_command_line_nsec_and_password {
+                    use super::*;
+
+                    #[test]
+                    #[serial]
+                    fn displays_correct_name() -> Result<()> {
+                        futures::executor::block_on(
+                        run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
+                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                                relay.respond_events(
+                                    client_id,
+                                    &subscription_id,
+                                    &vec![
+                                        generate_test_key_1_metadata_event("fred"),
+                                        generate_test_key_1_relay_list_event_same_as_fallback(),
+                                    ],
+                                )?;
+                                Ok(())
+                            }),
+                            None,
+                        ),
+                    )
+                    }
+                    async fn run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
+                        relay_listener1: Option<ListenerReqFunc<'_>>,
+                        relay_listener2: Option<ListenerReqFunc<'_>>,
+                    ) -> Result<()> {
+                        let (mut r51, mut r52) = (
+                            Relay::new(8051, None, relay_listener1),
+                            Relay::new(8052, None, relay_listener2),
+                        );
+
+                        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                            with_fresh_config(|| {
+                                let mut p = CliTester::new([
+                                    "login",
+                                    "--nsec",
+                                    TEST_KEY_1_NSEC,
+                                    "--password",
+                                    TEST_PASSWORD,
+                                ]);
+
+                                p.expect("searching for your details...\r\n")?;
+                                p.expect("\r")?;
+
+                                p.expect_end_with("logged in as fred\r\n")?;
+                                for p in [51, 52] {
+                                    shutdown_relay(8000 + p)?;
+                                }
+                                Ok(())
+                            })
+                        });
+
+                        // launch relay
+                        let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
+
+                        cli_tester_handle.join().unwrap()?;
+                        Ok(())
+                    }
+                }
+            }
+
+            mod when_no_metadata_found {
+                use super::*;
+
+                #[test]
+                #[serial]
+                fn warm_user_and_displays_npub() -> Result<()> {
+                    futures::executor::block_on(
+                        run_test_when_no_metadata_found_warns_user_and_uses_npub(None, None),
+                    )
+                }
+
+                async fn run_test_when_no_metadata_found_warns_user_and_uses_npub(
                     relay_listener1: Option<ListenerReqFunc<'_>>,
                     relay_listener2: Option<ListenerReqFunc<'_>>,
                 ) -> Result<()> {
@@ -314,20 +433,83 @@ mod with_relays {
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         with_fresh_config(|| {
-                            CliTester::new([
-                                "login",
-                                "--offline",
-                                "--nsec",
-                                TEST_KEY_1_NSEC,
-                                "--password",
-                                TEST_PASSWORD,
-                            ])
-                            .expect_end_eventually()?;
+                            let mut p = CliTester::new(["login"]);
 
-                            let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
+                            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                                .succeeds_with(TEST_KEY_1_NSEC)?;
+
+                            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
+                                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
+                                .succeeds_with(TEST_PASSWORD)?;
 
                             p.expect("searching for your details...\r\n")?;
                             p.expect("\r")?;
+                            p.expect(
+                                "cannot find your account metadata (name, etc) on relays\r\n",
+                            )?;
+
+                            p.expect_end_with(
+                                format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str(),
+                            )?;
+                            for p in [51, 52] {
+                                shutdown_relay(8000 + p)?;
+                            }
+                            Ok(())
+                        })
+                    });
+
+                    // launch relay
+                    let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
+
+                    cli_tester_handle.join().unwrap()?;
+                    Ok(())
+                }
+            }
+
+            mod when_metadata_but_no_relay_list_found {
+                use super::*;
+
+                #[test]
+                #[serial]
+                fn warm_user_and_displays_name() -> Result<()> {
+                    futures::executor::block_on(
+                        run_test_when_no_relay_list_found_warns_user_and_uses_npub(
+                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                                relay.respond_events(
+                                    client_id,
+                                    &subscription_id,
+                                    &vec![generate_test_key_1_metadata_event("fred")],
+                                )?;
+                                Ok(())
+                            }),
+                            None,
+                        ),
+                    )
+                }
+
+                async fn run_test_when_no_relay_list_found_warns_user_and_uses_npub(
+                    relay_listener1: Option<ListenerReqFunc<'_>>,
+                    relay_listener2: Option<ListenerReqFunc<'_>>,
+                ) -> Result<()> {
+                    let (mut r51, mut r52) = (
+                        Relay::new(8051, None, relay_listener1),
+                        Relay::new(8052, None, relay_listener2),
+                    );
+
+                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                        with_fresh_config(|| {
+                            let mut p = CliTester::new(["login"]);
+
+                            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                                .succeeds_with(TEST_KEY_1_NSEC)?;
+
+                            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
+                                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
+                                .succeeds_with(TEST_PASSWORD)?;
+
+                            p.expect("searching for your details...\r\n")?;
+                            p.expect("\r")?;
+                            p.expect("cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
 
                             p.expect_end_with("logged in as fred\r\n")?;
                             for p in [51, 52] {
@@ -344,37 +526,42 @@ mod with_relays {
                     Ok(())
                 }
             }
+        }
 
-            mod when_specifying_command_line_nsec_and_password {
+        mod when_second_time_login_and_details_already_fetched {
+            use super::*;
+
+            // TODO: the following two tests would require a fake config file or
+            // fake time
+            //  - uses_relays_from_user_relay_list
+            //  - dislays_correct_name - when_local_metadata_is_the_most_recent
+
+            mod uses_cache {
                 use super::*;
 
                 #[test]
                 #[serial]
-                fn displays_correct_name() -> Result<()> {
-                    futures::executor::block_on(
-                        run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
-                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        generate_test_key_1_metadata_event("fred"),
-                                        generate_test_key_1_relay_list_event(),
-                                    ],
-                                )?;
-                                Ok(())
-                            }),
-                            None,
-                        ),
-                    )
+                fn dislays_logged_in_with_correct_name() -> Result<()> {
+                    futures::executor::block_on(run_test_dislays_logged_in_with_correct_name(Some(
+                        &|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ],
+                            )?;
+                            Ok(())
+                        },
+                    )))
                 }
-                async fn run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
-                    relay_listener1: Option<ListenerReqFunc<'_>>,
-                    relay_listener2: Option<ListenerReqFunc<'_>>,
+                async fn run_test_dislays_logged_in_with_correct_name(
+                    relay_listener: Option<ListenerReqFunc<'_>>,
                 ) -> Result<()> {
                     let (mut r51, mut r52) = (
-                        Relay::new(8051, None, relay_listener1),
-                        Relay::new(8052, None, relay_listener2),
+                        Relay::new(8051, None, relay_listener),
+                        Relay::new(8052, None, None),
                     );
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
@@ -387,13 +574,19 @@ mod with_relays {
                                 TEST_PASSWORD,
                             ]);
 
-                            p.expect("searching for your details...\r\n")?;
-                            p.expect("\r")?;
+                            p.expect_end_eventually_with("logged in as fred\r\n")?;
 
-                            p.expect_end_with("logged in as fred\r\n")?;
                             for p in [51, 52] {
                                 shutdown_relay(8000 + p)?;
                             }
+
+                            let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
+
+                            p.expect("searching for your details...\r\n")?;
+                            p.expect("\r")?;
+
+                            p.expect_end_eventually_with("logged in as fred\r\n")?;
+
                             Ok(())
                         })
                     });
@@ -402,29 +595,25 @@ mod with_relays {
                     let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
 
                     cli_tester_handle.join().unwrap()?;
+
                     Ok(())
                 }
             }
         }
-
-        mod when_no_metadata_found {
+    }
+    mod when_user_relay_list_contains_write_relays_not_in_fallback_list {
+        use super::*;
+        mod when_latest_metadata_not_on_fallback_relays_only_on_relays_in_user_list {
             use super::*;
-
-            #[test]
-            #[serial]
-            fn warm_user_and_displays_npub() -> Result<()> {
-                futures::executor::block_on(
-                    run_test_when_no_metadata_found_warns_user_and_uses_npub(None, None),
-                )
-            }
-
-            async fn run_test_when_no_metadata_found_warns_user_and_uses_npub(
+            async fn run_test_displays_correct_name(
                 relay_listener1: Option<ListenerReqFunc<'_>>,
                 relay_listener2: Option<ListenerReqFunc<'_>>,
             ) -> Result<()> {
-                let (mut r51, mut r52) = (
+                let (mut r51, mut r52, mut r53, mut r55) = (
                     Relay::new(8051, None, relay_listener1),
-                    Relay::new(8052, None, relay_listener2),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, relay_listener2),
+                    Relay::new(8055, None, None),
                 );
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
@@ -440,71 +629,9 @@ mod with_relays {
 
                         p.expect("searching for your details...\r\n")?;
                         p.expect("\r")?;
-                        p.expect("cannot find your account metadata (name, etc) on relays\r\n")?;
-
-                        p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())?;
-                        for p in [51, 52] {
-                            shutdown_relay(8000 + p)?;
-                        }
-                        Ok(())
-                    })
-                });
-
-                // launch relay
-                let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
-
-                cli_tester_handle.join().unwrap()?;
-                Ok(())
-            }
-        }
-
-        mod when_metadata_but_no_relay_list_found {
-            use super::*;
-
-            #[test]
-            #[serial]
-            fn warm_user_and_displays_name() -> Result<()> {
-                futures::executor::block_on(
-                    run_test_when_no_relay_list_found_warns_user_and_uses_npub(
-                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![generate_test_key_1_metadata_event("fred")],
-                            )?;
-                            Ok(())
-                        }),
-                        None,
-                    ),
-                )
-            }
-
-            async fn run_test_when_no_relay_list_found_warns_user_and_uses_npub(
-                relay_listener1: Option<ListenerReqFunc<'_>>,
-                relay_listener2: Option<ListenerReqFunc<'_>>,
-            ) -> Result<()> {
-                let (mut r51, mut r52) = (
-                    Relay::new(8051, None, relay_listener1),
-                    Relay::new(8052, None, relay_listener2),
-                );
-
-                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    with_fresh_config(|| {
-                        let mut p = CliTester::new(["login"]);
-
-                        p.expect_input(EXPECTED_NSEC_PROMPT)?
-                            .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                        p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                            .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                            .succeeds_with(TEST_PASSWORD)?;
-
-                        p.expect("searching for your details...\r\n")?;
-                        p.expect("\r")?;
-                        p.expect("cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
 
                         p.expect_end_with("logged in as fred\r\n")?;
-                        for p in [51, 52] {
+                        for p in [51, 52, 53, 55] {
                             shutdown_relay(8000 + p)?;
                         }
                         Ok(())
@@ -512,30 +639,34 @@ mod with_relays {
                 });
 
                 // launch relay
-                let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                );
 
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
             }
-        }
-    }
 
-    mod when_second_time_login_and_details_already_fetched {
-        use super::*;
-
-        // TODO: the following two tests would require a fake config file or
-        // fake time
-        //  - uses_relays_from_user_relay_list
-        //  - dislays_correct_name - when_local_metadata_is_the_most_recent
-
-        mod uses_cache {
-            use super::*;
-
+            /// this also tests that additional relays are queried
             #[test]
             #[serial]
-            fn dislays_logged_in_with_correct_name() -> Result<()> {
-                futures::executor::block_on(run_test_dislays_logged_in_with_correct_name(Some(
-                    &|relay, client_id, subscription_id, _| -> Result<()> {
+            fn displays_correct_name() -> Result<()> {
+                futures::executor::block_on(run_test_displays_correct_name(
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event_old("Fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                         relay.respond_events(
                             client_id,
                             &subscription_id,
@@ -545,50 +676,8 @@ mod with_relays {
                             ],
                         )?;
                         Ok(())
-                    },
-                )))
-            }
-            async fn run_test_dislays_logged_in_with_correct_name(
-                relay_listener: Option<ListenerReqFunc<'_>>,
-            ) -> Result<()> {
-                let (mut r51, mut r52) = (
-                    Relay::new(8051, None, relay_listener),
-                    Relay::new(8052, None, None),
-                );
-
-                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    with_fresh_config(|| {
-                        let mut p = CliTester::new([
-                            "login",
-                            "--nsec",
-                            TEST_KEY_1_NSEC,
-                            "--password",
-                            TEST_PASSWORD,
-                        ]);
-
-                        p.expect_end_eventually_with("logged in as fred\r\n")?;
-
-                        for p in [51, 52] {
-                            shutdown_relay(8000 + p)?;
-                        }
-
-                        let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
-
-                        p.expect("searching for your details...\r\n")?;
-                        p.expect("\r")?;
-
-                        p.expect_end_eventually_with("logged in as fred\r\n")?;
-
-                        Ok(())
-                    })
-                });
-
-                // launch relay
-                let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
-
-                cli_tester_handle.join().unwrap()?;
-
-                Ok(())
+                    }),
+                ))
             }
         }
     }

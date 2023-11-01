@@ -143,7 +143,8 @@ impl UserManagement for UserManager {
             .clone())
     }
     /// get UserRef fetching most recent user relays and metadata infomation
-    /// from relays
+    /// from
+    #[allow(clippy::too_many_lines)]
     async fn get_user(
         &self,
         #[cfg(test)] client: &MockConnect,
@@ -155,103 +156,127 @@ impl UserManagement for UserManager {
             .config_manager
             .load()
             .context("failed to load application config")?;
-        let user_ref = cfg
+        let mut user_ref = cfg
             .users
             .iter()
             .find(|u| u.public_key.eq(public_key))
-            .context(format!("pubkey isn't a current user: {public_key}"))?;
+            .context(format!("pubkey isn't a current user: {public_key}"))?
+            .clone();
         // return cache if last fetched was within X minutes
         if !unix_timestamp_after_now_plus_secs(
             user_ref.last_checked,
             use_cache_unless_checked_more_than_x_secs_ago,
         ) {
-            return Ok(user_ref.clone());
+            return Ok(user_ref);
         }
-        let events: Vec<Event> = match client
-            .get_events(
-                if user_ref.relays.write().is_empty() {
-                    client.get_fallback_relays().clone()
-                } else {
-                    user_ref.relays.write()
-                },
-                vec![
-                    nostr::Filter::default()
-                        .author(public_key.to_string())
-                        .since(nostr::Timestamp::from(user_ref.metadata.created_at + 1))
-                        .kind(Kind::Metadata),
-                    nostr::Filter::default()
-                        .author(public_key.to_string())
-                        .since(nostr::Timestamp::from(user_ref.relays.created_at + 1))
-                        .kind(Kind::RelayList),
-                ],
-            )
-            .await
-        {
-            Ok(events) => events,
-            Err(_) => {
-                // TODO error reporting
-                return Ok(user_ref.clone());
-            }
+
+        let mut relays_to_search = if user_ref.relays.write().is_empty() {
+            client.get_fallback_relays().clone()
+        } else {
+            user_ref.relays.write()
         };
 
-        let mut user_ref = user_ref.clone();
+        let mut relays_searched: Vec<String> = vec![];
 
-        user_ref.last_checked = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .context("system time should be after the year 1970")?
-            .as_secs();
-
-        if let Some(new_metadata_event) = events
-            .iter()
-            .filter(|e| e.kind.eq(&nostr::Kind::Metadata) && e.pubkey.eq(public_key))
-            .max_by_key(|e| e.created_at)
-        {
-            if new_metadata_event.created_at.as_u64() > user_ref.metadata.created_at {
-                let metadata = nostr::Metadata::from_json(new_metadata_event.content.clone())
-                    .context("metadata cannot be found in kind 0 event content")?;
-                user_ref.metadata = UserMetadata {
-                    name: metadata
-                        .name
-                        .context("user metadata should always have name")?,
-                    created_at: new_metadata_event.created_at.as_u64(),
-                };
+        loop {
+            for r in &relays_to_search {
+                if !relays_searched.iter().any(|sr| r.eq(sr)) {
+                    relays_searched.push(r.clone());
+                }
             }
-        };
 
-        if let Some(new_relays_event) = events
-            .iter()
-            .filter(|e| e.kind.eq(&nostr::Kind::RelayList) && e.pubkey.eq(public_key))
-            .max_by_key(|e| e.created_at)
-        {
-            if new_relays_event.created_at.as_u64() > user_ref.relays.created_at {
-                user_ref.relays = UserRelays {
-                    relays: new_relays_event
-                        .tags
+            let events: Vec<Event> = match client
+                .get_events(
+                    relays_to_search,
+                    vec![
+                        nostr::Filter::default()
+                            .author(public_key.to_string())
+                            .since(nostr::Timestamp::from(user_ref.metadata.created_at + 1))
+                            .kind(Kind::Metadata),
+                        nostr::Filter::default()
+                            .author(public_key.to_string())
+                            .since(nostr::Timestamp::from(user_ref.relays.created_at + 1))
+                            .kind(Kind::RelayList),
+                    ],
+                )
+                .await
+            {
+                Ok(events) => events,
+                Err(_) => {
+                    return Ok(user_ref.clone());
+                }
+            };
+
+            user_ref.last_checked = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .context("system time should be after the year 1970")?
+                .as_secs();
+
+            if let Some(new_metadata_event) = events
+                .iter()
+                .filter(|e| e.kind.eq(&nostr::Kind::Metadata) && e.pubkey.eq(public_key))
+                .max_by_key(|e| e.created_at)
+            {
+                if new_metadata_event.created_at.as_u64() > user_ref.metadata.created_at {
+                    let metadata = nostr::Metadata::from_json(new_metadata_event.content.clone())
+                        .context("metadata cannot be found in kind 0 event content")?;
+                    user_ref.metadata = UserMetadata {
+                        name: metadata
+                            .name
+                            .context("user metadata should always have name")?,
+                        created_at: new_metadata_event.created_at.as_u64(),
+                    };
+                }
+            };
+
+            if let Some(new_relays_event) = events
+                .iter()
+                .filter(|e| e.kind.eq(&nostr::Kind::RelayList) && e.pubkey.eq(public_key))
+                .max_by_key(|e| e.created_at)
+            {
+                if new_relays_event.created_at.as_u64() > user_ref.relays.created_at {
+                    let new_relay_list = UserRelays {
+                        relays: new_relays_event
+                            .tags
+                            .iter()
+                            .filter(|t| t.kind().eq(&nostr::TagKind::R))
+                            .map(|t| UserRelayRef {
+                                url: t.as_vec()[1].clone(),
+                                read: t.as_vec().len() == 2 || t.as_vec()[2].eq("read"),
+                                write: t.as_vec().len() == 2 || t.as_vec()[2].eq("write"),
+                            })
+                            .collect(),
+                        created_at: new_relays_event.created_at.as_u64(),
+                    };
+                    let new_relays: Vec<String> = new_relay_list
+                        .write()
                         .iter()
-                        .filter(|t| t.kind().eq(&nostr::TagKind::R))
-                        .map(|t| UserRelayRef {
-                            url: t.as_vec()[1].clone(),
-                            read: t.as_vec().len() == 2 || t.as_vec()[2].eq("read"),
-                            write: t.as_vec().len() == 2 || t.as_vec()[2].eq("write"),
-                        })
-                        .collect(),
-                    created_at: new_relays_event.created_at.as_u64(),
-                };
-            }
-        };
+                        .filter(|r| !relays_searched.iter().any(|or| r.eq(&or)))
+                        .map(std::clone::Clone::clone)
+                        .collect();
+                    user_ref.relays = new_relay_list;
 
-        // remove any duplicate entries for key before adding it to config
-        let mut cfg = self.config_manager.load().context("failed to load application config to find and remove any old versions of the user's encrypted key")?;
-        cfg.users = cfg
-            .users
-            .clone()
-            .into_iter()
-            .filter(|r| !r.public_key.eq(public_key))
-            .collect();
-        cfg.users.push(user_ref.clone());
-        self.config_manager
-            .save(&cfg)
-            .context("failed to save application configuration with new user details in")?;
+                    if !new_relays.is_empty() {
+                        relays_to_search = new_relays;
+                        continue;
+                    }
+                }
+            };
+
+            // remove any duplicate entries for key before adding it to config
+            let mut cfg = self.config_manager.load().context("failed to load application config to find and remove any old versions of the user's encrypted key")?;
+            cfg.users = cfg
+                .users
+                .clone()
+                .into_iter()
+                .filter(|r| !r.public_key.eq(public_key))
+                .collect();
+            cfg.users.push(user_ref.clone());
+            self.config_manager
+                .save(&cfg)
+                .context("failed to save application configuration with new user details in")?;
+            break;
+        }
         Ok(user_ref)
     }
 }
@@ -611,23 +636,33 @@ mod tests {
             .clone()
         }
 
+        fn expected_userrelayrefs_write1() -> UserRelayRef {
+            UserRelayRef {
+                url: "wss://fredswrite1.relay".into(),
+                read: false,
+                write: true,
+            }
+            .clone()
+        }
+
+        fn expected_userrelayrefs_read_write1() -> UserRelayRef {
+            UserRelayRef {
+                url: "wss://fredsreadwrite.relay".into(),
+                read: true,
+                write: true,
+            }
+            .clone()
+        }
+
         fn expected_userrelayrefs() -> Vec<UserRelayRef> {
             vec![
-                UserRelayRef {
-                    url: "wss://fredswrite1.relay".into(),
-                    read: false,
-                    write: true,
-                },
+                expected_userrelayrefs_write1(),
                 UserRelayRef {
                     url: "wss://fredsread1.relay".into(),
                     read: true,
                     write: false,
                 },
-                UserRelayRef {
-                    url: "wss://fredsreadwrite.relay".into(),
-                    read: true,
-                    write: true,
-                },
+                expected_userrelayrefs_read_write1(),
             ]
         }
 
@@ -957,6 +992,107 @@ mod tests {
                     5 * 60, // 5 mins ago
                 ))?;
                 Ok(())
+            }
+
+            mod fetches_from_new_relays_discovered_in_incoming_relay_list {
+                use super::*;
+
+                #[test]
+                fn when_all_relays_in_list_are_new_finds_name() -> Result<()> {
+                    let mut m = MockUserManager::default();
+                    let mut client = generate_mock_client();
+                    m.config_manager.expect_load().returning(|| {
+                        Ok(MyConfig {
+                            users: vec![UserRef {
+                                relays: UserRelays {
+                                    relays: vec![],
+                                    created_at: 0,
+                                },
+                                ..generate_standard_config().users[0].clone()
+                            }],
+                            ..generate_standard_config()
+                        })
+                    });
+                    m.config_manager.expect_save().returning(|_| Ok(()));
+                    client
+                        .expect_get_events()
+                        .times(2)
+                        .withf(move |relays, _filters| {
+                            fallback_relays().eq(relays)
+                                || UserRelays {
+                                    relays: expected_userrelayrefs(),
+                                    created_at: 0,
+                                }
+                                .write()
+                                .eq(relays)
+                        })
+                        .returning(|relays, _| {
+                            if fallback_relays().eq(&relays) {
+                                Ok(vec![generate_relaylist_event()])
+                            } else if (UserRelays {
+                                relays: expected_userrelayrefs(),
+                                created_at: 0,
+                            })
+                            .write()
+                            .eq(&relays)
+                            {
+                                Ok(vec![generate_test_key_1_metadata_event("fred")])
+                            } else {
+                                Ok(vec![])
+                            }
+                        });
+
+                    let res = futures::executor::block_on(m.get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    ))?;
+                    assert_eq!(res.metadata.name, "fred");
+                    Ok(())
+                }
+
+                #[test]
+                fn only_fetches_from_newly_added_relays() -> Result<()> {
+                    let mut m = MockUserManager::default();
+                    let mut client = generate_mock_client();
+                    m.config_manager.expect_load().returning(|| {
+                        Ok(MyConfig {
+                            users: vec![UserRef {
+                                relays: UserRelays {
+                                    relays: vec![expected_userrelayrefs_write1()],
+                                    created_at: 0,
+                                },
+                                ..generate_standard_config().users[0].clone()
+                            }],
+                            ..generate_standard_config()
+                        })
+                    });
+                    m.config_manager.expect_save().returning(|_| Ok(()));
+                    client
+                        .expect_get_events()
+                        .times(2)
+                        .withf(move |relays, _filters| {
+                            vec![expected_userrelayrefs_write1().url].eq(relays)
+                                || vec![expected_userrelayrefs_read_write1().url].eq(relays)
+                        })
+                        .returning(|relays, _| {
+                            if vec![expected_userrelayrefs_write1().url].eq(&relays) {
+                                Ok(vec![generate_relaylist_event()])
+                            } else if vec![expected_userrelayrefs_read_write1().url].eq(&relays) {
+                                Ok(vec![generate_test_key_1_metadata_event("fred")])
+                            } else {
+                                Ok(vec![])
+                            }
+                        });
+
+                    let res = futures::executor::block_on(m.get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    ))?;
+                    assert_eq!(res.metadata.name, "fred");
+                    Ok(())
+                }
             }
         }
 
