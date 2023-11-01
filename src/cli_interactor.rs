@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 #[cfg(test)]
 use mockall::*;
@@ -13,6 +13,7 @@ pub trait InteractorPrompt {
     fn input(&self, parms: PromptInputParms) -> Result<String>;
     fn password(&self, parms: PromptPasswordParms) -> Result<String>;
     fn confirm(&self, params: PromptConfirmParms) -> Result<bool>;
+    fn choice(&self, params: PromptChoiceParms) -> Result<usize>;
 }
 impl InteractorPrompt for Interactor {
     fn input(&self, parms: PromptInputParms) -> Result<String> {
@@ -36,6 +37,12 @@ impl InteractorPrompt for Interactor {
             .default(params.default)
             .interact()?;
         Ok(confirm)
+    }
+    fn choice(&self, parms: PromptChoiceParms) -> Result<usize> {
+        dialoguer::Select::with_theme(&self.theme)
+            .items(&parms.choices)
+            .interact()
+            .context("failed to get choice")
     }
 }
 
@@ -81,6 +88,23 @@ impl PromptConfirmParms {
     }
     pub fn with_default(mut self, default: bool) -> Self {
         self.default = default;
+        self
+    }
+}
+
+#[derive(Default)]
+pub struct PromptChoiceParms {
+    pub prompt: String,
+    pub choices: Vec<String>,
+}
+
+impl PromptChoiceParms {
+    pub fn with_prompt<S: Into<String>>(mut self, prompt: S) -> Self {
+        self.prompt = prompt.into();
+        self
+    }
+    pub fn with_choices(mut self, choices: Vec<String>) -> Self {
+        self.choices = choices;
         self
     }
 }
