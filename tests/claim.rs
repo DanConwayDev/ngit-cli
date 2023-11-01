@@ -165,7 +165,7 @@ mod sends_repoistory_to_relays {
 
         #[test]
         #[serial]
-        fn d_replaceable_event_identifier() -> Result<()> {
+        fn root_commit_as_d_replaceable_event_identifier() -> Result<()> {
             let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
             for relay in [&r53, &r55, &r56] {
                 let event: &nostr::Event = relay
@@ -182,7 +182,7 @@ mod sends_repoistory_to_relays {
 
         #[test]
         #[serial]
-        fn root_commit() -> Result<()> {
+        fn root_commit_as_reference() -> Result<()> {
             let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
             for relay in [&r53, &r55, &r56] {
                 let event: &nostr::Event = relay

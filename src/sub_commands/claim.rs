@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use nostr::{EventBuilder, Tag};
 
 use super::prs::create::send_events;
 #[cfg(not(test))]
@@ -10,7 +9,9 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::Connect,
     git::{Repo, RepoActions},
-    login, Cli,
+    login,
+    sub_commands::repo_ref::RepoRef,
+    Cli,
 };
 
 #[derive(Debug, clap::Args)]
@@ -66,15 +67,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     println!("publishing repostory reference...");
 
+    let repo_event = RepoRef::default()
+        .set_name(name)
+        .set_description(description)
+        .set_root_commit(root_commit.to_string())
+        .set_relays(repo_relays.clone())
+        .to_event(&keys)?;
+
     send_events(
         &client,
-        vec![generate_repo_event(
-            &name,
-            &description,
-            &repo_relays,
-            &root_commit.to_string(),
-            &keys,
-        )?],
+        vec![repo_event],
         user_ref.relays.write(),
         repo_relays,
         !cli_args.disable_cli_spinners,
@@ -82,33 +84,4 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     .await?;
 
     Ok(())
-}
-
-fn generate_repo_event(
-    name: &str,
-    description: &str,
-    relays: &[String],
-    // git_server: String,
-    root_commit: &String,
-    keys: &nostr::Keys,
-) -> Result<nostr::Event> {
-    EventBuilder::new(
-        nostr::event::Kind::Custom(30017),
-        "",
-        &[
-            vec![
-                Tag::Identifier(root_commit.to_string()),
-                Tag::Reference(format!("r-{root_commit}")),
-                Tag::Name(name.to_owned()),
-                Tag::Description(description.to_owned()),
-            ],
-            relays.iter().map(|r| Tag::Relay(r.into())).collect(),
-            // git_servers
-            // other maintainers
-            // code languages and hashtags
-        ]
-        .concat(),
-    )
-    .to_event(keys)
-    .context("failed to create pr event")
 }
