@@ -175,9 +175,9 @@ mod sends_pr_and_2_patches_to_3_relays {
                 "prs",
                 "create",
                 "--title",
-                "example",
+                "exampletitle",
                 "--description",
-                "example",
+                "exampledescription",
             ],
         )
     }
@@ -423,6 +423,79 @@ mod sends_pr_and_2_patches_to_3_relays {
                 // root commit 'r' tag
                 assert!(pr_event.tags.iter().any(|t| t.as_vec()[0].eq("r")
                     && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+            }
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn pr_tags_title_as_name() -> Result<()> {
+            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r53, &r55, &r56] {
+                let pr_event: &nostr::Event = relay
+                    .events
+                    .iter()
+                    .find(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .unwrap();
+
+                assert_eq!(
+                    pr_event
+                        .tags
+                        .iter()
+                        .find(|t| t.as_vec()[0].eq("name"))
+                        .unwrap()
+                        .as_vec()[1],
+                    "exampletitle"
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn pr_tags_description() -> Result<()> {
+            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r53, &r55, &r56] {
+                let pr_event: &nostr::Event = relay
+                    .events
+                    .iter()
+                    .find(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .unwrap();
+
+                assert_eq!(
+                    pr_event
+                        .tags
+                        .iter()
+                        .find(|t| t.as_vec()[0].eq("description"))
+                        .unwrap()
+                        .as_vec()[1],
+                    "exampledescription"
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn pr_tags_branch_name() -> Result<()> {
+            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r53, &r55, &r56] {
+                let pr_event: &nostr::Event = relay
+                    .events
+                    .iter()
+                    .find(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .unwrap();
+
+                // branch-name tag
+                assert_eq!(
+                    pr_event
+                        .tags
+                        .iter()
+                        .find(|t| t.as_vec()[0].eq("branch-name"))
+                        .unwrap()
+                        .as_vec()[1],
+                    "feature"
+                );
             }
             Ok(())
         }

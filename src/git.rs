@@ -30,6 +30,7 @@ impl Repo {
 pub trait RepoActions {
     fn get_local_branch_names(&self) -> Result<Vec<String>>;
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
+    fn get_checked_out_branch_name(&self) -> Result<String>;
     fn get_tip_of_local_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
     fn get_root_commit(&self, branch_name: &str) -> Result<Sha1Hash>;
     fn get_head_commit(&self) -> Result<Sha1Hash>;
@@ -81,6 +82,15 @@ impl RepoActions for Repo {
             }
         }
         Ok(branch_names)
+    }
+
+    fn get_checked_out_branch_name(&self) -> Result<String> {
+        Ok(self
+            .git_repo
+            .head()?
+            .shorthand()
+            .context("an object without a shorthand is checked out")?
+            .to_string())
     }
 
     fn get_tip_of_local_branch(&self, branch_name: &str) -> Result<Sha1Hash> {
@@ -374,6 +384,27 @@ mod tests {
             test_repo.populate()?;
             let git_repo = Repo::from_path(&test_repo.dir)?;
             assert!(git_repo.get_main_or_master_branch().is_err());
+            Ok(())
+        }
+    }
+
+    mod get_checked_out_branch_name {
+        use super::*;
+
+        #[test]
+        fn returns_checked_out_branch_name() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let _ = test_repo.populate()?;
+            // create feature branch
+            test_repo.create_branch("example-feature")?;
+            test_repo.checkout("example-feature")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert_eq!(
+                git_repo.get_checked_out_branch_name()?,
+                "example-feature".to_string()
+            );
             Ok(())
         }
     }

@@ -313,15 +313,23 @@ fn generate_pr_and_patch_events(
         .get_root_commit(to_branch)
         .context("failed to get root commit of the repository")?;
 
+    let mut pr_tags = vec![
+        Tag::Reference(format!("r-{root_commit}")),
+        Tag::Name(title.to_string()),
+        Tag::Description(description.to_string()),
+    ];
+
+    if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
+        pr_tags.push(Tag::Generic(
+            TagKind::Custom("branch-name".to_string()),
+            vec![branch_name],
+        ));
+    }
+
     let pr_event = EventBuilder::new(
         nostr::event::Kind::Custom(PR_KIND),
         format!("{title}\r\n\r\n{description}"),
-        &[Tag::Reference(format!("r-{root_commit}"))],
-        // TODO: suggested branch name
-        // Tag::Generic(
-        //     TagKind::Custom("suggested-branch-name".to_string()),
-        //     vec![],
-        // ),
+        &pr_tags,
         // TODO: add Repo event as root
         // TODO: people tag maintainers
         // TODO: add relay tags
