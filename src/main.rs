@@ -10,6 +10,7 @@ mod config;
 mod git;
 mod key_handling;
 mod login;
+mod repo_ref;
 mod sub_commands;
 
 #[derive(Parser)]

@@ -10,7 +10,7 @@ use crate::{
     client::Connect,
     git::{Repo, RepoActions},
     login,
-    sub_commands::repo_ref::RepoRef,
+    repo_ref::RepoRef,
     Cli,
 };
 
