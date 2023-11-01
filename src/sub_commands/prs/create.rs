@@ -1,14 +1,17 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use console::Term;
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nostr::{prelude::sha1::Hash as Sha1Hash, EventBuilder, Marker, Tag, TagKind};
 
+#[cfg(not(test))]
+use crate::client::Client;
+#[cfg(test)]
+use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms},
-    client::{Client, Connect, Params as ClientParams},
+    client::Connect,
     git::{Repo, RepoActions},
     login, Cli,
 };
@@ -84,66 +87,46 @@ pub async fn launch(
             .input(PromptInputParms::default().with_prompt("description (Optional)"))?,
     };
 
-    // create PR event
+    #[cfg(not(test))]
+    let mut client = Client::default();
+    #[cfg(test)]
+    let mut client = <MockConnect as std::default::Default>::default();
 
-    // TODO add client here
-    let keys = login::launch(&cli_args.nsec, &cli_args.password, None).await?;
+    let (keys, user_ref) = login::launch(&cli_args.nsec, &cli_args.password, Some(&client)).await?;
+
+    client.set_keys(&keys).await;
 
     let events =
         generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, &keys)?;
 
-    let my_write_relays: Vec<String> = vec![
-        "ws://localhost:8051".to_string(),
-        "ws://localhost:8052".to_string(),
-    ];
-
+    // TODO: get relays from repo event
     let repo_read_relays: Vec<String> = vec![
-        "ws://localhost:8051".to_string(),
-        "ws://localhost:8053".to_string(),
+        "ws://localhost:8055".to_string(),
+        "ws://localhost:8056".to_string(),
     ];
 
     send_events(
+        &client,
         events,
-        keys,
-        my_write_relays,
+        user_ref.relays.write(),
         repo_read_relays,
         !cli_args.disable_cli_spinners,
     )
     .await?;
     // TODO check if there is already a similarly named PR
 
-    // println!("failures:");
-    // println!("ws://relay.anon.io    Error: Payment Required");
-
-    // should we have a relays in Repository event?
-    // yes
-    //
-
-    // TODO connect to relays and post
-
     Ok(())
 }
 
 async fn send_events(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
     events: Vec<nostr::Event>,
-    keys: nostr::Keys,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<String>,
     animate: bool,
 ) -> Result<()> {
     let (_, _, _, all) = unique_and_duplicate_all(&my_write_relays, &repo_read_relays);
-
-    let client = Client::new(
-        ClientParams::default()
-            .with_keys(keys)
-            // .with_fallback_relays(vec!["ws://localhost:8080".to_string()]),
-            .with_fallback_relays(all.iter().map(std::string::ToString::to_string).collect()),
-    );
-
-    let term = Term::stdout();
-    term.write_line("connecting to relays...")?;
-    client.connect().await?;
-    term.clear_last_lines(1)?;
 
     println!(
         "posting 1 pull request with {} commits...",

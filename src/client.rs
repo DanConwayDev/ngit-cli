@@ -132,17 +132,6 @@ pub struct Params {
     pub fallback_relays: Vec<String>,
 }
 
-impl Params {
-    pub fn with_keys(mut self, keys: nostr::Keys) -> Self {
-        self.keys = Some(keys);
-        self
-    }
-    pub fn with_fallback_relays(mut self, fallback_relays: Vec<String>) -> Self {
-        self.fallback_relays = fallback_relays;
-        self
-    }
-}
-
 fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event> {
     let mut dedup_events: Vec<Event> = vec![];
     for events in relay_results.into_iter().flatten() {

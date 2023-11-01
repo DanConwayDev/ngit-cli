@@ -21,7 +21,7 @@ pub async fn launch(
     password: &Option<String>,
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
-) -> Result<nostr::Keys> {
+) -> Result<(nostr::Keys, UserRef)> {
     // if nsec parameter
     let key = if let Some(nsec_unwrapped) = nsec {
         // get key or fail without prompts
@@ -87,7 +87,7 @@ pub async fn launch(
     // print logged in
     println!("logged in as {}", user_ref.metadata.name);
 
-    Ok(key)
+    Ok((key, user_ref.clone()))
 }
 
 async fn get_user_details(

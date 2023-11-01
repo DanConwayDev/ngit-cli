@@ -169,6 +169,8 @@ mod sends_pr_and_2_patches_to_3_relays {
             [
                 "--nsec",
                 TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
                 "--disable-cli-spinners",
                 "prs",
                 "create",
@@ -182,29 +184,49 @@ mod sends_pr_and_2_patches_to_3_relays {
 
     fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
         p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
-        p.expect(
-            "logged in as npub175lyhnt6nn00qjw0v3navw9pxgv43txnku0tpxprl4h6mvpr6a5qlphudg\r\n",
-        )?;
-        p.expect("connecting to relays...\r\n")?;
+        p.expect("searching for your details...\r\n")?;
         p.expect("\r")?;
+        p.expect("logged in as fred\r\n")?;
         p.expect("posting 1 pull request with 2 commits...\r\n")?;
         Ok(())
     }
 
-    async fn prep_run_create_pr() -> Result<(Relay<'static>, Relay<'static>, Relay<'static>)> {
+    async fn prep_run_create_pr() -> Result<(
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+    )> {
         let git_repo = prep_git_repo()?;
-
-        let (mut r51, mut r52, mut r53) = (
-            Relay::new(8051, None, None),
+        // fallback (51,52) user write (53, 55) repo (55, 56)
+        let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+            Relay::new(
+                8051,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
+                    )?;
+                    Ok(())
+                }),
+            ),
             Relay::new(8052, None, None),
             Relay::new(8053, None, None),
+            Relay::new(8055, None, None),
+            Relay::new(8056, None, None),
         );
 
         // // check relay had the right number of events
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = cli_tester_create_pr(&git_repo);
             p.expect_end_eventually()?;
-            for p in [51, 52, 53] {
+            for p in [51, 52, 53, 55, 56] {
                 relay::shutdown_relay(8000 + p)?;
             }
             Ok(())
@@ -215,16 +237,18 @@ mod sends_pr_and_2_patches_to_3_relays {
             r51.listen_until_close(),
             r52.listen_until_close(),
             r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
         );
         cli_tester_handle.join().unwrap()?;
-        Ok((r51, r52, r53))
+        Ok((r51, r52, r53, r55, r56))
     }
 
     #[test]
     #[serial]
     fn only_1_pr_kind_event_sent_to_each_relay() -> Result<()> {
-        let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
-        for relay in [&r51, &r52, &r53] {
+        let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r53, &r55, &r56] {
             assert_eq!(
                 relay
                     .events
@@ -239,9 +263,60 @@ mod sends_pr_and_2_patches_to_3_relays {
 
     #[test]
     #[serial]
+    fn only_1_pr_kind_event_sent_to_user_relays() -> Result<()> {
+        let (_, _, r53, r55, _) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r53, &r55] {
+            assert_eq!(
+                relay
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .count(),
+                1,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn only_1_pr_kind_event_sent_to_repo_relays() -> Result<()> {
+        let (_, _, _, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r55, &r56] {
+            assert_eq!(
+                relay
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .count(),
+                1,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn pr_not_sent_to_fallback_relay() -> Result<()> {
+        let (r51, r52, _, _, _) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r51, &r52] {
+            assert_eq!(
+                relay
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .count(),
+                0,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
     fn only_2_patch_kind_events_sent_to_each_relay() -> Result<()> {
-        let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
-        for relay in [&r51, &r52, &r53] {
+        let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r53, &r55, &r56] {
             assert_eq!(
                 relay
                     .events
@@ -257,8 +332,8 @@ mod sends_pr_and_2_patches_to_3_relays {
     #[test]
     #[serial]
     fn patch_content_contains_patch_in_email_format() -> Result<()> {
-        let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
-        for relay in [&r51, &r52, &r53] {
+        let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        for relay in [&r53, &r55, &r56] {
             let patch_events: Vec<&nostr::Event> = relay
                 .events
                 .iter()
@@ -326,8 +401,8 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[test]
         #[serial]
         fn pr_tags_repo_commit() -> Result<()> {
-            let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
-            for relay in [&r51, &r52, &r53] {
+            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event = relay
                     .events
                     .iter()
@@ -347,8 +422,8 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[test]
         #[serial]
         fn patch_tags_correctly_formatted() -> Result<()> {
-            let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
-            for relay in [&r51, &r52, &r53] {
+            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r53, &r55, &r56] {
                 let patch_events: Vec<&nostr::Event> = relay
                     .events
                     .iter()
@@ -394,8 +469,8 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[test]
         #[serial]
         fn patch_tags_pr_event_as_root() -> Result<()> {
-            let (r51, r52, r53) = futures::executor::block_on(prep_run_create_pr())?;
-            for relay in [&r51, &r52, &r53] {
+            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            for relay in [&r53, &r55, &r56] {
                 let patch_events: Vec<&nostr::Event> = relay
                     .events
                     .iter()
@@ -428,10 +503,26 @@ mod sends_pr_and_2_patches_to_3_relays {
         async fn run_test_async() -> Result<()> {
             let git_repo = prep_git_repo()?;
 
-            let (mut r51, mut r52, mut r53) = (
-                Relay::new(8051, None, None),
+            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                Relay::new(
+                    8051,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
             );
 
             // // check relay had the right number of events
@@ -441,14 +532,14 @@ mod sends_pr_and_2_patches_to_3_relays {
                 relay::expect_send_with_progress(
                     &mut p,
                     vec![
-                        (" [my-relay] [repo-relay] ws://localhost:8051", true, ""),
-                        (" [my-relay] ws://localhost:8052", true, ""),
-                        (" [repo-relay] ws://localhost:8053", true, ""),
+                        (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
+                        (" [my-relay] ws://localhost:8053", true, ""),
+                        (" [repo-relay] ws://localhost:8056", true, ""),
                     ],
                     3,
                 )?;
                 p.expect_end_with_whitespace()?;
-                for p in [51, 52, 53] {
+                for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;
                 }
                 Ok(())
@@ -459,6 +550,8 @@ mod sends_pr_and_2_patches_to_3_relays {
                 r51.listen_until_close(),
                 r52.listen_until_close(),
                 r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
             );
             cli_tester_handle.join().unwrap()?;
             Ok(())
@@ -481,24 +574,40 @@ mod sends_pr_and_2_patches_to_3_relays {
             async fn run_test_async() -> Result<()> {
                 let git_repo = prep_git_repo()?;
 
-                let (mut r51, mut r52, mut r53) = (
-                    Relay::new(8051, None, None),
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(
-                        8052,
+                        8051,
+                        None,
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                    ),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(
+                        8056,
                         Some(&|relay, client_id, event| -> Result<()> {
                             relay.respond_ok(client_id, event, Some("Payment Required"))?;
                             Ok(())
                         }),
                         None,
                     ),
-                    Relay::new(8053, None, None),
                 );
 
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_create_pr(&git_repo);
                     p.expect_end_eventually()?;
-                    for p in [51, 52, 53] {
+                    for p in [51, 52, 53, 55, 56] {
                         relay::shutdown_relay(8000 + p)?;
                     }
                     Ok(())
@@ -509,10 +618,12 @@ mod sends_pr_and_2_patches_to_3_relays {
                     r51.listen_until_close(),
                     r52.listen_until_close(),
                     r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
 
-                assert_eq!(r52.events.len(), 1);
+                assert_eq!(r56.events.len(), 1);
 
                 Ok(())
             }
@@ -531,38 +642,55 @@ mod sends_pr_and_2_patches_to_3_relays {
             async fn run_test_async() -> Result<(Relay<'static>, Relay<'static>, Relay<'static>)> {
                 let git_repo = prep_git_repo()?;
 
-                let (mut r51, mut r52, mut r53) = (
-                    Relay::new(8051, None, None),
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(
-                        8052,
+                        8051,
+                        None,
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                    ),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(
+                        8056,
                         Some(&|relay, client_id, event| -> Result<()> {
                             relay.respond_ok(client_id, event, Some("Payment Required"))?;
                             Ok(())
                         }),
                         None,
                     ),
-                    Relay::new(8053, None, None),
                 );
 
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_create_pr(&git_repo);
                     expect_msgs_first(&mut p)?;
+                    // p.expect_end_with("bla")?;
                     relay::expect_send_with_progress(
                         &mut p,
                         vec![
-                            (" [my-relay] [repo-relay] ws://localhost:8051", true, ""),
+                            (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
+                            (" [my-relay] ws://localhost:8053", true, ""),
                             (
-                                " [my-relay] ws://localhost:8052",
+                                " [repo-relay] ws://localhost:8056",
                                 false,
                                 "error: Payment Required",
                             ),
-                            (" [repo-relay] ws://localhost:8053", true, ""),
                         ],
                         3,
                     )?;
                     p.expect_end_with_whitespace()?;
-                    for p in [51, 52, 53] {
+                    for p in [51, 52, 53, 55, 56] {
                         relay::shutdown_relay(8000 + p)?;
                     }
 
@@ -574,6 +702,8 @@ mod sends_pr_and_2_patches_to_3_relays {
                     r51.listen_until_close(),
                     r52.listen_until_close(),
                     r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
                 Ok((r51, r52, r53))
