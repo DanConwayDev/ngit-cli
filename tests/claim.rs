@@ -17,8 +17,6 @@ mod sends_repoistory_to_relays {
 
     use super::*;
 
-    static REPOSITORY_KIND: u64 = 30017;
-
     fn prep_git_repo() -> Result<GitTestRepo> {
         let test_repo = GitTestRepo::default();
         test_repo.populate()?;

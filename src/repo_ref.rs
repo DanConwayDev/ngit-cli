@@ -1,5 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use nostr::Tag;
+
+#[cfg(not(test))]
+use crate::client::Client;
+use crate::client::Connect;
+#[cfg(test)]
+use crate::client::MockConnect;
 
 #[derive(Default)]
 pub struct RepoRef {
@@ -12,10 +18,43 @@ pub struct RepoRef {
     // code languages and hashtags
 }
 
+impl TryFrom<nostr::Event> for RepoRef {
+    type Error = anyhow::Error;
+
+    fn try_from(event: nostr::Event) -> Result<Self> {
+        if !event.kind.as_u64().eq(&REPO_REF_KIND) {
+            bail!("incorrect kind");
+        }
+        let mut r = Self::default();
+
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("name")) {
+            r.name = t.as_vec()[1].clone();
+        }
+
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("description")) {
+            r.description = t.as_vec()[1].clone();
+        }
+
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("d")) {
+            r.root_commit = t.as_vec()[1].clone();
+        }
+
+        r.relays = event
+            .tags
+            .iter()
+            .filter(|t| t.as_vec()[0].eq("relay"))
+            .map(|t| t.as_vec()[1].clone())
+            .collect();
+
+        Ok(r)
+    }
+}
+static REPO_REF_KIND: u64 = 300_317;
+
 impl RepoRef {
     pub fn to_event(&self, keys: &nostr::Keys) -> Result<nostr::Event> {
         nostr_sdk::EventBuilder::new(
-            nostr::event::Kind::Custom(30017),
+            nostr::event::Kind::Custom(REPO_REF_KIND),
             "",
             &[
                 vec![
@@ -36,6 +75,36 @@ impl RepoRef {
     }
 }
 
+pub async fn fetch(
+    root_commit: String,
+    #[cfg(test)] client: &MockConnect,
+    #[cfg(not(test))] client: &Client,
+    // TODO: more rubust way of finding repo events
+    relays: Vec<String>,
+) -> Result<RepoRef> {
+    // TODO: fetch relay information from file
+
+    let events: Vec<nostr::Event> = client
+        .get_events(
+            relays,
+            vec![
+                nostr::Filter::default()
+                    .kind(nostr::Kind::Custom(REPO_REF_KIND))
+                    .identifier(root_commit),
+            ],
+        )
+        .await?;
+
+    RepoRef::try_from(
+        events
+            .iter()
+            .filter(|e| e.kind.as_u64() == REPO_REF_KIND)
+            .max_by_key(|e| e.created_at)
+            .context("cannot find repository reference event")?
+            .clone(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use test_utils::*;
@@ -51,6 +120,38 @@ mod tests {
         }
         .to_event(&TEST_KEY_1_KEYS)
         .unwrap()
+    }
+    mod try_from {
+        use super::*;
+
+        #[test]
+        fn name() {
+            assert_eq!(RepoRef::try_from(create()).unwrap().name, "test name",)
+        }
+
+        #[test]
+        fn description() {
+            assert_eq!(
+                RepoRef::try_from(create()).unwrap().description,
+                "test description",
+            )
+        }
+
+        #[test]
+        fn root_commit() {
+            assert_eq!(
+                RepoRef::try_from(create()).unwrap().root_commit,
+                "23471389461",
+            )
+        }
+
+        #[test]
+        fn relays() {
+            assert_eq!(
+                RepoRef::try_from(create()).unwrap().relays,
+                vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
+            )
+        }
     }
 
     mod to_event {

@@ -13,7 +13,7 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms},
     client::Connect,
     git::{Repo, RepoActions},
-    login, Cli,
+    login, repo_ref, Cli,
 };
 
 #[derive(Debug, clap::Args)]
@@ -99,11 +99,16 @@ pub async fn launch(
     let events =
         generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, &keys)?;
 
-    // TODO: get relays from repo event
-    let repo_read_relays: Vec<String> = vec![
-        "ws://localhost:8055".to_string(),
-        "ws://localhost:8056".to_string(),
-    ];
+    let repo_ref = repo_ref::fetch(
+        git_repo
+            .get_root_commit(&to_branch)
+            .context("failed to get root commit of the repository")?
+            .to_string(),
+        &client,
+        // TODO: get relay list from local yaml file
+        user_ref.relays.write(),
+    )
+    .await?;
 
     println!(
         "posting 1 pull request with {} commits...",
@@ -114,12 +119,11 @@ pub async fn launch(
         &client,
         events,
         user_ref.relays.write(),
-        repo_read_relays,
+        repo_ref.relays.clone(),
         !cli_args.disable_cli_spinners,
     )
     .await?;
-    // TODO check if there is already a similarly named PR
-
+    // TODO check if there is already a similarly named
     Ok(())
 }
 
@@ -212,7 +216,6 @@ pub async fn send_events(
         }
     }))
     .await;
-    client.disconnect().await?;
     Ok(())
 }
 

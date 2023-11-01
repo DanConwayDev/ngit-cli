@@ -3,7 +3,7 @@ use std::{ffi::OsStr, path::PathBuf};
 use anyhow::{ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
-use nostr::{self, prelude::FromSkStr};
+use nostr::{self, prelude::FromSkStr, Tag};
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -118,6 +118,27 @@ pub fn make_event_old_or_change_user(
     );
 
     unsigned.sign(keys).unwrap()
+}
+
+pub static REPOSITORY_KIND: u64 = 300317;
+
+pub fn generate_repo_ref_event() -> nostr::Event {
+    // taken from test git_repo
+    let root_commit = "9ee507fc4357d7ee16a5d8901bedcd103f23c17d";
+    nostr::event::EventBuilder::new(
+        nostr::Kind::Custom(REPOSITORY_KIND),
+        "",
+        &[
+            Tag::Identifier(root_commit.to_string()),
+            Tag::Reference(format!("r-{}", root_commit)),
+            Tag::Name("example name".to_string()),
+            Tag::Description("example description".to_string()),
+            Tag::Relay("ws://localhost:8055".into()),
+            Tag::Relay("ws://localhost:8056".into()),
+        ],
+    )
+    .to_event(&TEST_KEY_1_KEYS)
+    .unwrap()
 }
 
 /// wrapper for a cli testing tool - currently wraps rexpect and dialoguer

@@ -218,7 +218,18 @@ mod sends_pr_and_2_patches_to_3_relays {
             ),
             Relay::new(8052, None, None),
             Relay::new(8053, None, None),
-            Relay::new(8055, None, None),
+            Relay::new(
+                8055,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event()],
+                    )?;
+                    Ok(())
+                }),
+            ),
             Relay::new(8056, None, None),
         );
 
@@ -521,7 +532,18 @@ mod sends_pr_and_2_patches_to_3_relays {
                 ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![generate_repo_ref_event()],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8056, None, None),
             );
 
@@ -592,7 +614,18 @@ mod sends_pr_and_2_patches_to_3_relays {
                     ),
                     Relay::new(8052, None, None),
                     Relay::new(8053, None, None),
-                    Relay::new(8055, None, None),
+                    Relay::new(
+                        8055,
+                        None,
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_repo_ref_event()],
+                            )?;
+                            Ok(())
+                        }),
+                    ),
                     Relay::new(
                         8056,
                         Some(&|relay, client_id, event| -> Result<()> {
@@ -660,7 +693,18 @@ mod sends_pr_and_2_patches_to_3_relays {
                     ),
                     Relay::new(8052, None, None),
                     Relay::new(8053, None, None),
-                    Relay::new(8055, None, None),
+                    Relay::new(
+                        8055,
+                        None,
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_repo_ref_event()],
+                            )?;
+                            Ok(())
+                        }),
+                    ),
                     Relay::new(
                         8056,
                         Some(&|relay, client_id, event| -> Result<()> {
