@@ -24,7 +24,6 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         #[cfg(test)]
         let client = <MockConnect as std::default::Default>::default();
 
-        client.connect().await?;
         login::launch(&args.nsec, &args.password, Some(&client)).await?;
         client.disconnect().await?;
         Ok(())

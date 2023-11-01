@@ -27,7 +27,7 @@ pub struct Client {
 pub trait Connect {
     fn default() -> Self;
     fn new(opts: Params) -> Self;
-    async fn connect(&self) -> Result<()>;
+    async fn set_keys(&mut self, keys: &nostr::Keys);
     async fn disconnect(&self) -> Result<()>;
     fn get_fallback_relays(&self) -> &Vec<String>;
     async fn send_event_to(&self, url: &str, event: nostr::event::Event) -> Result<nostr::EventId>;
@@ -55,12 +55,9 @@ impl Connect for Client {
             fallback_relays: opts.fallback_relays,
         }
     }
-    async fn connect(&self) -> Result<()> {
-        for relay in &self.fallback_relays {
-            self.client.add_relay(relay.as_str(), None).await?;
-        }
-        self.client.connect().await;
-        Ok(())
+
+    async fn set_keys(&mut self, keys: &nostr::Keys) {
+        self.client.set_keys(keys).await;
     }
 
     async fn disconnect(&self) -> Result<()> {
@@ -73,6 +70,8 @@ impl Connect for Client {
     }
 
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
+        self.client.add_relay(url, None).await?;
+        self.client.connect_relay(url).await?;
         Ok(self.client.send_event_to(url, event).await?)
     }
 
