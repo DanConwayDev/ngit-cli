@@ -33,7 +33,9 @@ pub struct Cli {
 enum Commands {
     /// save encrypted nsec for future use
     Login(sub_commands::login::SubCommandArgs),
-    /// create and issue Prs
+    /// issue repository reference event as a maintainers
+    Claim(sub_commands::claim::SubCommandArgs),
+    /// create and issue prs
     Prs(sub_commands::prs::SubCommandArgs),
 }
 
@@ -43,6 +45,9 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Login(args) => {
             futures::executor::block_on(sub_commands::login::launch(&cli, args))
+        }
+        Commands::Claim(args) => {
+            futures::executor::block_on(sub_commands::claim::launch(&cli, args))
         }
         Commands::Prs(args) => futures::executor::block_on(sub_commands::prs::launch(&cli, args)),
     }

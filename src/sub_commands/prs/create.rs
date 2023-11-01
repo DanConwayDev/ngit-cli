@@ -105,6 +105,11 @@ pub async fn launch(
         "ws://localhost:8056".to_string(),
     ];
 
+    println!(
+        "posting 1 pull request with {} commits...",
+        events.len() - 1
+    );
+
     send_events(
         &client,
         events,
@@ -118,7 +123,7 @@ pub async fn launch(
     Ok(())
 }
 
-async fn send_events(
+pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     events: Vec<nostr::Event>,
@@ -127,11 +132,6 @@ async fn send_events(
     animate: bool,
 ) -> Result<()> {
     let (_, _, _, all) = unique_and_duplicate_all(&my_write_relays, &repo_read_relays);
-
-    println!(
-        "posting 1 pull request with {} commits...",
-        events.len() - 1
-    );
 
     let m = MultiProgress::new();
     let pb_style = ProgressStyle::with_template(if animate {
