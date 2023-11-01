@@ -90,7 +90,7 @@ pub async fn launch(
     let keys = login::launch(&cli_args.nsec, &cli_args.password, None).await?;
 
     let events =
-        generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, keys)?;
+        generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, &keys)?;
 
     let my_write_relays: Vec<String> = vec![
         "ws://localhost:8051".to_string(),
@@ -318,7 +318,7 @@ fn generate_pr_and_patch_events(
     to_branch: &str,
     git_repo: &Repo,
     commits: &Vec<Sha1Hash>,
-    keys: nostr::Keys,
+    keys: &nostr::Keys,
 ) -> Result<Vec<nostr::Event>> {
     let root_commit = git_repo
         .get_root_commit(to_branch)
@@ -337,7 +337,7 @@ fn generate_pr_and_patch_events(
         // TODO: people tag maintainers
         // TODO: add relay tags
     )
-    .to_event(&keys)
+    .to_event(keys)
     .context("failed to create pr event")?;
 
     let pr_event_id = pr_event.id;
@@ -375,7 +375,7 @@ fn generate_pr_and_patch_events(
                     // TODO: add relay tags
                 ],
             )
-            .to_event(&keys)?,
+            .to_event(keys)?,
         );
     }
     Ok(events)

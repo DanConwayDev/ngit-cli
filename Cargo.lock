@@ -1570,6 +1570,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "negentropy"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e664971378a3987224f7a0e10059782035e89899ae403718ee07de85bec42afe"
+
+[[package]]
 name = "ngit"
 version = "0.0.1"
 dependencies = [
@@ -1636,9 +1642,9 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
 name = "nostr"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df0af088a37ea0026bf96dcd66db8bf21ed7ff528b7cbe34b7f32f6af3ae14a0"
+checksum = "1b65a1b93d2c78550f8e7f84ce475b44c4f04e46b08d30be98523eaa498abae4"
 dependencies = [
  "aes 0.8.3",
  "base64",
@@ -1648,6 +1654,7 @@ dependencies = [
  "chacha20",
  "getrandom",
  "instant",
+ "negentropy",
  "once_cell",
  "reqwest",
  "serde",
@@ -1658,9 +1665,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5facab78c73baf3853f8c807006e23567dd3825392ef13a3a07122f4ce18b56d"
+checksum = "f887f45f344828e14740eb37b32c6ae3b6ac5dc7ea94dd60817507c44a770b01"
 dependencies = [
  "async-utility",
  "nostr",
@@ -1673,9 +1680,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk-net"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa4058b0267a1537c25b4674db9ed7a18152fc4c33df246dd4a88701007084ee"
+checksum = "18d66a499ce2e1ab5ac03626df913d4fe2aa544231ec8b04f312cc13b74d50b2"
 dependencies = [
  "futures-util",
  "thiserror",

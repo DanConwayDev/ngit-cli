@@ -9,7 +9,7 @@ assert_cmd = "2.0.12"
 dialoguer = "0.10.4"
 directories = "5.0.1"
 git2 = "0.18.1"
-nostr = "0.24.0"
+nostr = "0.25.0"
 once_cell = "1.18.0"
 rand = "0.8"
 rexpect = { git = "https://github.com/phaer/rexpect.git", branch= "skip-ansi-escape-codes" }

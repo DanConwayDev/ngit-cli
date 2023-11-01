@@ -190,11 +190,11 @@ impl UserManagement for UserManager {
                     relays_to_search,
                     vec![
                         nostr::Filter::default()
-                            .author(public_key.to_string())
+                            .author(*public_key)
                             .since(nostr::Timestamp::from(user_ref.metadata.created_at + 1))
                             .kind(Kind::Metadata),
                         nostr::Filter::default()
-                            .author(public_key.to_string())
+                            .author(*public_key)
                             .since(nostr::Timestamp::from(user_ref.relays.created_at + 1))
                             .kind(Kind::RelayList),
                     ],

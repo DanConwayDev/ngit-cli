@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{bail, Result};
-use nostr::{ClientMessage, RelayMessage};
+use nostr::{ClientMessage, JsonUtil, RelayMessage};
 
 use crate::CliTester;
 
