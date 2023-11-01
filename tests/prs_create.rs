@@ -204,6 +204,9 @@ mod sends_pr_and_2_patches_to_3_relays {
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = cli_tester_create_pr(&git_repo);
             p.expect_end_eventually()?;
+            for p in [51, 52, 53] {
+                relay::shutdown_relay(8000 + p)?;
+            }
             Ok(())
         });
 
@@ -419,7 +422,6 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
     }
-
     mod cli_ouput {
         use super::*;
 
@@ -446,6 +448,9 @@ mod sends_pr_and_2_patches_to_3_relays {
                     3,
                 )?;
                 p.expect_end_with_whitespace()?;
+                for p in [51, 52, 53] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
                 Ok(())
             });
 
@@ -493,6 +498,9 @@ mod sends_pr_and_2_patches_to_3_relays {
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_create_pr(&git_repo);
                     p.expect_end_eventually()?;
+                    for p in [51, 52, 53] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
                     Ok(())
                 });
 
@@ -554,6 +562,10 @@ mod sends_pr_and_2_patches_to_3_relays {
                         3,
                     )?;
                     p.expect_end_with_whitespace()?;
+                    for p in [51, 52, 53] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+
                     Ok(())
                 });
 

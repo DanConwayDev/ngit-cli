@@ -91,12 +91,6 @@ impl<'a> Relay<'a> {
         self.respond_eose(client_id, subscription_id.clone())
     }
 
-    pub fn shutdown(&mut self) -> Result<()> {
-        let (mut socket, _) = tungstenite::connect(format!("ws://localhost:{}", self.port))?;
-        socket.write(tungstenite::Message::text("shut me down"))?;
-        socket.close(None)?;
-        Ok(())
-    }
     /// listen, collect events and responds with event_listener to events or
     /// Ok(eventid) if event_listner is None
     pub async fn listen_until_close(&mut self) -> Result<()> {
@@ -159,9 +153,14 @@ impl<'a> Relay<'a> {
 }
 
 pub fn shutdown_relay(port: u64) -> Result<()> {
-    let (mut socket, _) = tungstenite::connect(format!("ws://localhost:{}", port))?;
-    socket.write(tungstenite::Message::text("shut me down"))?;
-    socket.close(None)?;
+    let mut counter = 0;
+    while let Ok((mut socket, _)) = tungstenite::connect(format!("ws://localhost:{}", port)) {
+        counter += 1;
+        if counter == 1 {
+            socket.write(tungstenite::Message::text("shut me down"))?;
+        }
+        socket.close(None)?;
+    }
     Ok(())
 }
 
