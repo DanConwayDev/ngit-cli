@@ -40,6 +40,8 @@ impl InteractorPrompt for Interactor {
     }
     fn choice(&self, parms: PromptChoiceParms) -> Result<usize> {
         dialoguer::Select::with_theme(&self.theme)
+            .with_prompt(parms.prompt)
+            .report(parms.report)
             .items(&parms.choices)
             .interact()
             .context("failed to get choice")
@@ -96,13 +98,20 @@ impl PromptConfirmParms {
 pub struct PromptChoiceParms {
     pub prompt: String,
     pub choices: Vec<String>,
+    pub report: bool,
 }
 
 impl PromptChoiceParms {
     pub fn with_prompt<S: Into<String>>(mut self, prompt: S) -> Self {
         self.prompt = prompt.into();
+        self.report = true;
         self
     }
+
+    // pub fn dont_report(mut self) -> Self {
+    //     self.report = false;
+    //     self
+    // }
     pub fn with_choices(mut self, choices: Vec<String>) -> Self {
         self.choices = choices;
         self

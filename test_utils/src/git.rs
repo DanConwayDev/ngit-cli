@@ -3,7 +3,7 @@
 // implement drop?
 use std::{env::current_dir, fs, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use git2::{Oid, RepositoryInitOptions, Signature, Time};
 
 pub struct GitTestRepo {
@@ -53,7 +53,27 @@ impl GitTestRepo {
         self.stage_and_commit("add t2.md")
     }
 
+    pub fn populate_with_test_branch(&self) -> Result<Oid> {
+        self.populate()?;
+        self.create_branch("add-example-feature")?;
+        fs::write(self.dir.join("f1.md"), "some content")?;
+        self.stage_and_commit("add f1.md")?;
+        fs::write(self.dir.join("f2.md"), "some content")?;
+        self.stage_and_commit("add f2.md")?;
+        fs::write(self.dir.join("f3.md"), "some content1")?;
+        self.stage_and_commit("add f3.md")
+    }
+
     pub fn stage_and_commit(&self, message: &str) -> Result<Oid> {
+        self.stage_and_commit_custom_signature(message, None, None)
+    }
+
+    pub fn stage_and_commit_custom_signature(
+        &self,
+        message: &str,
+        author: Option<&git2::Signature>,
+        commiter: Option<&git2::Signature>,
+    ) -> Result<Oid> {
         let prev_oid = self.git_repo.head().unwrap().peel_to_commit()?;
 
         let mut index = self.git_repo.index()?;
@@ -62,8 +82,8 @@ impl GitTestRepo {
 
         let oid = self.git_repo.commit(
             Some("HEAD"),
-            &joe_signature(),
-            &joe_signature(),
+            author.unwrap_or(&joe_signature()),
+            commiter.unwrap_or(&joe_signature()),
             message,
             &self.git_repo.find_tree(index.write_tree()?)?,
             &[&prev_oid],
@@ -91,6 +111,40 @@ impl GitTestRepo {
         }?;
         let oid = self.git_repo.head()?.peel_to_commit()?.id();
         Ok(oid)
+    }
+
+    pub fn get_local_branch_names(&self) -> Result<Vec<String>> {
+        let local_branches = self
+            .git_repo
+            .branches(Some(git2::BranchType::Local))
+            .context("getting GitRepo branches should not error even for a blank repository")?;
+
+        let mut branch_names = vec![];
+
+        for iter in local_branches {
+            let branch = iter?.0;
+            if let Some(name) = branch.name()? {
+                branch_names.push(name.to_string());
+            }
+        }
+        Ok(branch_names)
+    }
+
+    pub fn get_checked_out_branch_name(&self) -> Result<String> {
+        Ok(self
+            .git_repo
+            .head()?
+            .shorthand()
+            .context("an object without a shorthand is checked out")?
+            .to_string())
+    }
+
+    pub fn get_tip_of_local_branch(&self, branch_name: &str) -> Result<Oid> {
+        let branch = self
+            .git_repo
+            .find_branch(branch_name, git2::BranchType::Local)
+            .context(format!("cannot find branch {branch_name}"))?;
+        Ok(branch.into_reference().peel_to_commit()?.id())
     }
 }
 

@@ -11,6 +11,10 @@ use strip_ansi_escapes::strip_str;
 pub mod git;
 pub mod relay;
 
+pub static PR_KIND: u64 = 318;
+pub static PATCH_KIND: u64 = 317;
+pub static REPOSITORY_KIND: u64 = 300317;
+
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
 pub static TEST_KEY_1_SK_HEX: &str =
@@ -120,8 +124,6 @@ pub fn make_event_old_or_change_user(
     unsigned.sign(keys).unwrap()
 }
 
-pub static REPOSITORY_KIND: u64 = 300317;
-
 pub fn generate_repo_ref_event() -> nostr::Event {
     // taken from test git_repo
     let root_commit = "9ee507fc4357d7ee16a5d8901bedcd103f23c17d";
@@ -206,6 +208,20 @@ impl CliTester {
             default,
         };
         i.prompt(true, default).context("initial confirm prompt")?;
+        Ok(i)
+    }
+
+    pub fn expect_choice(
+        &mut self,
+        prompt: &str,
+        choices: Vec<String>,
+    ) -> Result<CliTesterChoicePrompt> {
+        let mut i = CliTesterChoicePrompt {
+            tester: self,
+            prompt: prompt.to_string(),
+            choices,
+        };
+        i.prompt(false).context("initial confirm prompt")?;
         Ok(i)
     }
 }
@@ -397,6 +413,137 @@ impl CliTesterConfirmPrompt<'_> {
     }
 }
 
+pub struct CliTesterChoicePrompt<'a> {
+    tester: &'a mut CliTester,
+    prompt: String,
+    choices: Vec<String>,
+}
+
+impl CliTesterChoicePrompt<'_> {
+    fn prompt(&mut self, eventually: bool) -> Result<&mut Self> {
+        let mut s = String::new();
+        self.tester
+            .formatter
+            .format_select_prompt(&mut s, self.prompt.as_str())
+            .expect("diagluer theme formatter should succeed");
+        ensure!(
+            s.contains(self.prompt.as_str()),
+            "dialoguer must be broken as formatted prompt success doesnt contain prompt"
+        );
+
+        if eventually {
+            self.tester
+                .expect_eventually(sanatize(s).as_str())
+                .context("expect input prompt eventually")?;
+        } else {
+            self.tester
+                .expect(sanatize(s).as_str())
+                .context("expect confirm prompt")?;
+        }
+
+        Ok(self)
+    }
+
+    pub fn succeeds_with(&mut self, chosen_index: u64, report: bool) -> Result<&mut Self> {
+        fn show_options(
+            tester: &mut CliTester,
+            choices: &Vec<String>,
+            selected_index: Option<usize>,
+        ) -> Result<()> {
+            if selected_index.is_some() {
+                for _ in 0..choices.len() {
+                    tester.expect("\r").context("expect new line per choice")?;
+                }
+            } else {
+                tester
+                    .expect("\r\n")
+                    .context("expect new line before choices")?;
+            }
+
+            for (index, item) in choices.iter().enumerate() {
+                let mut s = String::new();
+                tester
+                    .formatter
+                    .format_select_prompt_item(
+                        &mut s,
+                        item.as_str(),
+                        if let Some(i) = selected_index {
+                            index == i
+                        } else {
+                            false
+                        },
+                    )
+                    .expect("diagluer theme formatter should succeed");
+                ensure!(
+                    s.contains(item.as_str()),
+                    "dialoguer must be broken as formatted prompt success doesnt contain prompt"
+                );
+                tester.expect(sanatize(s)).context("expect choice item")?;
+
+                tester
+                    .expect(if choices.len() == index {
+                        "\r\r"
+                    } else {
+                        "\r\n"
+                    })
+                    .context("expect new line after choice item")?;
+            }
+            Ok(())
+        }
+        fn show_selected(
+            tester: &mut CliTester,
+            prompt: &str,
+            choices: &[String],
+            selected_index: u64,
+        ) -> Result<()> {
+            let mut s = String::new();
+
+            let selected = choices[usize::try_from(selected_index)?].clone();
+            tester
+                .formatter
+                .format_select_prompt_selection(&mut s, prompt, selected.as_str())
+                .expect("diagluer theme formatter should succeed");
+            ensure!(
+                s.contains(selected.as_str()),
+                "dialoguer must be broken as formatted prompt success doesnt contain prompt"
+            );
+            tester.expect(sanatize(s)).context("expect choice item")?;
+            Ok(())
+        }
+
+        show_options(self.tester, &self.choices, None)?;
+
+        for _ in 0..(chosen_index + 1) {
+            self.tester.send("j")?;
+        }
+
+        self.tester.send(" ")?;
+
+        for index in 0..(chosen_index + 1) {
+            show_options(self.tester, &self.choices, Some(usize::try_from(index)?))?;
+        }
+
+        for _ in 0..self.choices.len() {
+            self.tester
+                .expect("\r")
+                .context("expect new line per option")?;
+        }
+
+        self.tester
+            .expect("\r")
+            .context("expect new line after options")?;
+
+        if report {
+            show_selected(self.tester, &self.prompt, &self.choices, chosen_index)?;
+            self.tester
+                .expect("\r\n")
+                .context("expect new line at end")?;
+        }
+
+        Ok(self)
+    }
+}
+
 impl CliTester {
     pub fn new<I, S>(args: I) -> Self
     where
@@ -525,6 +672,16 @@ impl CliTester {
         Ok(())
     }
 
+    pub fn expect_end_eventually_and_print(&mut self) -> Result<()> {
+        let before = self
+            .rexpect_session
+            .exp_eof()
+            .context("expected immediate end but got timed out")?;
+        println!("ended eventually with:");
+        println!("{}", &before);
+        Ok(())
+    }
+
     pub fn expect_end_with_whitespace(&mut self) -> Result<()> {
         let before = self
             .rexpect_session
@@ -549,6 +706,12 @@ impl CliTester {
         self.rexpect_session
             .send_line(line)
             .context("send_line failed")?;
+        Ok(())
+    }
+
+    fn send(&mut self, s: &str) -> Result<()> {
+        self.rexpect_session.send(s).context("send failed")?;
+        self.rexpect_session.flush()?;
         Ok(())
     }
 }

@@ -20,6 +20,7 @@ use nostr::Event;
 pub struct Client {
     client: nostr_sdk::Client,
     fallback_relays: Vec<String>,
+    more_fallback_relays: Vec<String>,
 }
 
 #[cfg_attr(test, automock)]
@@ -30,6 +31,7 @@ pub trait Connect {
     async fn set_keys(&mut self, keys: &nostr::Keys);
     async fn disconnect(&self) -> Result<()>;
     fn get_fallback_relays(&self) -> &Vec<String>;
+    fn get_more_fallback_relays(&self) -> &Vec<String>;
     async fn send_event_to(&self, url: &str, event: nostr::event::Event) -> Result<nostr::EventId>;
     async fn get_events(
         &self,
@@ -47,12 +49,17 @@ impl Connect for Client {
                 "ws://localhost:8051".to_string(),
                 "ws://localhost:8052".to_string(),
             ],
+            more_fallback_relays: vec![
+                "ws://localhost:8055".to_string(),
+                "ws://localhost:8056".to_string(),
+            ],
         }
     }
     fn new(opts: Params) -> Self {
         Client {
             client: nostr_sdk::Client::new(&opts.keys.unwrap_or(nostr::Keys::generate())),
             fallback_relays: opts.fallback_relays,
+            more_fallback_relays: opts.more_fallback_relays,
         }
     }
 
@@ -67,6 +74,10 @@ impl Connect for Client {
 
     fn get_fallback_relays(&self) -> &Vec<String> {
         &self.fallback_relays
+    }
+
+    fn get_more_fallback_relays(&self) -> &Vec<String> {
+        &self.more_fallback_relays
     }
 
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
@@ -130,6 +141,7 @@ async fn get_events_of(
 pub struct Params {
     pub keys: Option<nostr::Keys>,
     pub fallback_relays: Vec<String>,
+    pub more_fallback_relays: Vec<String>,
 }
 
 fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event> {

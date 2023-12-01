@@ -147,9 +147,6 @@ mod sends_pr_and_2_patches_to_3_relays {
 
     use super::*;
 
-    static PR_KIND: u64 = 318;
-    static PATCH_KIND: u64 = 317;
-
     fn prep_git_repo() -> Result<GitTestRepo> {
         let test_repo = GitTestRepo::default();
         test_repo.populate()?;
@@ -411,8 +408,31 @@ mod sends_pr_and_2_patches_to_3_relays {
         use super::*;
         #[test]
         #[serial]
+        fn pr_tags_repo_commit_as_identifier() -> Result<()> {
+            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            let root_commit = GitTestRepo::default().initial_commit()?;
+
+            for relay in [&r53, &r55, &r56] {
+                let pr_event: &nostr::Event = relay
+                    .events
+                    .iter()
+                    .find(|e| e.kind.as_u64().eq(&PR_KIND))
+                    .unwrap();
+
+                // root commit identifier tag
+                assert!(pr_event.tags.iter().any(
+                    |t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq(&format!("{}", root_commit))
+                ));
+            }
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
         fn pr_tags_repo_commit() -> Result<()> {
             let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+            let root_commit = GitTestRepo::default().initial_commit()?;
+
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event = relay
                     .events
@@ -421,8 +441,10 @@ mod sends_pr_and_2_patches_to_3_relays {
                     .unwrap();
 
                 // root commit 'r' tag
-                assert!(pr_event.tags.iter().any(|t| t.as_vec()[0].eq("r")
-                    && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+                assert!(
+                    pr_event.tags.iter().any(|t| t.as_vec()[0].eq("r")
+                        && t.as_vec()[1].eq(&format!("r-{}", root_commit)))
+                );
             }
             Ok(())
         }
@@ -503,50 +525,107 @@ mod sends_pr_and_2_patches_to_3_relays {
 
     mod patch_tags {
         use super::*;
+
+        fn prep() -> Result<nostr::Event> {
+            let (_, _, r53, _, _) = futures::executor::block_on(prep_run_create_pr())?;
+            Ok(r53
+                .events
+                .iter()
+                .find(|e| e.kind.as_u64().eq(&PATCH_KIND))
+                .unwrap()
+                .clone())
+        }
+
         #[test]
         #[serial]
-        fn patch_tags_correctly_formatted() -> Result<()> {
-            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
-            for relay in [&r53, &r55, &r56] {
-                let patch_events: Vec<&nostr::Event> = relay
-                    .events
+        fn commit_and_commit_r() -> Result<()> {
+            static COMMIT_ID: &str = "fe973a840fba2a8ab37dd505c154854a69a6505c";
+            let most_recent_patch = prep()?;
+            assert!(
+                most_recent_patch
+                    .tags
                     .iter()
-                    .filter(|e| e.kind.as_u64().eq(&PATCH_KIND))
-                    .collect();
+                    .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq(COMMIT_ID))
+            );
+            assert!(
+                most_recent_patch
+                    .tags
+                    .iter()
+                    .any(|t| t.as_vec()[0].eq("commit") && t.as_vec()[1].eq(COMMIT_ID))
+            );
+            Ok(())
+        }
 
-                static COMMIT_ID: &str = "fe973a840fba2a8ab37dd505c154854a69a6505c";
-                let most_recent_patch = patch_events[0];
-
-                // commit 'r' and 'commit' tag
-                assert!(
-                    most_recent_patch
-                        .tags
-                        .iter()
-                        .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq(COMMIT_ID))
-                );
-                assert!(
-                    most_recent_patch
-                        .tags
-                        .iter()
-                        .any(|t| t.as_vec()[0].eq("commit") && t.as_vec()[1].eq(COMMIT_ID))
-                );
-
-                // commit parent 't' and 'parent-commit' tag
-                static COMMIT_PARENT_ID: &str = "232efb37ebc67692c9e9ff58b83c0d3d63971a0a";
-                assert!(
-                    most_recent_patch
-                        .tags
-                        .iter()
-                        .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq(COMMIT_PARENT_ID))
-                );
-                assert!(most_recent_patch.tags.iter().any(
+        #[test]
+        #[serial]
+        fn parent_commit_and_parent_commit_r() -> Result<()> {
+            // commit parent 'r' and 'parent-commit' tag
+            static COMMIT_PARENT_ID: &str = "232efb37ebc67692c9e9ff58b83c0d3d63971a0a";
+            let most_recent_patch = prep()?;
+            assert!(
+                most_recent_patch
+                    .tags
+                    .iter()
+                    .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq(COMMIT_PARENT_ID))
+            );
+            assert!(
+                most_recent_patch.tags.iter().any(
                     |t| t.as_vec()[0].eq("parent-commit") && t.as_vec()[1].eq(COMMIT_PARENT_ID)
-                ));
+                )
+            );
+            Ok(())
+        }
 
-                // root commit 't' tag
-                assert!(most_recent_patch.tags.iter().any(|t| t.as_vec()[0].eq("r")
-                    && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
-            }
+        #[test]
+        #[serial]
+        fn root_commit_as_r_with_r_hypen_prefix() -> Result<()> {
+            assert!(prep()?.tags.iter().any(|t| t.as_vec()[0].eq("r")
+                && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn description_with_commit_message() -> Result<()> {
+            assert_eq!(
+                prep()?
+                    .tags
+                    .iter()
+                    .find(|t| t.as_vec()[0].eq("description"))
+                    .unwrap()
+                    .as_vec()[1],
+                "add t4.md"
+            );
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn commit_author() -> Result<()> {
+            assert_eq!(
+                prep()?
+                    .tags
+                    .iter()
+                    .find(|t| t.as_vec()[0].eq("author"))
+                    .unwrap()
+                    .as_vec(),
+                vec!["author", "Joe Bloggs", "joe.bloggs@pm.me", "0,0"],
+            );
+            Ok(())
+        }
+
+        #[test]
+        #[serial]
+        fn commit_committer() -> Result<()> {
+            assert_eq!(
+                prep()?
+                    .tags
+                    .iter()
+                    .find(|t| t.as_vec()[0].eq("committer"))
+                    .unwrap()
+                    .as_vec(),
+                vec!["committer", "Joe Bloggs", "joe.bloggs@pm.me", "0,0"],
+            );
             Ok(())
         }
 

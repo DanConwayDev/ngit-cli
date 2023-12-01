@@ -91,6 +91,27 @@ impl<'a> Relay<'a> {
         self.respond_eose(client_id, subscription_id.clone())
     }
 
+    /// send collected events, filtered by filters, and eose
+    pub fn respond_standard_req(
+        &self,
+        client_id: u64,
+        subscription_id: &nostr::SubscriptionId,
+        filters: &[nostr::Filter],
+    ) -> Result<bool> {
+        // let t: Vec<nostr::Kind> = self.events.iter().map(|e| e.kind).collect();
+        // .filter(|e| filters.iter().any(|filter| filter.match_event(e)))
+        // println!("letsgo{:?}", t);
+        self.respond_events(
+            client_id,
+            subscription_id,
+            &self
+                .events
+                .iter()
+                .filter(|e| filters.iter().any(|filter| filter.match_event(e)))
+                .cloned()
+                .collect(),
+        )
+    }
     /// listen, collect events and responds with event_listener to events or
     /// Ok(eventid) if event_listner is None
     pub async fn listen_until_close(&mut self) -> Result<()> {
@@ -108,6 +129,8 @@ impl<'a> Relay<'a> {
                     // break;
                 }
                 simple_websockets::Event::Message(client_id, message) => {
+                    // println!("bla{:?}", &message);
+
                     println!(
                         "{} Received a message from client #{}: {:?}",
                         self.port, client_id, message
@@ -118,8 +141,15 @@ impl<'a> Relay<'a> {
                             break;
                         }
                     }
+                    // println!("{:?}", &message);
                     if let Ok(event) = get_nevent(&message) {
+                        // println!("{:?}", &event);
+                        // let t: Vec<nostr::Kind> = self.events.iter().map(|e| e.kind).collect();
+                        // println!("before{:?}", t);
                         self.events.push(event.clone());
+                        // let t: Vec<nostr::Kind> = self.events.iter().map(|e| e.kind).collect();
+                        // println!("after{:?}", t);
+
                         if let Some(listner) = self.event_listener {
                             listner(self, client_id, event)?;
                         } else {
@@ -132,7 +162,8 @@ impl<'a> Relay<'a> {
                         if let Some(listner) = self.req_listener {
                             listner(self, client_id, subscription_id, filters)?;
                         } else {
-                            self.respond_eose(client_id, subscription_id)?;
+                            self.respond_standard_req(client_id, &subscription_id, &filters)?;
+                            // self.respond_eose(client_id, subscription_id)?;
                         }
                         // respond with events
                         // respond with EOSE

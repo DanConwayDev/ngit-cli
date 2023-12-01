@@ -301,9 +301,9 @@ mod tests_unique_and_duplicate {
 pub static PR_KIND: u64 = 318;
 pub static PATCH_KIND: u64 = 317;
 
-fn generate_pr_and_patch_events(
-    title: &String,
-    description: &String,
+pub fn generate_pr_and_patch_events(
+    title: &str,
+    description: &str,
     to_branch: &str,
     git_repo: &Repo,
     commits: &Vec<Sha1Hash>,
@@ -314,6 +314,7 @@ fn generate_pr_and_patch_events(
         .context("failed to get root commit of the repository")?;
 
     let mut pr_tags = vec![
+        Tag::Identifier(root_commit.to_string()),
         Tag::Reference(format!("r-{root_commit}")),
         Tag::Name(title.to_string()),
         Tag::Description(description.to_string()),
@@ -341,41 +342,62 @@ fn generate_pr_and_patch_events(
 
     let mut events = vec![pr_event];
     for commit in commits {
-        let commit_parent = git_repo
-            .get_commit_parent(commit)
-            .context("failed to create patch event")?;
         events.push(
-            EventBuilder::new(
-                nostr::event::Kind::Custom(PATCH_KIND),
-                git_repo
-                    .make_patch_from_commit(commit)
-                    .context(format!("cannot make patch for commit {commit}"))?,
-                &[
-                    Tag::Reference(format!("r-{root_commit}")),
-                    Tag::Reference(commit.to_string()),
-                    Tag::Reference(commit_parent.to_string()),
-                    Tag::Event(
-                        pr_event_id,
-                        None, // TODO: add relay
-                        Some(Marker::Root),
-                    ),
-                    Tag::Generic(
-                        TagKind::Custom("commit".to_string()),
-                        vec![commit.to_string()],
-                    ),
-                    Tag::Generic(
-                        TagKind::Custom("parent-commit".to_string()),
-                        vec![commit_parent.to_string()],
-                    ),
-                    // TODO: add Repo event tags
-                    // TODO: people tag maintainers
-                    // TODO: add relay tags
-                ],
-            )
-            .to_event(keys)?,
+            generate_patch_event(git_repo, &root_commit, commit, pr_event_id, keys)
+                .context("failed to generate patch event")?,
         );
     }
     Ok(events)
+}
+
+pub fn generate_patch_event(
+    git_repo: &Repo,
+    root_commit: &Sha1Hash,
+    commit: &Sha1Hash,
+    pr_event_id: nostr::EventId,
+    keys: &nostr::Keys,
+) -> Result<nostr::Event> {
+    let commit_parent = git_repo
+        .get_commit_parent(commit)
+        .context("failed to get parent commit")?;
+    EventBuilder::new(
+        nostr::event::Kind::Custom(PATCH_KIND),
+        git_repo
+            .make_patch_from_commit(commit)
+            .context(format!("cannot make patch for commit {commit}"))?,
+        &[
+            Tag::Reference(format!("r-{root_commit}")),
+            Tag::Reference(commit.to_string()),
+            Tag::Reference(commit_parent.to_string()),
+            Tag::Event(
+                pr_event_id,
+                None, // TODO: add relay
+                Some(Marker::Root),
+            ),
+            Tag::Generic(
+                TagKind::Custom("commit".to_string()),
+                vec![commit.to_string()],
+            ),
+            Tag::Generic(
+                TagKind::Custom("parent-commit".to_string()),
+                vec![commit_parent.to_string()],
+            ),
+            Tag::Description(git_repo.get_commit_message(commit)?.to_string()),
+            Tag::Generic(
+                TagKind::Custom("author".to_string()),
+                git_repo.get_commit_author(commit)?,
+            ),
+            Tag::Generic(
+                TagKind::Custom("committer".to_string()),
+                git_repo.get_commit_comitter(commit)?,
+            ),
+            // TODO: add Repo event tags
+            // TODO: people tag maintainers
+            // TODO: add relay tags
+        ],
+    )
+    .to_event(keys)
+    .context("failed to sign event")
 }
 // TODO
 // - find profile
