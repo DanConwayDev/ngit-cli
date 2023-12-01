@@ -18,12 +18,20 @@ pub struct Cli {
 enum Commands {
     /// replace with an actual subcommand
     Placeholder(sub_commands::placeholder::SubCommandArgs),
+    Capabilities(),
+    // list
+    //  - get git list from remote git server
+    //  - suppliment list with open prs and send back
+    //    - get prs
+    //    - get commits against pr
+    //    - find most recent commit against pr
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Commands::Capabilities() => sub_commands::capabilities::launch(),
         Commands::Placeholder(args) => {
             futures::executor::block_on(sub_commands::placeholder::launch(&cli, args))
         }
