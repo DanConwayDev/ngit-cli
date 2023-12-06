@@ -2619,6 +2619,7 @@ dependencies = [
 [[package]]
 name = "simple-websockets"
 version = "0.1.6"
+source = "git+https://github.com/DanConwayDev/simple-websockets?branch=auto-release-port#f53d7662ddf10d926e46c34e7d4044c0ebc21bb0"
 dependencies = [
  "flume",
  "futures-util",
