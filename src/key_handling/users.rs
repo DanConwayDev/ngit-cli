@@ -103,8 +103,7 @@ impl UserManagement for UserManager {
         encrypted_secret_key: Option<String>,
         overwrite: bool,
     ) -> Result<()> {
-        let user_ref =
-            config::UserRef::new(public_key, encrypted_secret_key.unwrap_or(String::new()));
+        let user_ref = config::UserRef::new(public_key, encrypted_secret_key.unwrap_or_default());
 
         let mut cfg = self.config_manager.load().context("failed to load application config to find and remove any old versions of the user's encrypted key")?;
         // don't overwrite unless specified
