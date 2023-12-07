@@ -38,6 +38,8 @@ enum Commands {
     Claim(sub_commands::claim::SubCommandArgs),
     /// create and issue prs
     Prs(sub_commands::prs::SubCommandArgs),
+    /// pull latest commits in pr linked to checked out branch
+    Pull,
 }
 
 #[tokio::main]
@@ -51,5 +53,6 @@ async fn main() -> Result<()> {
             futures::executor::block_on(sub_commands::claim::launch(&cli, args))
         }
         Commands::Prs(args) => futures::executor::block_on(sub_commands::prs::launch(&cli, args)),
+        Commands::Pull => futures::executor::block_on(sub_commands::pull::launch()),
     }
 }
