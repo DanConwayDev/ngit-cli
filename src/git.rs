@@ -384,6 +384,12 @@ fn sha1_to_oid(hash: &Sha1Hash) -> Result<Oid> {
     Oid::from_bytes(hash.as_byte_array()).context("Sha1Hash bytes failed to produce a valid Oid")
 }
 
+pub fn str_to_sha1(s: &str) -> Result<Sha1Hash> {
+    Ok(oid_to_sha1(
+        &Oid::from_str(s).context("string is not a sha1 hash")?,
+    ))
+}
+
 fn git_sig_to_tag_vec(sig: &git2::Signature) -> Vec<String> {
     vec![
         sig.name().unwrap_or("").to_string(),

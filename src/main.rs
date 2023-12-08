@@ -40,6 +40,8 @@ enum Commands {
     Prs(sub_commands::prs::SubCommandArgs),
     /// pull latest commits in pr linked to checked out branch
     Pull,
+    /// push commits to current checked out pr branch
+    Push,
 }
 
 #[tokio::main]
@@ -54,5 +56,6 @@ async fn main() -> Result<()> {
         }
         Commands::Prs(args) => futures::executor::block_on(sub_commands::prs::launch(&cli, args)),
         Commands::Pull => futures::executor::block_on(sub_commands::pull::launch()),
+        Commands::Push => futures::executor::block_on(sub_commands::push::launch(&cli)),
     }
 }
