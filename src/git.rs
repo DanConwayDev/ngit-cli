@@ -1,6 +1,6 @@
-use std::env::current_dir;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::{env::current_dir, path::Path};
 
 use anyhow::{bail, Context, Result};
 use git2::{Oid, Revwalk};
@@ -30,6 +30,8 @@ impl Repo {
 // pub type Sha1 = [u8; 20];
 
 pub trait RepoActions {
+    fn get_path(&self) -> Result<&Path>;
+    fn get_origin_url(&self) -> Result<String>;
     fn get_local_branch_names(&self) -> Result<Vec<String>>;
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_checked_out_branch_name(&self) -> Result<String>;
@@ -61,6 +63,23 @@ pub trait RepoActions {
 }
 
 impl RepoActions for Repo {
+    fn get_path(&self) -> Result<&Path> {
+        self.git_repo
+            .path()
+            .parent()
+            .context("cannot find repositiory path as .git has  no parent")
+    }
+
+    fn get_origin_url(&self) -> Result<String> {
+        Ok(self
+            .git_repo
+            .find_remote("origin")
+            .context("cannot find origin")?
+            .url()
+            .context("cannot find origin url")?
+            .to_string())
+    }
+
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)> {
         let main_branch_name = {
             let local_branches = self
@@ -860,6 +879,18 @@ mod tests {
         }
     }
 
+    mod get_origin_url {
+        use super::*;
+
+        #[test]
+        fn returns_origin_url() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.add_remote("origin", "https://localhost:1000")?;
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            assert_eq!(git_repo.get_origin_url()?, "https://localhost:1000");
+            Ok(())
+        }
+    }
     mod get_checked_out_branch_name {
         use super::*;
 

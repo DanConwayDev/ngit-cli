@@ -146,6 +146,11 @@ impl GitTestRepo {
             .context(format!("cannot find branch {branch_name}"))?;
         Ok(branch.into_reference().peel_to_commit()?.id())
     }
+
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<()> {
+        self.git_repo.remote(name, url)?;
+        Ok(())
+    }
 }
 
 impl Drop for GitTestRepo {

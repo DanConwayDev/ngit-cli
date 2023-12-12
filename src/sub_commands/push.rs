@@ -41,6 +41,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     let mut client = <MockConnect as std::default::Default>::default();
 
     let repo_ref = repo_ref::fetch(
+        &git_repo,
         root_commit.to_string(),
         &client,
         client.get_more_fallback_relays().clone(),

@@ -100,12 +100,12 @@ pub async fn launch(
         generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, &keys)?;
 
     let repo_ref = repo_ref::fetch(
+        &git_repo,
         git_repo
             .get_root_commit(&to_branch)
             .context("failed to get root commit of the repository")?
             .to_string(),
         &client,
-        // TODO: get relay list from local yaml file
         user_ref.relays.write(),
     )
     .await?;
