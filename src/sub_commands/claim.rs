@@ -55,7 +55,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             .input(PromptInputParms::default().with_prompt("description (Optional)"))?,
     };
 
-    let git_server = git_repo.get_origin_url()?;
+    let git_server = git_repo
+        .get_origin_url()
+        .context(
+            "to claim the repository it must be available on a publically accessable git server",
+        )
+        .context("no git remote origin configured")?;
 
     #[cfg(not(test))]
     let mut client = Client::default();
