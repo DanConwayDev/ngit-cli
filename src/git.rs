@@ -465,14 +465,51 @@ fn apply_patch(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
     index.add_all(["."], git2::IndexAddOption::DEFAULT, None)?;
     index.write()?;
 
-    git_repo.git_repo.commit(
-        Some("HEAD"),
-        &extract_sig_from_patch_tags(&patch.tags, "author")?,
-        &extract_sig_from_patch_tags(&patch.tags, "committer")?,
-        tag_value(patch, "description")?.as_str(),
-        &git_repo.git_repo.find_tree(index.write_tree()?)?,
-        &[&prev_oid],
-    )?;
+    let pgp_sig = if let Ok(pgp_sig) = tag_value(patch, "commit-sig") {
+        if pgp_sig.is_empty() {
+            None
+        } else {
+            Some(pgp_sig)
+        }
+    } else {
+        None
+    };
+
+    if let Some(pgp_sig) = pgp_sig {
+        let commit_buff = git_repo.git_repo.commit_create_buffer(
+            &extract_sig_from_patch_tags(&patch.tags, "author")?,
+            &extract_sig_from_patch_tags(&patch.tags, "committer")?,
+            tag_value(patch, "description")?.as_str(),
+            &git_repo.git_repo.find_tree(index.write_tree()?)?,
+            &[&prev_oid],
+        )?;
+        let gpg_commit_id = git_repo.git_repo.commit_signed(
+            commit_buff.as_str().unwrap(),
+            pgp_sig.as_str(),
+            None,
+        )?;
+        git_repo.git_repo.reset(
+            &git_repo.git_repo.find_object(gpg_commit_id, None)?,
+            git2::ResetType::Mixed,
+            None,
+        )?;
+        if gpg_commit_id.to_string().eq(&tag_value(patch, "commit")?) {
+            return Ok(());
+        }
+    } else {
+        git_repo.git_repo.commit(
+            Some("HEAD"),
+            &extract_sig_from_patch_tags(&patch.tags, "author")?,
+            &extract_sig_from_patch_tags(&patch.tags, "committer")?,
+            tag_value(patch, "description")?.as_str(),
+            &git_repo.git_repo.find_tree(index.write_tree()?)?,
+            &[&prev_oid],
+        )?;
+    }
+    validate_patch_applied(git_repo, patch)
+}
+
+fn validate_patch_applied(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
     // end of stage and commit
     // check commit applied
     if git_repo
