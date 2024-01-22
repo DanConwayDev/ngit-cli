@@ -137,6 +137,8 @@ pub fn generate_repo_ref_event() -> nostr::Event {
             Tag::Description("example description".to_string()),
             Tag::Relay("ws://localhost:8055".into()),
             Tag::Relay("ws://localhost:8056".into()),
+            Tag::PubKey(TEST_KEY_1_KEYS.public_key(), None),
+            Tag::PubKey(TEST_KEY_2_KEYS.public_key(), None),
         ],
     )
     .to_event(&TEST_KEY_1_KEYS)
