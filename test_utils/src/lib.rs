@@ -13,7 +13,7 @@ pub mod relay;
 
 pub static PR_KIND: u64 = 318;
 pub static PATCH_KIND: u64 = 317;
-pub static REPOSITORY_KIND: u64 = 300317;
+pub static REPOSITORY_KIND: u64 = 30317;
 
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";

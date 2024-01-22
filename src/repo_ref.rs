@@ -68,7 +68,7 @@ impl TryFrom<nostr::Event> for RepoRef {
         Ok(r)
     }
 }
-static REPO_REF_KIND: u64 = 300_317;
+static REPO_REF_KIND: u64 = 30_317;
 
 impl RepoRef {
     pub fn to_event(&self, keys: &nostr::Keys) -> Result<nostr::Event> {
