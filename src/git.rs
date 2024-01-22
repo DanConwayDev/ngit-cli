@@ -53,6 +53,7 @@ pub trait RepoActions {
         latest_commit: &Sha1Hash,
     ) -> Result<(Vec<Sha1Hash>, Vec<Sha1Hash>)>;
     fn make_patch_from_commit(&self, commit: &Sha1Hash) -> Result<String>;
+    fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String>;
     fn checkout(&self, ref_name: &str) -> Result<Sha1Hash>;
     fn create_branch_at_commit(&self, branch_name: &str, commit: &str) -> Result<()>;
     fn apply_patch_chain(
@@ -222,6 +223,22 @@ impl RepoActions for Repo {
 
         Ok(std::str::from_utf8(patch.as_slice())
             .context("patch content could not be converted to a utf8 string")?
+            .to_owned())
+    }
+
+    fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String> {
+        let oid = Oid::from_bytes(commit.as_byte_array()).context(format!(
+            "failed to convert commit_id format for {}",
+            &commit
+        ))?;
+
+        let (sign, _data) = self
+            .git_repo
+            .extract_signature(&oid, None)
+            .context("failed to extract signature - perhaps there is no signature?")?;
+
+        Ok(std::str::from_utf8(&sign)
+            .context("commit signature cannot be converted to a utf8 string")?
             .to_owned())
     }
 

@@ -382,6 +382,14 @@ pub fn generate_patch_event(
                 TagKind::Custom("parent-commit".to_string()),
                 vec![commit_parent.to_string()],
             ),
+            Tag::Generic(
+                TagKind::Custom("commit-sig".to_string()),
+                vec![
+                    git_repo
+                        .extract_commit_pgp_signature(commit)
+                        .unwrap_or_default(),
+                ],
+            ),
             Tag::Description(git_repo.get_commit_message(commit)?.to_string()),
             Tag::Generic(
                 TagKind::Custom("author".to_string()),
