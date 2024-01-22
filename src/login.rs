@@ -102,8 +102,8 @@ async fn get_user_details(
         .get_user(
             client,
             public_key,
-            // 1 hour
-            60 * 60,
+            // use cache for 3 minutes
+            3 * 60,
         )
         .await?;
     term.clear_last_lines(1)?;
