@@ -96,7 +96,9 @@ pub async fn launch() -> Result<()> {
         .map(std::borrow::ToOwned::to_owned)
         .collect();
 
-    // TODO: are there outstanding changes to prevent checking out a new branch?
+    if git_repo.has_outstanding_changes()? {
+        bail!("cannot pull changes when repository is not clean. discard changes and try again.");
+    }
 
     let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commits_events)
         .context("cannot get most recent patch for PR")?;
