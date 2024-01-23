@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::{env::current_dir, path::Path};
 
 use anyhow::{bail, Context, Result};
-use git2::{Oid, Revwalk};
+use git2::{DiffOptions, Oid, Revwalk};
 use nostr::prelude::{sha1::Hash as Sha1Hash, Hash};
 
 use crate::sub_commands::prs::list::tag_value;
@@ -52,6 +52,8 @@ pub trait RepoActions {
         base_commit: &Sha1Hash,
         latest_commit: &Sha1Hash,
     ) -> Result<(Vec<Sha1Hash>, Vec<Sha1Hash>)>;
+    // including (un)staged changes and (un)tracked files
+    fn has_outstanding_changes(&self) -> Result<bool>;
     fn make_patch_from_commit(&self, commit: &Sha1Hash) -> Result<String>;
     fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String>;
     fn checkout(&self, ref_name: &str) -> Result<Sha1Hash>;
@@ -240,6 +242,16 @@ impl RepoActions for Repo {
         Ok(std::str::from_utf8(&sign)
             .context("commit signature cannot be converted to a utf8 string")?
             .to_owned())
+    }
+
+    // including (un)staged changes and (un)tracked files
+    fn has_outstanding_changes(&self) -> Result<bool> {
+        let diff = self.git_repo.diff_tree_to_workdir_with_index(
+            Some(&self.git_repo.head()?.peel_to_tree()?),
+            Some(DiffOptions::new().include_untracked(true)),
+        )?;
+
+        Ok(diff.deltas().len().gt(&0))
     }
 
     fn get_commits_ahead_behind(

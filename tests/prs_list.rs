@@ -141,7 +141,9 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
-
+                            let mut confirm =
+                                p.expect_confirm_eventually("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect_end_eventually_and_print()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -200,6 +202,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
+                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect("checked out PR branch. pulled 2 new commits\r\n")?;
                             p.expect_end()?;
 
@@ -302,7 +306,9 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true)?;
-
+                            let mut confirm =
+                                p.expect_confirm_eventually("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect_end_eventually_and_print()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -361,6 +367,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(2, true)?;
                             p.expect("finding commits...\r\n")?;
+                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect("checked out PR branch. pulled 2 new commits\r\n")?;
                             p.expect_end()?;
 
@@ -478,6 +486,9 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
+                            let mut confirm =
+                                p.expect_confirm_eventually("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect_end_eventually_and_print()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -544,6 +555,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
+                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect("checked out PR branch. no new commits to pull\r\n")?;
                             p.expect_end()?;
 
@@ -632,7 +645,9 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
-
+                            let mut confirm =
+                                p.expect_confirm_eventually("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect_end_eventually_and_print()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -699,6 +714,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
+                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
                             p.expect("checked out PR branch. pulled 1 new commits\r\n")?;
                             p.expect_end()?;
 

@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
-    cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
+    cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::Connect,
     git::{Repo, RepoActions},
     repo_ref,
@@ -134,7 +134,7 @@ pub async fn launch(
         .map(std::borrow::ToOwned::to_owned)
         .collect();
 
-    // TODO: are there outstanding changes to prevent checking out a new branch?
+    confirm_checkout(&git_repo)?;
 
     let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commits_events)
         .context("cannot get most recent patch for PR")?;
@@ -189,6 +189,23 @@ pub async fn launch(
     // //
 
     // TODO: checkout PR branch
+    Ok(())
+}
+
+fn confirm_checkout(git_repo: &Repo) -> Result<()> {
+    if !Interactor::default().confirm(
+        PromptConfirmParms::default()
+            .with_prompt("check out branch?")
+            .with_default(true),
+    )? {
+        bail!("Exiting...");
+    }
+
+    if git_repo.has_outstanding_changes()? {
+        bail!(
+            "cannot pull PR branch when repository is not clean. discard or stash (un)staged changes and try again."
+        );
+    }
     Ok(())
 }
 
