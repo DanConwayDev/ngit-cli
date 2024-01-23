@@ -43,16 +43,39 @@ pub trait Connect {
 #[async_trait]
 impl Connect for Client {
     fn default() -> Self {
-        Client {
-            client: nostr_sdk::Client::new(&nostr::Keys::generate()),
-            fallback_relays: vec![
+        let fallback_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
+            vec![
                 "ws://localhost:8051".to_string(),
                 "ws://localhost:8052".to_string(),
-            ],
-            more_fallback_relays: vec![
+            ]
+        } else {
+            vec![
+                "wss://relayable.org".to_string(),
+                "wss://relay.f7z.io".to_string(),
+                "wss://relay.damus.io".to_string(),
+                "wss://relay.snort.social".to_string(),
+                // "ws://localhost:8080".to_string()
+            ]
+        };
+
+        let more_fallback_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
+            vec![
                 "ws://localhost:8055".to_string(),
                 "ws://localhost:8056".to_string(),
-            ],
+            ]
+        } else {
+            vec![
+                "wss://nostr.wine/".to_string(),
+                "wss://eden.nostr.land/".to_string(),
+                "wss://relay.nostr.band/".to_string(),
+                // "ws://localhost:8080".to_string()
+            ]
+        };
+
+        Client {
+            client: nostr_sdk::Client::new(&nostr::Keys::generate()),
+            fallback_relays,
+            more_fallback_relays,
         }
     }
     fn new(opts: Params) -> Self {
