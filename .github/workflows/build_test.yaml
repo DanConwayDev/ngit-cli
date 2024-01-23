@@ -1,0 +1,29 @@
+on: push
+
+name: build test
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust:
+          - stable
+          - nightly
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          override: true
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test

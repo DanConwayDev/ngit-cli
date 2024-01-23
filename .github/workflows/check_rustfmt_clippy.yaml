@@ -1,6 +1,6 @@
 on: push
 
-name: check test rustfmt clippy
+name: check rustfmt clippy
 
 jobs:
   ci:
@@ -8,7 +8,6 @@ jobs:
     strategy:
       matrix:
         rust:
-          - stable
           - nightly
 
     steps:
@@ -20,14 +19,6 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
           components: rustfmt, clippy
-
-      - uses: actions-rs/cargo@v1
-        with:
-          command: build
-
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
 
       - uses: actions-rs/cargo@v1
         with:
