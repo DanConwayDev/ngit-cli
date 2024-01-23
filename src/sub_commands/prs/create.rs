@@ -314,7 +314,6 @@ pub fn generate_pr_and_patch_events(
         .context("failed to get root commit of the repository")?;
 
     let mut pr_tags = vec![
-        Tag::Identifier(root_commit.to_string()),
         Tag::Reference(format!("r-{root_commit}")),
         Tag::Name(title.to_string()),
         Tag::Description(description.to_string()),

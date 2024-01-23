@@ -406,26 +406,6 @@ mod sends_pr_and_2_patches_to_3_relays {
 
     mod pr_tags {
         use super::*;
-        #[test]
-        #[serial]
-        fn pr_tags_repo_commit_as_identifier() -> Result<()> {
-            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
-            let root_commit = GitTestRepo::default().initial_commit()?;
-
-            for relay in [&r53, &r55, &r56] {
-                let pr_event: &nostr::Event = relay
-                    .events
-                    .iter()
-                    .find(|e| e.kind.as_u64().eq(&PR_KIND))
-                    .unwrap();
-
-                // root commit identifier tag
-                assert!(pr_event.tags.iter().any(
-                    |t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq(&format!("{}", root_commit))
-                ));
-            }
-            Ok(())
-        }
 
         #[test]
         #[serial]
