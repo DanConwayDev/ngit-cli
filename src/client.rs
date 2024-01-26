@@ -16,6 +16,7 @@ use futures::future::join_all;
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
+use nostr_sdk::ClientSigner;
 
 pub struct Client {
     client: nostr_sdk::Client,
@@ -87,7 +88,8 @@ impl Connect for Client {
     }
 
     async fn set_keys(&mut self, keys: &nostr::Keys) {
-        self.client.set_keys(keys).await;
+        self.client.set_signer(Some(ClientSigner::Keys(keys.clone()))).await;
+
     }
 
     async fn disconnect(&self) -> Result<()> {
@@ -104,7 +106,7 @@ impl Connect for Client {
     }
 
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
-        self.client.add_relay(url, None).await?;
+        self.client.add_relay(url).await?;
         self.client.connect_relay(url).await?;
         Ok(self.client.send_event_to(url, event).await?)
     }
@@ -117,7 +119,7 @@ impl Connect for Client {
         // add relays
         for relay in &relays {
             self.client
-                .add_relay(relay.as_str(), None)
+                .add_relay(relay.as_str())
                 .await
                 .context("cannot add relay")?;
         }
@@ -147,7 +149,7 @@ async fn get_events_of(
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<Event>> {
     if !relay.is_connected().await {
-        relay.connect(true).await;
+        relay.connect(None).await;
     }
     relay
         .get_events_of(

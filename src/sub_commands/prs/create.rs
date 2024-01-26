@@ -329,7 +329,7 @@ pub fn generate_pr_and_patch_events(
     let pr_event = EventBuilder::new(
         nostr::event::Kind::Custom(PR_KIND),
         format!("{title}\r\n\r\n{description}"),
-        &pr_tags,
+        pr_tags,
         // TODO: add Repo event as root
         // TODO: people tag maintainers
         // TODO: add relay tags
@@ -364,15 +364,15 @@ pub fn generate_patch_event(
         git_repo
             .make_patch_from_commit(commit)
             .context(format!("cannot make patch for commit {commit}"))?,
-        &[
+        [
             Tag::Reference(format!("r-{root_commit}")),
             Tag::Reference(commit.to_string()),
             Tag::Reference(commit_parent.to_string()),
-            Tag::Event(
-                pr_event_id,
-                None, // TODO: add relay
-                Some(Marker::Root),
-            ),
+            Tag::Event{
+              event_id: pr_event_id,
+              relay_url: None, // TODO: add relay
+              marker: Some(Marker::Root),
+            },
             Tag::Generic(
                 TagKind::Custom("commit".to_string()),
                 vec![commit.to_string()],
