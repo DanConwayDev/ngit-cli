@@ -75,7 +75,7 @@ impl RepoRef {
         nostr_sdk::EventBuilder::new(
             nostr::event::Kind::Custom(REPO_REF_KIND),
             "",
-            &[
+            [
                 vec![
                     Tag::Identifier(self.root_commit.to_string()),
                     Tag::Reference(format!("r-{}", self.root_commit)),
@@ -90,7 +90,7 @@ impl RepoRef {
                 self.relays.iter().map(|r| Tag::Relay(r.into())).collect(),
                 self.maintainers
                     .iter()
-                    .map(|pk| Tag::PubKey(*pk, None))
+                    .map(|pk| Tag::public_key(*pk))
                     .collect(),
                 // code languages and hashtags
             ]

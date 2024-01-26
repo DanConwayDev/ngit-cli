@@ -3,7 +3,7 @@ use std::{ffi::OsStr, path::PathBuf};
 use anyhow::{ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
-use nostr::{self, prelude::FromSkStr, Tag};
+use nostr::{self, prelude::FromSkStr, Kind, Tag};
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -28,10 +28,11 @@ pub static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_1_NSEC).unwrap());
 
 pub fn generate_test_key_1_metadata_event(name: &str) -> nostr::Event {
-    nostr::event::EventBuilder::set_metadata(nostr::Metadata::new().name(name))
+    nostr::event::EventBuilder::metadata(&nostr::Metadata::new().name(name))
         .to_event(&TEST_KEY_1_KEYS)
         .unwrap()
 }
+
 pub fn generate_test_key_1_metadata_event_old(name: &str) -> nostr::Event {
     make_event_old_or_change_user(
         generate_test_key_1_metadata_event(name),
@@ -40,11 +41,17 @@ pub fn generate_test_key_1_metadata_event_old(name: &str) -> nostr::Event {
     )
 }
 
+pub fn generate_test_key_1_kind_event(kind: Kind) -> nostr::Event {
+    nostr::event::EventBuilder::new(kind, "", [])
+        .to_event(&TEST_KEY_1_KEYS)
+        .unwrap()
+}
+
 pub fn generate_test_key_1_relay_list_event() -> nostr::Event {
     nostr::event::EventBuilder::new(
         nostr::Kind::RelayList,
         "",
-        &[
+        [
             nostr::Tag::RelayMetadata(
                 "ws://localhost:8053".into(),
                 Some(nostr::RelayMetadata::Write),
@@ -64,7 +71,7 @@ pub fn generate_test_key_1_relay_list_event_same_as_fallback() -> nostr::Event {
     nostr::event::EventBuilder::new(
         nostr::Kind::RelayList,
         "",
-        &[
+        [
             nostr::Tag::RelayMetadata(
                 "ws://localhost:8051".into(),
                 Some(nostr::RelayMetadata::Write),
@@ -90,7 +97,7 @@ pub static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_2_NSEC).unwrap());
 
 pub fn generate_test_key_2_metadata_event(name: &str) -> nostr::Event {
-    nostr::event::EventBuilder::set_metadata(nostr::Metadata::new().name(name))
+    nostr::event::EventBuilder::metadata(&nostr::Metadata::new().name(name))
         .to_event(&TEST_KEY_2_KEYS)
         .unwrap()
 }
@@ -106,13 +113,12 @@ pub fn make_event_old_or_change_user(
     keys: &nostr::Keys,
     how_old_in_secs: u64,
 ) -> nostr::Event {
-    let mut unsigned = nostr::event::EventBuilder::new(event.kind, event.content, &event.tags)
-        .to_unsigned_event(keys.public_key());
+    let mut unsigned =
+        nostr::event::EventBuilder::new(event.kind, event.content.clone(), event.tags.clone())
+            .to_unsigned_event(keys.public_key());
 
-    unsigned.created_at = nostr::types::Timestamp::try_from(
-        nostr::types::Timestamp::now().as_u64() - how_old_in_secs,
-    )
-    .unwrap();
+    unsigned.created_at =
+        nostr::types::Timestamp::from(nostr::types::Timestamp::now().as_u64() - how_old_in_secs);
     unsigned.id = nostr::EventId::new(
         &keys.public_key(),
         unsigned.created_at,
@@ -130,15 +136,15 @@ pub fn generate_repo_ref_event() -> nostr::Event {
     nostr::event::EventBuilder::new(
         nostr::Kind::Custom(REPOSITORY_KIND),
         "",
-        &[
+        [
             Tag::Identifier(root_commit.to_string()),
             Tag::Reference(format!("r-{}", root_commit)),
             Tag::Name("example name".to_string()),
             Tag::Description("example description".to_string()),
             Tag::Relay("ws://localhost:8055".into()),
             Tag::Relay("ws://localhost:8056".into()),
-            Tag::PubKey(TEST_KEY_1_KEYS.public_key(), None),
-            Tag::PubKey(TEST_KEY_2_KEYS.public_key(), None),
+            Tag::public_key(TEST_KEY_1_KEYS.public_key()),
+            Tag::public_key(TEST_KEY_2_KEYS.public_key()),
         ],
     )
     .to_event(&TEST_KEY_1_KEYS)

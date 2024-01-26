@@ -551,7 +551,7 @@ mod tests {
             nostr::event::EventBuilder::new(
                 nostr::Kind::RelayList,
                 "",
-                &[
+                [
                     nostr::Tag::RelayMetadata(
                         "wss://fredswrite1.relay".into(),
                         Some(nostr::RelayMetadata::Write),
@@ -571,7 +571,7 @@ mod tests {
             nostr::event::EventBuilder::new(
                 nostr::Kind::RelayList,
                 "",
-                &[
+                [
                     nostr::Tag::RelayMetadata(
                         "wss://carolswrite1.relay".into(),
                         Some(nostr::RelayMetadata::Write),

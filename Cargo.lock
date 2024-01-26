@@ -313,6 +313,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-wsocket"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82d55992e9155e571208dc012c2a5c056572d1ab167bc299a63810ebf910226c"
+dependencies = [
+ "async-utility",
+ "futures-util",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-socks",
+ "tokio-tungstenite",
+ "url-fork",
+ "wasm-ws",
+ "webpki-roots",
+]
+
+[[package]]
 name = "async_io_stream"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1653,9 +1671,9 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
 name = "nostr"
-version = "0.25.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b65a1b93d2c78550f8e7f84ce475b44c4f04e46b08d30be98523eaa498abae4"
+checksum = "3e47228d958fd65ef3e04650a3b1dd80f16f10f0243c80ed969556dead0f48c8"
 dependencies = [
  "aes 0.8.3",
  "base64",
@@ -1665,6 +1683,7 @@ dependencies = [
  "chacha20",
  "getrandom",
  "instant",
+ "js-sys",
  "negentropy",
  "once_cell",
  "reqwest",
@@ -1672,38 +1691,38 @@ dependencies = [
  "serde_json",
  "tracing",
  "url-fork",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
-name = "nostr-sdk"
-version = "0.25.0"
+name = "nostr-database"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f887f45f344828e14740eb37b32c6ae3b6ac5dc7ea94dd60817507c44a770b01"
+checksum = "aa0550256c8d4f0aaf74891ac986bd5ba46b2957c2c7e20f51838fa5819285f8"
 dependencies = [
- "async-utility",
+ "async-trait",
  "nostr",
- "nostr-sdk-net",
- "once_cell",
  "thiserror",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "nostr-sdk-net"
-version = "0.25.0"
+name = "nostr-sdk"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d66a499ce2e1ab5ac03626df913d4fe2aa544231ec8b04f312cc13b74d50b2"
+checksum = "3cf190e41230721f0ce64f5ea72ed36cbc431d3b305eb166e24a94f5d7e4a425"
 dependencies = [
- "futures-util",
+ "async-utility",
+ "async-wsocket",
+ "nostr",
+ "nostr-database",
+ "once_cell",
  "thiserror",
  "tokio",
- "tokio-rustls",
- "tokio-socks",
- "tokio-tungstenite",
- "url-fork",
- "webpki-roots",
- "ws_stream_wasm",
+ "tracing",
 ]
 
 [[package]]
@@ -1809,9 +1828,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.18.0"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd8b5dd2ae5ed71462c540258bedcb51965123ad7e7ccf4b9a8cafaa4a63576d"
+checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
 
 [[package]]
 name = "opaque-debug"
@@ -2537,6 +2556,7 @@ version = "1.0.108"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d1c7e3eac408d115102c4c24ad393e0821bb3a5df4d506a80f85f7a742a526b"
 dependencies = [
+ "indexmap 2.1.0",
  "itoa",
  "ryu",
  "serde",
@@ -3228,6 +3248,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d046c5d029ba91a1ed14da14dca44b68bf2f124cfbaf741c54151fdb3e0750b"
 
 [[package]]
+name = "wasm-ws"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5b3a482e27ff54809c0848629d9033179705c5ea2f58e26cf45dc77c34c4984"
+dependencies = [
+ "async_io_stream",
+ "futures",
+ "js-sys",
+ "pharos",
+ "send_wrapper",
+ "thiserror",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3414,25 +3451,6 @@ checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "ws_stream_wasm"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7999f5f4217fe3818726b66257a4475f71e74ffd190776ad053fa159e50737f5"
-dependencies = [
- "async_io_stream",
- "futures",
- "js-sys",
- "log",
- "pharos",
- "rustc_version",
- "send_wrapper",
- "thiserror",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

@@ -16,7 +16,9 @@ use futures::stream::{self, StreamExt};
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
+use nostr_sdk::ClientSigner;
 
+#[allow(clippy::struct_field_names)]
 pub struct Client {
     client: nostr_sdk::Client,
     fallback_relays: Vec<String>,
@@ -87,7 +89,9 @@ impl Connect for Client {
     }
 
     async fn set_keys(&mut self, keys: &nostr::Keys) {
-        self.client.set_keys(keys).await;
+        self.client
+            .set_signer(Some(ClientSigner::Keys(keys.clone())))
+            .await;
     }
 
     async fn disconnect(&self) -> Result<()> {
@@ -104,7 +108,7 @@ impl Connect for Client {
     }
 
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
-        self.client.add_relay(url, None).await?;
+        self.client.add_relay(url).await?;
         self.client.connect_relay(url).await?;
         Ok(self.client.send_event_to(url, event).await?)
     }
@@ -117,7 +121,7 @@ impl Connect for Client {
         // add relays
         for relay in &relays {
             self.client
-                .add_relay(relay.as_str(), None)
+                .add_relay(relay.as_str())
                 .await
                 .context("cannot add relay")?;
         }
@@ -134,10 +138,6 @@ impl Connect for Client {
                 )
             })
             .map(|(relay, filters)| async {
-                if !relay.is_connected().await {
-                    relay.connect(false).await;
-                }
-
                 match get_events_of(relay, filters).await {
                     Err(error) => {
                         println!("{} {}", error, relay.url());
@@ -159,7 +159,9 @@ async fn get_events_of(
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<Event>> {
     println!("fetching from {}", relay.url());
-
+    if !relay.is_connected().await {
+        relay.connect(None).await;
+    }
     let events = relay
         .get_events_of(
             filters,

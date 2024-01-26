@@ -207,8 +207,7 @@ mod with_relays {
                 fn when_some_relays_return_other_event_kinds() -> Result<()> {
                     futures::executor::block_on(run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            let mut event = generate_test_key_1_metadata_event("Fred");
-                            event.kind = nostr::Kind::TextNote;
+                            let event = generate_test_key_1_kind_event(nostr::Kind::TextNote);
                             relay.respond_events(
                                 client_id,
                                 &subscription_id,
