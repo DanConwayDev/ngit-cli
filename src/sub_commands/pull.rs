@@ -41,7 +41,7 @@ pub async fn launch() -> Result<()> {
         &git_repo,
         root_commit.to_string(),
         &client,
-        client.get_more_fallback_relays().clone(),
+        client.get_fallback_relays().clone(),
     )
     .await?;
 
