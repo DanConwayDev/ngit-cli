@@ -109,10 +109,9 @@ pub fn make_event_old_or_change_user(
     let mut unsigned = nostr::event::EventBuilder::new(event.kind, event.content, &event.tags)
         .to_unsigned_event(keys.public_key());
 
-    unsigned.created_at = nostr::types::Timestamp::try_from(
+    unsigned.created_at = nostr::types::Timestamp::from(
         nostr::types::Timestamp::now().as_u64() - how_old_in_secs,
-    )
-    .unwrap();
+    );
     unsigned.id = nostr::EventId::new(
         &keys.public_key(),
         unsigned.created_at,
