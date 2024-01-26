@@ -12,7 +12,7 @@
 // want to inadvertlty use other features of nightly that might be removed.
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
@@ -50,10 +50,10 @@ impl Connect for Client {
             ]
         } else {
             vec![
-                "wss://relayable.org".to_string(),
-                "wss://relay.f7z.io".to_string(),
+                "wss://purplepages.es".to_string(),
                 "wss://relay.damus.io".to_string(),
-                "wss://relay.snort.social".to_string(),
+                "wss://nostr-pub.wellorder.net".to_string(),
+                "wss://nos.lol".to_string(),
                 // "ws://localhost:8080".to_string()
             ]
         };
@@ -124,19 +124,31 @@ impl Connect for Client {
 
         let relays_map = self.client.relays().await;
 
-        let relay_results = join_all(
-            relays
-                .clone()
-                .iter()
-                .map(|r| {
-                    (
-                        relays_map.get(&nostr::Url::parse(r).unwrap()).unwrap(),
-                        filters.clone(),
-                    )
-                })
-                .map(|(relay, filters)| get_events_of(relay, filters)),
-        )
-        .await;
+        let futures: Vec<_> = relays
+            .clone()
+            .iter()
+            .map(|r| {
+                (
+                    relays_map.get(&nostr::Url::parse(r).unwrap()).unwrap(),
+                    filters.clone(),
+                )
+            })
+            .map(|(relay, filters)| async {
+                if !relay.is_connected().await {
+                    relay.connect(false).await;
+                }
+
+                match get_events_of(relay, filters).await {
+                    Err(error) => {
+                        println!("{} {}", error, relay.url());
+                        Err(error)
+                    }
+                    res => res,
+                }
+            })
+            .collect();
+
+        let relay_results = stream::iter(futures).buffer_unordered(5).collect().await;
 
         Ok(get_dedup_events(relay_results))
     }
@@ -146,18 +158,19 @@ async fn get_events_of(
     relay: &nostr_sdk::Relay,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<Event>> {
-    if !relay.is_connected().await {
-        relay.connect(true).await;
-    }
-    relay
+    println!("fetching from {}", relay.url());
+
+    let events = relay
         .get_events_of(
             filters,
             // 20 is nostr_sdk default
-            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(10),
             nostr_sdk::FilterOptions::ExitOnEOSE,
         )
         .await
-        .context("failed to get events from relay")
+        .context("failed to get events from relay")?;
+    println!("fetched {} events from {}", events.len(), relay.url());
+    Ok(events)
 }
 
 #[derive(Default)]
