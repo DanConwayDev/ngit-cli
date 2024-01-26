@@ -18,6 +18,7 @@ use mockall::*;
 use nostr::Event;
 use nostr_sdk::ClientSigner;
 
+#[allow(clippy::struct_field_names)]
 pub struct Client {
     client: nostr_sdk::Client,
     fallback_relays: Vec<String>,

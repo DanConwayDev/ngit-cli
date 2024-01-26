@@ -1611,7 +1611,7 @@ dependencies = [
  "indicatif",
  "keyring",
  "mockall",
- "nostr 0.27.0",
+ "nostr",
  "nostr-sdk",
  "once_cell",
  "passwords",
@@ -1671,29 +1671,6 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
 name = "nostr"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b65a1b93d2c78550f8e7f84ce475b44c4f04e46b08d30be98523eaa498abae4"
-dependencies = [
- "aes 0.8.3",
- "base64",
- "bip39",
- "bitcoin",
- "cbc",
- "chacha20",
- "getrandom",
- "instant",
- "negentropy",
- "once_cell",
- "reqwest",
- "serde",
- "serde_json",
- "tracing",
- "url-fork",
-]
-
-[[package]]
-name = "nostr"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e47228d958fd65ef3e04650a3b1dd80f16f10f0243c80ed969556dead0f48c8"
@@ -1726,7 +1703,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa0550256c8d4f0aaf74891ac986bd5ba46b2957c2c7e20f51838fa5819285f8"
 dependencies = [
  "async-trait",
- "nostr 0.27.0",
+ "nostr",
  "thiserror",
  "tokio",
  "tracing",
@@ -1740,7 +1717,7 @@ checksum = "3cf190e41230721f0ce64f5ea72ed36cbc431d3b305eb166e24a94f5d7e4a425"
 dependencies = [
  "async-utility",
  "async-wsocket",
- "nostr 0.27.0",
+ "nostr",
  "nostr-database",
  "once_cell",
  "thiserror",
@@ -2836,7 +2813,7 @@ dependencies = [
  "dialoguer",
  "directories",
  "git2",
- "nostr 0.25.0",
+ "nostr",
  "once_cell",
  "rand",
  "rexpect 0.5.0 (git+https://github.com/rust-cli/rexpect.git?rev=9eb61dd)",
