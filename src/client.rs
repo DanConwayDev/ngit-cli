@@ -88,8 +88,9 @@ impl Connect for Client {
     }
 
     async fn set_keys(&mut self, keys: &nostr::Keys) {
-        self.client.set_signer(Some(ClientSigner::Keys(keys.clone()))).await;
-
+        self.client
+            .set_signer(Some(ClientSigner::Keys(keys.clone())))
+            .await;
     }
 
     async fn disconnect(&self) -> Result<()> {

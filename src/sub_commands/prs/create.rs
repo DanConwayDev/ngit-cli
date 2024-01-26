@@ -368,10 +368,10 @@ pub fn generate_patch_event(
             Tag::Reference(format!("r-{root_commit}")),
             Tag::Reference(commit.to_string()),
             Tag::Reference(commit_parent.to_string()),
-            Tag::Event{
-              event_id: pr_event_id,
-              relay_url: None, // TODO: add relay
-              marker: Some(Marker::Root),
+            Tag::Event {
+                event_id: pr_event_id,
+                relay_url: None, // TODO: add relay
+                marker: Some(Marker::Root),
             },
             Tag::Generic(
                 TagKind::Custom("commit".to_string()),
