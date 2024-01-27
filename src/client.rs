@@ -131,6 +131,8 @@ impl Connect for Client {
         let futures: Vec<_> = relays
             .clone()
             .iter()
+            // don't look for events on blaster
+            .filter(|r| !r.contains("nostr.mutinywallet.com"))
             .map(|r| {
                 (
                     relays_map.get(&nostr::Url::parse(r).unwrap()).unwrap(),
