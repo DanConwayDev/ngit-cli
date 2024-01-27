@@ -220,9 +220,20 @@ impl UserManagement for UserManager {
                     let metadata = nostr::Metadata::from_json(new_metadata_event.content.clone())
                         .context("metadata cannot be found in kind 0 event content")?;
                     user_ref.metadata = UserMetadata {
-                        name: metadata
-                            .name
-                            .context("user metadata should always have name")?,
+                        name: if let Some(n) = metadata.name {
+                            n
+                        } else if let Some(n) = metadata.custom.get("displayName") {
+                            // strip quote marks that custom.get() adds
+                            let binding = n.to_string();
+                            let mut chars = binding.chars();
+                            chars.next();
+                            chars.next_back();
+                            chars.as_str().to_string()
+                        } else if let Some(n) = metadata.display_name {
+                            n
+                        } else {
+                            user_ref.metadata.name
+                        },
                         created_at: new_metadata_event.created_at.as_u64(),
                     };
                 }

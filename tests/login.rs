@@ -63,7 +63,50 @@ mod with_relays {
                             p.expect("searching for your details...\r\n")?;
                             p.expect("\r")?;
 
+                            // p.expect_end_with(
+                            //     format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str(),
+                            // )?;
                             p.expect_end_with("logged in as fred\r\n")?;
+                            for p in [51, 52] {
+                                shutdown_relay(8000 + p)?;
+                            }
+                            Ok(())
+                        })
+                    });
+
+                    // launch relay
+                    let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
+
+                    cli_tester_handle.join().unwrap()?;
+                    Ok(())
+                }
+
+                async fn run_test_displays_fallback_to_npub(
+                    relay_listener1: Option<ListenerReqFunc<'_>>,
+                    relay_listener2: Option<ListenerReqFunc<'_>>,
+                ) -> Result<()> {
+                    let (mut r51, mut r52) = (
+                        Relay::new(8051, None, relay_listener1),
+                        Relay::new(8052, None, relay_listener2),
+                    );
+
+                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                        with_fresh_config(|| {
+                            let mut p = CliTester::new(["login"]);
+
+                            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                                .succeeds_with(TEST_KEY_1_NSEC)?;
+
+                            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
+                                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
+                                .succeeds_with(TEST_PASSWORD)?;
+
+                            p.expect("searching for your details...\r\n")?;
+                            p.expect("\r")?;
+
+                            p.expect_end_with(
+                                format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str(),
+                            )?;
                             for p in [51, 52] {
                                 shutdown_relay(8000 + p)?;
                             }
@@ -105,6 +148,107 @@ mod with_relays {
                             Ok(())
                         }),
                     ))
+                }
+
+                mod poorly_quality_metadata_event {
+                    use super::*;
+
+                    #[test]
+                    #[serial]
+                    fn when_metadata_contains_only_display_name() -> Result<()> {
+                        futures::executor::block_on(run_test_displays_correct_name(
+                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                                relay.respond_events(
+                                    client_id,
+                                    &subscription_id,
+                                    &vec![
+                                        nostr::event::EventBuilder::metadata(
+                                            &nostr::Metadata::new().display_name("fred"),
+                                        )
+                                        .to_event(&TEST_KEY_1_KEYS)
+                                        .unwrap(),
+                                        generate_test_key_1_relay_list_event_same_as_fallback(),
+                                    ],
+                                )?;
+                                Ok(())
+                            }),
+                            None,
+                        ))
+                    }
+
+                    #[test]
+                    #[serial]
+                    fn when_metadata_contains_only_displayname() -> Result<()> {
+                        println!(
+                            "displayName: {}",
+                            nostr::Metadata::new()
+                                .custom_field("displayName", "fred")
+                                .custom
+                                .get("displayName")
+                                .unwrap()
+                        );
+                        println!(
+                            "name: {}",
+                            nostr::Metadata::new().name("fred").name.unwrap()
+                        );
+
+                        futures::executor::block_on(run_test_displays_correct_name(
+                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                                relay.respond_events(
+                                    client_id,
+                                    &subscription_id,
+                                    &vec![
+                                        nostr::event::EventBuilder::metadata(
+                                            &nostr::Metadata::new()
+                                                .custom_field("displayName", "fred"),
+                                        )
+                                        .to_event(&TEST_KEY_1_KEYS)
+                                        .unwrap(),
+                                        generate_test_key_1_relay_list_event_same_as_fallback(),
+                                    ],
+                                )?;
+                                Ok(())
+                            }),
+                            None,
+                        ))
+                    }
+
+                    #[test]
+                    #[serial]
+                    fn displays_npub_when_metadata_contains_no_name_displayname_or_display_name()
+                    -> Result<()> {
+                        println!(
+                            "displayName: {}",
+                            nostr::Metadata::new()
+                                .custom_field("displayName", "fred")
+                                .custom
+                                .get("displayName")
+                                .unwrap()
+                        );
+                        println!(
+                            "name: {}",
+                            nostr::Metadata::new().name("fred").name.unwrap()
+                        );
+
+                        futures::executor::block_on(run_test_displays_fallback_to_npub(
+                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                                relay.respond_events(
+                                    client_id,
+                                    &subscription_id,
+                                    &vec![
+                                        nostr::event::EventBuilder::metadata(
+                                            &nostr::Metadata::new(),
+                                        )
+                                        .to_event(&TEST_KEY_1_KEYS)
+                                        .unwrap(),
+                                        generate_test_key_1_relay_list_event_same_as_fallback(),
+                                    ],
+                                )?;
+                                Ok(())
+                            }),
+                            None,
+                        ))
+                    }
                 }
 
                 #[test]
