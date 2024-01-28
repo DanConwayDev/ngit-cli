@@ -314,9 +314,9 @@ dependencies = [
 
 [[package]]
 name = "async-wsocket"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82d55992e9155e571208dc012c2a5c056572d1ab167bc299a63810ebf910226c"
+checksum = "a2d9504eb5213e3dde775ccb10994d0c17edbf72f4b008307778c66f5b4c40f0"
 dependencies = [
  "async-utility",
  "futures-util",
@@ -325,7 +325,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-socks",
  "tokio-tungstenite",
- "url-fork",
+ "url",
  "wasm-ws",
  "webpki-roots",
 ]
@@ -943,9 +943,9 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.0"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a62bc1cf6f830c2ec14a513a9fb124d0a213a629668a4186f329db21fe045652"
+checksum = "e13624c2627564efccf4934284bdd98cbaa14e79b0b5a141218e507b3a823456"
 dependencies = [
  "percent-encoding",
 ]
@@ -1273,9 +1273,9 @@ dependencies = [
 
 [[package]]
 name = "idna"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d20d6b07bfbc108882d88ed8e37d39636dcc260e15e30c45e6ba089610b917c"
+checksum = "634d9b1461af396cad843f47fdba5597a4f9e6ddd4bfb6ff5d85028c25cb12f6"
 dependencies = [
  "unicode-bidi",
  "unicode-normalization",
@@ -1486,6 +1486,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "969488b55f8ac402214f3f5fd243ebb7206cf82de60d3172994707a4bcc2b829"
 
 [[package]]
+name = "lnurl-pay"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b628658116d331c9567f6cb22415d726125ff6e328d1fb1b422b1b58afeaec21"
+dependencies = [
+ "bech32",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1672,8 +1684,7 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 [[package]]
 name = "nostr"
 version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e47228d958fd65ef3e04650a3b1dd80f16f10f0243c80ed969556dead0f48c8"
+source = "git+https://github.com/sectore/nostr.git?branch=fix/expose-filter-matchevent#23e6b5b5afe39fb760f5ffc869e92be4d61c5809"
 dependencies = [
  "aes 0.8.3",
  "base64",
@@ -1690,7 +1701,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "url-fork",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1699,8 +1710,7 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa0550256c8d4f0aaf74891ac986bd5ba46b2957c2c7e20f51838fa5819285f8"
+source = "git+https://github.com/sectore/nostr.git?branch=fix/expose-filter-matchevent#23e6b5b5afe39fb760f5ffc869e92be4d61c5809"
 dependencies = [
  "async-trait",
  "nostr",
@@ -1712,14 +1722,13 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cf190e41230721f0ce64f5ea72ed36cbc431d3b305eb166e24a94f5d7e4a425"
+source = "git+https://github.com/sectore/nostr.git?branch=fix/expose-filter-matchevent#23e6b5b5afe39fb760f5ffc869e92be4d61c5809"
 dependencies = [
  "async-utility",
  "async-wsocket",
+ "lnurl-pay",
  "nostr",
  "nostr-database",
- "once_cell",
  "thiserror",
  "tokio",
  "tracing",
@@ -1933,9 +1942,9 @@ dependencies = [
 
 [[package]]
 name = "percent-encoding"
-version = "2.3.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b2a4787296e9989611394c33f193f676704af1686e70b8f8033ab5ba9a35a94"
+checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
 
 [[package]]
 name = "pharos"
@@ -2814,6 +2823,7 @@ dependencies = [
  "directories",
  "git2",
  "nostr",
+ "nostr-database",
  "once_cell",
  "rand",
  "rexpect 0.5.0 (git+https://github.com/rust-cli/rexpect.git?rev=9eb61dd)",
@@ -3085,26 +3095,14 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.4.1"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "143b538f18257fac9cad154828a57c6bf5157e1aa604d4816b5995bf6de87ae5"
+checksum = "31e6302e3bb753d46e83516cae55ae196fc0c309407cf11ab35cc51a4c2a4633"
 dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
-]
-
-[[package]]
-name = "url-fork"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "956afc9d7e101f0b718a6776489cd7998d0b17fc79f4cdb6ee6761fb72d1c2ce"
-dependencies = [
- "form_urlencoded",
- "percent-encoding",
  "serde",
- "unicode-bidi",
- "unicode-normalization",
 ]
 
 [[package]]
