@@ -1,4 +1,4 @@
-on: push
+on: [push, fork]
 
 name: build test
 
