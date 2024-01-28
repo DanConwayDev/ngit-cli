@@ -1,4 +1,4 @@
-on: [push, fork]
+on: push
 
 name: check rustfmt
 
