@@ -1615,7 +1615,7 @@ dependencies = [
  "indicatif",
  "keyring",
  "mockall",
- "nostr",
+ "nostr 0.27.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nostr-sdk",
  "once_cell",
  "passwords",
@@ -1701,13 +1701,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostr"
+version = "0.27.0"
+source = "git+https://github.com/DanConwayDev/nostr.git?rev=e949cca706f7f032e27c6ca22ce8c996ea22b6c6#e949cca706f7f032e27c6ca22ce8c996ea22b6c6"
+dependencies = [
+ "aes 0.8.3",
+ "base64",
+ "bip39",
+ "bitcoin",
+ "cbc",
+ "chacha20",
+ "getrandom",
+ "instant",
+ "js-sys",
+ "negentropy",
+ "once_cell",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+ "url-fork",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "nostr-database"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa0550256c8d4f0aaf74891ac986bd5ba46b2957c2c7e20f51838fa5819285f8"
 dependencies = [
  "async-trait",
- "nostr",
+ "nostr 0.27.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nostr-database"
+version = "0.27.0"
+source = "git+https://github.com/DanConwayDev/nostr.git?rev=e949cca706f7f032e27c6ca22ce8c996ea22b6c6#e949cca706f7f032e27c6ca22ce8c996ea22b6c6"
+dependencies = [
+ "async-trait",
+ "nostr 0.27.0 (git+https://github.com/DanConwayDev/nostr.git?rev=e949cca706f7f032e27c6ca22ce8c996ea22b6c6)",
  "thiserror",
  "tokio",
  "tracing",
@@ -1721,8 +1759,8 @@ checksum = "3cf190e41230721f0ce64f5ea72ed36cbc431d3b305eb166e24a94f5d7e4a425"
 dependencies = [
  "async-utility",
  "async-wsocket",
- "nostr",
- "nostr-database",
+ "nostr 0.27.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nostr-database 0.27.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "once_cell",
  "thiserror",
  "tokio",
@@ -2816,7 +2854,8 @@ dependencies = [
  "dialoguer",
  "directories",
  "git2",
- "nostr",
+ "nostr 0.27.0 (git+https://github.com/DanConwayDev/nostr.git?rev=e949cca706f7f032e27c6ca22ce8c996ea22b6c6)",
+ "nostr-database 0.27.0 (git+https://github.com/DanConwayDev/nostr.git?rev=e949cca706f7f032e27c6ca22ce8c996ea22b6c6)",
  "once_cell",
  "rand",
  "rexpect 0.5.0 (git+https://github.com/rust-cli/rexpect.git?rev=9eb61dd)",

@@ -2,10 +2,11 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 use nostr::{ClientMessage, JsonUtil, RelayMessage};
+use nostr_database::index::{EventIndex, FilterIndex};
 
 use crate::CliTester;
 
-type ListenerEventFunc<'a> = &'a dyn Fn(&mut Relay, u64, nostr::Event) -> Result<()>;
+type ListenerEventFunc<'a> = &'a dyn Fn(&mut Relay, u64, nostr::event::Event) -> Result<()>;
 pub type ListenerReqFunc<'a> =
     &'a dyn Fn(&mut Relay, u64, nostr::SubscriptionId, Vec<nostr::Filter>) -> Result<()>;
 
@@ -13,7 +14,7 @@ pub struct Relay<'a> {
     port: u16,
     event_hub: simple_websockets::EventHub,
     clients: HashMap<u64, simple_websockets::Responder>,
-    pub events: Vec<nostr::Event>,
+    pub events: Vec<nostr::event::Event>,
     pub reqs: Vec<Vec<nostr::Filter>>,
     event_listener: Option<ListenerEventFunc<'a>>,
     req_listener: Option<ListenerReqFunc<'a>>,
@@ -40,7 +41,7 @@ impl<'a> Relay<'a> {
     pub fn respond_ok(
         &self,
         client_id: u64,
-        event: nostr::Event,
+        event: nostr::event::Event,
         error: Option<&str>,
     ) -> Result<bool> {
         let responder = self.clients.get(&client_id).unwrap();
@@ -72,7 +73,7 @@ impl<'a> Relay<'a> {
         &self,
         client_id: u64,
         subscription_id: &nostr::SubscriptionId,
-        events: &Vec<nostr::Event>,
+        events: &Vec<nostr::event::Event>,
     ) -> Result<bool> {
         let responder = self.clients.get(&client_id).unwrap();
 
@@ -96,8 +97,7 @@ impl<'a> Relay<'a> {
         &self,
         client_id: u64,
         subscription_id: &nostr::SubscriptionId,
-        // TODO: enable filters
-        _filters: &[nostr::Filter],
+        filters: &[nostr::Filter],
     ) -> Result<bool> {
         // let t: Vec<nostr::Kind> = self.events.iter().map(|e| e.kind).collect();
         // .filter(|e| filters.iter().any(|filter| filter.match_event(e)))
@@ -109,12 +109,13 @@ impl<'a> Relay<'a> {
             &self
                 .events
                 .iter()
-                // FIXME:
-                // `filter.match_events` does not exist anymore
-                // it has been moved to `nostr_database_::FilterIndex`
-                // but it's private now
-                // .filter(|e| filters.iter().any(|filter|filter.match_event(e)))
-                .filter(|_| true)
+                .filter(|e| {
+                    filters.iter().any(|filter| {
+                        let filter_index: FilterIndex = FilterIndex::from(filter.clone());
+                        let event_index: EventIndex = EventIndex::from(*e);
+                        filter_index.match_event(&event_index)
+                    })
+                })
                 .cloned()
                 .collect(),
         )
@@ -202,7 +203,7 @@ pub fn shutdown_relay(port: u64) -> Result<()> {
     Ok(())
 }
 
-fn get_nevent(message: &simple_websockets::Message) -> Result<nostr::Event> {
+fn get_nevent(message: &simple_websockets::Message) -> Result<nostr::event::Event> {
     if let simple_websockets::Message::Text(s) = message.clone() {
         let cm_result = ClientMessage::from_json(s);
         if let Ok(ClientMessage::Event(event)) = cm_result {

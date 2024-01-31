@@ -9,7 +9,8 @@ assert_cmd = "2.0.12"
 dialoguer = "0.10.4"
 directories = "5.0.1"
 git2 = "0.18.1"
-nostr = "0.27.0"
+nostr = { git = "https://github.com/DanConwayDev/nostr.git", rev = "e949cca706f7f032e27c6ca22ce8c996ea22b6c6" }
+nostr-database = { git = "https://github.com/DanConwayDev/nostr.git", rev = "e949cca706f7f032e27c6ca22ce8c996ea22b6c6" }
 once_cell = "1.18.0"
 rand = "0.8"
 rexpect = { git = "https://github.com/rust-cli/rexpect.git", rev = "9eb61dd" }
