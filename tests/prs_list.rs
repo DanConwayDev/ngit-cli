@@ -226,17 +226,18 @@ mod when_main_branch_is_uptodate {
                         Ok(())
                     }
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        futures::executor::block_on(run_async_prompts_to_choose_from_pr_titles())
+                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                        Ok(())
                     }
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn pr_branch_created_with_correct_name() -> Result<()> {
-                    let (_, test_repo) = futures::executor::block_on(prep_and_run())?;
+                async fn pr_branch_created_with_correct_name() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         vec![FEATURE_BRANCH_NAME_1, "main"],
                         test_repo.get_local_branch_names()?
@@ -244,10 +245,10 @@ mod when_main_branch_is_uptodate {
                     Ok(())
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn pr_branch_checked_out() -> Result<()> {
-                    let (_, test_repo) = futures::executor::block_on(prep_and_run())?;
+                async fn pr_branch_checked_out() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_1,
                         test_repo.get_checked_out_branch_name()?,
@@ -390,17 +391,18 @@ mod when_main_branch_is_uptodate {
                         Ok(())
                     }
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        futures::executor::block_on(run_async_prompts_to_choose_from_pr_titles())
+                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                        Ok(())
                     }
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn pr_branch_created_with_correct_name() -> Result<()> {
-                    let (_, test_repo) = futures::executor::block_on(prep_and_run())?;
+                async fn pr_branch_created_with_correct_name() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         vec![FEATURE_BRANCH_NAME_3, "main"],
                         test_repo.get_local_branch_names()?
@@ -408,10 +410,10 @@ mod when_main_branch_is_uptodate {
                     Ok(())
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn pr_branch_checked_out() -> Result<()> {
-                    let (_, test_repo) = futures::executor::block_on(prep_and_run())?;
+                async fn pr_branch_checked_out() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_3,
                         test_repo.get_checked_out_branch_name()?,
@@ -577,17 +579,18 @@ mod when_main_branch_is_uptodate {
                         Ok(())
                     }
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        futures::executor::block_on(run_async_prompts_to_choose_from_pr_titles())
+                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                        Ok(())
                     }
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn pr_branch_checked_out() -> Result<()> {
-                    let (_, test_repo) = futures::executor::block_on(prep_and_run())?;
+                async fn pr_branch_checked_out() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_1,
                         test_repo.get_checked_out_branch_name()?,
@@ -736,17 +739,18 @@ mod when_main_branch_is_uptodate {
                         Ok(())
                     }
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        futures::executor::block_on(run_async_prompts_to_choose_from_pr_titles())
+                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                        Ok(())
                     }
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn pr_branch_checked_out() -> Result<()> {
-                    let (_, test_repo) = futures::executor::block_on(prep_and_run())?;
+                async fn pr_branch_checked_out() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_1,
                         test_repo.get_checked_out_branch_name()?,

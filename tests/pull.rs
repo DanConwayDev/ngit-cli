@@ -144,10 +144,10 @@ mod when_main_is_checked_out {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn cli_show_error() -> Result<()> {
-            futures::executor::block_on(run_async_cli_show_error())
+        async fn cli_show_error() -> Result<()> {
+            run_async_cli_show_error().await
         }
     }
 }
@@ -209,10 +209,10 @@ mod when_branch_doesnt_exist {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn cli_show_error() -> Result<()> {
-            futures::executor::block_on(run_async_cli_show_error())
+        async fn cli_show_error() -> Result<()> {
+            run_async_cli_show_error().await
         }
     }
 }
@@ -274,10 +274,10 @@ mod when_branch_is_checked_out {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn cli_show_up_to_date() -> Result<()> {
-                futures::executor::block_on(run_async_cli_show_up_to_date())
+            async fn cli_show_up_to_date() -> Result<()> {
+                run_async_cli_show_up_to_date().await
             }
         }
     }
@@ -389,10 +389,10 @@ mod when_branch_is_checked_out {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn cli_applied_1_commit() -> Result<()> {
-                futures::executor::block_on(run_async_cli_applied_1_commit())
+            async fn cli_applied_1_commit() -> Result<()> {
+                run_async_cli_applied_1_commit().await
             }
         }
 
