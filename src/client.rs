@@ -131,6 +131,8 @@ impl Connect for Client {
         let futures: Vec<_> = relays
             .clone()
             .iter()
+            // don't look for events on blaster
+            .filter(|r| !r.contains("nostr.mutinywallet.com"))
             .map(|r| {
                 (
                     relays_map.get(&nostr::Url::parse(r).unwrap()).unwrap(),
@@ -140,7 +142,9 @@ impl Connect for Client {
             .map(|(relay, filters)| async {
                 match get_events_of(relay, filters).await {
                     Err(error) => {
-                        println!("{} {}", error, relay.url());
+                        if std::env::var("NGITTEST").is_err() {
+                            println!("{} {}", error, relay.url());
+                        }
                         Err(error)
                     }
                     res => res,
@@ -148,7 +152,7 @@ impl Connect for Client {
             })
             .collect();
 
-        let relay_results = stream::iter(futures).buffer_unordered(5).collect().await;
+        let relay_results = stream::iter(futures).buffer_unordered(15).collect().await;
 
         Ok(get_dedup_events(relay_results))
     }
@@ -158,7 +162,9 @@ async fn get_events_of(
     relay: &nostr_sdk::Relay,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<Event>> {
-    println!("fetching from {}", relay.url());
+    if std::env::var("NGITTEST").is_err() {
+        println!("fetching from {}", relay.url());
+    }
     if !relay.is_connected().await {
         relay.connect(None).await;
     }
@@ -171,7 +177,9 @@ async fn get_events_of(
         )
         .await
         .context("failed to get events from relay")?;
-    println!("fetched {} events from {}", events.len(), relay.url());
+    if std::env::var("NGITTEST").is_err() {
+        println!("fetched {} events from {}", events.len(), relay.url());
+    }
     Ok(events)
 }
 

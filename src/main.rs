@@ -48,14 +48,10 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
-        Commands::Login(args) => {
-            futures::executor::block_on(sub_commands::login::launch(&cli, args))
-        }
-        Commands::Claim(args) => {
-            futures::executor::block_on(sub_commands::claim::launch(&cli, args))
-        }
-        Commands::Prs(args) => futures::executor::block_on(sub_commands::prs::launch(&cli, args)),
-        Commands::Pull => futures::executor::block_on(sub_commands::pull::launch()),
-        Commands::Push => futures::executor::block_on(sub_commands::push::launch(&cli)),
+        Commands::Login(args) => sub_commands::login::launch(&cli, args).await,
+        Commands::Claim(args) => sub_commands::claim::launch(&cli, args).await,
+        Commands::Prs(args) => sub_commands::prs::launch(&cli, args).await,
+        Commands::Pull => sub_commands::pull::launch().await,
+        Commands::Push => sub_commands::push::launch(&cli).await,
     }
 }
