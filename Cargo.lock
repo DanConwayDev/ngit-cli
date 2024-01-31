@@ -1684,7 +1684,7 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 [[package]]
 name = "nostr"
 version = "0.27.0"
-source = "git+https://github.com/sectore/nostr.git?branch=fix/expose-filter-matchevent#23e6b5b5afe39fb760f5ffc869e92be4d61c5809"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=664ffe31c5c573593e2f92acb044c1d7678693e2#664ffe31c5c573593e2f92acb044c1d7678693e2"
 dependencies = [
  "aes 0.8.3",
  "base64",
@@ -1710,7 +1710,7 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.27.0"
-source = "git+https://github.com/sectore/nostr.git?branch=fix/expose-filter-matchevent#23e6b5b5afe39fb760f5ffc869e92be4d61c5809"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=664ffe31c5c573593e2f92acb044c1d7678693e2#664ffe31c5c573593e2f92acb044c1d7678693e2"
 dependencies = [
  "async-trait",
  "nostr",
@@ -1722,7 +1722,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.27.0"
-source = "git+https://github.com/sectore/nostr.git?branch=fix/expose-filter-matchevent#23e6b5b5afe39fb760f5ffc869e92be4d61c5809"
+source = "git+https://github.com/rust-nostr/nostr.git?rev=664ffe31c5c573593e2f92acb044c1d7678693e2#664ffe31c5c573593e2f92acb044c1d7678693e2"
 dependencies = [
  "async-utility",
  "async-wsocket",
