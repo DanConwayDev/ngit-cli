@@ -252,10 +252,10 @@ mod sends_pr_and_2_patches_to_3_relays {
         Ok((r51, r52, r53, r55, r56))
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn only_1_pr_kind_event_sent_to_each_relay() -> Result<()> {
-        let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+    async fn only_1_pr_kind_event_sent_to_each_relay() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
         for relay in [&r53, &r55, &r56] {
             assert_eq!(
                 relay
@@ -269,10 +269,10 @@ mod sends_pr_and_2_patches_to_3_relays {
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn only_1_pr_kind_event_sent_to_user_relays() -> Result<()> {
-        let (_, _, r53, r55, _) = futures::executor::block_on(prep_run_create_pr())?;
+    async fn only_1_pr_kind_event_sent_to_user_relays() -> Result<()> {
+        let (_, _, r53, r55, _) = prep_run_create_pr().await?;
         for relay in [&r53, &r55] {
             assert_eq!(
                 relay
@@ -286,10 +286,10 @@ mod sends_pr_and_2_patches_to_3_relays {
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn only_1_pr_kind_event_sent_to_repo_relays() -> Result<()> {
-        let (_, _, _, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+    async fn only_1_pr_kind_event_sent_to_repo_relays() -> Result<()> {
+        let (_, _, _, r55, r56) = prep_run_create_pr().await?;
         for relay in [&r55, &r56] {
             assert_eq!(
                 relay
@@ -303,10 +303,10 @@ mod sends_pr_and_2_patches_to_3_relays {
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn pr_not_sent_to_fallback_relay() -> Result<()> {
-        let (r51, r52, _, _, _) = futures::executor::block_on(prep_run_create_pr())?;
+    async fn pr_not_sent_to_fallback_relay() -> Result<()> {
+        let (r51, r52, _, _, _) = prep_run_create_pr().await?;
         for relay in [&r51, &r52] {
             assert_eq!(
                 relay
@@ -320,10 +320,10 @@ mod sends_pr_and_2_patches_to_3_relays {
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn only_2_patch_kind_events_sent_to_each_relay() -> Result<()> {
-        let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+    async fn only_2_patch_kind_events_sent_to_each_relay() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
         for relay in [&r53, &r55, &r56] {
             assert_eq!(
                 relay
@@ -337,10 +337,10 @@ mod sends_pr_and_2_patches_to_3_relays {
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn patch_content_contains_patch_in_email_format() -> Result<()> {
-        let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+    async fn patch_content_contains_patch_in_email_format() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
         for relay in [&r53, &r55, &r56] {
             let patch_events: Vec<&nostr::Event> = relay
                 .events
@@ -407,10 +407,10 @@ mod sends_pr_and_2_patches_to_3_relays {
     mod pr_tags {
         use super::*;
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn pr_tags_repo_commit() -> Result<()> {
-            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        async fn pr_tags_repo_commit() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
             let root_commit = GitTestRepo::default().initial_commit()?;
 
             for relay in [&r53, &r55, &r56] {
@@ -429,10 +429,10 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn pr_tags_title_as_name() -> Result<()> {
-            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        async fn pr_tags_title_as_name() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event = relay
                     .events
@@ -453,10 +453,10 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn pr_tags_description() -> Result<()> {
-            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        async fn pr_tags_description() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event = relay
                     .events
@@ -477,10 +477,10 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn pr_tags_branch_name() -> Result<()> {
-            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        async fn pr_tags_branch_name() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event = relay
                     .events
@@ -506,8 +506,8 @@ mod sends_pr_and_2_patches_to_3_relays {
     mod patch_tags {
         use super::*;
 
-        fn prep() -> Result<nostr::Event> {
-            let (_, _, r53, _, _) = futures::executor::block_on(prep_run_create_pr())?;
+        async fn prep() -> Result<nostr::Event> {
+            let (_, _, r53, _, _) = prep_run_create_pr().await?;
             Ok(r53
                 .events
                 .iter()
@@ -516,11 +516,11 @@ mod sends_pr_and_2_patches_to_3_relays {
                 .clone())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn commit_and_commit_r() -> Result<()> {
+        async fn commit_and_commit_r() -> Result<()> {
             static COMMIT_ID: &str = "fe973a840fba2a8ab37dd505c154854a69a6505c";
-            let most_recent_patch = prep()?;
+            let most_recent_patch = prep().await?;
             assert!(
                 most_recent_patch
                     .tags
@@ -536,12 +536,12 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn parent_commit() -> Result<()> {
+        async fn parent_commit() -> Result<()> {
             // commit parent 'r' and 'parent-commit' tag
             static COMMIT_PARENT_ID: &str = "232efb37ebc67692c9e9ff58b83c0d3d63971a0a";
-            let most_recent_patch = prep()?;
+            let most_recent_patch = prep().await?;
             assert!(
                 most_recent_patch.tags.iter().any(
                     |t| t.as_vec()[0].eq("parent-commit") && t.as_vec()[1].eq(COMMIT_PARENT_ID)
@@ -550,19 +550,20 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn root_commit_as_r() -> Result<()> {
-            assert!(prep()?.tags.iter().any(|t| t.as_vec()[0].eq("r")
+        async fn root_commit_as_r() -> Result<()> {
+            assert!(prep().await?.tags.iter().any(|t| t.as_vec()[0].eq("r")
                 && t.as_vec()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn description_with_commit_message() -> Result<()> {
+        async fn description_with_commit_message() -> Result<()> {
             assert_eq!(
-                prep()?
+                prep()
+                    .await?
                     .tags
                     .iter()
                     .find(|t| t.as_vec()[0].eq("description"))
@@ -573,11 +574,12 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn commit_author() -> Result<()> {
+        async fn commit_author() -> Result<()> {
             assert_eq!(
-                prep()?
+                prep()
+                    .await?
                     .tags
                     .iter()
                     .find(|t| t.as_vec()[0].eq("author"))
@@ -588,11 +590,12 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn commit_committer() -> Result<()> {
+        async fn commit_committer() -> Result<()> {
             assert_eq!(
-                prep()?
+                prep()
+                    .await?
                     .tags
                     .iter()
                     .find(|t| t.as_vec()[0].eq("committer"))
@@ -603,10 +606,10 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn patch_tags_pr_event_as_root() -> Result<()> {
-            let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_create_pr())?;
+        async fn patch_tags_pr_event_as_root() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
             for relay in [&r53, &r55, &r56] {
                 let patch_events: Vec<&nostr::Event> = relay
                     .events
@@ -705,10 +708,10 @@ mod sends_pr_and_2_patches_to_3_relays {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn check_cli_output() -> Result<()> {
-            futures::executor::block_on(run_test_async())?;
+        async fn check_cli_output() -> Result<()> {
+            run_test_async().await?;
             Ok(())
         }
     }
@@ -787,10 +790,10 @@ mod sends_pr_and_2_patches_to_3_relays {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn only_first_rejected_event_sent_to_relay() -> Result<()> {
-                futures::executor::block_on(run_test_async())?;
+            async fn only_first_rejected_event_sent_to_relay() -> Result<()> {
+                run_test_async().await?;
                 Ok(())
             }
         }
@@ -879,10 +882,10 @@ mod sends_pr_and_2_patches_to_3_relays {
                 Ok((r51, r52, r53))
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn cli_show_rejection_with_comment() -> Result<()> {
-                futures::executor::block_on(run_test_async())?;
+            async fn cli_show_rejection_with_comment() -> Result<()> {
+                run_test_async().await?;
                 Ok(())
             }
         }

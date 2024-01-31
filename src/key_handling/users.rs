@@ -679,18 +679,21 @@ mod tests {
         mod when_within_caching_time_window {
             use super::*;
 
-            #[test]
-            fn returns_cached_details_without_checking_relays_or_updaing_config() -> Result<()> {
+            #[tokio::test]
+            async fn returns_cached_details_without_checking_relays_or_updaing_config() -> Result<()>
+            {
                 let mut m = MockUserManager::default();
                 let client = generate_mock_client();
                 m.config_manager
                     .expect_load()
                     .returning(|| Ok(generate_standard_config()));
-                let res = futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    24 * 60 * 60, // within 24 hours
-                ))?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        24 * 60 * 60, // within 24 hours
+                    )
+                    .await?;
                 assert_eq!(res.metadata.name, "Fred");
                 assert_eq!(res.relays.relays[0].url, "ws://existingread");
                 Ok(())
@@ -700,8 +703,8 @@ mod tests {
         mod returns_userref_with_latest_details_from_events_on_relays {
             use super::*;
 
-            #[test]
-            fn name() -> Result<()> {
+            #[tokio::test]
+            async fn name() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -712,17 +715,19 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                let res = futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.metadata.name, "fred");
                 Ok(())
             }
 
-            #[test]
-            fn name_ignoring_other_users_events() -> Result<()> {
+            #[tokio::test]
+            async fn name_ignoring_other_users_events() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -736,17 +741,19 @@ mod tests {
                     ])
                 });
 
-                let res = futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.metadata.name, "fred");
                 Ok(())
             }
 
-            #[test]
-            fn relays() -> Result<()> {
+            #[tokio::test]
+            async fn relays() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -760,17 +767,19 @@ mod tests {
                     ])
                 });
 
-                let res = futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.relays.relays, expected_userrelayrefs(),);
                 Ok(())
             }
 
-            #[test]
-            fn relays_ignoring_other_users_events() -> Result<()> {
+            #[tokio::test]
+            async fn relays_ignoring_other_users_events() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -788,11 +797,13 @@ mod tests {
                     ])
                 });
 
-                let res = futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.relays.relays, expected_userrelayrefs(),);
                 Ok(())
             }
@@ -801,8 +812,8 @@ mod tests {
         mod saves_updates_to_config {
             use super::*;
 
-            #[test]
-            fn saves_name_to_config() -> Result<()> {
+            #[tokio::test]
+            async fn saves_name_to_config() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -817,16 +828,18 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
-            #[test]
-            fn updates_metadata_created_at() -> Result<()> {
+            #[tokio::test]
+            async fn updates_metadata_created_at() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -841,16 +854,18 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
-            #[test]
-            fn saves_relays_to_config() -> Result<()> {
+            #[tokio::test]
+            async fn saves_relays_to_config() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -865,16 +880,18 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_relaylist_event()]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
-            #[test]
-            fn updates_relays_created_at() -> Result<()> {
+            #[tokio::test]
+            async fn updates_relays_created_at() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -889,16 +906,18 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_relaylist_event()]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
-            #[test]
-            fn when_no_changes_updates_last_updated() -> Result<()> {
+            #[tokio::test]
+            async fn when_no_changes_updates_last_updated() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -911,16 +930,18 @@ mod tests {
                     .returning(|_| Ok(()));
                 client.expect_get_events().returning(|_, _| Ok(vec![]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
-            #[test]
-            fn when_changes_updates_last_updated() -> Result<()> {
+            #[tokio::test]
+            async fn when_changes_updates_last_updated() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -935,19 +956,21 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
         }
 
         mod fetches_from_correct_relays {
             use super::*;
-            #[test]
-            fn when_userref_write_relays_present_fetches_only_from_them() -> Result<()> {
+            #[tokio::test]
+            async fn when_userref_write_relays_present_fetches_only_from_them() -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager
@@ -966,15 +989,19 @@ mod tests {
                     })
                     .returning(|_, _| Ok(vec![]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
-            #[test]
-            fn when_userref_write_relays_not_present_fetches_from_fallback_relays() -> Result<()> {
+
+            #[tokio::test]
+            async fn when_userref_write_relays_not_present_fetches_from_fallback_relays()
+            -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager.expect_load().returning(|| {
@@ -996,19 +1023,21 @@ mod tests {
                     .withf(move |relays, _filters| fallback_relays().eq(relays))
                     .returning(|_, _| Ok(vec![]));
 
-                futures::executor::block_on(m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ))?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
             mod fetches_from_new_relays_discovered_in_incoming_relay_list {
                 use super::*;
 
-                #[test]
-                fn when_all_relays_in_list_are_new_finds_name() -> Result<()> {
+                #[tokio::test]
+                async fn when_all_relays_in_list_are_new_finds_name() -> Result<()> {
                     let mut m = MockUserManager::default();
                     let mut client = generate_mock_client();
                     m.config_manager.expect_load().returning(|| {
@@ -1052,17 +1081,19 @@ mod tests {
                             }
                         });
 
-                    let res = futures::executor::block_on(m.get_user(
-                        &client,
-                        &TEST_KEY_1_KEYS.public_key(),
-                        5 * 60, // 5 mins ago
-                    ))?;
+                    let res = m
+                        .get_user(
+                            &client,
+                            &TEST_KEY_1_KEYS.public_key(),
+                            5 * 60, // 5 mins ago
+                        )
+                        .await?;
                     assert_eq!(res.metadata.name, "fred");
                     Ok(())
                 }
 
-                #[test]
-                fn only_fetches_from_newly_added_relays() -> Result<()> {
+                #[tokio::test]
+                async fn only_fetches_from_newly_added_relays() -> Result<()> {
                     let mut m = MockUserManager::default();
                     let mut client = generate_mock_client();
                     m.config_manager.expect_load().returning(|| {
@@ -1095,19 +1126,21 @@ mod tests {
                             }
                         });
 
-                    let res = futures::executor::block_on(m.get_user(
-                        &client,
-                        &TEST_KEY_1_KEYS.public_key(),
-                        5 * 60, // 5 mins ago
-                    ))?;
+                    let res = m
+                        .get_user(
+                            &client,
+                            &TEST_KEY_1_KEYS.public_key(),
+                            5 * 60, // 5 mins ago
+                        )
+                        .await?;
                     assert_eq!(res.metadata.name, "fred");
                     Ok(())
                 }
             }
         }
 
-        #[test]
-        fn when_failed_to_fetch_events_returns_cached_details() -> Result<()> {
+        #[tokio::test]
+        async fn when_failed_to_fetch_events_returns_cached_details() -> Result<()> {
             let mut m = MockUserManager::default();
             let mut client = generate_mock_client();
             m.config_manager
@@ -1117,11 +1150,13 @@ mod tests {
                 .expect_get_events()
                 .returning(|_, _| Err(anyhow!("test error")));
 
-            let res = futures::executor::block_on(m.get_user(
-                &client,
-                &TEST_KEY_1_KEYS.public_key(),
-                5 * 60, // 10 mins ago
-            ))?;
+            let res = m
+                .get_user(
+                    &client,
+                    &TEST_KEY_1_KEYS.public_key(),
+                    5 * 60, // 10 mins ago
+                )
+                .await?;
             assert_eq!(res.metadata.name, "Fred");
             Ok(())
         }

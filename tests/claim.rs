@@ -117,10 +117,10 @@ mod when_repo_not_previously_claimed {
         mod sent_to_correct_relays {
             use super::*;
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn only_1_repository_kind_event_sent_to_user_relays() -> Result<()> {
-                let (_, _, r53, r55, _) = futures::executor::block_on(prep_run_claim())?;
+            async fn only_1_repository_kind_event_sent_to_user_relays() -> Result<()> {
+                let (_, _, r53, r55, _) = prep_run_claim().await?;
                 for relay in [&r53, &r55] {
                     assert_eq!(
                         relay
@@ -134,10 +134,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn only_1_repository_kind_event_sent_to_specified_repo_relays() -> Result<()> {
-                let (_, _, _, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+            async fn only_1_repository_kind_event_sent_to_specified_repo_relays() -> Result<()> {
+                let (_, _, _, r55, r56) = prep_run_claim().await?;
                 for relay in [&r55, &r56] {
                     assert_eq!(
                         relay
@@ -151,10 +151,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn event_not_sent_to_fallback_relay() -> Result<()> {
-                let (r51, r52, _, _, _) = futures::executor::block_on(prep_run_claim())?;
+            async fn event_not_sent_to_fallback_relay() -> Result<()> {
+                let (r51, r52, _, _, _) = prep_run_claim().await?;
                 for relay in [&r51, &r52] {
                     assert_eq!(
                         relay
@@ -241,10 +241,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn contains_maintainers_and_relays() -> Result<()> {
-                futures::executor::block_on(async_run_test())?;
+            async fn contains_maintainers_and_relays() -> Result<()> {
+                async_run_test().await?;
                 Ok(())
             }
         }
@@ -252,9 +252,10 @@ mod when_repo_not_previously_claimed {
         mod tags {
             use super::*;
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn d_replaceable_event_identifier_defaults_to_root_commit_id_shorthand() -> Result<()> {
+            async fn d_replaceable_event_identifier_defaults_to_root_commit_id_shorthand()
+            -> Result<()> {
                 let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
@@ -273,10 +274,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn root_commit_as_reference() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+            async fn root_commit_as_reference() -> Result<()> {
+                let (_, _, r53, r55, r56) = prep_run_claim().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -290,10 +291,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn name() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+            async fn name() -> Result<()> {
+                let (_, _, r53, r55, r56) = prep_run_claim().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -311,10 +312,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn description() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+            async fn description() -> Result<()> {
+                let (_, _, r53, r55, r56) = prep_run_claim().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -328,10 +329,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn git_server() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+            async fn git_server() -> Result<()> {
+                let (_, _, r53, r55, r56) = prep_run_claim().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -347,10 +348,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn relays() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+            async fn relays() -> Result<()> {
+                let (_, _, r53, r55, r56) = prep_run_claim().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -369,9 +370,9 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn web() -> Result<()> {
+            async fn web() -> Result<()> {
                 let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
@@ -473,10 +474,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn check_cli_output() -> Result<()> {
-                futures::executor::block_on(run_test_async())?;
+            async fn check_cli_output() -> Result<()> {
+                run_test_async().await?;
                 Ok(())
             }
         }
@@ -572,10 +573,10 @@ mod when_repo_not_previously_claimed {
         mod tags {
             use super::*;
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn relays_match_user_write_relays() -> Result<()> {
-                let (_, _, r53, r55, _) = futures::executor::block_on(prep_run_claim())?;
+            async fn relays_match_user_write_relays() -> Result<()> {
+                let (_, _, r53, r55, _) = prep_run_claim().await?;
                 for relay in [&r53, &r55] {
                     let event: &nostr::Event = relay
                         .events
@@ -650,10 +651,10 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn check_cli_output() -> Result<()> {
-                futures::executor::block_on(run_test_async())?;
+            async fn check_cli_output() -> Result<()> {
+                run_test_async().await?;
                 Ok(())
             }
         }

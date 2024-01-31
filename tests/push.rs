@@ -111,6 +111,7 @@ mod when_pr_isnt_associated_with_branch_name {
     use super::*;
 
     mod cli_prompts {
+
         use super::*;
         async fn run_async_cli_show_error() -> Result<()> {
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -164,10 +165,10 @@ mod when_pr_isnt_associated_with_branch_name {
             Ok(())
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn cli_show_error() -> Result<()> {
-            futures::executor::block_on(run_async_cli_show_error())
+        async fn cli_show_error() -> Result<()> {
+            run_async_cli_show_error().await
         }
     }
 }
@@ -229,10 +230,11 @@ mod when_branch_is_checked_out {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn cli_show_up_to_date() -> Result<()> {
-                futures::executor::block_on(run_async_cli_show_up_to_date())
+            async fn cli_show_up_to_date() -> Result<()> {
+                let _ = run_async_cli_show_up_to_date().await;
+                Ok(())
             }
         }
     }
@@ -291,10 +293,11 @@ mod when_branch_is_checked_out {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn cli_show_up_to_date() -> Result<()> {
-                futures::executor::block_on(run_async_cli_show_up_to_date())
+            async fn cli_show_up_to_date() -> Result<()> {
+                let _ = run_async_cli_show_up_to_date().await;
+                Ok(())
             }
         }
     }
@@ -389,10 +392,11 @@ mod when_branch_is_checked_out {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn cli_applied_1_commit() -> Result<()> {
-                futures::executor::block_on(run_async_cli_applied_1_commit())
+            async fn cli_applied_1_commit() -> Result<()> {
+                let _ = run_async_cli_applied_1_commit().await;
+                Ok(())
             }
         }
 
@@ -453,10 +457,10 @@ mod when_branch_is_checked_out {
 
             Ok((res, r55.events.clone()))
         }
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn commits_issued_as_patch_event() -> Result<()> {
-            let (test_repo, r55_events) = futures::executor::block_on(prep_and_run())?;
+        async fn commits_issued_as_patch_event() -> Result<()> {
+            let (test_repo, r55_events) = prep_and_run().await?;
 
             let commit_id = test_repo
                 .get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?
