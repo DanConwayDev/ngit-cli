@@ -150,7 +150,7 @@ impl Connect for Client {
             })
             .collect();
 
-        let relay_results = stream::iter(futures).buffer_unordered(5).collect().await;
+        let relay_results = stream::iter(futures).buffer_unordered(15).collect().await;
 
         Ok(get_dedup_events(relay_results))
     }
