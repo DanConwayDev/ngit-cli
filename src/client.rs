@@ -140,7 +140,9 @@ impl Connect for Client {
 
                 match get_events_of(relay, filters).await {
                     Err(error) => {
-                        println!("{} {}", error, relay.url());
+                        if std::env::var("NGITTEST").is_err() {
+                            println!("{} {}", error, relay.url());
+                        }
                         Err(error)
                     }
                     res => res,
@@ -158,8 +160,9 @@ async fn get_events_of(
     relay: &nostr_sdk::Relay,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<Event>> {
-    println!("fetching from {}", relay.url());
-
+    if std::env::var("NGITTEST").is_err() {
+        println!("fetching from {}", relay.url());
+    }
     let events = relay
         .get_events_of(
             filters,
@@ -169,7 +172,9 @@ async fn get_events_of(
         )
         .await
         .context("failed to get events from relay")?;
-    println!("fetched {} events from {}", events.len(), relay.url());
+    if std::env::var("NGITTEST").is_err() {
+        println!("fetched {} events from {}", events.len(), relay.url());
+    }
     Ok(events)
 }
 
