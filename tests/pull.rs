@@ -396,10 +396,10 @@ mod when_branch_is_checked_out {
             }
         }
 
-        #[test]
+        #[tokio::test]
         #[serial]
-        fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
-            let (originating_repo, test_repo) = futures::executor::block_on(prep_and_run())?;
+        async fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
+            let (originating_repo, test_repo) = prep_and_run().await?;
             assert_eq!(
                 originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
                 test_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
