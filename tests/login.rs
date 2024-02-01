@@ -121,10 +121,10 @@ mod with_relays {
                     Ok(())
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn when_latest_metadata_and_relay_list_on_all_relays() -> Result<()> {
-                    futures::executor::block_on(run_test_displays_correct_name(
+                async fn when_latest_metadata_and_relay_list_on_all_relays() -> Result<()> {
+                    run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             relay.respond_events(
                                 client_id,
@@ -147,16 +147,16 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ))
+                    ).await
                 }
 
                 mod poorly_quality_metadata_event {
                     use super::*;
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn when_metadata_contains_only_display_name() -> Result<()> {
-                        futures::executor::block_on(run_test_displays_correct_name(
+                    async fn when_metadata_contains_only_display_name() -> Result<()> {
+                        run_test_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
                                     client_id,
@@ -173,12 +173,12 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ))
+                        ).await
                     }
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn when_metadata_contains_only_displayname() -> Result<()> {
+                    async fn when_metadata_contains_only_displayname() -> Result<()> {
                         println!(
                             "displayName: {}",
                             nostr::Metadata::new()
@@ -192,7 +192,7 @@ mod with_relays {
                             nostr::Metadata::new().name("fred").name.unwrap()
                         );
 
-                        futures::executor::block_on(run_test_displays_correct_name(
+                        run_test_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
                                     client_id,
@@ -210,12 +210,12 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ))
+                        ).await
                     }
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn displays_npub_when_metadata_contains_no_name_displayname_or_display_name()
+                    async fn displays_npub_when_metadata_contains_no_name_displayname_or_display_name()
                     -> Result<()> {
                         println!(
                             "displayName: {}",
@@ -230,7 +230,7 @@ mod with_relays {
                             nostr::Metadata::new().name("fred").name.unwrap()
                         );
 
-                        futures::executor::block_on(run_test_displays_fallback_to_npub(
+                        run_test_displays_fallback_to_npub(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
                                     client_id,
@@ -247,15 +247,15 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ))
+                        ).await
                     }
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn when_latest_metadata_and_relay_list_on_some_relays_but_others_have_none()
+                async fn when_latest_metadata_and_relay_list_on_some_relays_but_others_have_none()
                 -> Result<()> {
-                    futures::executor::block_on(run_test_displays_correct_name(
+                    run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             relay.respond_events(
                                 client_id,
@@ -268,13 +268,13 @@ mod with_relays {
                             Ok(())
                         }),
                         None,
-                    ))
+                    ).await
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn when_latest_metadata_only_on_relay_and_relay_list_on_another() -> Result<()> {
-                    futures::executor::block_on(run_test_displays_correct_name(
+                async fn when_latest_metadata_only_on_relay_and_relay_list_on_another() -> Result<()> {
+                    run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             relay.respond_events(
                                 client_id,
@@ -291,13 +291,13 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ))
+                    ).await
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn when_some_relays_return_old_metadata_event() -> Result<()> {
-                    futures::executor::block_on(run_test_displays_correct_name(
+                async fn when_some_relays_return_old_metadata_event() -> Result<()> {
+                    run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             relay.respond_events(
                                 client_id,
@@ -317,13 +317,13 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ))
+                    ).await
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn when_some_relays_return_other_users_metadata() -> Result<()> {
-                    futures::executor::block_on(run_test_displays_correct_name(
+                async fn when_some_relays_return_other_users_metadata() -> Result<()> {
+                    run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             relay.respond_events(
                                 client_id,
@@ -343,13 +343,13 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ))
+                    ).await
                 }
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn when_some_relays_return_other_event_kinds() -> Result<()> {
-                    futures::executor::block_on(run_test_displays_correct_name(
+                async fn when_some_relays_return_other_event_kinds() -> Result<()> {
+                    run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             let event = generate_test_key_1_kind_event(nostr::Kind::TextNote);
                             relay.respond_events(
@@ -370,16 +370,16 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ))
+                    ).await
                 }
 
                 mod when_specifying_command_line_nsec_only {
                     use super::*;
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn displays_correct_name() -> Result<()> {
-                        futures::executor::block_on(
+                    async fn displays_correct_name() -> Result<()> {
+                        
                             run_test_when_specifying_command_line_nsec_only_displays_correct_name(
                                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                     relay.respond_events(
@@ -393,8 +393,8 @@ mod with_relays {
                                     Ok(())
                                 }),
                                 None,
-                            ),
-                        )
+                            ).await
+                
                     }
                     async fn run_test_when_specifying_command_line_nsec_only_displays_correct_name(
                         relay_listener1: Option<ListenerReqFunc<'_>>,
@@ -430,10 +430,10 @@ mod with_relays {
                 mod when_specifying_command_line_password_only {
                     use super::*;
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn displays_correct_name() -> Result<()> {
-                        futures::executor::block_on(
+                    async fn displays_correct_name() -> Result<()> {
+                        
                         run_test_when_specifying_command_line_password_only_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
@@ -447,8 +447,8 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ),
-                    )
+                        ).await
+                    
                     }
                     async fn run_test_when_specifying_command_line_password_only_displays_correct_name(
                         relay_listener1: Option<ListenerReqFunc<'_>>,
@@ -495,10 +495,10 @@ mod with_relays {
                 mod when_specifying_command_line_nsec_and_password {
                     use super::*;
 
-                    #[test]
+                    #[tokio::test]
                     #[serial]
-                    fn displays_correct_name() -> Result<()> {
-                        futures::executor::block_on(
+                    async fn displays_correct_name() -> Result<()> {
+                        
                         run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
@@ -512,8 +512,7 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ),
-                    )
+                        ).await
                     }
                     async fn run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
                         relay_listener1: Option<ListenerReqFunc<'_>>,
@@ -557,12 +556,11 @@ mod with_relays {
             mod when_no_metadata_found {
                 use super::*;
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn warm_user_and_displays_npub() -> Result<()> {
-                    futures::executor::block_on(
-                        run_test_when_no_metadata_found_warns_user_and_uses_npub(None, None),
-                    )
+                async fn warm_user_and_displays_npub() -> Result<()> {
+                        run_test_when_no_metadata_found_warns_user_and_uses_npub(None, None).await
+                    
                 }
 
                 async fn run_test_when_no_metadata_found_warns_user_and_uses_npub(
@@ -612,10 +610,9 @@ mod with_relays {
             mod when_metadata_but_no_relay_list_found {
                 use super::*;
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn warm_user_and_displays_name() -> Result<()> {
-                    futures::executor::block_on(
+                async fn warm_user_and_displays_name() -> Result<()> {
                         run_test_when_no_relay_list_found_warns_user_and_uses_npub(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
@@ -626,8 +623,7 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ),
-                    )
+                        ).await
                 }
 
                 async fn run_test_when_no_relay_list_found_warns_user_and_uses_npub(
@@ -682,10 +678,10 @@ mod with_relays {
             mod uses_cache {
                 use super::*;
 
-                #[test]
+                #[tokio::test]
                 #[serial]
-                fn dislays_logged_in_with_correct_name() -> Result<()> {
-                    futures::executor::block_on(run_test_dislays_logged_in_with_correct_name(Some(
+                async fn dislays_logged_in_with_correct_name() -> Result<()> {
+                    run_test_dislays_logged_in_with_correct_name(Some(
                         &|relay, client_id, subscription_id, _| -> Result<()> {
                             relay.respond_events(
                                 client_id,
@@ -697,7 +693,7 @@ mod with_relays {
                             )?;
                             Ok(())
                         },
-                    )))
+                    )).await
                 }
                 async fn run_test_dislays_logged_in_with_correct_name(
                     relay_listener: Option<ListenerReqFunc<'_>>,
@@ -794,10 +790,10 @@ mod with_relays {
             }
 
             /// this also tests that additional relays are queried
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn displays_correct_name() -> Result<()> {
-                futures::executor::block_on(run_test_displays_correct_name(
+            async fn displays_correct_name() -> Result<()> {
+                run_test_displays_correct_name(
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                         relay.respond_events(
                             client_id,
@@ -820,7 +816,7 @@ mod with_relays {
                         )?;
                         Ok(())
                     }),
-                ))
+                ).await
             }
         }
     }
