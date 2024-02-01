@@ -23,6 +23,9 @@ pub struct SubCommandArgs {
     /// optional description
     description: Option<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
+    /// homepage
+    web: Vec<String>,
+    #[clap(short, long, value_parser, num_args = 1..)]
     /// relays contributors push patches and comments to
     relays: Vec<String>,
 }
@@ -62,6 +65,15 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         )
         .context("no git remote origin configured")?;
 
+    let web: Vec<String> = if args.web.is_empty() {
+        Interactor::default()
+            .input(PromptInputParms::default().with_prompt("description (Optional)"))?
+            .split(' ')
+            .map(std::string::ToString::to_string)
+            .collect()
+    } else {
+        args.web.clone()
+    };
     #[cfg(not(test))]
     let mut client = Client::default();
     #[cfg(test)]
@@ -120,10 +132,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     println!("publishing repostory reference...");
 
     let repo_event = RepoRef {
+        identifier: root_commit.to_string()[..7].to_string(),
         name,
         description,
         root_commit: root_commit.to_string(),
         git_server,
+        web,
         relays: repo_relays.clone(),
         maintainers,
     }

@@ -51,6 +51,9 @@ mod when_repo_not_previously_claimed {
                     "example-name",
                     "--description",
                     "example-description",
+                    "--web",
+                    "https://exampleproject.xyz",
+                    "https://gitworkshop.dev/123",
                     "--relays",
                     "ws://localhost:8055",
                     "ws://localhost:8056",
@@ -251,7 +254,7 @@ mod when_repo_not_previously_claimed {
 
             #[test]
             #[serial]
-            fn root_commit_as_d_replaceable_event_identifier() -> Result<()> {
+            fn d_replaceable_event_identifier_defaults_to_root_commit_id_shorthand() -> Result<()> {
                 let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
@@ -260,8 +263,12 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
                         .unwrap();
 
-                    assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("d")
-                        && t.as_vec()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+                    assert!(
+                        event
+                            .tags
+                            .iter()
+                            .any(|t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq("9ee507f"))
+                    );
                 }
                 Ok(())
             }
@@ -277,9 +284,8 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
                         .unwrap();
 
-                    // root commit 'r' tag with 'r-' prefix
                     assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("r")
-                        && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+                        && t.as_vec()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
                 }
                 Ok(())
             }
@@ -333,26 +339,10 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
                         .unwrap();
 
-                    assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("git-server")
-                        && t.as_vec()[1].eq("https://localhost:1000")));
-                }
-                Ok(())
-            }
-
-            #[test]
-            #[serial]
-            fn git_server_as_reference() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
-                for relay in [&r53, &r55, &r56] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
-                        .unwrap();
-
-                    assert!(event.tags.iter().any(
-                        |t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq("https://localhost:1000")
-                    ));
+                    assert!(
+                        event.tags.iter().any(|t| t.as_vec()[0].eq("clone")
+                            && t.as_vec()[1].eq("https://localhost:1000"))
+                    );
                 }
                 Ok(())
             }
@@ -367,14 +357,36 @@ mod when_repo_not_previously_claimed {
                         .iter()
                         .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
                         .unwrap();
-
-                    let relay_tags = event
+                    let relays_tag = event
                         .tags
                         .iter()
-                        .filter(|t| t.as_vec()[0].eq("relay"))
-                        .collect::<Vec<&nostr::Tag>>();
-                    assert_eq!(relay_tags[0].as_vec()[1], "ws://localhost:8055");
-                    assert_eq!(relay_tags[1].as_vec()[1], "ws://localhost:8056");
+                        .find(|t| t.as_vec()[0].eq("relays"))
+                        .unwrap()
+                        .as_vec();
+                    assert_eq!(relays_tag[1], "ws://localhost:8055",);
+                    assert_eq!(relays_tag[2], "ws://localhost:8056",);
+                }
+                Ok(())
+            }
+
+            #[test]
+            #[serial]
+            fn web() -> Result<()> {
+                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+                for relay in [&r53, &r55, &r56] {
+                    let event: &nostr::Event = relay
+                        .events
+                        .iter()
+                        .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
+                        .unwrap();
+                    let web_tag = event
+                        .tags
+                        .iter()
+                        .find(|t| t.as_vec()[0].eq("web"))
+                        .unwrap()
+                        .as_vec();
+                    assert_eq!(web_tag[1], "https://exampleproject.xyz",);
+                    assert_eq!(web_tag[2], "https://gitworkshop.dev/123",);
                 }
                 Ok(())
             }
@@ -501,6 +513,9 @@ mod when_repo_not_previously_claimed {
                     "example-name",
                     "--description",
                     "example-description",
+                    "--web",
+                    "https://exampleproject.xyz",
+                    "https://gitworkshop.dev/123",
                 ],
             )
         }
@@ -572,13 +587,9 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
                         .unwrap();
 
-                    let relay_tags = event
-                        .tags
-                        .iter()
-                        .filter(|t| t.as_vec()[0].eq("relay"))
-                        .collect::<Vec<&nostr::Tag>>();
-                    assert_eq!(relay_tags[0].as_vec()[1], "ws://localhost:8053");
-                    assert_eq!(relay_tags[1].as_vec()[1], "ws://localhost:8055");
+                    assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("relays")
+                        && t.as_vec()[1].eq("ws://localhost:8053")
+                        && t.as_vec()[2].eq("ws://localhost:8055")));
                 }
                 Ok(())
             }

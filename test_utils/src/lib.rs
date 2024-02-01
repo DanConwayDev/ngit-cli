@@ -13,7 +13,7 @@ pub mod relay;
 
 pub static PR_KIND: u64 = 318;
 pub static PATCH_KIND: u64 = 317;
-pub static REPOSITORY_KIND: u64 = 30317;
+pub static REPOSITORY_KIND: u64 = 30617;
 
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
@@ -132,17 +132,38 @@ pub fn make_event_old_or_change_user(
 
 pub fn generate_repo_ref_event() -> nostr::Event {
     // taken from test git_repo
+    // TODO - this may not be consistant across computers as it might take the
+    // author and committer from global git config
     let root_commit = "9ee507fc4357d7ee16a5d8901bedcd103f23c17d";
     nostr::event::EventBuilder::new(
         nostr::Kind::Custom(REPOSITORY_KIND),
         "",
         [
-            Tag::Identifier(root_commit.to_string()),
-            Tag::Reference(format!("r-{}", root_commit)),
-            Tag::Name("example name".to_string()),
-            Tag::Description("example description".to_string()),
-            Tag::Relay("ws://localhost:8055".into()),
-            Tag::Relay("ws://localhost:8056".into()),
+            Tag::Identifier(
+                // root_commit.to_string()
+                format!("{}-consider-it-random", root_commit),
+            ),
+            Tag::Reference(root_commit.into()),
+            Tag::Name("example name".into()),
+            Tag::Description("example description".into()),
+            Tag::Generic(
+                nostr::TagKind::Custom("clone".to_string()),
+                vec!["git:://123.gitexample.com/test".to_string()],
+            ),
+            Tag::Generic(
+                nostr::TagKind::Custom("web".to_string()),
+                vec![
+                    "https://exampleproject.xyz".to_string(),
+                    "https://gitworkshop.dev/123".to_string(),
+                ],
+            ),
+            Tag::Generic(
+                nostr::TagKind::Custom("relays".to_string()),
+                vec![
+                    "ws://localhost:8055".to_string(),
+                    "ws://localhost:8056".to_string(),
+                ],
+            ),
             Tag::public_key(TEST_KEY_1_KEYS.public_key()),
             Tag::public_key(TEST_KEY_2_KEYS.public_key()),
         ],

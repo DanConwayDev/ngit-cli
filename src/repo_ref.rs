@@ -17,8 +17,10 @@ use crate::{
 pub struct RepoRef {
     pub name: String,
     pub description: String,
+    pub identifier: String,
     pub root_commit: String,
     pub git_server: String,
+    pub web: Vec<String>,
     pub relays: Vec<String>,
     pub maintainers: Vec<XOnlyPublicKey>,
     // code languages and hashtags
@@ -33,6 +35,10 @@ impl TryFrom<nostr::Event> for RepoRef {
         }
         let mut r = Self::default();
 
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("d")) {
+            r.identifier = t.as_vec()[1].clone();
+        }
+
         if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("name")) {
             r.name = t.as_vec()[1].clone();
         }
@@ -41,20 +47,27 @@ impl TryFrom<nostr::Event> for RepoRef {
             r.description = t.as_vec()[1].clone();
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("git-server")) {
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("clone")) {
             r.git_server = t.as_vec()[1].clone();
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("d")) {
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("web")) {
+            r.web = t.as_vec().clone();
+            r.web.remove(0);
+        }
+
+        if let Some(t) = event.tags.iter().find(|t| {
+            t.as_vec()[0].eq("r")
+                && t.as_vec()[1].len().eq(&40)
+                && git2::Oid::from_str(t.as_vec()[1].as_str()).is_ok()
+        }) {
             r.root_commit = t.as_vec()[1].clone();
         }
 
-        r.relays = event
-            .tags
-            .iter()
-            .filter(|t| t.as_vec()[0].eq("relay"))
-            .map(|t| t.as_vec()[1].clone())
-            .collect();
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("relays")) {
+            r.relays = t.as_vec().clone();
+            r.relays.remove(0);
+        }
 
         for tag in event.tags.iter().filter(|t| t.as_vec()[0].eq("p")) {
             let pk = tag.as_vec()[1].clone();
@@ -68,7 +81,8 @@ impl TryFrom<nostr::Event> for RepoRef {
         Ok(r)
     }
 }
-static REPO_REF_KIND: u64 = 30_317;
+
+pub static REPO_REF_KIND: u64 = 30_617;
 
 impl RepoRef {
     pub fn to_event(&self, keys: &nostr::Keys) -> Result<nostr::Event> {
@@ -77,17 +91,41 @@ impl RepoRef {
             "",
             [
                 vec![
-                    Tag::Identifier(self.root_commit.to_string()),
-                    Tag::Reference(format!("r-{}", self.root_commit)),
+                    Tag::Identifier(if self.identifier.to_string().is_empty() {
+                        // fiatjaf thought a random string. its not in the draft nip.
+                        // thread_rng()
+                        //     .sample_iter(&Alphanumeric)
+                        //     .take(15)
+                        //     .map(char::from)
+                        //     .collect()
+
+                        // an identifier based on first commit is better so that users dont
+                        // accidentally create two seperate identifiers for the same repo
+                        // there is a hesitancy to use the commit id
+                        // in another conversaion with fiatjaf he suggested the first 6 character of
+                        // the commit id
+                        // here we are using 7 which is the standard for shorthand commit id
+                        self.root_commit.to_string()[..7].to_string()
+                    } else {
+                        self.identifier.to_string()
+                    }),
+                    Tag::Reference(self.root_commit.to_string()),
                     Tag::Name(self.name.clone()),
                     Tag::Description(self.description.clone()),
                     Tag::Generic(
-                        nostr::TagKind::Custom("git-server".to_string()),
+                        nostr::TagKind::Custom("clone".to_string()),
                         vec![self.git_server.clone()],
                     ),
-                    Tag::Reference(self.git_server.clone()),
+                    Tag::Generic(nostr::TagKind::Custom("web".to_string()), self.web.clone()),
+                    Tag::Generic(
+                        nostr::TagKind::Custom("relays".to_string()),
+                        self.relays.clone(),
+                    ),
                 ],
-                self.relays.iter().map(|r| Tag::Relay(r.into())).collect(),
+                // this appears like a number of relay tags but test suggest is is actually
+                // what we want which is a relays tag with lots of values. no need for the
+                // change?
+                // self.relays.iter().map(|r| Tag::Relay(r.into())).collect(),
                 self.maintainers
                     .iter()
                     .map(|pk| Tag::public_key(*pk))
@@ -116,7 +154,7 @@ pub async fn fetch(
 
     let mut repo_event_filter = nostr::Filter::default()
         .kind(nostr::Kind::Custom(REPO_REF_KIND))
-        .identifier(root_commit);
+        .reference(root_commit);
 
     let mut relays = fallback_relays;
     if let Ok(repo_config) = repo_config {
@@ -126,6 +164,15 @@ pub async fn fetch(
     }
 
     let events: Vec<nostr::Event> = client.get_events(relays, vec![repo_event_filter]).await?;
+
+    // TODO: fallback to ask user for nevent - to capture
+
+    // TODO: if maintainers.yaml isn't present, as the user to select from the
+    // pubkeys they want to use. could use WoT as an indicator as well as the repo
+    // and user name.
+
+    // TODO: if maintainers.yaml isn't present, save the selected repo pubkey
+    // somewhere within .git folder for future use and seek to get that next time
 
     RepoRef::try_from(
         events
@@ -207,10 +254,15 @@ mod tests {
 
     fn create() -> nostr::Event {
         RepoRef {
+            identifier: "123412341".to_string(),
             name: "test name".to_string(),
             description: "test description".to_string(),
-            root_commit: "23471389461".to_string(),
+            root_commit: "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2".to_string(),
             git_server: "https://localhost:1000".to_string(),
+            web: vec![
+                "https://exampleproject.xyz".to_string(),
+                "https://gitworkshop.dev/123".to_string(),
+            ],
             relays: vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
         }
@@ -219,6 +271,11 @@ mod tests {
     }
     mod try_from {
         use super::*;
+
+        #[test]
+        fn identifier() {
+            assert_eq!(RepoRef::try_from(create()).unwrap().identifier, "123412341",)
+        }
 
         #[test]
         fn name() {
@@ -234,11 +291,58 @@ mod tests {
         }
 
         #[test]
-        fn root_commit() {
+        fn root_commit_is_r_tag() {
             assert_eq!(
                 RepoRef::try_from(create()).unwrap().root_commit,
-                "23471389461",
+                "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2",
             )
+        }
+
+        mod root_commit_is_empty_if_no_r_tag_which_is_sha1_format {
+            use nostr::JsonUtil;
+
+            use super::*;
+            fn create_with_incorrect_first_commit_ref(s: &str) -> nostr::Event {
+                nostr::Event::from_json(
+                    create()
+                        .as_json()
+                        .replace("5e664e5a7845cd1373c79f580ca4fe29ab5b34d2", s),
+                )
+                .unwrap()
+            }
+
+            #[test]
+            fn less_than_40_characters() {
+                let s = "5e664e5a7845cd1373";
+                assert_eq!(
+                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s))
+                        .unwrap()
+                        .root_commit,
+                    "",
+                )
+            }
+
+            #[test]
+            fn more_than_40_characters() {
+                let s = "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2111111111";
+                assert_eq!(
+                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s))
+                        .unwrap()
+                        .root_commit,
+                    "",
+                )
+            }
+
+            #[test]
+            fn not_hex_characters() {
+                let s = "xxx64e5a7845cd1373c79f580ca4fe29ab5b34d2";
+                assert_eq!(
+                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s))
+                        .unwrap()
+                        .root_commit,
+                    "",
+                )
+            }
         }
 
         #[test]
@@ -246,6 +350,17 @@ mod tests {
             assert_eq!(
                 RepoRef::try_from(create()).unwrap().git_server,
                 "https://localhost:1000",
+            )
+        }
+
+        #[test]
+        fn web() {
+            assert_eq!(
+                RepoRef::try_from(create()).unwrap().web,
+                vec![
+                    "https://exampleproject.xyz".to_string(),
+                    "https://gitworkshop.dev/123".to_string()
+                ],
             )
         }
 
@@ -272,6 +387,16 @@ mod tests {
             use super::*;
 
             #[test]
+            fn identifier() {
+                assert!(
+                    create()
+                        .tags
+                        .iter()
+                        .any(|t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq("123412341"))
+                )
+            }
+
+            #[test]
             fn name() {
                 assert!(
                     create()
@@ -288,51 +413,39 @@ mod tests {
             }
 
             #[test]
-            fn root_commit_as_d_replaceable_event_identifier() {
-                assert!(
-                    create()
-                        .tags
-                        .iter()
-                        .any(|t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq("23471389461"))
-                )
+            fn root_commit_as_reference() {
+                assert!(create().tags.iter().any(|t| t.as_vec()[0].eq("r")
+                    && t.as_vec()[1].eq("5e664e5a7845cd1373c79f580ca4fe29ab5b34d2")))
             }
 
             #[test]
             fn git_server() {
-                assert!(create().tags.iter().any(|t| t.as_vec()[0].eq("git-server")
-                    && t.as_vec()[1].eq("https://localhost:1000")))
-            }
-
-            #[test]
-            fn git_server_as_reference() {
-                assert!(
-                    create().tags.iter().any(
-                        |t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq("https://localhost:1000")
-                    )
-                )
-            }
-
-            #[test]
-            fn root_commit_as_reference() {
-                assert!(
-                    create()
-                        .tags
-                        .iter()
-                        .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq("r-23471389461"))
-                )
+                assert!(create().tags.iter().any(
+                    |t| t.as_vec()[0].eq("clone") && t.as_vec()[1].eq("https://localhost:1000")
+                ))
             }
 
             #[test]
             fn relays() {
                 let event = create();
-                let relay_tags = event
+                let relays_tag: &nostr::Tag = event
                     .tags
                     .iter()
-                    .filter(|t| t.as_vec()[0].eq("relay"))
-                    .collect::<Vec<&nostr::Tag>>();
-                assert_eq!(relay_tags[0].as_vec().len(), 2);
-                assert_eq!(relay_tags[0].as_vec()[1], "ws://relay1.io");
-                assert_eq!(relay_tags[1].as_vec()[1], "ws://relay2.io");
+                    .find(|t| t.as_vec()[0].eq("relays"))
+                    .unwrap();
+                assert_eq!(relays_tag.as_vec().len(), 3);
+                assert_eq!(relays_tag.as_vec()[1], "ws://relay1.io");
+                assert_eq!(relays_tag.as_vec()[2], "ws://relay2.io");
+            }
+
+            #[test]
+            fn web() {
+                let event = create();
+                let web_tag: &nostr::Tag =
+                    event.tags.iter().find(|t| t.as_vec()[0].eq("web")).unwrap();
+                assert_eq!(web_tag.as_vec().len(), 3);
+                assert_eq!(web_tag.as_vec()[1], "https://exampleproject.xyz");
+                assert_eq!(web_tag.as_vec()[2], "https://gitworkshop.dev/123");
             }
 
             #[test]
@@ -356,7 +469,7 @@ mod tests {
 
             #[test]
             fn no_other_tags() {
-                assert_eq!(create().tags.len(), 10)
+                assert_eq!(create().tags.len(), 9)
             }
         }
     }
