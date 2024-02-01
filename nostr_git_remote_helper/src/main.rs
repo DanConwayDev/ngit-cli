@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Capabilities() => sub_commands::capabilities::launch(),
         Commands::Placeholder(args) => {
-            futures::executor::block_on(sub_commands::placeholder::launch(&cli, args))
+            sub_commands::placeholder::launch(&cli, args).await
         }
     }
 }
