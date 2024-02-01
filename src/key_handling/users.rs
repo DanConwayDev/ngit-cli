@@ -680,17 +680,20 @@ mod tests {
             use super::*;
 
             #[tokio::test]
-            async fn returns_cached_details_without_checking_relays_or_updaing_config() -> Result<()> {
+            async fn returns_cached_details_without_checking_relays_or_updaing_config() -> Result<()>
+            {
                 let mut m = MockUserManager::default();
                 let client = generate_mock_client();
                 m.config_manager
                     .expect_load()
                     .returning(|| Ok(generate_standard_config()));
-                let res = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    24 * 60 * 60, // within 24 hours
-                ).await?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        24 * 60 * 60, // within 24 hours
+                    )
+                    .await?;
                 assert_eq!(res.metadata.name, "Fred");
                 assert_eq!(res.relays.relays[0].url, "ws://existingread");
                 Ok(())
@@ -712,11 +715,13 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                let res = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.metadata.name, "fred");
                 Ok(())
             }
@@ -736,11 +741,13 @@ mod tests {
                     ])
                 });
 
-                let res = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.metadata.name, "fred");
                 Ok(())
             }
@@ -760,11 +767,13 @@ mod tests {
                     ])
                 });
 
-                let res = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.relays.relays, expected_userrelayrefs(),);
                 Ok(())
             }
@@ -788,11 +797,13 @@ mod tests {
                     ])
                 });
 
-                let res = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let res = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 assert_eq!(res.relays.relays, expected_userrelayrefs(),);
                 Ok(())
             }
@@ -817,11 +828,13 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
@@ -841,11 +854,13 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
@@ -865,11 +880,13 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_relaylist_event()]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
@@ -889,11 +906,13 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_relaylist_event()]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
@@ -911,11 +930,13 @@ mod tests {
                     .returning(|_| Ok(()));
                 client.expect_get_events().returning(|_, _| Ok(vec![]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
@@ -935,11 +956,13 @@ mod tests {
                     .expect_get_events()
                     .returning(|_, _| Ok(vec![generate_test_key_1_metadata_event("fred")]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
         }
@@ -966,16 +989,19 @@ mod tests {
                     })
                     .returning(|_, _| Ok(vec![]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
             #[tokio::test]
-            async fn when_userref_write_relays_not_present_fetches_from_fallback_relays() -> Result<()> {
+            async fn when_userref_write_relays_not_present_fetches_from_fallback_relays()
+            -> Result<()> {
                 let mut m = MockUserManager::default();
                 let mut client = generate_mock_client();
                 m.config_manager.expect_load().returning(|| {
@@ -997,11 +1023,13 @@ mod tests {
                     .withf(move |relays, _filters| fallback_relays().eq(relays))
                     .returning(|_, _| Ok(vec![]));
 
-                let _ = m.get_user(
-                    &client,
-                    &TEST_KEY_1_KEYS.public_key(),
-                    5 * 60, // 5 mins ago
-                ).await?;
+                let _ = m
+                    .get_user(
+                        &client,
+                        &TEST_KEY_1_KEYS.public_key(),
+                        5 * 60, // 5 mins ago
+                    )
+                    .await?;
                 Ok(())
             }
 
@@ -1053,11 +1081,13 @@ mod tests {
                             }
                         });
 
-                    let res = m.get_user(
-                        &client,
-                        &TEST_KEY_1_KEYS.public_key(),
-                        5 * 60, // 5 mins ago
-                    ).await?;
+                    let res = m
+                        .get_user(
+                            &client,
+                            &TEST_KEY_1_KEYS.public_key(),
+                            5 * 60, // 5 mins ago
+                        )
+                        .await?;
                     assert_eq!(res.metadata.name, "fred");
                     Ok(())
                 }
@@ -1096,11 +1126,13 @@ mod tests {
                             }
                         });
 
-                    let res = m.get_user(
-                        &client,
-                        &TEST_KEY_1_KEYS.public_key(),
-                        5 * 60, // 5 mins ago
-                    ).await?;
+                    let res = m
+                        .get_user(
+                            &client,
+                            &TEST_KEY_1_KEYS.public_key(),
+                            5 * 60, // 5 mins ago
+                        )
+                        .await?;
                     assert_eq!(res.metadata.name, "fred");
                     Ok(())
                 }
@@ -1118,11 +1150,13 @@ mod tests {
                 .expect_get_events()
                 .returning(|_, _| Err(anyhow!("test error")));
 
-            let res = m.get_user(
-                &client,
-                &TEST_KEY_1_KEYS.public_key(),
-                5 * 60, // 10 mins ago
-            ).await?;
+            let res = m
+                .get_user(
+                    &client,
+                    &TEST_KEY_1_KEYS.public_key(),
+                    5 * 60, // 10 mins ago
+                )
+                .await?;
             assert_eq!(res.metadata.name, "Fred");
             Ok(())
         }

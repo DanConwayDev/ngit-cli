@@ -147,7 +147,8 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ).await
+                    )
+                    .await
                 }
 
                 mod poorly_quality_metadata_event {
@@ -173,7 +174,8 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ).await
+                        )
+                        .await
                     }
 
                     #[tokio::test]
@@ -210,7 +212,8 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ).await
+                        )
+                        .await
                     }
 
                     #[tokio::test]
@@ -247,7 +250,8 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ).await
+                        )
+                        .await
                     }
                 }
 
@@ -268,12 +272,14 @@ mod with_relays {
                             Ok(())
                         }),
                         None,
-                    ).await
+                    )
+                    .await
                 }
 
                 #[tokio::test]
                 #[serial]
-                async fn when_latest_metadata_only_on_relay_and_relay_list_on_another() -> Result<()> {
+                async fn when_latest_metadata_only_on_relay_and_relay_list_on_another() -> Result<()>
+                {
                     run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             relay.respond_events(
@@ -291,7 +297,8 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ).await
+                    )
+                    .await
                 }
 
                 #[tokio::test]
@@ -317,7 +324,8 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ).await
+                    )
+                    .await
                 }
 
                 #[tokio::test]
@@ -343,7 +351,8 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ).await
+                    )
+                    .await
                 }
 
                 #[tokio::test]
@@ -370,7 +379,8 @@ mod with_relays {
                             )?;
                             Ok(())
                         }),
-                    ).await
+                    )
+                    .await
                 }
 
                 mod when_specifying_command_line_nsec_only {
@@ -379,22 +389,21 @@ mod with_relays {
                     #[tokio::test]
                     #[serial]
                     async fn displays_correct_name() -> Result<()> {
-                        
-                            run_test_when_specifying_command_line_nsec_only_displays_correct_name(
-                                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                    relay.respond_events(
-                                        client_id,
-                                        &subscription_id,
-                                        &vec![
-                                            generate_test_key_1_metadata_event("fred"),
-                                            generate_test_key_1_relay_list_event_same_as_fallback(),
-                                        ],
-                                    )?;
-                                    Ok(())
-                                }),
-                                None,
-                            ).await
-                
+                        run_test_when_specifying_command_line_nsec_only_displays_correct_name(
+                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                                relay.respond_events(
+                                    client_id,
+                                    &subscription_id,
+                                    &vec![
+                                        generate_test_key_1_metadata_event("fred"),
+                                        generate_test_key_1_relay_list_event_same_as_fallback(),
+                                    ],
+                                )?;
+                                Ok(())
+                            }),
+                            None,
+                        )
+                        .await
                     }
                     async fn run_test_when_specifying_command_line_nsec_only_displays_correct_name(
                         relay_listener1: Option<ListenerReqFunc<'_>>,
@@ -433,7 +442,6 @@ mod with_relays {
                     #[tokio::test]
                     #[serial]
                     async fn displays_correct_name() -> Result<()> {
-                        
                         run_test_when_specifying_command_line_password_only_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
@@ -447,8 +455,8 @@ mod with_relays {
                                 Ok(())
                             }),
                             None,
-                        ).await
-                    
+                        )
+                        .await
                     }
                     async fn run_test_when_specifying_command_line_password_only_displays_correct_name(
                         relay_listener1: Option<ListenerReqFunc<'_>>,
@@ -498,7 +506,6 @@ mod with_relays {
                     #[tokio::test]
                     #[serial]
                     async fn displays_correct_name() -> Result<()> {
-                        
                         run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                                 relay.respond_events(
@@ -559,8 +566,7 @@ mod with_relays {
                 #[tokio::test]
                 #[serial]
                 async fn warm_user_and_displays_npub() -> Result<()> {
-                        run_test_when_no_metadata_found_warns_user_and_uses_npub(None, None).await
-                    
+                    run_test_when_no_metadata_found_warns_user_and_uses_npub(None, None).await
                 }
 
                 async fn run_test_when_no_metadata_found_warns_user_and_uses_npub(
@@ -613,17 +619,18 @@ mod with_relays {
                 #[tokio::test]
                 #[serial]
                 async fn warm_user_and_displays_name() -> Result<()> {
-                        run_test_when_no_relay_list_found_warns_user_and_uses_npub(
-                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![generate_test_key_1_metadata_event("fred")],
-                                )?;
-                                Ok(())
-                            }),
-                            None,
-                        ).await
+                    run_test_when_no_relay_list_found_warns_user_and_uses_npub(
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_test_key_1_metadata_event("fred")],
+                            )?;
+                            Ok(())
+                        }),
+                        None,
+                    )
+                    .await
                 }
 
                 async fn run_test_when_no_relay_list_found_warns_user_and_uses_npub(
@@ -693,7 +700,8 @@ mod with_relays {
                             )?;
                             Ok(())
                         },
-                    )).await
+                    ))
+                    .await
                 }
                 async fn run_test_dislays_logged_in_with_correct_name(
                     relay_listener: Option<ListenerReqFunc<'_>>,
@@ -816,7 +824,8 @@ mod with_relays {
                         )?;
                         Ok(())
                     }),
-                ).await
+                )
+                .await
             }
         }
     }
