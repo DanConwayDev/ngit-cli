@@ -164,8 +164,13 @@ pub fn generate_repo_ref_event() -> nostr::Event {
                     "ws://localhost:8056".to_string(),
                 ],
             ),
-            Tag::public_key(TEST_KEY_1_KEYS.public_key()),
-            Tag::public_key(TEST_KEY_2_KEYS.public_key()),
+            Tag::Generic(
+                nostr::TagKind::Custom("maintainers".to_string()),
+                vec![
+                    TEST_KEY_1_KEYS.public_key().to_string(),
+                    TEST_KEY_2_KEYS.public_key().to_string(),
+                ],
+            ),
         ],
     )
     .to_event(&TEST_KEY_1_KEYS)

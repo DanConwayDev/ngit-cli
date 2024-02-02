@@ -69,13 +69,19 @@ impl TryFrom<nostr::Event> for RepoRef {
             r.relays.remove(0);
         }
 
-        for tag in event.tags.iter().filter(|t| t.as_vec()[0].eq("p")) {
-            let pk = tag.as_vec()[1].clone();
-            r.maintainers.push(
+        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("maintainers")) {
+            let mut maintainers = t.as_vec().clone();
+            maintainers.remove(0);
+            if !maintainers.contains(&event.pubkey.to_string()) {
+                r.maintainers.push(event.pubkey);
+            }
+            for pk in maintainers {
+                r.maintainers.push(
                 nostr_sdk::prelude::XOnlyPublicKey::from_str(&pk)
-                    .context(format!("cannot convert {pk} into a valid nostr public key"))
+                    .context(format!("cannot convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
                     .context("invalid repository event")?,
-            );
+                );
+            }
         }
 
         Ok(r)
@@ -121,15 +127,14 @@ impl RepoRef {
                         nostr::TagKind::Custom("relays".to_string()),
                         self.relays.clone(),
                     ),
+                    Tag::Generic(
+                        nostr::TagKind::Custom("maintainers".to_string()),
+                        self.maintainers
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect(),
+                    ),
                 ],
-                // this appears like a number of relay tags but test suggest is is actually
-                // what we want which is a relays tag with lots of values. no need for the
-                // change?
-                // self.relays.iter().map(|r| Tag::Relay(r.into())).collect(),
-                self.maintainers
-                    .iter()
-                    .map(|pk| Tag::public_key(*pk))
-                    .collect(),
                 // code languages and hashtags
             ]
             .concat(),
@@ -451,25 +456,25 @@ mod tests {
             #[test]
             fn maintainers() {
                 let event = create();
-                let p_tags = event
+                let maintainers_tag: &nostr::Tag = event
                     .tags
                     .iter()
-                    .filter(|t| t.as_vec()[0].eq("p"))
-                    .collect::<Vec<&nostr::Tag>>();
-                assert_eq!(p_tags[0].as_vec().len(), 2);
+                    .find(|t| t.as_vec()[0].eq("maintainers"))
+                    .unwrap();
+                assert_eq!(maintainers_tag.as_vec().len(), 3);
                 assert_eq!(
-                    p_tags[0].as_vec()[1],
+                    maintainers_tag.as_vec()[1],
                     TEST_KEY_1_KEYS.public_key().to_string()
                 );
                 assert_eq!(
-                    p_tags[1].as_vec()[1],
+                    maintainers_tag.as_vec()[2],
                     TEST_KEY_2_KEYS.public_key().to_string()
                 );
             }
 
             #[test]
             fn no_other_tags() {
-                assert_eq!(create().tags.len(), 9)
+                assert_eq!(create().tags.len(), 8)
             }
         }
     }

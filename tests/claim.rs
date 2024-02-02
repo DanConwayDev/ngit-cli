@@ -393,7 +393,7 @@ mod when_repo_not_previously_claimed {
 
             #[test]
             #[serial]
-            fn current_user_tagged_indicating_maintainer() -> Result<()> {
+            fn current_user_in_maintainers() -> Result<()> {
                 let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
@@ -401,17 +401,13 @@ mod when_repo_not_previously_claimed {
                         .iter()
                         .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
                         .unwrap();
-
-                    let relay_tags = event
+                    let maintainers_tag = event
                         .tags
                         .iter()
-                        .filter(|t| t.as_vec()[0].eq("p"))
-                        .collect::<Vec<&nostr::Tag>>();
-                    assert_eq!(relay_tags.len(), 1);
-                    assert_eq!(
-                        relay_tags[0].as_vec()[1],
-                        TEST_KEY_1_KEYS.public_key().to_string()
-                    );
+                        .find(|t| t.as_vec()[0].eq("maintainers"))
+                        .unwrap()
+                        .as_vec();
+                    assert_eq!(maintainers_tag[1], TEST_KEY_1_KEYS.public_key().to_string());
                 }
                 Ok(())
             }
