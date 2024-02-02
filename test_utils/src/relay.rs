@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 use nostr::{ClientMessage, JsonUtil, RelayMessage};
+use nostr_database::index::{EventIndex, FilterIndex};
 
 use crate::CliTester;
 
@@ -96,8 +97,7 @@ impl<'a> Relay<'a> {
         &self,
         client_id: u64,
         subscription_id: &nostr::SubscriptionId,
-        // TODO: enable filters
-        _filters: &[nostr::Filter],
+        filters: &[nostr::Filter],
     ) -> Result<bool> {
         // let t: Vec<nostr::Kind> = self.events.iter().map(|e| e.kind).collect();
         // .filter(|e| filters.iter().any(|filter| filter.match_event(e)))
@@ -109,12 +109,13 @@ impl<'a> Relay<'a> {
             &self
                 .events
                 .iter()
-                // FIXME:
-                // `filter.match_events` does not exist anymore
-                // it has been moved to `nostr_database_::FilterIndex`
-                // but it's private now
-                // .filter(|e| filters.iter().any(|filter|filter.match_event(e)))
-                .filter(|_| true)
+                .filter(|e| {
+                    filters.iter().any(|filter| {
+                        let filter_index: FilterIndex = FilterIndex::from(filter.clone());
+                        let event_index: EventIndex = EventIndex::from(*e);
+                        filter_index.match_event(&event_index)
+                    })
+                })
                 .cloned()
                 .collect(),
         )
