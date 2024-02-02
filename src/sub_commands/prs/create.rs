@@ -13,7 +13,9 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms},
     client::Connect,
     git::{Repo, RepoActions},
-    login, repo_ref, Cli,
+    login,
+    repo_ref::{self, RepoRef, REPO_REF_KIND},
+    Cli,
 };
 
 #[derive(Debug, clap::Args)]
@@ -96,9 +98,6 @@ pub async fn launch(
 
     client.set_keys(&keys).await;
 
-    let events =
-        generate_pr_and_patch_events(&title, &description, &to_branch, &git_repo, &ahead, &keys)?;
-
     let repo_ref = repo_ref::fetch(
         &git_repo,
         git_repo
@@ -109,6 +108,16 @@ pub async fn launch(
         user_ref.relays.write(),
     )
     .await?;
+
+    let events = generate_pr_and_patch_events(
+        &title,
+        &description,
+        &to_branch,
+        &git_repo,
+        &ahead,
+        &keys,
+        &repo_ref,
+    )?;
 
     println!(
         "posting 1 pull request with {} commits...",
@@ -299,7 +308,7 @@ mod tests_unique_and_duplicate {
 }
 
 pub static PR_KIND: u64 = 318;
-pub static PATCH_KIND: u64 = 317;
+pub static PATCH_KIND: u64 = 1617;
 
 pub fn generate_pr_and_patch_events(
     title: &str,
@@ -308,6 +317,7 @@ pub fn generate_pr_and_patch_events(
     git_repo: &Repo,
     commits: &Vec<Sha1Hash>,
     keys: &nostr::Keys,
+    repo_ref: &RepoRef,
 ) -> Result<Vec<nostr::Event>> {
     let root_commit = git_repo
         .get_root_commit(to_branch)
@@ -342,8 +352,16 @@ pub fn generate_pr_and_patch_events(
     let mut events = vec![pr_event];
     for commit in commits {
         events.push(
-            generate_patch_event(git_repo, &root_commit, commit, pr_event_id, keys)
-                .context("failed to generate patch event")?,
+            generate_patch_event(
+                git_repo,
+                &root_commit,
+                commit,
+                pr_event_id,
+                keys,
+                repo_ref,
+                events.last().map(nostr::Event::id),
+            )
+            .context("failed to generate patch event")?,
         );
     }
     Ok(events)
@@ -353,55 +371,92 @@ pub fn generate_patch_event(
     git_repo: &Repo,
     root_commit: &Sha1Hash,
     commit: &Sha1Hash,
-    pr_event_id: nostr::EventId,
+    thread_event_id: nostr::EventId,
     keys: &nostr::Keys,
+    repo_ref: &RepoRef,
+    parent_patch_event_id: Option<nostr::EventId>,
 ) -> Result<nostr::Event> {
     let commit_parent = git_repo
         .get_commit_parent(commit)
         .context("failed to get parent commit")?;
+    let relay_hint = repo_ref.relays.first().map(nostr::UncheckedUrl::from);
     EventBuilder::new(
         nostr::event::Kind::Custom(PATCH_KIND),
         git_repo
             .make_patch_from_commit(commit)
             .context(format!("cannot make patch for commit {commit}"))?,
         [
-            Tag::Reference(format!("r-{root_commit}")),
-            Tag::Reference(commit.to_string()),
-            Tag::Reference(commit_parent.to_string()),
-            Tag::Event {
-                event_id: pr_event_id,
-                relay_url: None, // TODO: add relay
-                marker: Some(Marker::Root),
+            vec![
+                Tag::A {
+                    kind: nostr::Kind::Custom(REPO_REF_KIND),
+                    public_key: *repo_ref.maintainers.first()
+                        .context("repo reference should always have at least one maintainer - the issuer of the repo event")
+                        ?,
+                    identifier: repo_ref.identifier.to_string(),
+                    relay_url: relay_hint.clone(),
+                },
+                Tag::Reference(format!("{root_commit}")),
+                // commit id reference is a trade-off. its now
+                // unclear which one is the root commit id but it
+                // enables easier location of code comments againt
+                // code that makes it into the main branch, assuming
+                // the commit id is correct
+                Tag::Reference(commit.to_string()),
+
+                Tag::Event {
+                    event_id: thread_event_id,
+                    relay_url: relay_hint.clone(),
+                    marker: Some(Marker::Root),
+                },
+            ],
+            if let Some(id) = parent_patch_event_id {
+                vec![Tag::Event {
+                    event_id: id,
+                    relay_url: relay_hint.clone(),
+                    marker: Some(Marker::Reply),
+                }]
+            } else {
+                vec![]
             },
-            Tag::Generic(
-                TagKind::Custom("commit".to_string()),
-                vec![commit.to_string()],
-            ),
-            Tag::Generic(
-                TagKind::Custom("parent-commit".to_string()),
-                vec![commit_parent.to_string()],
-            ),
-            Tag::Generic(
-                TagKind::Custom("commit-sig".to_string()),
-                vec![
-                    git_repo
-                        .extract_commit_pgp_signature(commit)
-                        .unwrap_or_default(),
-                ],
-            ),
-            Tag::Description(git_repo.get_commit_message(commit)?.to_string()),
-            Tag::Generic(
-                TagKind::Custom("author".to_string()),
-                git_repo.get_commit_author(commit)?,
-            ),
-            Tag::Generic(
-                TagKind::Custom("committer".to_string()),
-                git_repo.get_commit_comitter(commit)?,
-            ),
-            // TODO: add Repo event tags
-            // TODO: people tag maintainers
-            // TODO: add relay tags
-        ],
+            // whilst it is in nip34 draft to tag the maintainers
+            // I'm not sure it is a good idea because if they are
+            // interested in all patches then their specialised
+            // client should subscribe to patches tagged with the
+            // repo reference. maintainers of large repos will not
+            // be interested in every patch.
+            repo_ref.maintainers
+                    .iter()
+                    .map(|pk| Tag::public_key(*pk))
+                    .collect(),
+            vec![
+                Tag::Generic(
+                    TagKind::Custom("commit".to_string()),
+                    vec![commit.to_string()],
+                ),
+                Tag::Generic(
+                    TagKind::Custom("parent-commit".to_string()),
+                    vec![commit_parent.to_string()],
+                ),
+                Tag::Generic(
+                    TagKind::Custom("commit-pgp-sig".to_string()),
+                    vec![
+                        git_repo
+                            .extract_commit_pgp_signature(commit)
+                            .unwrap_or_default(),
+                    ],
+                ),
+                Tag::Description(git_repo.get_commit_message(commit)?.to_string()),
+                Tag::Generic(
+                    TagKind::Custom("author".to_string()),
+                    git_repo.get_commit_author(commit)?,
+                ),
+                Tag::Generic(
+                    TagKind::Custom("committer".to_string()),
+                    git_repo.get_commit_comitter(commit)?,
+                ),
+            ],
+        ]
+        .concat(),
     )
     .to_event(keys)
     .context("failed to sign event")

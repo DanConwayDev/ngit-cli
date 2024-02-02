@@ -41,11 +41,11 @@ pub trait RepoActions {
     fn get_head_commit(&self) -> Result<Sha1Hash>;
     fn get_commit_parent(&self, commit: &Sha1Hash) -> Result<Sha1Hash>;
     fn get_commit_message(&self, commit: &Sha1Hash) -> Result<String>;
-    /// returns vector ["name", "email", "unixtime"]
-    /// eg ["joe bloggs", "joe@pm.me", "12176,-300"]
+    /// returns vector ["name", "email", "unixtime", "offset"]
+    /// eg ["joe bloggs", "joe@pm.me", "12176","-300"]
     fn get_commit_author(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
-    /// returns vector ["name", "email", "unixtime"]
-    /// eg ["joe bloggs", "joe@pm.me", "12176,-300"]
+    /// returns vector ["name", "email", "unixtime", "offset"]
+    /// eg ["joe bloggs", "joe@pm.me", "12176","-300"]
     fn get_commit_comitter(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
     fn get_commits_ahead_behind(
         &self,
@@ -442,7 +442,8 @@ fn git_sig_to_tag_vec(sig: &git2::Signature) -> Vec<String> {
     vec![
         sig.name().unwrap_or("").to_string(),
         sig.email().unwrap_or("").to_string(),
-        format!("{},{}", sig.when().seconds(), sig.when().offset_minutes()),
+        format!("{}", sig.when().seconds()),
+        format!("{}", sig.when().offset_minutes()),
     ]
 }
 
@@ -477,7 +478,7 @@ fn apply_patch(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
     index.add_all(["."], git2::IndexAddOption::DEFAULT, None)?;
     index.write()?;
 
-    let pgp_sig = if let Ok(pgp_sig) = tag_value(patch, "commit-sig") {
+    let pgp_sig = if let Ok(pgp_sig) = tag_value(patch, "commit-pgp-sig") {
         if pgp_sig.is_empty() {
             None
         } else {
@@ -585,22 +586,15 @@ fn extract_sig_from_patch_tags<'a>(
         .find(|t| t.as_vec()[0].eq(tag_name))
         .context(format!("tag '{tag_name}' not present in patch"))?
         .as_vec();
-    if v.len() != 4 {
+    if v.len() != 5 {
         bail!("tag '{tag_name}' is incorrectly formatted")
-    }
-    let git_time: Vec<&str> = v[3].split(',').collect();
-    if git_time.len() != 2 {
-        bail!("tag '{tag_name}' time is incorrectly formatted")
     }
     git2::Signature::new(
         v[1].as_str(),
         v[2].as_str(),
         &git2::Time::new(
-            git_time[0]
-                .parse()
-                .context("tag time is incorrectly formatted")?,
-            git_time[1]
-                .parse()
+            v[3].parse().context("tag time is incorrectly formatted")?,
+            v[4].parse()
                 .context("tag time offset is incorrectly formatted")?,
         ),
     )
@@ -611,7 +605,7 @@ fn extract_sig_from_patch_tags<'a>(
 mod tests {
     use std::fs;
 
-    use test_utils::git::GitTestRepo;
+    use test_utils::{generate_repo_ref_event, git::GitTestRepo, TEST_KEY_1_KEYS};
 
     use super::*;
 
@@ -706,19 +700,22 @@ mod tests {
             #[test]
             fn no_offset() -> Result<()> {
                 let res = prep(&git2::Time::new(5000, 0))?;
-                assert_eq!("5000,0", res[2]);
+                assert_eq!("5000", res[2]);
+                assert_eq!("0", res[3]);
                 Ok(())
             }
             #[test]
             fn positive_offset() -> Result<()> {
                 let res = prep(&git2::Time::new(5000, 300))?;
-                assert_eq!("5000,300", res[2]);
+                assert_eq!("5000", res[2]);
+                assert_eq!("300", res[3]);
                 Ok(())
             }
             #[test]
             fn negative_offset() -> Result<()> {
                 let res = prep(&git2::Time::new(5000, -300))?;
-                assert_eq!("5000,-300", res[2]);
+                assert_eq!("5000", res[2]);
+                assert_eq!("-300", res[3]);
                 Ok(())
             }
         }
@@ -1205,10 +1202,9 @@ mod tests {
     }
 
     mod apply_patch {
-        use test_utils::TEST_KEY_1_KEYS;
 
         use super::*;
-        use crate::sub_commands::prs::create::generate_patch_event;
+        use crate::{repo_ref::RepoRef, sub_commands::prs::create::generate_patch_event};
 
         fn generate_patch_from_head_commit(test_repo: &GitTestRepo) -> Result<nostr::Event> {
             let original_oid = test_repo.git_repo.head()?.peel_to_commit()?.id();
@@ -1219,6 +1215,8 @@ mod tests {
                 &oid_to_sha1(&original_oid),
                 nostr::EventId::all_zeros(),
                 &TEST_KEY_1_KEYS,
+                &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
+                None,
             )
         }
         fn test_patch_applies_to_repository(patch_event: nostr::Event) -> Result<()> {
@@ -1358,7 +1356,7 @@ mod tests {
         use test_utils::TEST_KEY_1_KEYS;
 
         use super::*;
-        use crate::sub_commands::prs::create::generate_pr_and_patch_events;
+        use crate::{repo_ref::RepoRef, sub_commands::prs::create::generate_pr_and_patch_events};
 
         static BRANCH_NAME: &str = "add-example-feature";
         // returns original_repo, pr_event, patch_events
@@ -1378,6 +1376,7 @@ mod tests {
                 &git_repo,
                 &vec![oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
                 &TEST_KEY_1_KEYS,
+                &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
             )?;
 
             events.reverse();

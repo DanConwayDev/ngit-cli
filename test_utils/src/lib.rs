@@ -12,7 +12,7 @@ pub mod git;
 pub mod relay;
 
 pub static PR_KIND: u64 = 318;
-pub static PATCH_KIND: u64 = 317;
+pub static PATCH_KIND: u64 = 1617;
 pub static REPOSITORY_KIND: u64 = 30617;
 
 pub static TEST_KEY_1_NSEC: &str =

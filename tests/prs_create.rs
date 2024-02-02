@@ -538,16 +538,10 @@ mod sends_pr_and_2_patches_to_3_relays {
 
         #[test]
         #[serial]
-        fn parent_commit_and_parent_commit_r() -> Result<()> {
+        fn parent_commit() -> Result<()> {
             // commit parent 'r' and 'parent-commit' tag
             static COMMIT_PARENT_ID: &str = "232efb37ebc67692c9e9ff58b83c0d3d63971a0a";
             let most_recent_patch = prep()?;
-            assert!(
-                most_recent_patch
-                    .tags
-                    .iter()
-                    .any(|t| t.as_vec()[0].eq("r") && t.as_vec()[1].eq(COMMIT_PARENT_ID))
-            );
             assert!(
                 most_recent_patch.tags.iter().any(
                     |t| t.as_vec()[0].eq("parent-commit") && t.as_vec()[1].eq(COMMIT_PARENT_ID)
@@ -558,9 +552,9 @@ mod sends_pr_and_2_patches_to_3_relays {
 
         #[test]
         #[serial]
-        fn root_commit_as_r_with_r_hypen_prefix() -> Result<()> {
+        fn root_commit_as_r() -> Result<()> {
             assert!(prep()?.tags.iter().any(|t| t.as_vec()[0].eq("r")
-                && t.as_vec()[1].eq("r-9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+                && t.as_vec()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
             Ok(())
         }
 
@@ -589,7 +583,7 @@ mod sends_pr_and_2_patches_to_3_relays {
                     .find(|t| t.as_vec()[0].eq("author"))
                     .unwrap()
                     .as_vec(),
-                vec!["author", "Joe Bloggs", "joe.bloggs@pm.me", "0,0"],
+                vec!["author", "Joe Bloggs", "joe.bloggs@pm.me", "0", "0"],
             );
             Ok(())
         }
@@ -604,7 +598,7 @@ mod sends_pr_and_2_patches_to_3_relays {
                     .find(|t| t.as_vec()[0].eq("committer"))
                     .unwrap()
                     .as_vec(),
-                vec!["committer", "Joe Bloggs", "joe.bloggs@pm.me", "0,0"],
+                vec!["committer", "Joe Bloggs", "joe.bloggs@pm.me", "0", "0"],
             );
             Ok(())
         }

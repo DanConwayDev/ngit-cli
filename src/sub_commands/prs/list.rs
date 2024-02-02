@@ -115,8 +115,7 @@ pub async fn launch(
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .event(pr_events[selected_index].id)
-                    .reference(format!("r-{root_commit}")),
+                    .event(pr_events[selected_index].id),
             ],
         )
         .await?
@@ -127,9 +126,6 @@ pub async fn launch(
                     t.as_vec().len() > 2
                         && t.as_vec()[1].eq(&pr_events[selected_index].id.to_string())
                 })
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("r-{root_commit}")))
         })
         .map(std::borrow::ToOwned::to_owned)
         .collect();
@@ -154,41 +150,6 @@ pub async fn launch(
         );
     }
 
-    // // TODO: look for mapping of existing branch
-
-    // // if latest_commit_id exists locally
-    // if local_branch_base == latest_commit_id {
-    //     // TODO: check if its in the main / master branch (already merged)
-    //     // TODO: check if it has any decendants and warn. maybe the user has
-    //     //       been working on a updates to be pushed? Suggest checking
-    //     //       out that branch.
-    //     //       we could search nostr for decendants of the commit as well?
-    //     //       perhaps this is overkill
-    //     // TODO: check out the branch which it is the tip of. if the name of the
-    //     //       branch is different then ask the user if they would like to
-    //     //       use the existing branch or create one with the name of the PR.
-    //     // TODO: if there are no decendants and its not the tip then
-    //     //       its an ophan commit so just make a branch from this commit.
-    // }
-    // // if commits ahead exist in a branch other than main or master
-    // // TODO: Identify probable existing branches - check remote tracker?
-    // // TODO: beind head
-    // else {
-    //     // TODO: look for existing branch with same name
-    //     // TODO: create remote tracker
-    //     git_repo.create_branch_at_commit(&branch_name, &local_branch_base);
-    //     git_repo.checkout(&branch_name)?;
-    //     ahead.reverse();
-    //     for event in ahead {
-    //         git_repo.apply_patch(event, branch_name)?;
-    //     }
-    //     println!("applied!")
-    // }
-    // // TODO: check if commits in pr exist, if so look for branches with they are
-    // in //       could we suggest pulling updates into that branch?
-    // //
-
-    // TODO: checkout PR branch
     Ok(())
 }
 

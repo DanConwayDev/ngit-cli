@@ -78,8 +78,7 @@ pub async fn launch() -> Result<()> {
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .event(pr_event.id)
-                    .reference(format!("r-{root_commit}")),
+                    .event(pr_event.id),
             ],
         )
         .await?
@@ -89,9 +88,6 @@ pub async fn launch() -> Result<()> {
                 && e.tags
                     .iter()
                     .any(|t| t.as_vec().len() > 2 && t.as_vec()[1].eq(&pr_event.id.to_string()))
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("r-{root_commit}")))
         })
         .map(std::borrow::ToOwned::to_owned)
         .collect();

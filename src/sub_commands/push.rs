@@ -102,8 +102,16 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     let mut patch_events: Vec<nostr::Event> = vec![];
     for commit in &ahead {
         patch_events.push(
-            generate_patch_event(&git_repo, &root_commit, commit, pr_event.id, &keys)
-                .context("cannot make patch event from commit")?,
+            generate_patch_event(
+                &git_repo,
+                &root_commit,
+                commit,
+                pr_event.id,
+                &keys,
+                &repo_ref,
+                patch_events.last().map(nostr::Event::id),
+            )
+            .context("cannot make patch event from commit")?,
         );
     }
     println!("pushing {} commits", ahead.len());
@@ -162,8 +170,7 @@ async fn fetch_pr_and_most_recent_patch_chain(
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .event(pr_event.id)
-                    .reference(format!("r-{root_commit}")),
+                    .event(pr_event.id),
             ],
         )
         .await?
@@ -173,9 +180,6 @@ async fn fetch_pr_and_most_recent_patch_chain(
                 && e.tags
                     .iter()
                     .any(|t| t.as_vec().len() > 2 && t.as_vec()[1].eq(&pr_event.id.to_string()))
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("r-{root_commit}")))
         })
         .map(std::borrow::ToOwned::to_owned)
         .collect();
