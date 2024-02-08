@@ -110,6 +110,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
                 &keys,
                 &repo_ref,
                 patch_events.last().map(nostr::Event::id),
+                None,
             )
             .context("cannot make patch event from commit")?,
         );

@@ -339,7 +339,8 @@ mod sends_pr_and_2_patches_to_3_relays {
 
     #[tokio::test]
     #[serial]
-    async fn patch_content_contains_patch_in_email_format() -> Result<()> {
+    async fn patch_content_contains_patch_in_email_format_with_patch_series_numbers() -> Result<()>
+    {
         let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
         for relay in [&r53, &r55, &r56] {
             let patch_events: Vec<&nostr::Event> = relay
@@ -354,7 +355,7 @@ mod sends_pr_and_2_patches_to_3_relays {
                     From fe973a840fba2a8ab37dd505c154854a69a6505c Mon Sep 17 00:00:00 2001\n\
                     From: Joe Bloggs <joe.bloggs@pm.me>\n\
                     Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
-                    Subject: [PATCH] add t4.md\n\
+                    Subject: [PATCH 1/2] add t4.md\n\
                     \n\
                     ---\n \
                     t4.md | 1 +\n \
@@ -380,7 +381,7 @@ mod sends_pr_and_2_patches_to_3_relays {
                     From 232efb37ebc67692c9e9ff58b83c0d3d63971a0a Mon Sep 17 00:00:00 2001\n\
                     From: Joe Bloggs <joe.bloggs@pm.me>\n\
                     Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
-                    Subject: [PATCH] add t3.md\n\
+                    Subject: [PATCH 2/2] add t3.md\n\
                     \n\
                     ---\n \
                     t3.md | 1 +\n \

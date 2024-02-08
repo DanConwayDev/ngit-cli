@@ -54,7 +54,11 @@ pub trait RepoActions {
     ) -> Result<(Vec<Sha1Hash>, Vec<Sha1Hash>)>;
     // including (un)staged changes and (un)tracked files
     fn has_outstanding_changes(&self) -> Result<bool>;
-    fn make_patch_from_commit(&self, commit: &Sha1Hash) -> Result<String>;
+    fn make_patch_from_commit(
+        &self,
+        commit: &Sha1Hash,
+        series_count: &Option<(u64, u64)>,
+    ) -> Result<String>;
     fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String>;
     fn checkout(&self, ref_name: &str) -> Result<Sha1Hash>;
     fn create_branch_at_commit(&self, branch_name: &str, commit: &str) -> Result<()>;
@@ -212,7 +216,11 @@ impl RepoActions for Repo {
         Ok(git_sig_to_tag_vec(&sig))
     }
 
-    fn make_patch_from_commit(&self, commit: &Sha1Hash) -> Result<String> {
+    fn make_patch_from_commit(
+        &self,
+        commit: &Sha1Hash,
+        series_count: &Option<(u64, u64)>,
+    ) -> Result<String> {
         let c = self
             .git_repo
             .find_commit(Oid::from_bytes(commit.as_byte_array()).context(format!(
@@ -220,7 +228,11 @@ impl RepoActions for Repo {
                 &commit
             ))?)
             .context(format!("failed to find commit {}", &commit))?;
-        let patch = git2::Email::from_commit(&c, &mut git2::EmailCreateOptions::default())
+        let mut options = git2::EmailCreateOptions::default();
+        if let Some((n, total)) = series_count {
+            options.subject_prefix(format!("PATCH {n}/{total}"));
+        }
+        let patch = git2::Email::from_commit(&c, &mut options)
             .context(format!("failed to create patch from commit {}", &commit))?;
 
         Ok(std::str::from_utf8(patch.as_slice())
@@ -859,7 +871,43 @@ mod tests {
                 libgit2 1.7.1\n\
                 \n\
                 ",
-                git_repo.make_patch_from_commit(&oid_to_sha1(&oid))?,
+                git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &None)?,
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn series_count() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let oid = test_repo.populate()?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert_eq!(
+                "\
+                From 431b84edc0d2fa118d63faa3c2db9c73d630a5ae Mon Sep 17 00:00:00 2001\n\
+                From: Joe Bloggs <joe.bloggs@pm.me>\n\
+                Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
+                Subject: [PATCH 3/5] add t2.md\n\
+                \n\
+                ---\n \
+                t2.md | 1 +\n \
+                1 file changed, 1 insertion(+)\n \
+                create mode 100644 t2.md\n\
+                \n\
+                diff --git a/t2.md b/t2.md\n\
+                new file mode 100644\n\
+                index 0000000..a66525d\n\
+                --- /dev/null\n\
+                +++ b/t2.md\n\
+                @@ -0,0 +1 @@\n\
+                +some content1\n\\ \
+                No newline at end of file\n\
+                --\n\
+                libgit2 1.7.1\n\
+                \n\
+                ",
+                git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &Some((3, 5)))?,
             );
             Ok(())
         }
@@ -1216,6 +1264,7 @@ mod tests {
                 nostr::EventId::all_zeros(),
                 &TEST_KEY_1_KEYS,
                 &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
+                None,
                 None,
             )
         }

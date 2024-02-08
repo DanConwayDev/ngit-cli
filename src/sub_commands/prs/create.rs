@@ -80,7 +80,9 @@ pub async fn launch(
 
     let title = match &args.title {
         Some(t) => t.clone(),
-        None => Interactor::default().input(PromptInputParms::default().with_prompt("title"))?,
+        None => Interactor::default()
+            .input(PromptInputParms::default().with_prompt("title"))?
+            .clone(),
     };
 
     let description = match &args.description {
@@ -350,7 +352,7 @@ pub fn generate_pr_and_patch_events(
     let pr_event_id = pr_event.id;
 
     let mut events = vec![pr_event];
-    for commit in commits {
+    for (i, commit) in commits.iter().enumerate() {
         events.push(
             generate_patch_event(
                 git_repo,
@@ -360,6 +362,11 @@ pub fn generate_pr_and_patch_events(
                 keys,
                 repo_ref,
                 events.last().map(nostr::Event::id),
+                if events.is_empty() {
+                    None
+                } else {
+                    Some(((i + 1).try_into()?, commits.len().try_into()?))
+                },
             )
             .context("failed to generate patch event")?,
         );
@@ -367,6 +374,7 @@ pub fn generate_pr_and_patch_events(
     Ok(events)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate_patch_event(
     git_repo: &Repo,
     root_commit: &Sha1Hash,
@@ -375,6 +383,7 @@ pub fn generate_patch_event(
     keys: &nostr::Keys,
     repo_ref: &RepoRef,
     parent_patch_event_id: Option<nostr::EventId>,
+    series_count: Option<(u64, u64)>,
 ) -> Result<nostr::Event> {
     let commit_parent = git_repo
         .get_commit_parent(commit)
@@ -383,7 +392,7 @@ pub fn generate_patch_event(
     EventBuilder::new(
         nostr::event::Kind::Custom(PATCH_KIND),
         git_repo
-            .make_patch_from_commit(commit)
+            .make_patch_from_commit(commit,&series_count)
             .context(format!("cannot make patch for commit {commit}"))?,
         [
             vec![
