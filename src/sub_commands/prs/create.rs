@@ -103,7 +103,7 @@ pub async fn launch(
     let repo_ref = repo_ref::fetch(
         &git_repo,
         git_repo
-            .get_root_commit(&to_branch)
+            .get_root_commit()
             .context("failed to get root commit of the repository")?
             .to_string(),
         &client,
@@ -111,15 +111,8 @@ pub async fn launch(
     )
     .await?;
 
-    let events = generate_pr_and_patch_events(
-        &title,
-        &description,
-        &to_branch,
-        &git_repo,
-        &ahead,
-        &keys,
-        &repo_ref,
-    )?;
+    let events =
+        generate_pr_and_patch_events(&title, &description, &git_repo, &ahead, &keys, &repo_ref)?;
 
     println!(
         "posting 1 pull request with {} commits...",
@@ -315,14 +308,13 @@ pub static PATCH_KIND: u64 = 1617;
 pub fn generate_pr_and_patch_events(
     title: &str,
     description: &str,
-    to_branch: &str,
     git_repo: &Repo,
     commits: &Vec<Sha1Hash>,
     keys: &nostr::Keys,
     repo_ref: &RepoRef,
 ) -> Result<Vec<nostr::Event>> {
     let root_commit = git_repo
-        .get_root_commit(to_branch)
+        .get_root_commit()
         .context("failed to get root commit of the repository")?;
 
     let mut pr_tags = vec![

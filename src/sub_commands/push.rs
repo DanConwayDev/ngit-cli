@@ -25,7 +25,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
         .context("no main or master branch")?;
 
     let root_commit = git_repo
-        .get_root_commit(main_or_master_branch_name)
+        .get_root_commit()
         .context("failed to get root commit of the repository")?;
 
     let branch_name = git_repo

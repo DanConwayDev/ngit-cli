@@ -2,15 +2,6 @@ use anyhow::Result;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
 
-#[test]
-fn when_no_main_or_master_branch_return_error() -> Result<()> {
-    let test_repo = GitTestRepo::new("notmain")?;
-    test_repo.populate()?;
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["claim"]);
-    p.expect("Error: no main or master branch")?;
-    Ok(())
-}
-
 fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
     p.expect("searching for your details...\r\n")?;
     p.expect("\r")?;

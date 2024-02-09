@@ -36,7 +36,7 @@ pub trait RepoActions {
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_checked_out_branch_name(&self) -> Result<String>;
     fn get_tip_of_local_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
-    fn get_root_commit(&self, branch_name: &str) -> Result<Sha1Hash>;
+    fn get_root_commit(&self) -> Result<Sha1Hash>;
     fn does_commit_exist(&self, commit: &str) -> Result<bool>;
     fn get_head_commit(&self) -> Result<Sha1Hash>;
     fn get_commit_parent(&self, commit: &Sha1Hash) -> Result<Sha1Hash>;
@@ -144,14 +144,13 @@ impl RepoActions for Repo {
         Ok(oid_to_sha1(&branch.into_reference().peel_to_commit()?.id()))
     }
 
-    fn get_root_commit(&self, branch_name: &str) -> Result<Sha1Hash> {
-        let tip = self.get_tip_of_local_branch(branch_name)?;
+    fn get_root_commit(&self) -> Result<Sha1Hash> {
         let mut revwalk = self
             .git_repo
             .revwalk()
             .context("revwalk should be created from git repo")?;
         revwalk
-            .push(sha1_to_oid(&tip)?)
+            .push(sha1_to_oid(&self.get_head_commit()?)?)
             .context("revwalk should accept tip oid")?;
         Ok(oid_to_sha1(
             &revwalk
@@ -1259,7 +1258,7 @@ mod tests {
             let git_repo = Repo::from_path(&test_repo.dir)?;
             generate_patch_event(
                 &git_repo,
-                &git_repo.get_root_commit("main")?,
+                &git_repo.get_root_commit()?,
                 &oid_to_sha1(&original_oid),
                 nostr::EventId::all_zeros(),
                 &TEST_KEY_1_KEYS,
@@ -1421,7 +1420,6 @@ mod tests {
             let mut events = generate_pr_and_patch_events(
                 "title",
                 "description",
-                BRANCH_NAME,
                 &git_repo,
                 &vec![oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
                 &TEST_KEY_1_KEYS,

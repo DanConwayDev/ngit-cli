@@ -33,12 +33,8 @@ pub struct SubCommandArgs {
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
-    let (main_or_master_branch_name, _) = git_repo
-        .get_main_or_master_branch()
-        .context("no main or master branch")?;
-
     let root_commit = git_repo
-        .get_root_commit(main_or_master_branch_name)
+        .get_root_commit()
         .context("failed to get root commit of the repository")?;
 
     // TODO: check for empty repo
