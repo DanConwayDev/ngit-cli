@@ -21,10 +21,10 @@ use crate::{
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
     #[clap(short, long)]
-    /// title of pull request (defaults to first line of first commit)
+    /// optional cover letter title
     title: Option<String>,
     #[clap(short, long)]
-    /// optional description
+    /// optional cover letter description
     description: Option<String>,
     #[clap(long)]
     /// branch to get changes from (defaults to head)
@@ -34,6 +34,7 @@ pub struct SubCommandArgs {
     to_branch: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn launch(
     cli_args: &Cli,
     _pr_args: &super::SubCommandArgs,
@@ -91,6 +92,21 @@ pub async fn launch(
             .input(PromptInputParms::default().with_prompt("description (Optional)"))?,
     };
 
+    // let cover_letter_title_description = if let Some(title) = title {
+    //     Some((
+    //         title,
+    //         if let Some(t) = &args.description {
+    //             t.clone()
+    //         } else {
+    //             Interactor::default()
+    //                 .input(PromptInputParms::default().with_prompt("cover letter
+    // description"))?                 .clone()
+    //         },
+    //     ))
+    // } else {
+    //     None
+    // };
+
     #[cfg(not(test))]
     let mut client = Client::default();
     #[cfg(test)]
@@ -111,8 +127,15 @@ pub async fn launch(
     )
     .await?;
 
-    let events =
-        generate_pr_and_patch_events(&title, &description, &git_repo, &ahead, &keys, &repo_ref)?;
+    let events = generate_pr_and_patch_events(
+        // cover_letter_title_description,
+        &title,
+        &description,
+        &git_repo,
+        &ahead,
+        &keys,
+        &repo_ref,
+    )?;
 
     println!(
         "posting 1 pull request with {} commits...",
@@ -308,6 +331,7 @@ pub static PATCH_KIND: u64 = 1617;
 pub fn generate_pr_and_patch_events(
     title: &str,
     description: &str,
+    // cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
     commits: &Vec<Sha1Hash>,
     keys: &nostr::Keys,
@@ -317,40 +341,57 @@ pub fn generate_pr_and_patch_events(
         .get_root_commit()
         .context("failed to get root commit of the repository")?;
 
-    let mut pr_tags = vec![
-        Tag::Reference(format!("r-{root_commit}")),
-        Tag::Name(title.to_string()),
-        Tag::Description(description.to_string()),
-    ];
+    let mut events = vec![];
 
-    if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
-        pr_tags.push(Tag::Generic(
-            TagKind::Custom("branch-name".to_string()),
-            vec![branch_name],
-        ));
-    }
-
-    let pr_event = EventBuilder::new(
+    // if let Some((title, description)) = cover_letter_title_description {
+    if !title.is_empty() {
+        events.push(EventBuilder::new(
         nostr::event::Kind::Custom(PR_KIND),
-        format!("{title}\r\n\r\n{description}"),
-        pr_tags,
-        // TODO: add Repo event as root
-        // TODO: people tag maintainers
-        // TODO: add relay tags
+        format!(
+            "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
+            commits.last().unwrap(),
+            commits.len()
+        ),
+        [
+            vec![
+                // TODO: why not tag all maintainer identifiers?
+                Tag::A {
+                    kind: nostr::Kind::Custom(REPO_REF_KIND),
+                    public_key: *repo_ref.maintainers.first()
+                        .context("repo reference should always have at least one maintainer - the issuer of the repo event")
+                        ?,
+                    identifier: repo_ref.identifier.to_string(),
+                    relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::from).clone(),
+                },
+                Tag::Reference(format!("{root_commit}")),
+                Tag::Hashtag("cover-letter".to_string()),
+                Tag::Hashtag("root".to_string()),
+            ],
+            if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
+                vec![Tag::Generic(
+                    TagKind::Custom("branch-name".to_string()),
+                    vec![branch_name],
+                )]
+            } else {
+                vec![]
+            },
+            repo_ref.maintainers
+                .iter()
+                .map(|pk| Tag::public_key(*pk))
+                .collect(),
+        ].concat(),
     )
     .to_event(keys)
-    .context("failed to create pr event")?;
+    .context("failed to create cover-letter event")?);
+    }
 
-    let pr_event_id = pr_event.id;
-
-    let mut events = vec![pr_event];
     for (i, commit) in commits.iter().enumerate() {
         events.push(
             generate_patch_event(
                 git_repo,
                 &root_commit,
                 commit,
-                pr_event_id,
+                events.first().map(|event| event.id),
                 keys,
                 repo_ref,
                 events.last().map(nostr::Event::id),
@@ -366,12 +407,45 @@ pub fn generate_pr_and_patch_events(
     Ok(events)
 }
 
+pub struct CoverLetter {
+    pub title: String,
+    pub description: String,
+    pub branch_name: Option<String>,
+}
+
+fn event_is_cover_letter(event: &nostr::Event) -> bool {
+    event.kind.as_u64().eq(&PR_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+}
+pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
+    if !event_is_cover_letter(event) {
+        bail!("event is not a cover letter")
+    }
+    let title_index = event
+        .content
+        .find("] ")
+        .context("event is not formatted as a cover letter patch")?
+        + 2;
+    let description_index = event.content[title_index..]
+        .find('\n')
+        .unwrap_or(event.content.len() - 1 - title_index)
+        + title_index;
+
+    Ok(CoverLetter {
+        title: event.content[title_index..description_index].to_string(),
+        description: event.content[description_index..].trim().to_string(),
+        branch_name: event
+            .iter_tags()
+            .find(|t| t.as_vec()[0].eq("branch-name"))
+            .map(|tag| tag.as_vec()[1].clone()),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn generate_patch_event(
     git_repo: &Repo,
     root_commit: &Sha1Hash,
     commit: &Sha1Hash,
-    thread_event_id: nostr::EventId,
+    thread_event_id: Option<nostr::EventId>,
     keys: &nostr::Keys,
     repo_ref: &RepoRef,
     parent_patch_event_id: Option<nostr::EventId>,
@@ -404,10 +478,13 @@ pub fn generate_patch_event(
                 // the commit id is correct
                 Tag::Reference(commit.to_string()),
 
-                Tag::Event {
+                if let Some(thread_event_id) = thread_event_id { Tag::Event {
                     event_id: thread_event_id,
                     relay_url: relay_hint.clone(),
                     marker: Some(Marker::Root),
+                } }
+                else {
+                    Tag::Hashtag("root".to_string())
                 },
             ],
             if let Some(id) = parent_patch_event_id {
@@ -684,6 +761,111 @@ mod tests {
             assert_eq!(behind, vec![]);
 
             Ok(())
+        }
+    }
+
+    mod event_to_cover_letter {
+        use super::*;
+
+        fn generate_cover_letter(title: &str, description: &str) -> Result<nostr::Event> {
+            Ok(nostr::event::EventBuilder::new(
+                nostr::event::Kind::Custom(PR_KIND),
+                format!("From ea897e987ea9a7a98e7a987e97987ea98e7a3334 Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/2] {title}\n\n{description}"),
+                [
+                    Tag::Hashtag("cover-letter".to_string()),
+                    Tag::Hashtag("root".to_string()),
+                ],
+            )
+            .to_event(&nostr::Keys::generate())?)
+        }
+
+        #[test]
+        fn basic_title() -> Result<()> {
+            assert_eq!(
+                event_to_cover_letter(&generate_cover_letter("the title", "description here")?)?
+                    .title,
+                "the title",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn basic_description() -> Result<()> {
+            assert_eq!(
+                event_to_cover_letter(&generate_cover_letter("the title", "description here")?)?
+                    .description,
+                "description here",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn description_trimmed() -> Result<()> {
+            assert_eq!(
+                event_to_cover_letter(&generate_cover_letter(
+                    "the title",
+                    " \n \ndescription here\n\n "
+                )?)?
+                .description,
+                "description here",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn multi_line_description() -> Result<()> {
+            assert_eq!(
+                event_to_cover_letter(&generate_cover_letter(
+                    "the title",
+                    "description here\n\nmore here\nmore"
+                )?)?
+                .description,
+                "description here\n\nmore here\nmore",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn new_lines_in_title_forms_part_of_description() -> Result<()> {
+            assert_eq!(
+                event_to_cover_letter(&generate_cover_letter(
+                    "the title\nwith new line",
+                    "description here\n\nmore here\nmore"
+                )?)?
+                .title,
+                "the title",
+            );
+            assert_eq!(
+                event_to_cover_letter(&generate_cover_letter(
+                    "the title\nwith new line",
+                    "description here\n\nmore here\nmore"
+                )?)?
+                .description,
+                "with new line\n\ndescription here\n\nmore here\nmore",
+            );
+            Ok(())
+        }
+
+        mod blank_description {
+            use super::*;
+
+            #[test]
+            fn title_correct() -> Result<()> {
+                assert_eq!(
+                    event_to_cover_letter(&generate_cover_letter("the title", "")?)?.title,
+                    "the title",
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn description_is_empty_string() -> Result<()> {
+                assert_eq!(
+                    event_to_cover_letter(&generate_cover_letter("the title", "")?)?.description,
+                    "",
+                );
+                Ok(())
+            }
         }
     }
 }

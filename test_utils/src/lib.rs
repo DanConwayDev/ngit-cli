@@ -21,6 +21,8 @@ pub static TEST_KEY_1_SK_HEX: &str =
     "08608a436aee4c07ea5c36f85cb17c58f52b3ad7094f9318cc777771f0bf218b";
 pub static TEST_KEY_1_NPUB: &str =
     "npub175lyhnt6nn00qjw0v3navw9pxgv43txnku0tpxprl4h6mvpr6a5qlphudg";
+pub static TEST_KEY_1_PUBKEY_HEX: &str =
+    "f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768";
 pub static TEST_KEY_1_DISPLAY_NAME: &str = "bob";
 pub static TEST_KEY_1_ENCRYPTED: &str = "ncryptsec1qyq607h3cykxc3f2a44u89cdk336fptccn3fm5pf3nmf93d3c86qpunc7r6klwcn6lyszjy72wxwqq9aljg4pm6atvjrds9e248yhv76xfnt464265kgnjsvg8rlg06wg4sp9uljzfpu8zuaztcvfn2j8ggdrg8mldh850cy75efsyqqansert9wqmn4e6khpgvfz7h5le9";
 pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qy8ke0tjqnn8wt3w6lnc86c27ry3qrptxctjfcgruryxy0at238kwyjwsswd7z88thysruzw3awlrsxjvw5uptcd7vt70ft9rtkx00m8cgy3khm4hxa5d2gfnc6athnfruy2eyl6pkas8k34jg85z7xjqqadzfzh9rp0fzxqtw0tvxksac3n8yc98uksvuf93e0lcvqy8j6";

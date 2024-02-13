@@ -1260,7 +1260,7 @@ mod tests {
                 &git_repo,
                 &git_repo.get_root_commit()?,
                 &oid_to_sha1(&original_oid),
-                nostr::EventId::all_zeros(),
+                Some(nostr::EventId::all_zeros()),
                 &TEST_KEY_1_KEYS,
                 &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
                 None,
@@ -1418,6 +1418,7 @@ mod tests {
             let git_repo = Repo::from_path(&original_repo.dir)?;
 
             let mut events = generate_pr_and_patch_events(
+                // Some(("test".to_string(), "test".to_string())),
                 "title",
                 "description",
                 &git_repo,

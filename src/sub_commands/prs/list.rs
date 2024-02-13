@@ -8,8 +8,8 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::Connect,
     git::{Repo, RepoActions},
-    repo_ref,
-    sub_commands::prs::create::{PATCH_KIND, PR_KIND},
+    repo_ref::{self},
+    sub_commands::prs::create::{event_to_cover_letter, PATCH_KIND, PR_KIND},
     Cli,
 };
 
@@ -20,6 +20,7 @@ pub struct SubCommandArgs {
     open_only: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn launch(
     _cli_args: &Cli,
     _pr_args: &super::SubCommandArgs,
@@ -56,7 +57,7 @@ pub async fn launch(
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PR_KIND))
-                    .reference(format!("r-{root_commit}")),
+                    .reference(format!("{root_commit}")),
             ],
         )
         .await?
@@ -65,7 +66,7 @@ pub async fn launch(
             e.kind.as_u64() == PR_KIND
                 && e.tags
                     .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("r-{root_commit}")))
+                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("{root_commit}")))
         })
         .map(std::borrow::ToOwned::to_owned)
         .collect();
@@ -92,8 +93,8 @@ pub async fn launch(
                 pr_events
                     .iter()
                     .map(|e| {
-                        if let Ok(name) = tag_value(e, "name") {
-                            name
+                        if let Ok(cl) = event_to_cover_letter(e) {
+                            cl.title
                         } else {
                             e.id.to_string()
                         }
@@ -131,7 +132,19 @@ pub async fn launch(
     let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commits_events)
         .context("cannot get most recent patch for PR")?;
 
-    let branch_name = tag_value(&pr_events[selected_index], "branch-name")?;
+    let branch_name: String = if let Ok(cl) = event_to_cover_letter(&pr_events[selected_index]) {
+        if let Some(name) = cl.branch_name {
+            name
+        } else {
+            cl.title
+                .replace(' ', "-")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || c.eq(&'/'))
+                .collect()
+        }
+    } else {
+        bail!("Placeholder not a cover letter")
+    };
 
     let applied = git_repo
         .apply_patch_chain(&branch_name, most_recent_pr_patch_chain)
@@ -145,7 +158,6 @@ pub async fn launch(
             applied.len(),
         );
     }
-
     Ok(())
 }
 

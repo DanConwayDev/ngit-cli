@@ -8,6 +8,7 @@ use crate::{
     client::Connect,
     git::{Repo, RepoActions},
     repo_ref,
+    repo_ref::REPO_REF_KIND,
     sub_commands::prs::{
         create::{PATCH_KIND, PR_KIND},
         list::{get_most_recent_patch_with_ancestors, tag_value},
@@ -53,7 +54,12 @@ pub async fn launch() -> Result<()> {
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PR_KIND))
-                    .reference(format!("r-{root_commit}")),
+                    .identifiers(
+                        repo_ref
+                            .maintainers
+                            .iter()
+                            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
+                    ),
             ],
         )
         .await?
@@ -62,7 +68,7 @@ pub async fn launch() -> Result<()> {
             e.kind.as_u64() == PR_KIND
                 && e.tags
                     .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("r-{root_commit}")))
+                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("{root_commit}")))
                 && tag_value(e, "branch-name")
                     .unwrap_or_default()
                     .eq(&branch_name)

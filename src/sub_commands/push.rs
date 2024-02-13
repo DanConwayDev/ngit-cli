@@ -9,7 +9,7 @@ use crate::{
     client::Connect,
     git::{str_to_sha1, Repo, RepoActions},
     login,
-    repo_ref::{self, RepoRef},
+    repo_ref::{self, RepoRef, REPO_REF_KIND},
     sub_commands::prs::{
         create::{generate_patch_event, send_events, PATCH_KIND, PR_KIND},
         list::{get_most_recent_patch_with_ancestors, tag_value},
@@ -106,7 +106,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
                 &git_repo,
                 &root_commit,
                 commit,
-                pr_event.id,
+                Some(pr_event.id),
                 &keys,
                 &repo_ref,
                 patch_events.last().map(nostr::Event::id),
@@ -146,7 +146,12 @@ async fn fetch_pr_and_most_recent_patch_chain(
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PR_KIND))
-                    .reference(format!("r-{root_commit}")),
+                    .identifiers(
+                        repo_ref
+                            .maintainers
+                            .iter()
+                            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
+                    ),
             ],
         )
         .await?
@@ -155,7 +160,7 @@ async fn fetch_pr_and_most_recent_patch_chain(
             e.kind.as_u64() == PR_KIND
                 && e.tags
                     .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("r-{root_commit}")))
+                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("{root_commit}")))
                 && tag_value(e, "branch-name")
                     .unwrap_or_default()
                     .eq(branch_name)
