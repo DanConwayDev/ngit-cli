@@ -770,6 +770,7 @@ where
 {
     let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ngit"));
     cmd.env("NGITTEST", "TRUE");
+    cmd.env("RUST_BACKTRACE", "0");
     cmd.args(args);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
     rexpect::session::spawn_with_options(
@@ -792,6 +793,7 @@ where
 {
     let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ngit"));
     cmd.env("NGITTEST", "TRUE");
+    cmd.env("RUST_BACKTRACE", "0");
     cmd.current_dir(dir);
     cmd.args(args);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
