@@ -6,6 +6,7 @@ use test_utils::{git::GitTestRepo, relay::Relay, *};
 static FEATURE_BRANCH_NAME_1: &str = "feature-example-t";
 static FEATURE_BRANCH_NAME_2: &str = "feature-example-f";
 static FEATURE_BRANCH_NAME_3: &str = "feature-example-c";
+static FEATURE_BRANCH_NAME_4: &str = "feature-example-d";
 
 static PR_TITLE_1: &str = "pr a";
 static PR_TITLE_2: &str = "pr b";
@@ -18,22 +19,19 @@ fn cli_tester_create_prs() -> Result<GitTestRepo> {
         &git_repo,
         FEATURE_BRANCH_NAME_1,
         "a",
-        PR_TITLE_1,
-        "pr a description",
+        Some((PR_TITLE_1, "pr a description")),
     )?;
     cli_tester_create_pr(
         &git_repo,
         FEATURE_BRANCH_NAME_2,
         "b",
-        PR_TITLE_2,
-        "pr b description",
+        Some((PR_TITLE_2, "pr b description")),
     )?;
     cli_tester_create_pr(
         &git_repo,
         FEATURE_BRANCH_NAME_3,
         "c",
-        PR_TITLE_3,
-        "pr c description",
+        Some((PR_TITLE_3, "pr c description")),
     )?;
     Ok(git_repo)
 }
@@ -66,28 +64,44 @@ fn cli_tester_create_pr(
     test_repo: &GitTestRepo,
     branch_name: &str,
     prefix: &str,
-    title: &str,
-    description: &str,
+    cover_letter_title_and_description: Option<(&str, &str)>,
 ) -> Result<()> {
     create_and_populate_branch(test_repo, branch_name, prefix, false)?;
 
-    let mut p = CliTester::new_from_dir(
-        &test_repo.dir,
-        [
-            "--nsec",
-            TEST_KEY_1_NSEC,
-            "--password",
-            TEST_PASSWORD,
-            "--disable-cli-spinners",
-            "prs",
-            "create",
-            "--title",
-            format!("\"{title}\"").as_str(),
-            "--description",
-            format!("\"{description}\"").as_str(),
-        ],
-    );
-    p.expect_end_eventually()?;
+    if let Some((title, description)) = cover_letter_title_and_description {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "prs",
+                "create",
+                "--title",
+                format!("\"{title}\"").as_str(),
+                "--description",
+                format!("\"{description}\"").as_str(),
+            ],
+        );
+        p.expect_end_eventually()?;
+    } else {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "prs",
+                "create",
+                "--no-cover-letter",
+            ],
+        );
+        p.expect_end_eventually()?;
+    }
     Ok(())
 }
 
@@ -428,6 +442,183 @@ mod when_main_branch_is_uptodate {
                     assert_eq!(
                         originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_3)?,
                         test_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_3)?,
+                    );
+                    Ok(())
+                }
+            }
+            mod when_forth_pr_has_no_cover_letter {
+                use super::*;
+
+                async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
+                    // fallback (51,52) user write (53, 55) repo (55, 56)
+                    let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                        Relay::new(8051, None, None),
+                        Relay::new(8052, None, None),
+                        Relay::new(8053, None, None),
+                        Relay::new(8055, None, None),
+                        Relay::new(8056, None, None),
+                    );
+
+                    r51.events.push(generate_test_key_1_relay_list_event());
+                    r51.events.push(generate_test_key_1_metadata_event("fred"));
+                    r51.events.push(generate_repo_ref_event());
+
+                    r55.events.push(generate_repo_ref_event());
+                    r55.events.push(generate_test_key_1_metadata_event("fred"));
+                    r55.events.push(generate_test_key_1_relay_list_event());
+
+                    let cli_tester_handle =
+                        std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
+                            let originating_repo = cli_tester_create_prs()?;
+                            cli_tester_create_pr(
+                                &originating_repo,
+                                FEATURE_BRANCH_NAME_4,
+                                "d",
+                                None,
+                            )?;
+                            let test_repo = GitTestRepo::default();
+                            test_repo.populate()?;
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+
+                            p.expect("finding PRs...\r\n")?;
+                            let mut c = p.expect_choice(
+                                "All PRs",
+                                vec![
+                                    format!("\"{PR_TITLE_1}\""),
+                                    format!("\"{PR_TITLE_2}\""),
+                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("add d3.md"), // commit msg title
+                                ],
+                            )?;
+                            c.succeeds_with(3, true)?;
+                            let mut confirm =
+                                p.expect_confirm_eventually("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
+                            p.expect_end_eventually_and_print()?;
+
+                            for p in [51, 52, 53, 55, 56] {
+                                relay::shutdown_relay(8000 + p)?;
+                            }
+                            Ok((originating_repo, test_repo))
+                        });
+
+                    // launch relay
+                    let _ = join!(
+                        r51.listen_until_close(),
+                        r52.listen_until_close(),
+                        r53.listen_until_close(),
+                        r55.listen_until_close(),
+                        r56.listen_until_close(),
+                    );
+                    let res = cli_tester_handle.join().unwrap()?;
+
+                    Ok(res)
+                }
+
+                mod cli_prompts {
+                    use super::*;
+                    async fn run_async_prompts_to_choose_from_pr_titles() -> Result<()> {
+                        let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                            Relay::new(8051, None, None),
+                            Relay::new(8052, None, None),
+                            Relay::new(8053, None, None),
+                            Relay::new(8055, None, None),
+                            Relay::new(8056, None, None),
+                        );
+
+                        r51.events.push(generate_test_key_1_relay_list_event());
+                        r51.events.push(generate_test_key_1_metadata_event("fred"));
+                        r51.events.push(generate_repo_ref_event());
+
+                        r55.events.push(generate_repo_ref_event());
+                        r55.events.push(generate_test_key_1_metadata_event("fred"));
+                        r55.events.push(generate_test_key_1_relay_list_event());
+
+                        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                            let originating_repo = cli_tester_create_prs()?;
+                            cli_tester_create_pr(
+                                &originating_repo,
+                                FEATURE_BRANCH_NAME_4,
+                                "d",
+                                None,
+                            )?;
+                            let test_repo = GitTestRepo::default();
+                            test_repo.populate()?;
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+
+                            p.expect("finding PRs...\r\n")?;
+                            let mut c = p.expect_choice(
+                                "All PRs",
+                                vec![
+                                    format!("\"{PR_TITLE_1}\""),
+                                    format!("\"{PR_TITLE_2}\""),
+                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("add d3.md"), // commit msg title
+                                ],
+                            )?;
+                            c.succeeds_with(3, true)?;
+                            p.expect("finding commits...\r\n")?;
+                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
+                            confirm.succeeds_with(None)?;
+                            p.expect("checked out PR branch. pulled 2 new commits\r\n")?;
+                            p.expect_end()?;
+
+                            for p in [51, 52, 53, 55, 56] {
+                                relay::shutdown_relay(8000 + p)?;
+                            }
+                            Ok(())
+                        });
+
+                        // launch relay
+                        let _ = join!(
+                            r51.listen_until_close(),
+                            r52.listen_until_close(),
+                            r53.listen_until_close(),
+                            r55.listen_until_close(),
+                            r56.listen_until_close(),
+                        );
+                        cli_tester_handle.join().unwrap()?;
+                        println!("{:?}", r55.events);
+                        Ok(())
+                    }
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                        Ok(())
+                    }
+                }
+
+                #[tokio::test]
+                #[serial]
+                async fn pr_branch_created_with_correct_name() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
+                    assert_eq!(
+                        vec![FEATURE_BRANCH_NAME_4, "main"],
+                        test_repo.get_local_branch_names()?
+                    );
+                    Ok(())
+                }
+
+                #[tokio::test]
+                #[serial]
+                async fn pr_branch_checked_out() -> Result<()> {
+                    let (_, test_repo) = prep_and_run().await?;
+                    assert_eq!(
+                        FEATURE_BRANCH_NAME_4,
+                        test_repo.get_checked_out_branch_name()?,
+                    );
+                    Ok(())
+                }
+
+                #[tokio::test]
+                #[serial]
+                async fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
+                    let (originating_repo, test_repo) = prep_and_run().await?;
+                    assert_eq!(
+                        originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_4)?,
+                        test_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_4)?,
                     );
                     Ok(())
                 }

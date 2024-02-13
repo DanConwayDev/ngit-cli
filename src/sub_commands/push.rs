@@ -9,10 +9,13 @@ use crate::{
     client::Connect,
     git::{str_to_sha1, Repo, RepoActions},
     login,
-    repo_ref::{self, RepoRef, REPO_REF_KIND},
+    repo_ref::{self, RepoRef},
     sub_commands::prs::{
-        create::{generate_patch_event, send_events, PATCH_KIND, PR_KIND},
-        list::{get_most_recent_patch_with_ancestors, tag_value},
+        create::{event_to_cover_letter, generate_patch_event, send_events},
+        list::{
+            find_commits_for_pr_event, find_pr_events, get_most_recent_patch_with_ancestors,
+            tag_value,
+        },
     },
     Cli,
 };
@@ -111,6 +114,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
                 &repo_ref,
                 patch_events.last().map(nostr::Event::id),
                 None,
+                None,
             )
             .context("cannot make patch event from commit")?,
         );
@@ -131,7 +135,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_pr_and_most_recent_patch_chain(
+pub async fn fetch_pr_and_most_recent_patch_chain(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     repo_ref: &RepoRef,
@@ -140,54 +144,24 @@ async fn fetch_pr_and_most_recent_patch_chain(
 ) -> Result<(nostr::Event, Vec<nostr::Event>)> {
     println!("finding PR event...");
 
-    let pr_event: nostr::Event = client
-        .get_events(
-            repo_ref.relays.clone(),
-            vec![
-                nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(PR_KIND))
-                    .identifiers(
-                        repo_ref
-                            .maintainers
-                            .iter()
-                            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
-                    ),
-            ],
-        )
-        .await?
+    let pr_events: Vec<nostr::Event> = find_pr_events(client, repo_ref, &root_commit.to_string())
+        .await
+        .context("cannot get pr events for repo")?;
+
+    let pr_event: nostr::Event = pr_events
         .iter()
         .find(|e| {
-            e.kind.as_u64() == PR_KIND
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("{root_commit}")))
-                && tag_value(e, "branch-name")
-                    .unwrap_or_default()
-                    .eq(branch_name)
+            event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(branch_name))
+            // TODO remove the dependancy on same branch name and replace with
+            // references stored in .git/ngit
         })
         .context("cannot find a PR event associated with the checked out branch name")?
         .to_owned();
 
     println!("found PR event. finding commits...");
 
-    let commits_events: Vec<nostr::Event> = client
-        .get_events(
-            repo_ref.relays.clone(),
-            vec![
-                nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .event(pr_event.id),
-            ],
-        )
-        .await?
-        .iter()
-        .filter(|e| {
-            e.kind.as_u64() == PATCH_KIND
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 2 && t.as_vec()[1].eq(&pr_event.id.to_string()))
-        })
-        .map(std::borrow::ToOwned::to_owned)
-        .collect();
+    let commits_events: Vec<nostr::Event> =
+        find_commits_for_pr_event(client, &pr_event, repo_ref).await?;
+
     Ok((pr_event, commits_events))
 }

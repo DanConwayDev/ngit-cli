@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 
+use super::create::event_is_patch_set_root;
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]
@@ -8,8 +9,10 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::Connect,
     git::{Repo, RepoActions},
-    repo_ref::{self},
-    sub_commands::prs::create::{event_to_cover_letter, PATCH_KIND, PR_KIND},
+    repo_ref::{self, RepoRef, REPO_REF_KIND},
+    sub_commands::prs::create::{
+        event_is_cover_letter, event_to_cover_letter, PATCH_KIND, PR_KIND,
+    },
     Cli,
 };
 
@@ -51,40 +54,8 @@ pub async fn launch(
 
     println!("finding PRs...");
 
-    let pr_events: Vec<nostr::Event> = client
-        .get_events(
-            repo_ref.relays.clone(),
-            vec![
-                nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(PR_KIND))
-                    .reference(format!("{root_commit}")),
-            ],
-        )
-        .await?
-        .iter()
-        .filter(|e| {
-            e.kind.as_u64() == PR_KIND
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("{root_commit}")))
-        })
-        .map(std::borrow::ToOwned::to_owned)
-        .collect();
-
-    // let pr_branch_names: Vec<String> = pr_events
-    //     .iter()
-    //     .map(|e| {
-    //         format!(
-    //             "{}-{}",
-    //             &e.id.to_string()[..5],
-    //             if let Some(t) = e.tags.iter().find(|t| t.as_vec()[0] ==
-    // "branch-name") {                 t.as_vec()[1].to_string()
-    //             } else {
-    //                 "".to_string()
-    //             } // git_repo.get_checked_out_branch_name(),
-    //         )
-    //     })
-    //     .collect();
+    let pr_events: Vec<nostr::Event> =
+        find_pr_events(&client, &repo_ref, &root_commit.to_string()).await?;
 
     let selected_index = Interactor::default().choice(
         PromptChoiceParms::default()
@@ -95,6 +66,8 @@ pub async fn launch(
                     .map(|e| {
                         if let Ok(cl) = event_to_cover_letter(e) {
                             cl.title
+                        } else if let Ok(msg) = tag_value(e, "description") {
+                            msg.split('\n').collect::<Vec<&str>>()[0].to_string()
                         } else {
                             e.id.to_string()
                         }
@@ -102,49 +75,20 @@ pub async fn launch(
                     .collect(),
             ),
     )?;
-    // println!("prs:{:?}", &pr_events);
 
     println!("finding commits...");
 
-    let commits_events: Vec<nostr::Event> = client
-        .get_events(
-            repo_ref.relays.clone(),
-            vec![
-                nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .event(pr_events[selected_index].id),
-            ],
-        )
-        .await?
-        .iter()
-        .filter(|e| {
-            e.kind.as_u64() == PATCH_KIND
-                && e.tags.iter().any(|t| {
-                    t.as_vec().len() > 2
-                        && t.as_vec()[1].eq(&pr_events[selected_index].id.to_string())
-                })
-        })
-        .map(std::borrow::ToOwned::to_owned)
-        .collect();
+    let commits_events: Vec<nostr::Event> =
+        find_commits_for_pr_event(&client, &pr_events[selected_index], &repo_ref).await?;
 
     confirm_checkout(&git_repo)?;
 
     let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commits_events)
         .context("cannot get most recent patch for PR")?;
 
-    let branch_name: String = if let Ok(cl) = event_to_cover_letter(&pr_events[selected_index]) {
-        if let Some(name) = cl.branch_name {
-            name
-        } else {
-            cl.title
-                .replace(' ', "-")
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || c.eq(&'/'))
-                .collect()
-        }
-    } else {
-        bail!("Placeholder not a cover letter")
-    };
+    let branch_name: String = event_to_cover_letter(&pr_events[selected_index])
+        .context("cannot assign a branch name as event is not a patch set root")?
+        .branch_name;
 
     let applied = git_repo
         .apply_patch_chain(&branch_name, most_recent_pr_patch_chain)
@@ -193,20 +137,139 @@ pub fn get_most_recent_patch_with_ancestors(
 ) -> Result<Vec<nostr::Event>> {
     patches.sort_by_key(|e| e.created_at);
 
-    let mut res = vec![];
+    let first_patch = patches.first().context("no patches found")?;
 
-    let latest_commit_id = tag_value(patches.first().context("no patches found")?, "commit")?;
+    let patches_with_youngest_created_at: Vec<&nostr::Event> = patches
+        .iter()
+        .filter(|p| p.created_at.eq(&first_patch.created_at))
+        .collect();
+
+    let latest_commit_id = tag_value(
+        // get the first patch which isn't a parent of a patch event created at the same
+        // time
+        patches_with_youngest_created_at
+            .clone()
+            .iter()
+            .find(|p| {
+                if let Ok(commit) = tag_value(p, "commit") {
+                    !patches_with_youngest_created_at.iter().any(|p2| {
+                        if let Ok(parent) = tag_value(p2, "parent-commit") {
+                            commit.eq(&parent)
+                        } else {
+                            false // skip 
+                        }
+                    })
+                } else {
+                    false // skip 
+                }
+            })
+            .context("cannot find patches_with_youngest_created_at")?,
+        "commit",
+    )?;
+
+    let mut res = vec![];
 
     let mut commit_id_to_search = latest_commit_id;
 
     while let Some(event) = patches.iter().find(|e| {
-        tag_value(e, "commit")
-            .context("patch event doesnt contain commit tag")
-            .unwrap()
-            .eq(&commit_id_to_search)
+        if let Ok(commit) = tag_value(e, "commit") {
+            commit.eq(&commit_id_to_search)
+        } else {
+            false // skip
+        }
     }) {
         res.push(event.clone());
         commit_id_to_search = tag_value(event, "parent-commit")?;
     }
     Ok(res)
+}
+
+pub async fn find_pr_events(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    repo_ref: &RepoRef,
+    root_commit: &str,
+) -> Result<Vec<nostr::Event>> {
+    Ok(client
+        .get_events(
+            repo_ref.relays.clone(),
+            vec![
+                nostr::Filter::default()
+                    .kinds(vec![
+                        nostr::Kind::Custom(PR_KIND),
+                        nostr::Kind::Custom(PATCH_KIND),
+                    ])
+                    .custom_tag(nostr::Alphabet::T, vec!["root"])
+                    .identifiers(
+                        repo_ref
+                            .maintainers
+                            .iter()
+                            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
+                    ),
+                // also pick up prs from the same repo but no target at our maintainers repo events
+                nostr::Filter::default()
+                    .kinds(vec![
+                        nostr::Kind::Custom(PR_KIND),
+                        nostr::Kind::Custom(PATCH_KIND),
+                    ])
+                    .custom_tag(nostr::Alphabet::T, vec!["root"])
+                    .reference(root_commit),
+            ],
+        )
+        .await
+        .context("cannot get pr events")?
+        .iter()
+        .filter(|e| {
+            event_is_patch_set_root(e)
+                && (e
+                    .tags
+                    .iter()
+                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(root_commit))
+                    || e.tags.iter().any(|t| {
+                        t.as_vec().len() > 1
+                            && repo_ref
+                                .maintainers
+                                .iter()
+                                .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier))
+                                .any(|d| t.as_vec()[1].eq(&d))
+                    }))
+        })
+        .map(std::borrow::ToOwned::to_owned)
+        .collect::<Vec<nostr::Event>>())
+}
+
+pub async fn find_commits_for_pr_event(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    pr_event: &nostr::Event,
+    repo_ref: &RepoRef,
+) -> Result<Vec<nostr::Event>> {
+    let mut patch_events: Vec<nostr::Event> = client
+        .get_events(
+            repo_ref.relays.clone(),
+            vec![
+                nostr::Filter::default()
+                    .kind(nostr::Kind::Custom(PATCH_KIND))
+                    // this requires every patch to reference the root event
+                    // this will not pick up v2,v3 patch sets
+                    // TODO: fetch commits for v2.. patch sets
+                    .event(pr_event.id),
+            ],
+        )
+        .await
+        .context("cannot fetch patch events")?
+        .iter()
+        .filter(|e| {
+            e.kind.as_u64() == PATCH_KIND
+                && e.tags
+                    .iter()
+                    .any(|t| t.as_vec().len() > 2 && t.as_vec()[1].eq(&pr_event.id.to_string()))
+        })
+        .map(std::borrow::ToOwned::to_owned)
+        .collect();
+
+    if !event_is_cover_letter(pr_event) {
+        patch_events.push(pr_event.clone());
+    }
+    Ok(patch_events)
 }

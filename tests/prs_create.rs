@@ -1,6 +1,7 @@
 use anyhow::Result;
+use futures::join;
 use serial_test::serial;
-use test_utils::{git::GitTestRepo, *};
+use test_utils::{git::GitTestRepo, relay::Relay, *};
 
 #[test]
 fn when_to_branch_doesnt_exist_return_error() -> Result<()> {
@@ -150,121 +151,133 @@ fn is_patch(event: &nostr::Event) -> bool {
         && !event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
-mod sends_pr_and_2_patches_to_3_relays {
-    use futures::join;
-    use test_utils::relay::Relay;
+fn prep_git_repo() -> Result<GitTestRepo> {
+    let test_repo = GitTestRepo::default();
+    test_repo.populate()?;
+    // create feature branch with 2 commit ahead
+    test_repo.create_branch("feature")?;
+    test_repo.checkout("feature")?;
+    std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+    test_repo.stage_and_commit("add t3.md")?;
+    std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+    test_repo.stage_and_commit("add t4.md")?;
+    Ok(test_repo)
+}
+
+fn cli_tester_create_pr(git_repo: &GitTestRepo, include_cover_letter: bool) -> CliTester {
+    let mut args = vec![
+        "--nsec",
+        TEST_KEY_1_NSEC,
+        "--password",
+        TEST_PASSWORD,
+        "--disable-cli-spinners",
+        "prs",
+        "create",
+    ];
+    if include_cover_letter {
+        for arg in [
+            "--title",
+            "exampletitle",
+            "--description",
+            "exampledescription",
+        ] {
+            args.push(arg);
+        }
+    } else {
+        args.push("--no-cover-letter");
+    }
+    CliTester::new_from_dir(&git_repo.dir, args)
+}
+
+fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
+    p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
+    p.expect("searching for your details...\r\n")?;
+    p.expect("\r")?;
+    p.expect("logged in as fred\r\n")?;
+    p.expect(format!(
+        "posting 2 patches {} a covering letter...\r\n",
+        if include_cover_letter {
+            "with"
+        } else {
+            "without"
+        }
+    ))?;
+    Ok(())
+}
+
+async fn prep_run_create_pr(
+    include_cover_letter: bool,
+) -> Result<(
+    Relay<'static>,
+    Relay<'static>,
+    Relay<'static>,
+    Relay<'static>,
+    Relay<'static>,
+)> {
+    let git_repo = prep_git_repo()?;
+    // fallback (51,52) user write (53, 55) repo (55, 56)
+    let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+        Relay::new(
+            8051,
+            None,
+            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                relay.respond_events(
+                    client_id,
+                    &subscription_id,
+                    &vec![
+                        generate_test_key_1_metadata_event("fred"),
+                        generate_test_key_1_relay_list_event(),
+                    ],
+                )?;
+                Ok(())
+            }),
+        ),
+        Relay::new(8052, None, None),
+        Relay::new(8053, None, None),
+        Relay::new(
+            8055,
+            None,
+            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                relay.respond_events(
+                    client_id,
+                    &subscription_id,
+                    &vec![generate_repo_ref_event()],
+                )?;
+                Ok(())
+            }),
+        ),
+        Relay::new(8056, None, None),
+    );
+
+    // // check relay had the right number of events
+    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+        let mut p = cli_tester_create_pr(&git_repo, include_cover_letter);
+        p.expect_end_eventually()?;
+        for p in [51, 52, 53, 55, 56] {
+            relay::shutdown_relay(8000 + p)?;
+        }
+        Ok(())
+    });
+
+    // launch relay
+    let _ = join!(
+        r51.listen_until_close(),
+        r52.listen_until_close(),
+        r53.listen_until_close(),
+        r55.listen_until_close(),
+        r56.listen_until_close(),
+    );
+    cli_tester_handle.join().unwrap()?;
+    Ok((r51, r52, r53, r55, r56))
+}
+
+mod sends_cover_letter_and_2_patches_to_3_relays {
 
     use super::*;
-
-    fn prep_git_repo() -> Result<GitTestRepo> {
-        let test_repo = GitTestRepo::default();
-        test_repo.populate()?;
-        // create feature branch with 2 commit ahead
-        test_repo.create_branch("feature")?;
-        test_repo.checkout("feature")?;
-        std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
-        test_repo.stage_and_commit("add t3.md")?;
-        std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
-        test_repo.stage_and_commit("add t4.md")?;
-        Ok(test_repo)
-    }
-
-    fn cli_tester_create_pr(git_repo: &GitTestRepo) -> CliTester {
-        CliTester::new_from_dir(
-            &git_repo.dir,
-            [
-                "--nsec",
-                TEST_KEY_1_NSEC,
-                "--password",
-                TEST_PASSWORD,
-                "--disable-cli-spinners",
-                "prs",
-                "create",
-                "--title",
-                "exampletitle",
-                "--description",
-                "exampledescription",
-            ],
-        )
-    }
-
-    fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
-        p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
-        p.expect("searching for your details...\r\n")?;
-        p.expect("\r")?;
-        p.expect("logged in as fred\r\n")?;
-        p.expect("posting 1 pull request with 2 commits...\r\n")?;
-        Ok(())
-    }
-
-    async fn prep_run_create_pr() -> Result<(
-        Relay<'static>,
-        Relay<'static>,
-        Relay<'static>,
-        Relay<'static>,
-        Relay<'static>,
-    )> {
-        let git_repo = prep_git_repo()?;
-        // fallback (51,52) user write (53, 55) repo (55, 56)
-        let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
-            Relay::new(
-                8051,
-                None,
-                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(
-                        client_id,
-                        &subscription_id,
-                        &vec![
-                            generate_test_key_1_metadata_event("fred"),
-                            generate_test_key_1_relay_list_event(),
-                        ],
-                    )?;
-                    Ok(())
-                }),
-            ),
-            Relay::new(8052, None, None),
-            Relay::new(8053, None, None),
-            Relay::new(
-                8055,
-                None,
-                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(
-                        client_id,
-                        &subscription_id,
-                        &vec![generate_repo_ref_event()],
-                    )?;
-                    Ok(())
-                }),
-            ),
-            Relay::new(8056, None, None),
-        );
-
-        // // check relay had the right number of events
-        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-            let mut p = cli_tester_create_pr(&git_repo);
-            p.expect_end_eventually()?;
-            for p in [51, 52, 53, 55, 56] {
-                relay::shutdown_relay(8000 + p)?;
-            }
-            Ok(())
-        });
-
-        // launch relay
-        let _ = join!(
-            r51.listen_until_close(),
-            r52.listen_until_close(),
-            r53.listen_until_close(),
-            r55.listen_until_close(),
-            r56.listen_until_close(),
-        );
-        cli_tester_handle.join().unwrap()?;
-        Ok((r51, r52, r53, r55, r56))
-    }
-
     #[tokio::test]
     #[serial]
     async fn only_1_pr_kind_event_sent_to_each_relay() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+        let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
         for relay in [&r53, &r55, &r56] {
             assert_eq!(
                 relay.events.iter().filter(|e| is_cover_letter(e)).count(),
@@ -277,7 +290,7 @@ mod sends_pr_and_2_patches_to_3_relays {
     #[tokio::test]
     #[serial]
     async fn only_1_pr_kind_event_sent_to_user_relays() -> Result<()> {
-        let (_, _, r53, r55, _) = prep_run_create_pr().await?;
+        let (_, _, r53, r55, _) = prep_run_create_pr(true).await?;
         for relay in [&r53, &r55] {
             assert_eq!(
                 relay.events.iter().filter(|e| is_cover_letter(e)).count(),
@@ -290,7 +303,7 @@ mod sends_pr_and_2_patches_to_3_relays {
     #[tokio::test]
     #[serial]
     async fn only_1_pr_kind_event_sent_to_repo_relays() -> Result<()> {
-        let (_, _, _, r55, r56) = prep_run_create_pr().await?;
+        let (_, _, _, r55, r56) = prep_run_create_pr(true).await?;
         for relay in [&r55, &r56] {
             assert_eq!(
                 relay.events.iter().filter(|e| is_cover_letter(e)).count(),
@@ -303,7 +316,7 @@ mod sends_pr_and_2_patches_to_3_relays {
     #[tokio::test]
     #[serial]
     async fn pr_not_sent_to_fallback_relay() -> Result<()> {
-        let (r51, r52, _, _, _) = prep_run_create_pr().await?;
+        let (r51, r52, _, _, _) = prep_run_create_pr(true).await?;
         for relay in [&r51, &r52] {
             assert_eq!(
                 relay.events.iter().filter(|e| is_cover_letter(e)).count(),
@@ -316,7 +329,7 @@ mod sends_pr_and_2_patches_to_3_relays {
     #[tokio::test]
     #[serial]
     async fn only_2_patch_kind_events_sent_to_each_relay() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+        let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
         for relay in [&r53, &r55, &r56] {
             assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 2,);
         }
@@ -327,18 +340,18 @@ mod sends_pr_and_2_patches_to_3_relays {
     #[serial]
     async fn patch_content_contains_patch_in_email_format_with_patch_series_numbers() -> Result<()>
     {
-        let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+        let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
         for relay in [&r53, &r55, &r56] {
             let patch_events: Vec<&nostr::Event> =
                 relay.events.iter().filter(|e| is_patch(e)).collect();
 
             assert_eq!(
-                patch_events[0].content,
+                patch_events[1].content,
                 "\
                     From fe973a840fba2a8ab37dd505c154854a69a6505c Mon Sep 17 00:00:00 2001\n\
                     From: Joe Bloggs <joe.bloggs@pm.me>\n\
                     Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
-                    Subject: [PATCH 1/2] add t4.md\n\
+                    Subject: [PATCH 2/2] add t4.md\n\
                     \n\
                     ---\n \
                     t4.md | 1 +\n \
@@ -359,12 +372,12 @@ mod sends_pr_and_2_patches_to_3_relays {
                     ",
             );
             assert_eq!(
-                patch_events[1].content,
+                patch_events[0].content,
                 "\
                     From 232efb37ebc67692c9e9ff58b83c0d3d63971a0a Mon Sep 17 00:00:00 2001\n\
                     From: Joe Bloggs <joe.bloggs@pm.me>\n\
                     Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
-                    Subject: [PATCH 2/2] add t3.md\n\
+                    Subject: [PATCH 1/2] add t3.md\n\
                     \n\
                     ---\n \
                     t3.md | 1 +\n \
@@ -394,7 +407,7 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[tokio::test]
         #[serial]
         async fn root_commit_as_r() -> Result<()> {
-            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event =
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
@@ -414,7 +427,7 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[tokio::test]
         #[serial]
         async fn a_tag_for_repo_event() -> Result<()> {
-            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event =
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
@@ -436,7 +449,7 @@ mod sends_pr_and_2_patches_to_3_relays {
                 .unwrap()
                 .as_vec()
                 .clone()[1..];
-            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
             for relay in [&r53, &r55, &r56] {
                 for m in maintainers {
                     let pr_event: &nostr::Event =
@@ -454,7 +467,7 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[tokio::test]
         #[serial]
         async fn t_tag_cover_letter() -> Result<()> {
-            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event =
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
@@ -470,7 +483,7 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[tokio::test]
         #[serial]
         async fn t_tag_root() -> Result<()> {
-            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event =
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
@@ -486,7 +499,7 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[tokio::test]
         #[serial]
         async fn pr_tags_branch_name() -> Result<()> {
-            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let pr_event: &nostr::Event =
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
@@ -509,14 +522,14 @@ mod sends_pr_and_2_patches_to_3_relays {
         use super::*;
 
         async fn prep() -> Result<nostr::Event> {
-            let (_, _, r53, _, _) = prep_run_create_pr().await?;
+            let (_, _, r53, _, _) = prep_run_create_pr(true).await?;
             Ok(r53.events.iter().find(|e| is_patch(e)).unwrap().clone())
         }
 
         #[tokio::test]
         #[serial]
         async fn commit_and_commit_r() -> Result<()> {
-            static COMMIT_ID: &str = "fe973a840fba2a8ab37dd505c154854a69a6505c";
+            static COMMIT_ID: &str = "232efb37ebc67692c9e9ff58b83c0d3d63971a0a";
             let most_recent_patch = prep().await?;
             assert!(
                 most_recent_patch
@@ -537,12 +550,16 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[serial]
         async fn parent_commit() -> Result<()> {
             // commit parent 'r' and 'parent-commit' tag
-            static COMMIT_PARENT_ID: &str = "232efb37ebc67692c9e9ff58b83c0d3d63971a0a";
+            static COMMIT_PARENT_ID: &str = "431b84edc0d2fa118d63faa3c2db9c73d630a5ae";
             let most_recent_patch = prep().await?;
-            assert!(
-                most_recent_patch.tags.iter().any(
-                    |t| t.as_vec()[0].eq("parent-commit") && t.as_vec()[1].eq(COMMIT_PARENT_ID)
-                )
+            assert_eq!(
+                most_recent_patch
+                    .tags
+                    .iter()
+                    .find(|t| t.as_vec()[0].eq("parent-commit"))
+                    .unwrap()
+                    .as_vec()[1],
+                COMMIT_PARENT_ID,
             );
             Ok(())
         }
@@ -599,7 +616,7 @@ mod sends_pr_and_2_patches_to_3_relays {
                     .find(|t| t.as_vec()[0].eq("description"))
                     .unwrap()
                     .as_vec()[1],
-                "add t4.md"
+                "add t3.md"
             );
             Ok(())
         }
@@ -639,7 +656,7 @@ mod sends_pr_and_2_patches_to_3_relays {
         #[tokio::test]
         #[serial]
         async fn patch_tags_pr_event_as_root() -> Result<()> {
-            let (_, _, r53, r55, r56) = prep_run_create_pr().await?;
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let patch_events: Vec<&nostr::Event> =
                     relay.events.iter().filter(|e| is_patch(e)).collect();
@@ -657,6 +674,43 @@ mod sends_pr_and_2_patches_to_3_relays {
 
                 assert_eq!(root_event_tag.as_vec()[1], pr_event.id.to_string());
             }
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn second_patch_tags_first_with_reply() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
+            for relay in [&r53, &r55, &r56] {
+                let patch_events = relay
+                    .events
+                    .iter()
+                    .filter(|e| is_patch(e))
+                    .collect::<Vec<&nostr::Event>>();
+                assert_eq!(
+                    patch_events[1]
+                        .iter_tags()
+                        .find(|t| t.as_vec()[0].eq("e")
+                            && t.as_vec().len().eq(&4)
+                            && t.as_vec()[3].eq("reply"))
+                        .unwrap()
+                        .as_vec()[1],
+                    patch_events[0].id.to_string(),
+                );
+            }
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn no_t_root_tag() -> Result<()> {
+            assert!(
+                !prep()
+                    .await?
+                    .tags
+                    .iter()
+                    .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq("root"))
+            );
             Ok(())
         }
     }
@@ -701,8 +755,8 @@ mod sends_pr_and_2_patches_to_3_relays {
 
             // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_create_pr(&git_repo);
-                expect_msgs_first(&mut p)?;
+                let mut p = cli_tester_create_pr(&git_repo, true);
+                expect_msgs_first(&mut p, true)?;
                 relay::expect_send_with_progress(
                     &mut p,
                     vec![
@@ -790,7 +844,7 @@ mod sends_pr_and_2_patches_to_3_relays {
 
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    let mut p = cli_tester_create_pr(&git_repo);
+                    let mut p = cli_tester_create_pr(&git_repo, true);
                     p.expect_end_eventually()?;
                     for p in [51, 52, 53, 55, 56] {
                         relay::shutdown_relay(8000 + p)?;
@@ -869,8 +923,8 @@ mod sends_pr_and_2_patches_to_3_relays {
 
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    let mut p = cli_tester_create_pr(&git_repo);
-                    expect_msgs_first(&mut p)?;
+                    let mut p = cli_tester_create_pr(&git_repo, true);
+                    expect_msgs_first(&mut p, true)?;
                     // p.expect_end_with("bla")?;
                     relay::expect_send_with_progress(
                         &mut p,
@@ -915,7 +969,162 @@ mod sends_pr_and_2_patches_to_3_relays {
     }
 }
 
-mod without_cover_letter {
+mod sends_2_patches_without_cover_letter {
     use super::*;
-    // TODO
+
+    mod cli_ouput {
+        use super::*;
+
+        async fn run_test_async() -> Result<()> {
+            let git_repo = prep_git_repo()?;
+
+            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                Relay::new(
+                    8051,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![generate_repo_ref_event()],
+                        )?;
+                        Ok(())
+                    }),
+                ),
+                Relay::new(8056, None, None),
+            );
+
+            // // check relay had the right number of events
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                let mut p = cli_tester_create_pr(&git_repo, false);
+
+                expect_msgs_first(&mut p, false)?;
+                relay::expect_send_with_progress(
+                    &mut p,
+                    vec![
+                        (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
+                        (" [my-relay] ws://localhost:8053", true, ""),
+                        (" [repo-relay] ws://localhost:8056", true, ""),
+                    ],
+                    2,
+                )?;
+                p.expect_end_with_whitespace()?;
+                for p in [51, 52, 53, 55, 56] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+
+            // launch relay
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn check_cli_output() -> Result<()> {
+            run_test_async().await?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn no_cover_letter_event() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_pr(false).await?;
+        for relay in [&r53, &r55, &r56] {
+            assert_eq!(
+                relay.events.iter().filter(|e| is_cover_letter(e)).count(),
+                0,
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn two_patch_events() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_pr(false).await?;
+        for relay in [&r53, &r55, &r56] {
+            assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 2);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    // TODO check this is the ancestor
+    async fn first_patch_with_root_t_tag() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_pr(false).await?;
+        for relay in [&r53, &r55, &r56] {
+            let patch_events = relay
+                .events
+                .iter()
+                .filter(|e| is_patch(e))
+                .collect::<Vec<&nostr::Event>>();
+
+            // first patch tagged as root
+            assert!(
+                patch_events[0]
+                    .iter_tags()
+                    .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq("root"))
+            );
+            // second patch not tagged as root
+            assert!(
+                !patch_events[1]
+                    .iter_tags()
+                    .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq("root"))
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn second_patch_lists_first_as_root() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_pr(false).await?;
+        for relay in [&r53, &r55, &r56] {
+            let patch_events = relay
+                .events
+                .iter()
+                .filter(|e| is_patch(e))
+                .collect::<Vec<&nostr::Event>>();
+
+            assert_eq!(
+                patch_events[1]
+                    .iter_tags()
+                    .find(|t| t.as_vec()[0].eq("e")
+                        && t.as_vec().len().eq(&4)
+                        && t.as_vec()[3].eq("root"))
+                    .unwrap()
+                    .as_vec()[1],
+                patch_events[0].id.to_string(),
+            );
+        }
+        Ok(())
+    }
 }

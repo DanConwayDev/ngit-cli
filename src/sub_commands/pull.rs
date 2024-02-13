@@ -8,10 +8,8 @@ use crate::{
     client::Connect,
     git::{Repo, RepoActions},
     repo_ref,
-    repo_ref::REPO_REF_KIND,
-    sub_commands::prs::{
-        create::{PATCH_KIND, PR_KIND},
-        list::{get_most_recent_patch_with_ancestors, tag_value},
+    sub_commands::{
+        prs::list::get_most_recent_patch_with_ancestors, push::fetch_pr_and_most_recent_patch_chain,
     },
 };
 
@@ -46,63 +44,15 @@ pub async fn launch() -> Result<()> {
     )
     .await?;
 
-    println!("finding PR event...");
-
-    let pr_event: nostr::Event = client
-        .get_events(
-            repo_ref.relays.clone(),
-            vec![
-                nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(PR_KIND))
-                    .identifiers(
-                        repo_ref
-                            .maintainers
-                            .iter()
-                            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
-                    ),
-            ],
-        )
-        .await?
-        .iter()
-        .find(|e| {
-            e.kind.as_u64() == PR_KIND
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(&format!("{root_commit}")))
-                && tag_value(e, "branch-name")
-                    .unwrap_or_default()
-                    .eq(&branch_name)
-        })
-        .context("cannot find a PR event associated with the checked out branch name")?
-        .to_owned();
-
-    println!("found PR event. finding commits...");
-
-    let commits_events: Vec<nostr::Event> = client
-        .get_events(
-            repo_ref.relays.clone(),
-            vec![
-                nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .event(pr_event.id),
-            ],
-        )
-        .await?
-        .iter()
-        .filter(|e| {
-            e.kind.as_u64() == PATCH_KIND
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 2 && t.as_vec()[1].eq(&pr_event.id.to_string()))
-        })
-        .map(std::borrow::ToOwned::to_owned)
-        .collect();
+    let (_pr_event, commit_events) =
+        fetch_pr_and_most_recent_patch_chain(&client, &repo_ref, &root_commit, &branch_name)
+            .await?;
 
     if git_repo.has_outstanding_changes()? {
         bail!("cannot pull changes when repository is not clean. discard changes and try again.");
     }
 
-    let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commits_events)
+    let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commit_events)
         .context("cannot get most recent patch for PR")?;
 
     let applied = git_repo

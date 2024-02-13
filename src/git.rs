@@ -1265,6 +1265,7 @@ mod tests {
                 &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
                 None,
                 None,
+                None,
             )
         }
         fn test_patch_applies_to_repository(patch_event: nostr::Event) -> Result<()> {
@@ -1418,9 +1419,7 @@ mod tests {
             let git_repo = Repo::from_path(&original_repo.dir)?;
 
             let mut events = generate_pr_and_patch_events(
-                // Some(("test".to_string(), "test".to_string())),
-                "title",
-                "description",
+                Some(("test".to_string(), "test".to_string())),
                 &git_repo,
                 &vec![oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
                 &TEST_KEY_1_KEYS,

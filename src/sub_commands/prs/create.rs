@@ -5,6 +5,7 @@ use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nostr::{prelude::sha1::Hash as Sha1Hash, EventBuilder, Marker, Tag, TagKind};
 
+use super::list::tag_value;
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]
@@ -32,6 +33,9 @@ pub struct SubCommandArgs {
     #[clap(long)]
     /// destination branch (defaults to main or master)
     to_branch: Option<String>,
+    /// don't ask about a cover letter
+    #[arg(long, action)]
+    no_cover_letter: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -42,7 +46,7 @@ pub async fn launch(
 ) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
-    let (from_branch, to_branch, ahead, behind) =
+    let (from_branch, to_branch, mut ahead, behind) =
         identify_ahead_behind(&git_repo, &args.from_branch, &args.to_branch)?;
 
     if ahead.is_empty() {
@@ -79,33 +83,43 @@ pub async fn launch(
         );
     }
 
-    let title = match &args.title {
-        Some(t) => t.clone(),
-        None => Interactor::default()
-            .input(PromptInputParms::default().with_prompt("title"))?
-            .clone(),
+    let title = if args.no_cover_letter {
+        None
+    } else {
+        match &args.title {
+            Some(t) => Some(t.clone()),
+            None => {
+                if Interactor::default().confirm(
+                    PromptConfirmParms::default()
+                        .with_default(false)
+                        .with_prompt("include cover letter?"),
+                )? {
+                    Some(
+                        Interactor::default()
+                            .input(PromptInputParms::default().with_prompt("title"))?
+                            .clone(),
+                    )
+                } else {
+                    None
+                }
+            }
+        }
     };
 
-    let description = match &args.description {
-        Some(t) => t.clone(),
-        None => Interactor::default()
-            .input(PromptInputParms::default().with_prompt("description (Optional)"))?,
+    let cover_letter_title_description = if let Some(title) = title {
+        Some((
+            title,
+            if let Some(t) = &args.description {
+                t.clone()
+            } else {
+                Interactor::default()
+                    .input(PromptInputParms::default().with_prompt("cover letter description"))?
+                    .clone()
+            },
+        ))
+    } else {
+        None
     };
-
-    // let cover_letter_title_description = if let Some(title) = title {
-    //     Some((
-    //         title,
-    //         if let Some(t) = &args.description {
-    //             t.clone()
-    //         } else {
-    //             Interactor::default()
-    //                 .input(PromptInputParms::default().with_prompt("cover letter
-    // description"))?                 .clone()
-    //         },
-    //     ))
-    // } else {
-    //     None
-    // };
 
     #[cfg(not(test))]
     let mut client = Client::default();
@@ -127,10 +141,11 @@ pub async fn launch(
     )
     .await?;
 
+    // oldest first
+    ahead.reverse();
+
     let events = generate_pr_and_patch_events(
-        // cover_letter_title_description,
-        &title,
-        &description,
+        cover_letter_title_description.clone(),
         &git_repo,
         &ahead,
         &keys,
@@ -138,8 +153,17 @@ pub async fn launch(
     )?;
 
     println!(
-        "posting 1 pull request with {} commits...",
-        events.len() - 1
+        "posting {} patches {} a covering letter...",
+        if cover_letter_title_description.is_none() {
+            events.len()
+        } else {
+            events.len() - 1
+        },
+        if cover_letter_title_description.is_none() {
+            "without"
+        } else {
+            "with"
+        }
     );
 
     send_events(
@@ -329,9 +353,7 @@ pub static PR_KIND: u64 = 318;
 pub static PATCH_KIND: u64 = 1617;
 
 pub fn generate_pr_and_patch_events(
-    title: &str,
-    description: &str,
-    // cover_letter_title_description: Option<(String, String)>,
+    cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
     commits: &Vec<Sha1Hash>,
     keys: &nostr::Keys,
@@ -343,8 +365,7 @@ pub fn generate_pr_and_patch_events(
 
     let mut events = vec![];
 
-    // if let Some((title, description)) = cover_letter_title_description {
-    if !title.is_empty() {
+    if let Some((title, description)) = cover_letter_title_description {
         events.push(EventBuilder::new(
         nostr::event::Kind::Custom(PR_KIND),
         format!(
@@ -400,6 +421,15 @@ pub fn generate_pr_and_patch_events(
                 } else {
                     Some(((i + 1).try_into()?, commits.len().try_into()?))
                 },
+                if events.is_empty() {
+                    if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
+                        Some(branch_name)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                },
             )
             .context("failed to generate patch event")?,
         );
@@ -410,34 +440,70 @@ pub fn generate_pr_and_patch_events(
 pub struct CoverLetter {
     pub title: String,
     pub description: String,
-    pub branch_name: Option<String>,
+    pub branch_name: String,
 }
 
-fn event_is_cover_letter(event: &nostr::Event) -> bool {
+pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
     event.kind.as_u64().eq(&PR_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
-    if !event_is_cover_letter(event) {
-        bail!("event is not a cover letter")
+    if !event_is_patch_set_root(event) {
+        bail!("event is not a patch set root event (root patch or cover letter)")
     }
     let title_index = event
         .content
         .find("] ")
-        .context("event is not formatted as a cover letter patch")?
+        .context("event is not formatted as a patch or cover letter")?
         + 2;
     let description_index = event.content[title_index..]
         .find('\n')
         .unwrap_or(event.content.len() - 1 - title_index)
         + title_index;
 
+    let title = if let Ok(msg) = tag_value(event, "description") {
+        msg.split('\n').collect::<Vec<&str>>()[0].to_string()
+    } else {
+        event.content[title_index..description_index].to_string()
+    };
+
+    // note: if the description field is removed from patch events like in gitstr,
+    // then this will show entire patch. I'm not sure it is ever displayed though
+    let description = if let Ok(msg) = tag_value(event, "description") {
+        if let Some((_before, after)) = msg.split_once('\n') {
+            after.trim().to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        event.content[description_index..].trim().to_string()
+    };
+
     Ok(CoverLetter {
-        title: event.content[title_index..description_index].to_string(),
-        description: event.content[description_index..].trim().to_string(),
-        branch_name: event
-            .iter_tags()
-            .find(|t| t.as_vec()[0].eq("branch-name"))
-            .map(|tag| tag.as_vec()[1].clone()),
+        title: title.clone(),
+        description,
+        // TODO should this be prefixed by format!("{}-"e.id.to_string()[..5]?)
+        branch_name: if let Ok(name) = tag_value(event, "branch-name") {
+            name
+        } else {
+            let s = title
+                .replace(' ', "-")
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c.eq(&'/') {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            s
+        },
     })
+}
+
+pub fn event_is_patch_set_root(event: &nostr::Event) -> bool {
+    (event.kind.as_u64().eq(&PR_KIND) || event.kind.as_u64().eq(&PATCH_KIND))
+        && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -450,6 +516,7 @@ pub fn generate_patch_event(
     repo_ref: &RepoRef,
     parent_patch_event_id: Option<nostr::EventId>,
     series_count: Option<(u64, u64)>,
+    branch_name: Option<String>,
 ) -> Result<nostr::Event> {
     let commit_parent = git_repo
         .get_commit_parent(commit)
@@ -496,6 +563,18 @@ pub fn generate_patch_event(
             } else {
                 vec![]
             },
+            if let Some(branch_name) = branch_name {
+                if thread_event_id.is_none() {
+                    vec![
+                        Tag::Generic(
+                            TagKind::Custom("branch-name".to_string()),
+                            vec![branch_name.to_string()],
+                        )
+                    ]
+                }
+                else { vec![]}
+            }
+            else { vec![]},
             // whilst it is in nip34 draft to tag the maintainers
             // I'm not sure it is a good idea because if they are
             // interested in all patches then their specialised
