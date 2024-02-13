@@ -11,7 +11,6 @@ use strip_ansi_escapes::strip_str;
 pub mod git;
 pub mod relay;
 
-pub static PR_KIND: u64 = 318;
 pub static PATCH_KIND: u64 = 1617;
 pub static REPOSITORY_KIND: u64 = 30617;
 

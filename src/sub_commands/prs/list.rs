@@ -10,9 +10,7 @@ use crate::{
     client::Connect,
     git::{Repo, RepoActions},
     repo_ref::{self, RepoRef, REPO_REF_KIND},
-    sub_commands::prs::create::{
-        event_is_cover_letter, event_to_cover_letter, PATCH_KIND, PR_KIND,
-    },
+    sub_commands::prs::create::{event_is_cover_letter, event_to_cover_letter, PATCH_KIND},
     Cli,
 };
 
@@ -195,10 +193,7 @@ pub async fn find_pr_events(
             repo_ref.relays.clone(),
             vec![
                 nostr::Filter::default()
-                    .kinds(vec![
-                        nostr::Kind::Custom(PR_KIND),
-                        nostr::Kind::Custom(PATCH_KIND),
-                    ])
+                    .kind(nostr::Kind::Custom(PATCH_KIND))
                     .custom_tag(nostr::Alphabet::T, vec!["root"])
                     .identifiers(
                         repo_ref
@@ -208,10 +203,7 @@ pub async fn find_pr_events(
                     ),
                 // also pick up prs from the same repo but no target at our maintainers repo events
                 nostr::Filter::default()
-                    .kinds(vec![
-                        nostr::Kind::Custom(PR_KIND),
-                        nostr::Kind::Custom(PATCH_KIND),
-                    ])
+                    .kind(nostr::Kind::Custom(PATCH_KIND))
                     .custom_tag(nostr::Alphabet::T, vec!["root"])
                     .reference(root_commit),
             ],

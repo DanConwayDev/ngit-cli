@@ -143,7 +143,8 @@ fn cli_message_creating_patches() -> Result<()> {
 }
 
 fn is_cover_letter(event: &nostr::Event) -> bool {
-    event.kind.as_u64().eq(&PR_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+    event.kind.as_u64().eq(&PATCH_KIND)
+        && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
 fn is_patch(event: &nostr::Event) -> bool {

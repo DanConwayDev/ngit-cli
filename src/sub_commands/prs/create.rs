@@ -349,7 +349,6 @@ mod tests_unique_and_duplicate {
     }
 }
 
-pub static PR_KIND: u64 = 318;
 pub static PATCH_KIND: u64 = 1617;
 
 pub fn generate_pr_and_patch_events(
@@ -367,7 +366,7 @@ pub fn generate_pr_and_patch_events(
 
     if let Some((title, description)) = cover_letter_title_description {
         events.push(EventBuilder::new(
-        nostr::event::Kind::Custom(PR_KIND),
+        nostr::event::Kind::Custom(PATCH_KIND),
         format!(
             "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
             commits.last().unwrap(),
@@ -444,7 +443,12 @@ pub struct CoverLetter {
 }
 
 pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
-    event.kind.as_u64().eq(&PR_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+    // TODO: look for Subject:[ PATCH 0/n ] but watch out for:
+    //   [PATCH v1 0/n ] or
+    //   [PATCH subsystem v2 0/n ]
+    event.kind.as_u64().eq(&PATCH_KIND)
+        && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
+        && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
     if !event_is_patch_set_root(event) {
@@ -502,8 +506,7 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
 }
 
 pub fn event_is_patch_set_root(event: &nostr::Event) -> bool {
-    (event.kind.as_u64().eq(&PR_KIND) || event.kind.as_u64().eq(&PATCH_KIND))
-        && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
+    event.kind.as_u64().eq(&PATCH_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -848,7 +851,7 @@ mod tests {
 
         fn generate_cover_letter(title: &str, description: &str) -> Result<nostr::Event> {
             Ok(nostr::event::EventBuilder::new(
-                nostr::event::Kind::Custom(PR_KIND),
+                nostr::event::Kind::Custom(PATCH_KIND),
                 format!("From ea897e987ea9a7a98e7a987e97987ea98e7a3334 Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/2] {title}\n\n{description}"),
                 [
                     Tag::Hashtag("cover-letter".to_string()),
