@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use git2::{DiffOptions, Oid, Revwalk};
 use nostr::prelude::{sha1::Hash as Sha1Hash, Hash};
 
-use crate::sub_commands::prs::list::tag_value;
+use crate::sub_commands::list::tag_value;
 
 pub struct Repo {
     git_repo: git2::Repository,
@@ -1251,7 +1251,7 @@ mod tests {
     mod apply_patch {
 
         use super::*;
-        use crate::{repo_ref::RepoRef, sub_commands::prs::create::generate_patch_event};
+        use crate::{repo_ref::RepoRef, sub_commands::send::generate_patch_event};
 
         fn generate_patch_from_head_commit(test_repo: &GitTestRepo) -> Result<nostr::Event> {
             let original_oid = test_repo.git_repo.head()?.peel_to_commit()?.id();
@@ -1405,7 +1405,7 @@ mod tests {
         use test_utils::TEST_KEY_1_KEYS;
 
         use super::*;
-        use crate::{repo_ref::RepoRef, sub_commands::prs::create::generate_pr_and_patch_events};
+        use crate::{repo_ref::RepoRef, sub_commands::send::generate_pr_and_patch_events};
 
         static BRANCH_NAME: &str = "add-example-feature";
         // returns original_repo, pr_event, patch_events

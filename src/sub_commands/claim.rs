@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-use super::prs::create::send_events;
+use super::send::send_events;
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]

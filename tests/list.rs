@@ -77,8 +77,7 @@ fn cli_tester_create_pr(
                 "--password",
                 TEST_PASSWORD,
                 "--disable-cli-spinners",
-                "prs",
-                "create",
+                "send",
                 "--title",
                 format!("\"{title}\"").as_str(),
                 "--description",
@@ -95,8 +94,7 @@ fn cli_tester_create_pr(
                 "--password",
                 TEST_PASSWORD,
                 "--disable-cli-spinners",
-                "prs",
-                "create",
+                "send",
                 "--no-cover-letter",
             ],
         );
@@ -143,7 +141,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             p.expect("finding PRs...\r\n")?;
                             let mut c = p.expect_choice(
@@ -203,7 +201,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             p.expect("finding PRs...\r\n")?;
                             let mut c = p.expect_choice(
@@ -308,7 +306,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             p.expect("finding PRs...\r\n")?;
                             let mut c = p.expect_choice(
@@ -368,7 +366,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             p.expect("finding PRs...\r\n")?;
                             let mut c = p.expect_choice(
@@ -478,7 +476,7 @@ mod when_main_branch_is_uptodate {
                             )?;
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             p.expect("finding PRs...\r\n")?;
                             let mut c = p.expect_choice(
@@ -544,7 +542,7 @@ mod when_main_branch_is_uptodate {
                             )?;
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             p.expect("finding PRs...\r\n")?;
                             let mut c = p.expect_choice(
@@ -658,7 +656,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             create_and_populate_branch(
                                 &test_repo,
@@ -725,7 +723,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             create_and_populate_branch(
                                 &test_repo,
@@ -817,7 +815,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             create_and_populate_branch(
                                 &test_repo,
@@ -885,7 +883,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
                             create_and_populate_branch(
                                 &test_repo,

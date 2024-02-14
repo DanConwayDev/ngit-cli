@@ -10,12 +10,12 @@ use crate::{
     git::{str_to_sha1, Repo, RepoActions},
     login,
     repo_ref::{self, RepoRef},
-    sub_commands::prs::{
-        create::{event_to_cover_letter, generate_patch_event, send_events},
+    sub_commands::{
         list::{
             find_commits_for_pr_event, find_pr_events, get_most_recent_patch_with_ancestors,
             tag_value,
         },
+        send::{event_to_cover_letter, generate_patch_event, send_events},
     },
     Cli,
 };

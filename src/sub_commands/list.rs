@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use super::create::event_is_patch_set_root;
+use super::send::event_is_patch_set_root;
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]
@@ -10,7 +10,7 @@ use crate::{
     client::Connect,
     git::{Repo, RepoActions},
     repo_ref::{self, RepoRef, REPO_REF_KIND},
-    sub_commands::prs::create::{event_is_cover_letter, event_to_cover_letter, PATCH_KIND},
+    sub_commands::send::{event_is_cover_letter, event_to_cover_letter, PATCH_KIND},
     Cli,
 };
 
@@ -22,11 +22,7 @@ pub struct SubCommandArgs {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(
-    _cli_args: &Cli,
-    _pr_args: &super::SubCommandArgs,
-    _args: &SubCommandArgs,
-) -> Result<()> {
+pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
     let root_commit = git_repo

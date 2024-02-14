@@ -39,11 +39,7 @@ pub struct SubCommandArgs {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(
-    cli_args: &Cli,
-    _pr_args: &super::SubCommandArgs,
-    args: &SubCommandArgs,
-) -> Result<()> {
+pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
     let (from_branch, to_branch, mut ahead, behind) =
@@ -178,6 +174,7 @@ pub async fn launch(
     Ok(())
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,

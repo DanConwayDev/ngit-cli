@@ -9,7 +9,7 @@ use crate::{
     git::{Repo, RepoActions},
     repo_ref,
     sub_commands::{
-        prs::list::get_most_recent_patch_with_ancestors, push::fetch_pr_and_most_recent_patch_chain,
+        list::get_most_recent_patch_with_ancestors, push::fetch_pr_and_most_recent_patch_chain,
     },
 };
 

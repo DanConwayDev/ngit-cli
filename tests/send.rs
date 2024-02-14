@@ -7,10 +7,7 @@ use test_utils::{git::GitTestRepo, relay::Relay, *};
 fn when_to_branch_doesnt_exist_return_error() -> Result<()> {
     let test_repo = GitTestRepo::default();
     test_repo.populate()?;
-    let mut p = CliTester::new_from_dir(
-        &test_repo.dir,
-        ["prs", "create", "--to-branch", "nonexistant"],
-    );
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--to-branch", "nonexistant"]);
     p.expect("Error: cannot find to_branch 'nonexistant'")?;
     Ok(())
 }
@@ -19,7 +16,7 @@ fn when_to_branch_doesnt_exist_return_error() -> Result<()> {
 fn when_no_to_branch_specified_and_no_main_or_master_branch_return_error() -> Result<()> {
     let test_repo = GitTestRepo::new("notmain")?;
     test_repo.populate()?;
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
     p.expect("Error: a destination branch (to_branch) is not specified and the defaults (main or master) do not exist")?;
     Ok(())
 }
@@ -28,10 +25,7 @@ fn when_no_to_branch_specified_and_no_main_or_master_branch_return_error() -> Re
 fn when_from_branch_doesnt_exist_return_error() -> Result<()> {
     let test_repo = GitTestRepo::default();
     test_repo.populate()?;
-    let mut p = CliTester::new_from_dir(
-        &test_repo.dir,
-        ["prs", "create", "--from-branch", "nonexistant"],
-    );
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--from-branch", "nonexistant"]);
     p.expect("Error: cannot find from_branch 'nonexistant'")?;
     Ok(())
 }
@@ -44,7 +38,7 @@ fn when_no_commits_ahead_of_main_return_error() -> Result<()> {
     test_repo.create_branch("feature")?;
     test_repo.checkout("feature")?;
 
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
     p.expect("Error: 'head' is 0 commits ahead of 'main' so no patches were created")?;
     Ok(())
 }
@@ -88,7 +82,7 @@ mod when_commits_behind_ask_to_proceed {
     fn asked_with_default_no() -> Result<()> {
         let test_repo = prep_test_repo()?;
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
         expect_confirm_prompt(&mut p, BEHIND_LEN, AHEAD_LEN)?;
         p.exit()?;
         Ok(())
@@ -98,7 +92,7 @@ mod when_commits_behind_ask_to_proceed {
     fn when_response_is_false_aborts() -> Result<()> {
         let test_repo = prep_test_repo()?;
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
 
         expect_confirm_prompt(&mut p, BEHIND_LEN, AHEAD_LEN)?.succeeds_with(Some(false))?;
 
@@ -111,7 +105,7 @@ mod when_commits_behind_ask_to_proceed {
     fn when_response_is_true_proceeds() -> Result<()> {
         let test_repo = prep_test_repo()?;
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
         expect_confirm_prompt(&mut p, BEHIND_LEN, AHEAD_LEN)?.succeeds_with(Some(true))?;
         p.expect(
             format!("creating patch for {AHEAD_LEN} commits from 'head' that are {BEHIND_LEN} behind 'main'",)
@@ -135,7 +129,7 @@ fn cli_message_creating_patches() -> Result<()> {
     std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
     test_repo.stage_and_commit("add t4.md")?;
 
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["prs", "create"]);
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
 
     p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'")?;
     p.exit()?;
@@ -172,8 +166,7 @@ fn cli_tester_create_pr(git_repo: &GitTestRepo, include_cover_letter: bool) -> C
         "--password",
         TEST_PASSWORD,
         "--disable-cli-spinners",
-        "prs",
-        "create",
+        "send",
     ];
     if include_cover_letter {
         for arg in [
