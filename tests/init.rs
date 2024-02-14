@@ -28,7 +28,7 @@ mod when_repo_not_previously_claimed {
             Ok(test_repo)
         }
 
-        fn cli_tester_claim(git_repo: &GitTestRepo) -> CliTester {
+        fn cli_tester_init(git_repo: &GitTestRepo) -> CliTester {
             CliTester::new_from_dir(
                 &git_repo.dir,
                 [
@@ -37,7 +37,7 @@ mod when_repo_not_previously_claimed {
                     "--password",
                     TEST_PASSWORD,
                     "--disable-cli-spinners",
-                    "claim",
+                    "init",
                     "--title",
                     "example-name",
                     "--description",
@@ -52,7 +52,7 @@ mod when_repo_not_previously_claimed {
             )
         }
 
-        async fn prep_run_claim() -> Result<(
+        async fn prep_run_init() -> Result<(
             Relay<'static>,
             Relay<'static>,
             Relay<'static>,
@@ -85,7 +85,7 @@ mod when_repo_not_previously_claimed {
 
             // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_claim(&git_repo);
+                let mut p = cli_tester_init(&git_repo);
                 p.expect_end_eventually()?;
                 for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;
@@ -111,7 +111,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn only_1_repository_kind_event_sent_to_user_relays() -> Result<()> {
-                let (_, _, r53, r55, _) = prep_run_claim().await?;
+                let (_, _, r53, r55, _) = prep_run_init().await?;
                 for relay in [&r53, &r55] {
                     assert_eq!(
                         relay
@@ -128,7 +128,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn only_1_repository_kind_event_sent_to_specified_repo_relays() -> Result<()> {
-                let (_, _, _, r55, r56) = prep_run_claim().await?;
+                let (_, _, _, r55, r56) = prep_run_init().await?;
                 for relay in [&r55, &r56] {
                     assert_eq!(
                         relay
@@ -145,7 +145,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn event_not_sent_to_fallback_relay() -> Result<()> {
-                let (r51, r52, _, _, _) = prep_run_claim().await?;
+                let (r51, r52, _, _, _) = prep_run_init().await?;
                 for relay in [&r51, &r52] {
                     assert_eq!(
                         relay
@@ -192,7 +192,7 @@ mod when_repo_not_previously_claimed {
 
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    let mut p = cli_tester_claim(&git_repo);
+                    let mut p = cli_tester_init(&git_repo);
                     p.expect_end_eventually()?;
 
                     let yaml_path = git_repo.dir.join("maintainers.yaml");
@@ -247,7 +247,7 @@ mod when_repo_not_previously_claimed {
             #[serial]
             async fn d_replaceable_event_identifier_defaults_to_root_commit_id_shorthand()
             -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_init())?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -268,7 +268,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn root_commit_as_reference() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_claim().await?;
+                let (_, _, r53, r55, r56) = prep_run_init().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -285,7 +285,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn name() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_claim().await?;
+                let (_, _, r53, r55, r56) = prep_run_init().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -306,7 +306,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn description() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_claim().await?;
+                let (_, _, r53, r55, r56) = prep_run_init().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -323,7 +323,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn git_server() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_claim().await?;
+                let (_, _, r53, r55, r56) = prep_run_init().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -342,7 +342,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn relays() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_claim().await?;
+                let (_, _, r53, r55, r56) = prep_run_init().await?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -364,7 +364,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn web() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_init())?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -386,7 +386,7 @@ mod when_repo_not_previously_claimed {
             #[test]
             #[serial]
             fn current_user_in_maintainers() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_claim())?;
+                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_init())?;
                 for relay in [&r53, &r55, &r56] {
                     let event: &nostr::Event = relay
                         .events
@@ -435,7 +435,7 @@ mod when_repo_not_previously_claimed {
 
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    let mut p = cli_tester_claim(&git_repo);
+                    let mut p = cli_tester_init(&git_repo);
                     expect_msgs_first(&mut p)?;
                     relay::expect_send_with_progress(
                         &mut p,
@@ -487,7 +487,7 @@ mod when_repo_not_previously_claimed {
             Ok(test_repo)
         }
 
-        fn cli_tester_claim(git_repo: &GitTestRepo) -> CliTester {
+        fn cli_tester_init(git_repo: &GitTestRepo) -> CliTester {
             CliTester::new_from_dir(
                 &git_repo.dir,
                 [
@@ -496,7 +496,7 @@ mod when_repo_not_previously_claimed {
                     "--password",
                     TEST_PASSWORD,
                     "--disable-cli-spinners",
-                    "claim",
+                    "init",
                     "--title",
                     "example-name",
                     "--description",
@@ -508,7 +508,7 @@ mod when_repo_not_previously_claimed {
             )
         }
 
-        async fn prep_run_claim() -> Result<(
+        async fn prep_run_init() -> Result<(
             Relay<'static>,
             Relay<'static>,
             Relay<'static>,
@@ -541,7 +541,7 @@ mod when_repo_not_previously_claimed {
 
             // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_claim(&git_repo);
+                let mut p = cli_tester_init(&git_repo);
                 p.expect_end_eventually()?;
                 for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;
@@ -567,7 +567,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn relays_match_user_write_relays() -> Result<()> {
-                let (_, _, r53, r55, _) = prep_run_claim().await?;
+                let (_, _, r53, r55, _) = prep_run_init().await?;
                 for relay in [&r53, &r55] {
                     let event: &nostr::Event = relay
                         .events
@@ -613,7 +613,7 @@ mod when_repo_not_previously_claimed {
 
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    let mut p = cli_tester_claim(&git_repo);
+                    let mut p = cli_tester_init(&git_repo);
                     expect_msgs_first(&mut p)?;
                     relay::expect_send_with_progress(
                         &mut p,
