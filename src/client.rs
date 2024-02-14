@@ -10,12 +10,12 @@
 // which is currently in nightly. alternatively we can use nightly as it looks
 // certain that the implementation is going to make it to stable but we don't
 // want to inadvertlty use other features of nightly that might be removed.
-use std::time::Duration;
+use std::{fmt::Write, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
@@ -143,7 +143,18 @@ impl Connect for Client {
         }
 
         let m = MultiProgress::new();
-        let pb_style = ProgressStyle::with_template(" {spinner} {prefix} {msg}")?;
+        let pb_style = ProgressStyle::with_template(" {spinner} {prefix} {msg} {timeout_in}")?
+            .with_key("timeout_in", |state: &ProgressState, w: &mut dyn Write| {
+                if state.elapsed().as_secs() > 3 {
+                    write!(
+                        w,
+                        "timeout in {:.1}s",
+                        GET_EVENTS_TIMEOUT - state.elapsed().as_secs()
+                    )
+                    .unwrap();
+                }
+            });
+
         let pb_after_style = |succeed| {
             ProgressStyle::with_template(
                 format!(
@@ -228,6 +239,8 @@ impl Connect for Client {
     }
 }
 
+static GET_EVENTS_TIMEOUT: u64 = 10;
+
 async fn get_events_of(
     relay: &nostr_sdk::Relay,
     filters: Vec<nostr::Filter>,
@@ -244,7 +257,7 @@ async fn get_events_of(
         .get_events_of(
             filters,
             // 20 is nostr_sdk default
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(GET_EVENTS_TIMEOUT),
             nostr_sdk::FilterOptions::ExitOnEOSE,
         )
         .await?;
