@@ -10,9 +10,12 @@
 // which is currently in nightly. alternatively we can use nightly as it looks
 // certain that the implementation is going to make it to stable but we don't
 // want to inadvertlty use other features of nightly that might be removed.
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
@@ -126,6 +129,29 @@ impl Connect for Client {
                 .context("cannot add relay")?;
         }
 
+        let m = MultiProgress::new();
+        let pb_style = ProgressStyle::with_template(" {spinner} {prefix} {msg}")?;
+        let pb_after_style = |succeed| {
+            ProgressStyle::with_template(
+                format!(
+                    " {} {}",
+                    if succeed {
+                        console::style("✔".to_string())
+                            .for_stderr()
+                            .green()
+                            .to_string()
+                    } else {
+                        console::style("✘".to_string())
+                            .for_stderr()
+                            .red()
+                            .to_string()
+                    },
+                    "{prefix} {msg}",
+                )
+                .as_str(),
+            )
+        };
+
         let relays_map = self.client.relays().await;
 
         let futures: Vec<_> = relays
@@ -140,14 +166,45 @@ impl Connect for Client {
                 )
             })
             .map(|(relay, filters)| async {
-                match get_events_of(relay, filters).await {
+                let pb = if std::env::var("NGITTEST").is_err() {
+                    let pb = m.add(
+                        ProgressBar::new(1)
+                            .with_prefix(format!("{: <11}{}", "connecting", relay.url()))
+                            .with_style(pb_style.clone()),
+                    );
+                    pb.enable_steady_tick(Duration::from_millis(300));
+                    Some(pb)
+                } else {
+                    None
+                };
+                match get_events_of(relay, filters, &pb).await {
                     Err(error) => {
-                        if std::env::var("NGITTEST").is_err() {
-                            println!("{} {}", error, relay.url());
+                        if let Some(pb) = pb {
+                            pb.set_style(pb_after_style(false)?);
+                            pb.set_prefix(format!("{: <11}{}", "error", relay.url()));
+                            pb.finish_with_message(
+                                console::style(
+                                    error.to_string().replace("relay pool error:", "error:"),
+                                )
+                                .for_stderr()
+                                .red()
+                                .to_string(),
+                            );
                         }
                         Err(error)
                     }
-                    res => res,
+                    Ok(res) => {
+                        if let Some(pb) = pb {
+                            pb.set_style(pb_after_style(true)?);
+                            pb.set_prefix(format!(
+                                "{: <11}{}",
+                                format!("{} events", res.len()),
+                                relay.url()
+                            ));
+                            pb.finish_with_message("");
+                        }
+                        Ok(res)
+                    }
                 }
             })
             .collect();
@@ -161,12 +218,14 @@ impl Connect for Client {
 async fn get_events_of(
     relay: &nostr_sdk::Relay,
     filters: Vec<nostr::Filter>,
+    pb: &Option<ProgressBar>,
 ) -> Result<Vec<Event>> {
-    if std::env::var("NGITTEST").is_err() {
-        println!("fetching from {}", relay.url());
-    }
     if !relay.is_connected().await {
         relay.connect(None).await;
+    }
+
+    if let Some(pb) = pb {
+        pb.set_prefix(format!("connected  {}", relay.url()));
     }
     let events = relay
         .get_events_of(
@@ -175,11 +234,7 @@ async fn get_events_of(
             std::time::Duration::from_secs(10),
             nostr_sdk::FilterOptions::ExitOnEOSE,
         )
-        .await
-        .context("failed to get events from relay")?;
-    if std::env::var("NGITTEST").is_err() {
-        println!("fetched {} events from {}", events.len(), relay.url());
-    }
+        .await?;
     Ok(events)
 }
 
