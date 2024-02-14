@@ -51,6 +51,11 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
     let pr_events: Vec<nostr::Event> =
         find_pr_events(&client, &repo_ref, &root_commit.to_string()).await?;
 
+    if pr_events.is_empty() {
+        println!("no PRs found... create one? try `ngit send`");
+        return Ok(());
+    }
+
     let selected_index = Interactor::default().choice(
         PromptChoiceParms::default()
             .with_prompt("All PRs")

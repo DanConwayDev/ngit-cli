@@ -103,6 +103,120 @@ fn cli_tester_create_pr(
     Ok(())
 }
 
+mod cannot_find_repo_event {
+    use super::*;
+    mod cli_prompts {
+        use nostr::{
+            nips::{nip01::Coordinate, nip19::Nip19Event},
+            ToBech32,
+        };
+
+        use super::*;
+        async fn run_async_repo_event_ref_needed(
+            invalid_input: bool,
+            nevent: bool,
+            naddr: bool,
+        ) -> Result<()> {
+            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+            );
+
+            r51.events.push(generate_test_key_1_relay_list_event());
+            r51.events.push(generate_test_key_1_metadata_event("fred"));
+
+            r55.events.push(generate_test_key_1_relay_list_event());
+            r55.events.push(generate_test_key_1_metadata_event("fred"));
+
+            let repo_event = generate_repo_ref_event();
+            r56.events.push(repo_event.clone());
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                test_repo.populate()?;
+                let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+
+                p.expect("cannot find repo event\r\n")?;
+
+                if invalid_input {
+                    let mut input = p.expect_input("repository naddr or nevent")?;
+                    input.succeeds_with("dfgvfvfzadvd")?;
+                    p.expect("not a valid nevent or naddr\r\n")?;
+                    let _ = p.expect_input("repository naddr or nevent")?;
+                    p.exit()?;
+                }
+                if nevent {
+                    let mut input = p.expect_input("repository naddr or nevent")?;
+                    input.succeeds_with(
+                        &Nip19Event {
+                            event_id: repo_event.id,
+                            author: Some(TEST_KEY_1_KEYS.public_key()),
+                            relays: vec!["ws://localhost:8056".to_string()],
+                        }
+                        .to_bech32()?,
+                    )?;
+                    p.expect("finding PRs...\r\n")?;
+                    p.expect_end_with("no PRs found... create one? try `ngit send`\r\n")?;
+                }
+                if naddr {
+                    let mut input = p.expect_input("repository naddr or nevent")?;
+                    input.succeeds_with(
+                        &Coordinate {
+                            kind: nostr::Kind::Custom(REPOSITORY_KIND),
+                            pubkey: TEST_KEY_1_KEYS.public_key(),
+                            identifier: repo_event.identifier().unwrap().to_string(),
+                            relays: vec!["ws://localhost:8056".to_string()],
+                        }
+                        .to_bech32()?,
+                    )?;
+                    p.expect("finding PRs...\r\n")?;
+                    p.expect_end_with("no PRs found... create one? try `ngit send`\r\n")?;
+                    p.expect_end_eventually()?;
+                }
+
+                for p in [51, 52, 53, 55, 56] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+
+            // launch relay
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn warns_not_valid_input_and_asks_again() -> Result<()> {
+            let _ = run_async_repo_event_ref_needed(true, false, false).await;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn finds_based_on_nevent_on_embeded_relay() -> Result<()> {
+            let _ = run_async_repo_event_ref_needed(false, true, false).await;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn finds_based_on_naddr_on_embeded_relay() -> Result<()> {
+            let _ = run_async_repo_event_ref_needed(false, false, true).await;
+            Ok(())
+        }
+    }
+}
 mod when_main_branch_is_uptodate {
     use super::*;
 

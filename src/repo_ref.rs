@@ -1,7 +1,7 @@
 use std::{fs::File, io::BufReader, str::FromStr};
 
 use anyhow::{bail, Context, Result};
-use nostr::{secp256k1::XOnlyPublicKey, FromBech32, Tag, ToBech32};
+use nostr::{nips::nip19::Nip19, secp256k1::XOnlyPublicKey, FromBech32, Tag, ToBech32};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -9,6 +9,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
+    cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::Connect,
     git::{Repo, RepoActions},
 };
@@ -168,25 +169,59 @@ pub async fn fetch(
         relays = repo_config.relays.clone();
     }
 
-    let events: Vec<nostr::Event> = client.get_events(relays, vec![repo_event_filter]).await?;
+    let event = loop {
+        let events: Vec<nostr::Event> = client
+            .get_events(relays.clone(), vec![repo_event_filter.clone()])
+            .await?;
 
-    // TODO: fallback to ask user for nevent - to capture
+        // TODO: if maintainers.yaml isn't present, as the user to select from the
+        // pubkeys they want to use. could use WoT as an indicator as well as the repo
+        // and user name.
 
-    // TODO: if maintainers.yaml isn't present, as the user to select from the
-    // pubkeys they want to use. could use WoT as an indicator as well as the repo
-    // and user name.
-
-    // TODO: if maintainers.yaml isn't present, save the selected repo pubkey
-    // somewhere within .git folder for future use and seek to get that next time
-
-    RepoRef::try_from(
-        events
+        // TODO: if maintainers.yaml isn't present, save the selected repo pubkey
+        // somewhere within .git folder for future use and seek to get that next time
+        if let Some(event) = events
             .iter()
             .filter(|e| e.kind.as_u64() == REPO_REF_KIND)
             .max_by_key(|e| e.created_at)
-            .context("cannot find repository reference event")?
-            .clone(),
-    )
+        {
+            break event.clone();
+        }
+        println!("cannot find repo event");
+        loop {
+            let bech32 = Interactor::default()
+                .input(PromptInputParms::default().with_prompt("repository naddr or nevent"))?;
+            if let Ok(nip19) = Nip19::from_bech32(bech32) {
+                repo_event_filter =
+                    nostr::Filter::default().kind(nostr::Kind::Custom(REPO_REF_KIND));
+                match nip19 {
+                    Nip19::Coordinate(c) => {
+                        repo_event_filter =
+                            repo_event_filter.identifier(c.identifier).author(c.pubkey);
+                        for r in c.relays {
+                            relays.push(r);
+                        }
+                    }
+                    Nip19::Event(n) => {
+                        if let Some(author) = n.author {
+                            repo_event_filter = repo_event_filter.id(n.event_id).author(author);
+                        }
+                        for r in n.relays {
+                            relays.push(r);
+                        }
+                    }
+                    Nip19::EventId(id) => repo_event_filter = repo_event_filter.id(id),
+                    _ => (),
+                }
+            } else {
+                println!("not a valid nevent or naddr");
+                continue;
+            }
+            break;
+        }
+    };
+
+    RepoRef::try_from(event.clone()).context("cannot parse event as repo reference")
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
