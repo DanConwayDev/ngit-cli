@@ -81,7 +81,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let mut maintainers = vec![keys.public_key()];
 
-    let mut repo_relays: Vec<String> = if !args.relays.is_empty() {
+    let repo_relays: Vec<String> = if !args.relays.is_empty() {
         args.relays.clone()
     } else if let Ok(config) = &repo_config_result {
         config.relays.clone()
@@ -91,16 +91,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         // TODO: reccommend some free relays
         user_ref.relays.write()
     };
-
-    // TODO: add blaster for just repo event and don't add it to repo relays
-    // TODO: fix the tests to support blaster
-    if std::env::var("NGITTEST").is_err()
-        && !repo_relays
-            .iter()
-            .any(|s| s.contains("nostr.mutinywallet.com"))
-    {
-        repo_relays.push("wss://nostr.mutinywallet.com".to_string());
-    }
 
     if let Ok(config) = &repo_config_result {
         maintainers = extract_pks(config.maintainers.clone())?;

@@ -309,12 +309,12 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
 
     #[tokio::test]
     #[serial]
-    async fn pr_not_sent_to_fallback_relay() -> Result<()> {
+    async fn only_1_pr_kind_event_sent_to_fallback_relays() -> Result<()> {
         let (r51, r52, _, _, _) = prep_run_create_pr(true).await?;
         for relay in [&r51, &r52] {
             assert_eq!(
                 relay.events.iter().filter(|e| is_cover_letter(e)).count(),
-                0,
+                1,
             );
         }
         Ok(())
@@ -323,8 +323,8 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
     #[tokio::test]
     #[serial]
     async fn only_2_patch_kind_events_sent_to_each_relay() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_pr(true).await?;
-        for relay in [&r53, &r55, &r56] {
+        let (r51, r52, r53, r55, r56) = prep_run_create_pr(true).await?;
+        for relay in [&r51, &r52, &r53, &r55, &r56] {
             assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 2,);
         }
         Ok(())
@@ -757,6 +757,8 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
                         (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
                         (" [my-relay] ws://localhost:8053", true, ""),
                         (" [repo-relay] ws://localhost:8056", true, ""),
+                        (" [default] ws://localhost:8051", true, ""),
+                        (" [default] ws://localhost:8052", true, ""),
                     ],
                     3,
                 )?;
@@ -930,6 +932,8 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
                                 false,
                                 "error: Payment Required",
                             ),
+                            (" [default] ws://localhost:8051", true, ""),
+                            (" [default] ws://localhost:8052", true, ""),
                         ],
                         3,
                     )?;
@@ -1016,6 +1020,8 @@ mod sends_2_patches_without_cover_letter {
                         (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
                         (" [my-relay] ws://localhost:8053", true, ""),
                         (" [repo-relay] ws://localhost:8056", true, ""),
+                        (" [default] ws://localhost:8051", true, ""),
+                        (" [default] ws://localhost:8052", true, ""),
                     ],
                     2,
                 )?;

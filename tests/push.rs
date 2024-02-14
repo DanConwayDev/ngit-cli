@@ -366,6 +366,8 @@ mod when_branch_is_checked_out {
                                 (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
                                 (" [my-relay] ws://localhost:8053", true, ""),
                                 (" [repo-relay] ws://localhost:8056", true, ""),
+                                (" [default] ws://localhost:8051", true, ""),
+                                (" [default] ws://localhost:8052", true, ""),
                             ],
                             1,
                         )?;

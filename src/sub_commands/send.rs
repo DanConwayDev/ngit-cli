@@ -183,7 +183,23 @@ pub async fn send_events(
     repo_read_relays: Vec<String>,
     animate: bool,
 ) -> Result<()> {
-    let (_, _, _, all) = unique_and_duplicate_all(&my_write_relays, &repo_read_relays);
+    let (_, _, _, mut all) = unique_and_duplicate_all(&my_write_relays, &repo_read_relays);
+
+    let mut fallback = client.get_fallback_relays().clone();
+
+    // blast repo events
+    if events.iter().any(|e| e.kind().as_u64().eq(&REPO_REF_KIND)) {
+        for r in client.get_blaster_relays() {
+            fallback.push(r.to_string());
+        }
+    }
+
+    // then remaining fallback list
+    for r in &fallback {
+        if !all.iter().any(|r2| r2.eq(&r)) {
+            all.push(r);
+        }
+    }
 
     let m = MultiProgress::new();
     let pb_style = ProgressStyle::with_template(if animate {
@@ -215,7 +231,7 @@ pub async fn send_events(
 
     join_all(all.iter().map(|&relay| async {
         let details = format!(
-            "{}{} {}",
+            "{}{}{} {}",
             if my_write_relays.iter().any(|r| relay.eq(r)) {
                 " [my-relay]"
             } else {
@@ -223,6 +239,11 @@ pub async fn send_events(
             },
             if repo_read_relays.iter().any(|r| relay.eq(r)) {
                 " [repo-relay]"
+            } else {
+                ""
+            },
+            if fallback.iter().any(|r| relay.eq(r)) {
+                " [default]"
             } else {
                 ""
             },

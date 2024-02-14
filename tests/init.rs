@@ -58,10 +58,11 @@ mod when_repo_not_previously_claimed {
             Relay<'static>,
             Relay<'static>,
             Relay<'static>,
+            Relay<'static>,
         )> {
             let git_repo = prep_git_repo()?;
-            // fallback (51,52) user write (53, 55) repo (55, 56)
-            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
                 Relay::new(
                     8051,
                     None,
@@ -81,13 +82,14 @@ mod when_repo_not_previously_claimed {
                 Relay::new(8053, None, None),
                 Relay::new(8055, None, None),
                 Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
             );
 
             // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_init(&git_repo);
                 p.expect_end_eventually()?;
-                for p in [51, 52, 53, 55, 56] {
+                for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
                 }
                 Ok(())
@@ -100,9 +102,10 @@ mod when_repo_not_previously_claimed {
                 r53.listen_until_close(),
                 r55.listen_until_close(),
                 r56.listen_until_close(),
+                r57.listen_until_close(),
             );
             cli_tester_handle.join().unwrap()?;
-            Ok((r51, r52, r53, r55, r56))
+            Ok((r51, r52, r53, r55, r56, r57))
         }
 
         mod sent_to_correct_relays {
@@ -111,7 +114,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn only_1_repository_kind_event_sent_to_user_relays() -> Result<()> {
-                let (_, _, r53, r55, _) = prep_run_init().await?;
+                let (_, _, r53, r55, _, _) = prep_run_init().await?;
                 for relay in [&r53, &r55] {
                     assert_eq!(
                         relay
@@ -128,7 +131,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn only_1_repository_kind_event_sent_to_specified_repo_relays() -> Result<()> {
-                let (_, _, _, r55, r56) = prep_run_init().await?;
+                let (_, _, _, r55, r56, _) = prep_run_init().await?;
                 for relay in [&r55, &r56] {
                     assert_eq!(
                         relay
@@ -144,8 +147,8 @@ mod when_repo_not_previously_claimed {
 
             #[tokio::test]
             #[serial]
-            async fn event_not_sent_to_fallback_relay() -> Result<()> {
-                let (r51, r52, _, _, _) = prep_run_init().await?;
+            async fn only_1_repository_kind_event_sent_to_fallback_relays() -> Result<()> {
+                let (r51, r52, _, _, _, _) = prep_run_init().await?;
                 for relay in [&r51, &r52] {
                     assert_eq!(
                         relay
@@ -153,9 +156,23 @@ mod when_repo_not_previously_claimed {
                             .iter()
                             .filter(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
                             .count(),
-                        0,
+                        1,
                     );
                 }
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
+            async fn only_1_repository_kind_event_sent_to_blaster_relays() -> Result<()> {
+                let (_, _, _, _, _, r57) = prep_run_init().await?;
+                assert_eq!(
+                    r57.events
+                        .iter()
+                        .filter(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
+                        .count(),
+                    1,
+                );
                 Ok(())
             }
         }
@@ -167,8 +184,8 @@ mod when_repo_not_previously_claimed {
 
             async fn async_run_test() -> Result<()> {
                 let git_repo = prep_git_repo()?;
-                // fallback (51,52) user write (53, 55) repo (55, 56)
-                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
                     Relay::new(
                         8051,
                         None,
@@ -188,6 +205,7 @@ mod when_repo_not_previously_claimed {
                     Relay::new(8053, None, None),
                     Relay::new(8055, None, None),
                     Relay::new(8056, None, None),
+                    Relay::new(8057, None, None),
                 );
 
                 // // check relay had the right number of events
@@ -214,7 +232,7 @@ mod when_repo_not_previously_claimed {
                         "
                         ),
                     );
-                    for p in [51, 52, 53, 55, 56] {
+                    for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
                     }
                     Ok(())
@@ -227,6 +245,7 @@ mod when_repo_not_previously_claimed {
                     r53.listen_until_close(),
                     r55.listen_until_close(),
                     r56.listen_until_close(),
+                    r57.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
@@ -247,8 +266,8 @@ mod when_repo_not_previously_claimed {
             #[serial]
             async fn d_replaceable_event_identifier_defaults_to_root_commit_id_shorthand()
             -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_init())?;
-                for relay in [&r53, &r55, &r56] {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -268,8 +287,8 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn root_commit_as_reference() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56] {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -285,8 +304,8 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn name() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56] {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -306,8 +325,8 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn description() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56] {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -323,8 +342,8 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn git_server() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56] {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -342,8 +361,8 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn relays() -> Result<()> {
-                let (_, _, r53, r55, r56) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56] {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -364,8 +383,8 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn web() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_init())?;
-                for relay in [&r53, &r55, &r56] {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -383,11 +402,11 @@ mod when_repo_not_previously_claimed {
                 Ok(())
             }
 
-            #[test]
+            #[tokio::test]
             #[serial]
-            fn current_user_in_maintainers() -> Result<()> {
-                let (_, _, r53, r55, r56) = futures::executor::block_on(prep_run_init())?;
-                for relay in [&r53, &r55, &r56] {
+            async fn current_user_in_maintainers() -> Result<()> {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
@@ -411,7 +430,8 @@ mod when_repo_not_previously_claimed {
             async fn run_test_async() -> Result<()> {
                 let git_repo = prep_git_repo()?;
 
-                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
                     Relay::new(
                         8051,
                         None,
@@ -431,6 +451,7 @@ mod when_repo_not_previously_claimed {
                     Relay::new(8053, None, None),
                     Relay::new(8055, None, None),
                     Relay::new(8056, None, None),
+                    Relay::new(8057, None, None),
                 );
 
                 // // check relay had the right number of events
@@ -443,11 +464,14 @@ mod when_repo_not_previously_claimed {
                             (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
                             (" [my-relay] ws://localhost:8053", true, ""),
                             (" [repo-relay] ws://localhost:8056", true, ""),
+                            (" [default] ws://localhost:8051", true, ""),
+                            (" [default] ws://localhost:8052", true, ""),
+                            (" [default] ws://localhost:8057", true, ""),
                         ],
                         1,
                     )?;
                     p.expect_end_with_whitespace()?;
-                    for p in [51, 52, 53, 55, 56] {
+                    for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
                     }
                     Ok(())
@@ -460,6 +484,7 @@ mod when_repo_not_previously_claimed {
                     r53.listen_until_close(),
                     r55.listen_until_close(),
                     r56.listen_until_close(),
+                    r57.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
@@ -514,10 +539,11 @@ mod when_repo_not_previously_claimed {
             Relay<'static>,
             Relay<'static>,
             Relay<'static>,
+            Relay<'static>,
         )> {
             let git_repo = prep_git_repo()?;
-            // fallback (51,52) user write (53, 55) repo (55, 56)
-            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
                 Relay::new(
                     8051,
                     None,
@@ -537,13 +563,14 @@ mod when_repo_not_previously_claimed {
                 Relay::new(8053, None, None),
                 Relay::new(8055, None, None),
                 Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
             );
 
             // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_init(&git_repo);
                 p.expect_end_eventually()?;
-                for p in [51, 52, 53, 55, 56] {
+                for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
                 }
                 Ok(())
@@ -556,9 +583,10 @@ mod when_repo_not_previously_claimed {
                 r53.listen_until_close(),
                 r55.listen_until_close(),
                 r56.listen_until_close(),
+                r57.listen_until_close(),
             );
             cli_tester_handle.join().unwrap()?;
-            Ok((r51, r52, r53, r55, r56))
+            Ok((r51, r52, r53, r55, r56, r57))
         }
 
         mod tags {
@@ -567,7 +595,7 @@ mod when_repo_not_previously_claimed {
             #[tokio::test]
             #[serial]
             async fn relays_match_user_write_relays() -> Result<()> {
-                let (_, _, r53, r55, _) = prep_run_init().await?;
+                let (_, _, r53, r55, _, _) = prep_run_init().await?;
                 for relay in [&r53, &r55] {
                     let event: &nostr::Event = relay
                         .events
@@ -589,7 +617,8 @@ mod when_repo_not_previously_claimed {
             async fn run_test_async() -> Result<()> {
                 let git_repo = prep_git_repo()?;
 
-                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
                     Relay::new(
                         8051,
                         None,
@@ -609,6 +638,7 @@ mod when_repo_not_previously_claimed {
                     Relay::new(8053, None, None),
                     Relay::new(8055, None, None),
                     Relay::new(8056, None, None),
+                    Relay::new(8057, None, None),
                 );
 
                 // // check relay had the right number of events
@@ -620,11 +650,14 @@ mod when_repo_not_previously_claimed {
                         vec![
                             (" [my-relay] [repo-relay] ws://localhost:8053", true, ""),
                             (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
+                            (" [default] ws://localhost:8051", true, ""),
+                            (" [default] ws://localhost:8052", true, ""),
+                            (" [default] ws://localhost:8057", true, ""),
                         ],
                         1,
                     )?;
                     p.expect_end_with_whitespace()?;
-                    for p in [51, 52, 53, 55, 56] {
+                    for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
                     }
                     Ok(())
@@ -637,6 +670,7 @@ mod when_repo_not_previously_claimed {
                     r53.listen_until_close(),
                     r55.listen_until_close(),
                     r56.listen_until_close(),
+                    r57.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
                 Ok(())

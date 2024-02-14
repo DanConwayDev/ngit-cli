@@ -26,6 +26,7 @@ pub struct Client {
     client: nostr_sdk::Client,
     fallback_relays: Vec<String>,
     more_fallback_relays: Vec<String>,
+    blaster_relays: Vec<String>,
 }
 
 #[cfg_attr(test, automock)]
@@ -37,6 +38,7 @@ pub trait Connect {
     async fn disconnect(&self) -> Result<()>;
     fn get_fallback_relays(&self) -> &Vec<String>;
     fn get_more_fallback_relays(&self) -> &Vec<String>;
+    fn get_blaster_relays(&self) -> &Vec<String>;
     async fn send_event_to(&self, url: &str, event: nostr::event::Event) -> Result<nostr::EventId>;
     async fn get_events(
         &self,
@@ -55,7 +57,6 @@ impl Connect for Client {
             ]
         } else {
             vec![
-                "wss://purplepages.es".to_string(),
                 "wss://relay.damus.io".to_string(),
                 "wss://nostr-pub.wellorder.net".to_string(),
                 "wss://nos.lol".to_string(),
@@ -70,6 +71,7 @@ impl Connect for Client {
             ]
         } else {
             vec![
+                "wss://purplepages.es".to_string(),
                 "wss://nostr.wine/".to_string(),
                 "wss://eden.nostr.land/".to_string(),
                 "wss://relay.nostr.band/".to_string(),
@@ -77,10 +79,16 @@ impl Connect for Client {
             ]
         };
 
+        let blaster_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
+            vec!["ws://localhost:8057".to_string()]
+        } else {
+            vec!["wss://nostr.mutinywallet.com".to_string()]
+        };
         Client {
             client: nostr_sdk::Client::new(&nostr::Keys::generate()),
             fallback_relays,
             more_fallback_relays,
+            blaster_relays,
         }
     }
     fn new(opts: Params) -> Self {
@@ -88,6 +96,7 @@ impl Connect for Client {
             client: nostr_sdk::Client::new(&opts.keys.unwrap_or(nostr::Keys::generate())),
             fallback_relays: opts.fallback_relays,
             more_fallback_relays: opts.more_fallback_relays,
+            blaster_relays: opts.blaster_relays,
         }
     }
 
@@ -108,6 +117,10 @@ impl Connect for Client {
 
     fn get_more_fallback_relays(&self) -> &Vec<String> {
         &self.more_fallback_relays
+    }
+
+    fn get_blaster_relays(&self) -> &Vec<String> {
+        &self.blaster_relays
     }
 
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
@@ -243,6 +256,7 @@ pub struct Params {
     pub keys: Option<nostr::Keys>,
     pub fallback_relays: Vec<String>,
     pub more_fallback_relays: Vec<String>,
+    pub blaster_relays: Vec<String>,
 }
 
 fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event> {
