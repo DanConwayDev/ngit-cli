@@ -57,10 +57,11 @@ impl Connect for Client {
             ]
         } else {
             vec![
-                "wss://relay.damus.io".to_string(),
-                "wss://nostr-pub.wellorder.net".to_string(),
+                "wss://relay.damus.io".to_string(), /* free, good reliability, have been known
+                                                     * to delete all messages */
                 "wss://nos.lol".to_string(),
-                // "ws://localhost:8080".to_string()
+                "wss://relay.nostr.band".to_string(),
+                "wss://relay.f7z.io".to_string(),
             ]
         };
 
@@ -71,11 +72,9 @@ impl Connect for Client {
             ]
         } else {
             vec![
-                "wss://purplepages.es".to_string(),
-                "wss://nostr.wine/".to_string(),
-                "wss://eden.nostr.land/".to_string(),
-                "wss://relay.nostr.band/".to_string(),
-                // "ws://localhost:8080".to_string()
+                "wss://purplerelay.com".to_string(), // free but reliability not tested
+                "wss://purplepages.es".to_string(),  // for profile events but unreliable
+                "wss://relayable.org".to_string(),   // free but not always reliable
             ]
         };
 
