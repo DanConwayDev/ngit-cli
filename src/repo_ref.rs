@@ -165,7 +165,7 @@ pub async fn fetch(
     let mut relays = fallback_relays;
     if let Ok(repo_config) = repo_config {
         repo_event_filter =
-            repo_event_filter.pubkeys(extract_pks(repo_config.maintainers.clone())?);
+            repo_event_filter.authors(extract_pks(repo_config.maintainers.clone())?);
         relays = repo_config.relays.clone();
     }
 
