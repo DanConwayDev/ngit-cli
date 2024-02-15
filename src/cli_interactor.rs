@@ -19,6 +19,8 @@ impl InteractorPrompt for Interactor {
     fn input(&self, parms: PromptInputParms) -> Result<String> {
         let input: String = Input::with_theme(&self.theme)
             .with_prompt(parms.prompt)
+            .default(parms.default)
+            .allow_empty(parms.optional)
             .interact_text()?;
         Ok(input)
     }
@@ -51,11 +53,21 @@ impl InteractorPrompt for Interactor {
 #[derive(Default)]
 pub struct PromptInputParms {
     pub prompt: String,
+    pub default: String,
+    pub optional: bool,
 }
 
 impl PromptInputParms {
     pub fn with_prompt<S: Into<String>>(mut self, prompt: S) -> Self {
         self.prompt = prompt.into();
+        self
+    }
+    pub fn with_default<S: Into<String>>(mut self, default: S) -> Self {
+        self.default = default.into();
+        self
+    }
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
         self
     }
 }

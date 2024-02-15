@@ -43,6 +43,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let repo_config_result = get_repo_config_from_yaml(&git_repo);
     // TODO: check for other claims
 
+    let identifier = root_commit.to_string()[..7].to_string();
+
     let name = match &args.title {
         Some(t) => t.clone(),
         None => Interactor::default().input(PromptInputParms::default().with_prompt("name"))?,
@@ -50,8 +52,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let description = match &args.description {
         Some(t) => t.clone(),
-        None => Interactor::default()
-            .input(PromptInputParms::default().with_prompt("description (Optional)"))?,
+        None => {
+            Interactor::default().input(PromptInputParms::default().with_prompt("description"))?
+        }
     };
 
     let git_server = git_repo
@@ -63,7 +66,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let web: Vec<String> = if args.web.is_empty() {
         Interactor::default()
-            .input(PromptInputParms::default().with_prompt("description (Optional)"))?
+            .input(
+                PromptInputParms::default()
+                    .with_prompt("web")
+                    .optional()
+                    .with_default(format!("https://gitworkshop.dev/repo/{}", &identifier)),
+            )?
             .split(' ')
             .map(std::string::ToString::to_string)
             .collect()
@@ -118,7 +126,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     println!("publishing repostory reference...");
 
     let repo_event = RepoRef {
-        identifier: root_commit.to_string()[..7].to_string(),
+        identifier,
         name,
         description,
         root_commit: root_commit.to_string(),
