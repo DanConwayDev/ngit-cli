@@ -196,7 +196,8 @@ pub async fn find_pr_events(
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
                     .custom_tag(nostr::Alphabet::T, vec!["root"])
-                    .identifiers(
+                    .custom_tag(
+                        nostr::Alphabet::A,
                         repo_ref
                             .maintainers
                             .iter()
