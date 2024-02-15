@@ -17,12 +17,12 @@ pub trait InteractorPrompt {
 }
 impl InteractorPrompt for Interactor {
     fn input(&self, parms: PromptInputParms) -> Result<String> {
-        let input: String = Input::with_theme(&self.theme)
-            .with_prompt(parms.prompt)
-            .default(parms.default)
-            .allow_empty(parms.optional)
-            .interact_text()?;
-        Ok(input)
+        let mut input = Input::with_theme(&self.theme);
+        input.with_prompt(parms.prompt).allow_empty(parms.optional);
+        if !parms.default.is_empty() {
+            input.default(parms.default);
+        }
+        Ok(input.interact_text()?)
     }
     fn password(&self, parms: PromptPasswordParms) -> Result<String> {
         let mut p = Password::with_theme(&self.theme);
