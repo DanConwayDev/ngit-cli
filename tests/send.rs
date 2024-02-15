@@ -185,7 +185,7 @@ fn cli_tester_create_pr(git_repo: &GitTestRepo, include_cover_letter: bool) -> C
 
 fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
     p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
-    p.expect("searching for your details...\r\n")?;
+    p.expect("searching for profile and relay updates...\r\n")?;
     p.expect("\r")?;
     p.expect("logged in as fred\r\n")?;
     p.expect(format!(

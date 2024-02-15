@@ -96,7 +96,7 @@ async fn get_user_details(
     #[cfg(not(test))] client: &Client,
 ) -> Result<UserRef> {
     let term = console::Term::stdout();
-    term.write_line("searching for your details...")?;
+    term.write_line("searching for profile and relay updates...")?;
     let user_manager = UserManager::default();
     let user_ref = user_manager
         .get_user(

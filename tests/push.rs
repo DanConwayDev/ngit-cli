@@ -355,7 +355,7 @@ mod when_branch_is_checked_out {
                         p.expect(
                             "1 commits ahead. preparing to create creating patch events.\r\n",
                         )?;
-                        p.expect("searching for your details...\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
                         p.expect("\r")?;
                         p.expect("logged in as fred\r\n")?;
                         p.expect("pushing 1 commits\r\n")?;

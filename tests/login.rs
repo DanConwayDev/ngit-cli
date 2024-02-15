@@ -60,7 +60,7 @@ mod with_relays {
                                 .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
                                 .succeeds_with(TEST_PASSWORD)?;
 
-                            p.expect("searching for your details...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
                             p.expect("\r")?;
 
                             // p.expect_end_with(
@@ -101,7 +101,7 @@ mod with_relays {
                                 .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
                                 .succeeds_with(TEST_PASSWORD)?;
 
-                            p.expect("searching for your details...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
                             p.expect("\r")?;
 
                             p.expect_end_with(
@@ -418,7 +418,7 @@ mod with_relays {
                             with_fresh_config(|| {
                                 let mut p = CliTester::new(["login", "--nsec", TEST_KEY_1_NSEC]);
 
-                                p.expect("searching for your details...\r\n")?;
+                                p.expect("searching for profile and relay updates...\r\n")?;
                                 p.expect("\r")?;
 
                                 p.expect_end_with("logged in as fred\r\n")?;
@@ -481,7 +481,7 @@ mod with_relays {
 
                                 let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
 
-                                p.expect("searching for your details...\r\n")?;
+                                p.expect("searching for profile and relay updates...\r\n")?;
                                 p.expect("\r")?;
 
                                 p.expect_end_with("logged in as fred\r\n")?;
@@ -540,7 +540,7 @@ mod with_relays {
                                     TEST_PASSWORD,
                                 ]);
 
-                                p.expect("searching for your details...\r\n")?;
+                                p.expect("searching for profile and relay updates...\r\n")?;
                                 p.expect("\r")?;
 
                                 p.expect_end_with("logged in as fred\r\n")?;
@@ -589,7 +589,7 @@ mod with_relays {
                                 .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
                                 .succeeds_with(TEST_PASSWORD)?;
 
-                            p.expect("searching for your details...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
                             p.expect("\r")?;
                             p.expect(
                                 "cannot find your account metadata (name, etc) on relays\r\n",
@@ -653,7 +653,7 @@ mod with_relays {
                                 .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
                                 .succeeds_with(TEST_PASSWORD)?;
 
-                            p.expect("searching for your details...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
                             p.expect("\r")?;
                             p.expect("cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
 
@@ -729,7 +729,7 @@ mod with_relays {
 
                             let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
 
-                            p.expect("searching for your details...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
                             p.expect("\r")?;
 
                             p.expect_end_eventually_with("logged in as fred\r\n")?;
@@ -774,7 +774,7 @@ mod with_relays {
                             .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
                             .succeeds_with(TEST_PASSWORD)?;
 
-                        p.expect("searching for your details...\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
                         p.expect("\r")?;
 
                         p.expect_end_with("logged in as fred\r\n")?;
