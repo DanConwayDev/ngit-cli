@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use git2::{DiffOptions, Oid, Revwalk};
 use nostr::prelude::{sha1::Hash as Sha1Hash, Hash};
 
-use crate::sub_commands::list::tag_value;
+use crate::sub_commands::list::{get_commit_id_from_patch, tag_value};
 
 pub struct Repo {
     git_repo: git2::Repository,
@@ -363,7 +363,7 @@ impl RepoActions for Repo {
             .into_iter()
             .filter(|e| {
                 !self
-                    .does_commit_exist(&tag_value(e, "commit").unwrap())
+                    .does_commit_exist(&get_commit_id_from_patch(e).unwrap())
                     .unwrap()
             })
             .collect();
@@ -517,7 +517,10 @@ fn apply_patch(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
             git2::ResetType::Mixed,
             None,
         )?;
-        if gpg_commit_id.to_string().eq(&tag_value(patch, "commit")?) {
+        if gpg_commit_id
+            .to_string()
+            .eq(&get_commit_id_from_patch(patch)?)
+        {
             return Ok(());
         }
     } else {
@@ -575,12 +578,12 @@ fn validate_patch_applied(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
 
             if !updated_commit_oid
                 .to_string()
-                .eq(&tag_value(patch, "commit")?)
+                .eq(&get_commit_id_from_patch(patch)?)
             {
                 bail!(
                     "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
                     updated_commit_oid.to_string(),
-                    tag_value(patch, "commit")?,
+                    get_commit_id_from_patch(patch)?,
                 )
             }
         }

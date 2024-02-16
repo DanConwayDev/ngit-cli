@@ -12,8 +12,8 @@ use crate::{
     repo_ref::{self, RepoRef},
     sub_commands::{
         list::{
-            find_commits_for_pr_event, find_pr_events, get_most_recent_patch_with_ancestors,
-            tag_value,
+            find_commits_for_pr_event, find_pr_events, get_commit_id_from_patch,
+            get_most_recent_patch_with_ancestors, tag_value,
         },
         send::{event_to_cover_letter, generate_patch_event, send_events},
     },
@@ -66,7 +66,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     let branch_tip = git_repo.get_tip_of_local_branch(&branch_name)?;
 
     let most_recent_patch_commit_id = str_to_sha1(
-        &tag_value(&most_recent_pr_patch_chain[0], "commit")
+        &get_commit_id_from_patch(&most_recent_pr_patch_chain[0])
             .context("latest patch event doesnt have a commit tag")?,
     )
     .context("latest patch event commit tag isn't a valid SHA1 hash")?;

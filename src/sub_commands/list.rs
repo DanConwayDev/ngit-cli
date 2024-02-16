@@ -131,6 +131,18 @@ pub fn tag_value(event: &nostr::Event, tag_name: &str) -> Result<String> {
         .clone())
 }
 
+pub fn get_commit_id_from_patch(event: &nostr::Event) -> Result<String> {
+    let value = tag_value(event, "commit");
+
+    if value.is_ok() {
+        value
+    } else if event.content.starts_with("From ") && event.content.len().gt(&45) {
+        Ok(event.content[5..45].to_string())
+    } else {
+        bail!("event is not a patch")
+    }
+}
+
 pub fn get_most_recent_patch_with_ancestors(
     mut patches: Vec<nostr::Event>,
 ) -> Result<Vec<nostr::Event>> {
@@ -143,14 +155,14 @@ pub fn get_most_recent_patch_with_ancestors(
         .filter(|p| p.created_at.eq(&first_patch.created_at))
         .collect();
 
-    let latest_commit_id = tag_value(
+    let latest_commit_id = get_commit_id_from_patch(
         // get the first patch which isn't a parent of a patch event created at the same
         // time
         patches_with_youngest_created_at
             .clone()
             .iter()
             .find(|p| {
-                if let Ok(commit) = tag_value(p, "commit") {
+                if let Ok(commit) = get_commit_id_from_patch(p) {
                     !patches_with_youngest_created_at.iter().any(|p2| {
                         if let Ok(parent) = tag_value(p2, "parent-commit") {
                             commit.eq(&parent)
@@ -163,7 +175,6 @@ pub fn get_most_recent_patch_with_ancestors(
                 }
             })
             .context("cannot find patches_with_youngest_created_at")?,
-        "commit",
     )?;
 
     let mut res = vec![];
@@ -171,7 +182,7 @@ pub fn get_most_recent_patch_with_ancestors(
     let mut commit_id_to_search = latest_commit_id;
 
     while let Some(event) = patches.iter().find(|e| {
-        if let Ok(commit) = tag_value(e, "commit") {
+        if let Ok(commit) = get_commit_id_from_patch(e) {
             commit.eq(&commit_id_to_search)
         } else {
             false // skip
