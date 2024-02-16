@@ -405,6 +405,10 @@ pub fn generate_cover_letter_and_patch_events(
                 Tag::Hashtag("cover-letter".to_string()),
                 Tag::Hashtag("root".to_string()),
             ],
+            // this is not strictly needed but makes for prettier branch names
+            // eventually a prefix will be needed of the event id to stop 2 proposals with the same name colliding
+            // a change like this, or the removal of this tag will require the actual branch name to be tracked
+            // so pulling and pushing still work
             if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
                 vec![Tag::Generic(
                     TagKind::Custom("branch-name".to_string()),
@@ -584,6 +588,7 @@ pub fn generate_patch_event(
             } else {
                 vec![]
             },
+            // see comment on branch names in cover letter event creation
             if let Some(branch_name) = branch_name {
                 if thread_event_id.is_none() {
                     vec![
@@ -607,14 +612,17 @@ pub fn generate_patch_event(
                     .map(|pk| Tag::public_key(*pk))
                     .collect(),
             vec![
+                // a fallback is now in place to extract this from the patch
                 Tag::Generic(
                     TagKind::Custom("commit".to_string()),
                     vec![commit.to_string()],
                 ),
+                // this is required as patches cannot be relied upon to include the 'base commit'
                 Tag::Generic(
                     TagKind::Custom("parent-commit".to_string()),
                     vec![commit_parent.to_string()],
                 ),
+                // this is required to ensure the commit id matches
                 Tag::Generic(
                     TagKind::Custom("commit-pgp-sig".to_string()),
                     vec![
@@ -623,11 +631,13 @@ pub fn generate_patch_event(
                             .unwrap_or_default(),
                     ],
                 ),
+                // removing description tag will not cause anything to break
                 Tag::Description(git_repo.get_commit_message(commit)?.to_string()),
                 Tag::Generic(
                     TagKind::Custom("author".to_string()),
                     git_repo.get_commit_author(commit)?,
                 ),
+                // this is required to ensure the commit id matches
                 Tag::Generic(
                     TagKind::Custom("committer".to_string()),
                     git_repo.get_commit_comitter(commit)?,
