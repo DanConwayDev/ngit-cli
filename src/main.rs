@@ -41,7 +41,7 @@ enum Commands {
     List(sub_commands::list::SubCommandArgs),
     /// send new commits as proposal ammendments
     Push,
-    /// pull latest commits in pr linked to checked out branch
+    /// pull latest commits in proposal linked to checked out branch
     Pull,
     /// run with --nsec flag to change npub
     Login(sub_commands::login::SubCommandArgs),

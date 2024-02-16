@@ -12,7 +12,7 @@ use crate::{
     repo_ref::{self, RepoRef},
     sub_commands::{
         list::{
-            find_commits_for_pr_event, find_pr_events, get_commit_id_from_patch,
+            find_commits_for_proposal_root_event, find_proposal_events, get_commit_id_from_patch,
             get_most_recent_patch_with_ancestors, tag_value,
         },
         send::{event_to_cover_letter, generate_patch_event, send_events},
@@ -36,7 +36,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
         .context("cannot get checked out branch name")?;
 
     if branch_name == main_or_master_branch_name {
-        bail!("checkout a branch associated with a PR first")
+        bail!("checkout a branch associated with a proposal first")
     }
     #[cfg(not(test))]
     let mut client = Client::default();
@@ -51,44 +51,48 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     )
     .await?;
 
-    let (pr_event, commit_events) =
-        fetch_pr_and_most_recent_patch_chain(&client, &repo_ref, &root_commit, &branch_name)
-            .await?;
+    let (proposal_root_event, commit_events) = fetch_proposal_root_and_most_recent_patch_chain(
+        &client,
+        &repo_ref,
+        &root_commit,
+        &branch_name,
+    )
+    .await?;
 
     // TODO: fix these scenarios:
-    // - local PR branch is 2 behind and 1 ahead. intructions: ...
-    // - PR has been rebased. (against commit in main) instructions: ...
-    // - PR has been rebased. (against commit not in repo) instructions: ..
+    // - local proposal branch is 2 behind and 1 ahead. intructions: ...
+    // - proposal has been rebased. (against commit in main) instructions: ...
+    // - proposal has been rebased. (against commit not in repo) instructions: ..
 
-    let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commit_events)
-        .context("cannot get most recent patch for PR")?;
+    let most_recent_proposal_patch_chain = get_most_recent_patch_with_ancestors(commit_events)
+        .context("cannot get most recent patch for proposal")?;
 
     let branch_tip = git_repo.get_tip_of_local_branch(&branch_name)?;
 
     let most_recent_patch_commit_id = str_to_sha1(
-        &get_commit_id_from_patch(&most_recent_pr_patch_chain[0])
+        &get_commit_id_from_patch(&most_recent_proposal_patch_chain[0])
             .context("latest patch event doesnt have a commit tag")?,
     )
     .context("latest patch event commit tag isn't a valid SHA1 hash")?;
 
     if most_recent_patch_commit_id.eq(&branch_tip) {
-        bail!("nostr pr already up-to-date with local branch");
+        bail!("nostr proposal already up-to-date with local branch");
     }
 
-    if most_recent_pr_patch_chain.iter().any(|e| {
+    if most_recent_proposal_patch_chain.iter().any(|e| {
         let c = tag_value(e, "parent-commit").unwrap_or_default();
         c.eq(&branch_tip.to_string())
     }) {
-        bail!("nostr pr is ahead of local branch");
+        bail!("nostr proposal is ahead of local branch");
     }
 
     let (ahead, behind) = git_repo
         .get_commits_ahead_behind(&most_recent_patch_commit_id, &branch_tip)
-        .context("the latest patch in pr doesnt share an ancestor with your branch.")?;
+        .context("the latest patch in proposal doesnt share an ancestor with your branch.")?;
 
     if !behind.is_empty() {
         bail!(
-            "your local pr branch is {} behind patches on nostr. consider rebasing or force pushing",
+            "your local proposal branch is {} behind patches on nostr. consider rebasing or force pushing",
             behind.len()
         )
     }
@@ -109,7 +113,7 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
                 &git_repo,
                 &root_commit,
                 commit,
-                Some(pr_event.id),
+                Some(proposal_root_event.id),
                 &keys,
                 &repo_ref,
                 patch_events.last().map(nostr::Event::id),
@@ -135,33 +139,34 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     Ok(())
 }
 
-pub async fn fetch_pr_and_most_recent_patch_chain(
+pub async fn fetch_proposal_root_and_most_recent_patch_chain(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     repo_ref: &RepoRef,
     root_commit: &Sha1Hash,
     branch_name: &String,
 ) -> Result<(nostr::Event, Vec<nostr::Event>)> {
-    println!("finding PR event...");
+    println!("finding proposal root event...");
 
-    let pr_events: Vec<nostr::Event> = find_pr_events(client, repo_ref, &root_commit.to_string())
-        .await
-        .context("cannot get pr events for repo")?;
+    let proposal_events: Vec<nostr::Event> =
+        find_proposal_events(client, repo_ref, &root_commit.to_string())
+            .await
+            .context("cannot get proposal events for repo")?;
 
-    let pr_event: nostr::Event = pr_events
+    let proposal_root_event: nostr::Event = proposal_events
         .iter()
         .find(|e| {
             event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(branch_name))
             // TODO remove the dependancy on same branch name and replace with
             // references stored in .git/ngit
         })
-        .context("cannot find a PR event associated with the checked out branch name")?
+        .context("cannot find a proposal root event associated with the checked out branch name")?
         .to_owned();
 
-    println!("found PR event. finding commits...");
+    println!("found proposal root event. finding commits...");
 
     let commits_events: Vec<nostr::Event> =
-        find_commits_for_pr_event(client, &pr_event, repo_ref).await?;
+        find_commits_for_proposal_root_event(client, &proposal_root_event, repo_ref).await?;
 
-    Ok((pr_event, commits_events))
+    Ok((proposal_root_event, commits_events))
 }

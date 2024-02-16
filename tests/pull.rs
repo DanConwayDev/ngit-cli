@@ -7,33 +7,33 @@ static FEATURE_BRANCH_NAME_1: &str = "feature-example-t";
 static FEATURE_BRANCH_NAME_2: &str = "feature-example-f";
 static FEATURE_BRANCH_NAME_3: &str = "feature-example-c";
 
-static PR_TITLE_1: &str = "pr a";
-static PR_TITLE_2: &str = "pr b";
-static PR_TITLE_3: &str = "pr c";
+static PROPOSAL_TITLE_1: &str = "proposal a";
+static PROPOSAL_TITLE_2: &str = "proposal b";
+static PROPOSAL_TITLE_3: &str = "proposal c";
 
-fn cli_tester_create_prs() -> Result<GitTestRepo> {
+fn cli_tester_create_proposals() -> Result<GitTestRepo> {
     let git_repo = GitTestRepo::default();
     git_repo.populate()?;
-    cli_tester_create_pr(
+    cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_1,
         "a",
-        PR_TITLE_1,
-        "pr a description",
+        PROPOSAL_TITLE_1,
+        "proposal a description",
     )?;
-    cli_tester_create_pr(
+    cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_2,
         "b",
-        PR_TITLE_2,
-        "pr b description",
+        PROPOSAL_TITLE_2,
+        "proposal b description",
     )?;
-    cli_tester_create_pr(
+    cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_3,
         "c",
-        PR_TITLE_3,
-        "pr c description",
+        PROPOSAL_TITLE_3,
+        "proposal c description",
     )?;
     Ok(git_repo)
 }
@@ -62,7 +62,7 @@ fn create_and_populate_branch(
     Ok(())
 }
 
-fn cli_tester_create_pr(
+fn cli_tester_create_proposal(
     test_repo: &GitTestRepo,
     branch_name: &str,
     prefix: &str,
@@ -113,7 +113,7 @@ mod when_main_is_checked_out {
             r55.events.push(generate_test_key_1_relay_list_event());
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                cli_tester_create_prs()?;
+                cli_tester_create_proposals()?;
 
                 let test_repo = GitTestRepo::default();
                 test_repo.populate()?;
@@ -122,7 +122,7 @@ mod when_main_is_checked_out {
                 test_repo.checkout("main")?;
 
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                p.expect("Error: checkout a branch associated with a PR first\r\n")?;
+                p.expect("Error: checkout a branch associated with a proposal first\r\n")?;
                 p.expect_end()?;
 
                 for p in [51, 52, 53, 55, 56] {
@@ -174,7 +174,7 @@ mod when_branch_doesnt_exist {
             r55.events.push(generate_test_key_1_relay_list_event());
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                cli_tester_create_prs()?;
+                cli_tester_create_proposals()?;
 
                 let test_repo = GitTestRepo::default();
                 test_repo.populate()?;
@@ -183,9 +183,9 @@ mod when_branch_doesnt_exist {
                 test_repo.checkout("random-name")?;
 
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                p.expect("finding PR event...\r\n")?;
+                p.expect("finding proposal event...\r\n")?;
                 p.expect(
-                    "Error: cannot find a PR event associated with the checked out branch name\r\n",
+                    "Error: cannot find a proposal event associated with the checked out branch name\r\n",
                 )?;
 
                 p.expect_end()?;
@@ -242,7 +242,7 @@ mod when_branch_is_checked_out {
                 r55.events.push(generate_test_key_1_relay_list_event());
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    cli_tester_create_prs()?;
+                    cli_tester_create_proposals()?;
 
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
@@ -250,8 +250,8 @@ mod when_branch_is_checked_out {
                     create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                    p.expect("finding PR event...\r\n")?;
-                    p.expect("found PR event. finding commits...\r\n")?;
+                    p.expect("finding proposal root event...\r\n")?;
+                    p.expect("found proposal root event. finding commits...\r\n")?;
                     p.expect("branch already up-to-date\r\n")?;
                     p.expect_end()?;
 
@@ -304,7 +304,7 @@ mod when_branch_is_checked_out {
 
             let cli_tester_handle =
                 std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                    let originating_repo = cli_tester_create_prs()?;
+                    let originating_repo = cli_tester_create_proposals()?;
 
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
@@ -356,7 +356,7 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle =
                     std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                        let originating_repo = cli_tester_create_prs()?;
+                        let originating_repo = cli_tester_create_proposals()?;
 
                         let test_repo = GitTestRepo::default();
                         test_repo.populate()?;
@@ -364,8 +364,8 @@ mod when_branch_is_checked_out {
                         create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", true)?;
 
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                        p.expect("finding PR event...\r\n")?;
-                        p.expect("found PR event. finding commits...\r\n")?;
+                        p.expect("finding proposal root event...\r\n")?;
+                        p.expect("found proposal root event. finding commits...\r\n")?;
                         p.expect("applied 1 new commits\r\n")?;
                         p.expect_end()?;
 
@@ -397,7 +397,7 @@ mod when_branch_is_checked_out {
 
         #[tokio::test]
         #[serial]
-        async fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
+        async fn proposal_branch_tip_is_most_recent_patch() -> Result<()> {
             let (originating_repo, test_repo) = prep_and_run().await?;
             assert_eq!(
                 originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
@@ -409,7 +409,7 @@ mod when_branch_is_checked_out {
 
     mod when_branch_is_ahead {
         // use super::*;
-        // TODO latest commit in pr builds off an older commit in pr
+        // TODO latest commit in proposal builds off an older commit in proposal
         // instead of previous.
         // TODO current git user created commit on branch
     }

@@ -140,7 +140,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     // oldest first
     ahead.reverse();
 
-    let events = generate_pr_and_patch_events(
+    let events = generate_cover_letter_and_patch_events(
         cover_letter_title_description.clone(),
         &git_repo,
         &ahead,
@@ -369,7 +369,7 @@ mod tests_unique_and_duplicate {
 
 pub static PATCH_KIND: u64 = 1617;
 
-pub fn generate_pr_and_patch_events(
+pub fn generate_cover_letter_and_patch_events(
     cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
     commits: &Vec<Sha1Hash>,

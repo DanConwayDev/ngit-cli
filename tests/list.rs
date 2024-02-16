@@ -8,30 +8,30 @@ static FEATURE_BRANCH_NAME_2: &str = "feature-example-f";
 static FEATURE_BRANCH_NAME_3: &str = "feature-example-c";
 static FEATURE_BRANCH_NAME_4: &str = "feature-example-d";
 
-static PR_TITLE_1: &str = "pr a";
-static PR_TITLE_2: &str = "pr b";
-static PR_TITLE_3: &str = "pr c";
+static PROPOSAL_TITLE_1: &str = "proposal a";
+static PROPOSAL_TITLE_2: &str = "proposal b";
+static PROPOSAL_TITLE_3: &str = "proposal c";
 
-fn cli_tester_create_prs() -> Result<GitTestRepo> {
+fn cli_tester_create_proposals() -> Result<GitTestRepo> {
     let git_repo = GitTestRepo::default();
     git_repo.populate()?;
-    cli_tester_create_pr(
+    cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_1,
         "a",
-        Some((PR_TITLE_1, "pr a description")),
+        Some((PROPOSAL_TITLE_1, "proposal a description")),
     )?;
-    cli_tester_create_pr(
+    cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_2,
         "b",
-        Some((PR_TITLE_2, "pr b description")),
+        Some((PROPOSAL_TITLE_2, "proposal b description")),
     )?;
-    cli_tester_create_pr(
+    cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_3,
         "c",
-        Some((PR_TITLE_3, "pr c description")),
+        Some((PROPOSAL_TITLE_3, "proposal c description")),
     )?;
     Ok(git_repo)
 }
@@ -60,7 +60,7 @@ fn create_and_populate_branch(
     Ok(())
 }
 
-fn cli_tester_create_pr(
+fn cli_tester_create_proposal(
     test_repo: &GitTestRepo,
     branch_name: &str,
     prefix: &str,
@@ -158,8 +158,8 @@ mod cannot_find_repo_event {
                         }
                         .to_bech32()?,
                     )?;
-                    p.expect("finding PRs...\r\n")?;
-                    p.expect_end_with("no PRs found... create one? try `ngit send`\r\n")?;
+                    p.expect("finding proposals...\r\n")?;
+                    p.expect_end_with("no proposals found... create one? try `ngit send`\r\n")?;
                 }
                 if naddr {
                     let mut input = p.expect_input("repository naddr or nevent")?;
@@ -172,8 +172,8 @@ mod cannot_find_repo_event {
                         }
                         .to_bech32()?,
                     )?;
-                    p.expect("finding PRs...\r\n")?;
-                    p.expect_end_with("no PRs found... create one? try `ngit send`\r\n")?;
+                    p.expect("finding proposals...\r\n")?;
+                    p.expect_end_with("no proposals found... create one? try `ngit send`\r\n")?;
                     p.expect_end_eventually()?;
                 }
 
@@ -220,17 +220,17 @@ mod cannot_find_repo_event {
 mod when_main_branch_is_uptodate {
     use super::*;
 
-    mod when_pr_branch_doesnt_exist {
+    mod when_proposal_branch_doesnt_exist {
         use super::*;
 
         mod when_main_is_checked_out {
             use super::*;
 
-            mod when_first_pr_selected {
+            mod when_first_proposal_selected {
                 use super::*;
 
-                // TODO: test when other prs with the same name but from other repositories are
-                //       present on relays
+                // TODO: test when other proposals with the same name but from other
+                // repositories are       present on relays
                 async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
                     // fallback (51,52) user write (53, 55) repo (55, 56)
                     let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -251,19 +251,19 @@ mod when_main_branch_is_uptodate {
 
                     let cli_tester_handle =
                         std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                            let originating_repo = cli_tester_create_prs()?;
+                            let originating_repo = cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
@@ -293,7 +293,7 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_pr_titles() -> Result<()> {
+                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -311,26 +311,26 @@ mod when_main_branch_is_uptodate {
                         r55.events.push(generate_test_key_1_relay_list_event());
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            cli_tester_create_prs()?;
+                            cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
                             let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
                             confirm.succeeds_with(None)?;
-                            p.expect("checked out PR branch. pulled 2 new commits\r\n")?;
+                            p.expect("checked out proposal branch. pulled 2 new commits\r\n")?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -354,15 +354,15 @@ mod when_main_branch_is_uptodate {
 
                     #[tokio::test]
                     #[serial]
-                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_created_with_correct_name() -> Result<()> {
+                async fn proposal_branch_created_with_correct_name() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         vec![FEATURE_BRANCH_NAME_1, "main"],
@@ -373,7 +373,7 @@ mod when_main_branch_is_uptodate {
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_checked_out() -> Result<()> {
+                async fn proposal_branch_checked_out() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_1,
@@ -384,7 +384,7 @@ mod when_main_branch_is_uptodate {
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
+                async fn proposal_branch_tip_is_most_recent_patch() -> Result<()> {
                     let (originating_repo, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
@@ -393,7 +393,7 @@ mod when_main_branch_is_uptodate {
                     Ok(())
                 }
             }
-            mod when_third_pr_selected {
+            mod when_third_proposal_selected {
                 use super::*;
 
                 async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
@@ -416,19 +416,19 @@ mod when_main_branch_is_uptodate {
 
                     let cli_tester_handle =
                         std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                            let originating_repo = cli_tester_create_prs()?;
+                            let originating_repo = cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(2, true)?;
@@ -458,7 +458,7 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_pr_titles() -> Result<()> {
+                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -476,26 +476,26 @@ mod when_main_branch_is_uptodate {
                         r55.events.push(generate_test_key_1_relay_list_event());
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            cli_tester_create_prs()?;
+                            cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(2, true)?;
                             p.expect("finding commits...\r\n")?;
                             let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
                             confirm.succeeds_with(None)?;
-                            p.expect("checked out PR branch. pulled 2 new commits\r\n")?;
+                            p.expect("checked out proposal branch. pulled 2 new commits\r\n")?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -519,15 +519,15 @@ mod when_main_branch_is_uptodate {
 
                     #[tokio::test]
                     #[serial]
-                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_created_with_correct_name() -> Result<()> {
+                async fn proposal_branch_created_with_correct_name() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         vec![FEATURE_BRANCH_NAME_3, "main"],
@@ -538,7 +538,7 @@ mod when_main_branch_is_uptodate {
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_checked_out() -> Result<()> {
+                async fn proposal_branch_checked_out() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_3,
@@ -549,7 +549,7 @@ mod when_main_branch_is_uptodate {
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
+                async fn proposal_branch_tip_is_most_recent_patch() -> Result<()> {
                     let (originating_repo, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_3)?,
@@ -558,7 +558,7 @@ mod when_main_branch_is_uptodate {
                     Ok(())
                 }
             }
-            mod when_forth_pr_has_no_cover_letter {
+            mod when_forth_proposal_has_no_cover_letter {
                 use super::*;
 
                 async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
@@ -581,8 +581,8 @@ mod when_main_branch_is_uptodate {
 
                     let cli_tester_handle =
                         std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                            let originating_repo = cli_tester_create_prs()?;
-                            cli_tester_create_pr(
+                            let originating_repo = cli_tester_create_proposals()?;
+                            cli_tester_create_proposal(
                                 &originating_repo,
                                 FEATURE_BRANCH_NAME_4,
                                 "d",
@@ -592,13 +592,13 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                     format!("add d3.md"), // commit msg title
                                 ],
                             )?;
@@ -629,7 +629,7 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_pr_titles() -> Result<()> {
+                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -647,8 +647,8 @@ mod when_main_branch_is_uptodate {
                         r55.events.push(generate_test_key_1_relay_list_event());
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            let originating_repo = cli_tester_create_prs()?;
-                            cli_tester_create_pr(
+                            let originating_repo = cli_tester_create_proposals()?;
+                            cli_tester_create_proposal(
                                 &originating_repo,
                                 FEATURE_BRANCH_NAME_4,
                                 "d",
@@ -658,13 +658,13 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                     format!("add d3.md"), // commit msg title
                                 ],
                             )?;
@@ -672,7 +672,7 @@ mod when_main_branch_is_uptodate {
                             p.expect("finding commits...\r\n")?;
                             let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
                             confirm.succeeds_with(None)?;
-                            p.expect("checked out PR branch. pulled 2 new commits\r\n")?;
+                            p.expect("checked out proposal branch. pulled 2 new commits\r\n")?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -696,15 +696,15 @@ mod when_main_branch_is_uptodate {
 
                     #[tokio::test]
                     #[serial]
-                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_created_with_correct_name() -> Result<()> {
+                async fn proposal_branch_created_with_correct_name() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         vec![FEATURE_BRANCH_NAME_4, "main"],
@@ -715,7 +715,7 @@ mod when_main_branch_is_uptodate {
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_checked_out() -> Result<()> {
+                async fn proposal_branch_checked_out() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_4,
@@ -726,7 +726,7 @@ mod when_main_branch_is_uptodate {
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
+                async fn proposal_branch_tip_is_most_recent_patch() -> Result<()> {
                     let (originating_repo, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_4)?,
@@ -738,7 +738,7 @@ mod when_main_branch_is_uptodate {
         }
     }
 
-    mod when_pr_branch_exists {
+    mod when_proposal_branch_exists {
         use super::*;
 
         mod when_main_is_checked_out {
@@ -766,7 +766,7 @@ mod when_main_branch_is_uptodate {
 
                     let cli_tester_handle =
                         std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                            let originating_repo = cli_tester_create_prs()?;
+                            let originating_repo = cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
@@ -779,13 +779,13 @@ mod when_main_branch_is_uptodate {
                                 false,
                             )?;
                             test_repo.checkout("main")?;
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
@@ -815,7 +815,7 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_pr_titles() -> Result<()> {
+                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -833,7 +833,7 @@ mod when_main_branch_is_uptodate {
                         r55.events.push(generate_test_key_1_relay_list_event());
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            cli_tester_create_prs()?;
+                            cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
@@ -847,20 +847,20 @@ mod when_main_branch_is_uptodate {
                             )?;
                             test_repo.checkout("main")?;
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
                             let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
                             confirm.succeeds_with(None)?;
-                            p.expect("checked out PR branch. no new commits to pull\r\n")?;
+                            p.expect("checked out proposal branch. no new commits to pull\r\n")?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -884,15 +884,15 @@ mod when_main_branch_is_uptodate {
 
                     #[tokio::test]
                     #[serial]
-                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_checked_out() -> Result<()> {
+                async fn proposal_branch_checked_out() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_1,
@@ -925,7 +925,7 @@ mod when_main_branch_is_uptodate {
 
                     let cli_tester_handle =
                         std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                            let originating_repo = cli_tester_create_prs()?;
+                            let originating_repo = cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
@@ -939,13 +939,13 @@ mod when_main_branch_is_uptodate {
                             )?;
                             test_repo.checkout("main")?;
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
@@ -975,7 +975,7 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_pr_titles() -> Result<()> {
+                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -993,7 +993,7 @@ mod when_main_branch_is_uptodate {
                         r55.events.push(generate_test_key_1_relay_list_event());
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            cli_tester_create_prs()?;
+                            cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
@@ -1007,20 +1007,20 @@ mod when_main_branch_is_uptodate {
                             )?;
                             test_repo.checkout("main")?;
 
-                            p.expect("finding PRs...\r\n")?;
+                            p.expect("finding proposals...\r\n")?;
                             let mut c = p.expect_choice(
-                                "All PRs",
+                                "all proposals",
                                 vec![
-                                    format!("\"{PR_TITLE_1}\""),
-                                    format!("\"{PR_TITLE_2}\""),
-                                    format!("\"{PR_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
                             let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
                             confirm.succeeds_with(None)?;
-                            p.expect("checked out PR branch. pulled 1 new commits\r\n")?;
+                            p.expect("checked out proposal branch. pulled 1 new commits\r\n")?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -1044,15 +1044,15 @@ mod when_main_branch_is_uptodate {
 
                     #[tokio::test]
                     #[serial]
-                    async fn prompts_to_choose_from_pr_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_pr_titles().await;
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
+                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_checked_out() -> Result<()> {
+                async fn proposal_branch_checked_out() -> Result<()> {
                     let (_, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         FEATURE_BRANCH_NAME_1,
@@ -1063,7 +1063,7 @@ mod when_main_branch_is_uptodate {
 
                 #[tokio::test]
                 #[serial]
-                async fn pr_branch_tip_is_most_recent_patch() -> Result<()> {
+                async fn proposal_branch_tip_is_most_recent_patch() -> Result<()> {
                     let (originating_repo, test_repo) = prep_and_run().await?;
                     assert_eq!(
                         originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
@@ -1075,8 +1075,8 @@ mod when_main_branch_is_uptodate {
 
             mod when_branch_is_ahead {
                 // use super::*;
-                // TODO latest commit in pr builds off an older commit in pr
-                // instead of previous.
+                // TODO latest commit in proposal builds off an older commit in
+                // proposal instead of previous.
                 // TODO current git user created commit on branch
             }
 

@@ -46,21 +46,21 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
     )
     .await?;
 
-    println!("finding PRs...");
+    println!("finding proposals...");
 
-    let pr_events: Vec<nostr::Event> =
-        find_pr_events(&client, &repo_ref, &root_commit.to_string()).await?;
+    let proposal_events: Vec<nostr::Event> =
+        find_proposal_events(&client, &repo_ref, &root_commit.to_string()).await?;
 
-    if pr_events.is_empty() {
-        println!("no PRs found... create one? try `ngit send`");
+    if proposal_events.is_empty() {
+        println!("no proposals found... create one? try `ngit send`");
         return Ok(());
     }
 
     let selected_index = Interactor::default().choice(
         PromptChoiceParms::default()
-            .with_prompt("All PRs")
+            .with_prompt("all proposals")
             .with_choices(
-                pr_events
+                proposal_events
                     .iter()
                     .map(|e| {
                         if let Ok(cl) = event_to_cover_letter(e) {
@@ -78,26 +78,27 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
     println!("finding commits...");
 
     let commits_events: Vec<nostr::Event> =
-        find_commits_for_pr_event(&client, &pr_events[selected_index], &repo_ref).await?;
+        find_commits_for_proposal_root_event(&client, &proposal_events[selected_index], &repo_ref)
+            .await?;
 
     confirm_checkout(&git_repo)?;
 
-    let most_recent_pr_patch_chain = get_most_recent_patch_with_ancestors(commits_events)
-        .context("cannot get most recent patch for PR")?;
+    let most_recent_proposal_patch_chain = get_most_recent_patch_with_ancestors(commits_events)
+        .context("cannot get most recent patch for proposal")?;
 
-    let branch_name: String = event_to_cover_letter(&pr_events[selected_index])
+    let branch_name: String = event_to_cover_letter(&proposal_events[selected_index])
         .context("cannot assign a branch name as event is not a patch set root")?
         .branch_name;
 
     let applied = git_repo
-        .apply_patch_chain(&branch_name, most_recent_pr_patch_chain)
+        .apply_patch_chain(&branch_name, most_recent_proposal_patch_chain)
         .context("cannot apply patch chain")?;
 
     if applied.is_empty() {
-        println!("checked out PR branch. no new commits to pull");
+        println!("checked out proposal branch. no new commits to pull");
     } else {
         println!(
-            "checked out PR branch. pulled {} new commits",
+            "checked out proposal branch. pulled {} new commits",
             applied.len(),
         );
     }
@@ -115,7 +116,7 @@ fn confirm_checkout(git_repo: &Repo) -> Result<()> {
 
     if git_repo.has_outstanding_changes()? {
         bail!(
-            "cannot pull PR branch when repository is not clean. discard or stash (un)staged changes and try again."
+            "cannot pull proposal branch when repository is not clean. discard or stash (un)staged changes and try again."
         );
     }
     Ok(())
@@ -201,7 +202,7 @@ pub fn get_most_recent_patch_with_ancestors(
     Ok(res)
 }
 
-pub async fn find_pr_events(
+pub async fn find_proposal_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     repo_ref: &RepoRef,
@@ -221,7 +222,8 @@ pub async fn find_pr_events(
                             .iter()
                             .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
                     ),
-                // also pick up prs from the same repo but no target at our maintainers repo events
+                // also pick up proposals from the same repo but no target at our maintainers repo
+                // events
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
                     .custom_tag(nostr::Alphabet::T, vec!["root"])
@@ -229,7 +231,7 @@ pub async fn find_pr_events(
             ],
         )
         .await
-        .context("cannot get pr events")?
+        .context("cannot get proposal events")?
         .iter()
         .filter(|e| {
             event_is_patch_set_root(e)
@@ -250,10 +252,10 @@ pub async fn find_pr_events(
         .collect::<Vec<nostr::Event>>())
 }
 
-pub async fn find_commits_for_pr_event(
+pub async fn find_commits_for_proposal_root_event(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    pr_event: &nostr::Event,
+    proposal_root_event: &nostr::Event,
     repo_ref: &RepoRef,
 ) -> Result<Vec<nostr::Event>> {
     let mut patch_events: Vec<nostr::Event> = client
@@ -265,7 +267,7 @@ pub async fn find_commits_for_pr_event(
                     // this requires every patch to reference the root event
                     // this will not pick up v2,v3 patch sets
                     // TODO: fetch commits for v2.. patch sets
-                    .event(pr_event.id),
+                    .event(proposal_root_event.id),
             ],
         )
         .await
@@ -273,15 +275,15 @@ pub async fn find_commits_for_pr_event(
         .iter()
         .filter(|e| {
             e.kind.as_u64() == PATCH_KIND
-                && e.tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 2 && t.as_vec()[1].eq(&pr_event.id.to_string()))
+                && e.tags.iter().any(|t| {
+                    t.as_vec().len() > 2 && t.as_vec()[1].eq(&proposal_root_event.id.to_string())
+                })
         })
         .map(std::borrow::ToOwned::to_owned)
         .collect();
 
-    if !event_is_cover_letter(pr_event) {
-        patch_events.push(pr_event.clone());
+    if !event_is_cover_letter(proposal_root_event) {
+        patch_events.push(proposal_root_event.clone());
     }
     Ok(patch_events)
 }

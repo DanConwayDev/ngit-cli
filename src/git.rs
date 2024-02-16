@@ -372,7 +372,7 @@ impl RepoActions for Repo {
             if let Ok(last_patch) = patches_to_apply.last().context("no patches") {
                 last_patch
             } else {
-                self.checkout(branch_name).context("latest commit in pr doesnt connect with an existing commit. Try a git pull on master first.")?;
+                self.checkout(branch_name).context("latest commit in proposal doesnt connect with an existing commit. Try a git pull on master first.")?;
                 return Ok(vec![]);
             },
             "parent-commit",
@@ -387,9 +387,9 @@ impl RepoActions for Repo {
         if let Ok(current_tip) = self.get_tip_of_local_branch(branch_name) {
             if !current_tip.to_string().eq(&parent_commit_id) {
                 // TODO: either changes have been made on the local branch or
-                // the latest commit in the pr has rebased onto a newer commit
-                // that you havn't pulled yet ask user whether
-                // they want to proceed
+                // the latest commit in the prpoosal has rebased onto a newer
+                // commit that you havn't pulled yet ask user
+                // whether they want to proceed
             }
         }
 
@@ -1408,20 +1408,22 @@ mod tests {
         use test_utils::TEST_KEY_1_KEYS;
 
         use super::*;
-        use crate::{repo_ref::RepoRef, sub_commands::send::generate_pr_and_patch_events};
+        use crate::{
+            repo_ref::RepoRef, sub_commands::send::generate_cover_letter_and_patch_events,
+        };
 
         static BRANCH_NAME: &str = "add-example-feature";
-        // returns original_repo, pr_event, patch_events
+        // returns original_repo, cover_letter_event, patch_events
         fn generate_test_repo_and_events() -> Result<(GitTestRepo, nostr::Event, Vec<nostr::Event>)>
         {
             let original_repo = GitTestRepo::default();
             let oid3 = original_repo.populate_with_test_branch()?;
             let oid2 = original_repo.git_repo.find_commit(oid3)?.parent_id(0)?;
             let oid1 = original_repo.git_repo.find_commit(oid2)?.parent_id(0)?;
-            // TODO: generate pr and patch events
+            // TODO: generate cover_letter and patch events
             let git_repo = Repo::from_path(&original_repo.dir)?;
 
-            let mut events = generate_pr_and_patch_events(
+            let mut events = generate_cover_letter_and_patch_events(
                 Some(("test".to_string(), "test".to_string())),
                 &git_repo,
                 &vec![oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
@@ -1441,7 +1443,7 @@ mod tests {
                 use super::*;
 
                 #[test]
-                fn branch_gets_created_with_name_specified_in_pr() -> Result<()> {
+                fn branch_gets_created_with_name_specified_in_proposal() -> Result<()> {
                     let (_, _, patch_events) = generate_test_repo_and_events()?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
@@ -1530,7 +1532,7 @@ mod tests {
                 use super::*;
 
                 #[test]
-                fn branch_gets_created_with_name_specified_in_pr() -> Result<()> {
+                fn branch_gets_created_with_name_specified_in_proposal() -> Result<()> {
                     let (_, _, patch_events) = generate_test_repo_and_events()?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
@@ -1609,7 +1611,7 @@ mod tests {
                 }
             }
 
-            // TODO when_pr_root_is_tip_ahead_of_main_and_doesnt_exist
+            // TODO when_proposal_root_is_tip_ahead_of_main_and_doesnt_exist
         }
 
         mod when_branch_and_first_commits_exists {
