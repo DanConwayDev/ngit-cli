@@ -372,7 +372,7 @@ impl RepoActions for Repo {
             if let Ok(last_patch) = patches_to_apply.last().context("no patches") {
                 last_patch
             } else {
-                self.checkout(branch_name).context("latest commit in pr doesnt connect with an existing commit. Try a git pull first.")?;
+                self.checkout(branch_name).context("latest commit in pr doesnt connect with an existing commit. Try a git pull on master first.")?;
                 return Ok(vec![]);
             },
             "parent-commit",
