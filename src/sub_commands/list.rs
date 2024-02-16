@@ -143,6 +143,24 @@ pub fn get_commit_id_from_patch(event: &nostr::Event) -> Result<String> {
     }
 }
 
+fn get_event_parent_id(event: &nostr::Event) -> Result<String> {
+    Ok(if let Some(reply_tag) = event
+        .tags
+        .iter()
+        .find(|t| t.as_vec().len().gt(&3) && t.as_vec()[3].eq("reply"))
+    {
+        reply_tag
+    } else {
+        event
+            .tags
+            .iter()
+            .find(|t| t.as_vec().len().gt(&3) && t.as_vec()[3].eq("root"))
+            .context("no reply or root e tag present".to_string())?
+    }
+    .as_vec()[1]
+        .clone())
+}
+
 pub fn get_most_recent_patch_with_ancestors(
     mut patches: Vec<nostr::Event>,
 ) -> Result<Vec<nostr::Event>> {
@@ -155,41 +173,30 @@ pub fn get_most_recent_patch_with_ancestors(
         .filter(|p| p.created_at.eq(&first_patch.created_at))
         .collect();
 
-    let latest_commit_id = get_commit_id_from_patch(
-        // get the first patch which isn't a parent of a patch event created at the same
-        // time
-        patches_with_youngest_created_at
-            .clone()
-            .iter()
-            .find(|p| {
-                if let Ok(commit) = get_commit_id_from_patch(p) {
-                    !patches_with_youngest_created_at.iter().any(|p2| {
-                        if let Ok(parent) = tag_value(p2, "parent-commit") {
-                            commit.eq(&parent)
-                        } else {
-                            false // skip 
-                        }
-                    })
-                } else {
-                    false // skip 
-                }
-            })
-            .context("cannot find patches_with_youngest_created_at")?,
-    )?;
-
     let mut res = vec![];
 
-    let mut commit_id_to_search = latest_commit_id;
+    let mut event_id_to_search = patches_with_youngest_created_at
+        .clone()
+        .iter()
+        .find(|p| {
+            !patches_with_youngest_created_at.iter().any(|p2| {
+                if let Ok(reply_to) = get_event_parent_id(p2) {
+                    reply_to.eq(&p.id.to_string())
+                } else {
+                    false
+                }
+            })
+        })
+        .context("cannot find patches_with_youngest_created_at")?
+        .id
+        .to_string();
 
-    while let Some(event) = patches.iter().find(|e| {
-        if let Ok(commit) = get_commit_id_from_patch(e) {
-            commit.eq(&commit_id_to_search)
-        } else {
-            false // skip
-        }
-    }) {
+    while let Some(event) = patches
+        .iter()
+        .find(|e| e.id.to_string().eq(&event_id_to_search))
+    {
         res.push(event.clone());
-        commit_id_to_search = tag_value(event, "parent-commit")?;
+        event_id_to_search = get_event_parent_id(event).unwrap_or_default();
     }
     Ok(res)
 }
