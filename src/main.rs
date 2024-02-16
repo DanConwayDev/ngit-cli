@@ -32,18 +32,19 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// save encrypted nsec for future use
-    Login(sub_commands::login::SubCommandArgs),
-    /// issue repository reference event as a maintainers
+    /// issue a repo event as a maintainers to signal you are accepting
+    /// proposals via nostr
     Init(sub_commands::init::SubCommandArgs),
-    /// send a PR / patch / patch set via nostr events
+    /// issue commits on current branch as a new proposal
     Send(sub_commands::send::SubCommandArgs),
-    /// list open PRs / patches / patch sets and pull / apply them a branch
+    /// list proposals; optionally apply them as a new branch
     List(sub_commands::list::SubCommandArgs),
+    /// send new commits as proposal ammendments
+    Push,
     /// pull latest commits in pr linked to checked out branch
     Pull,
-    /// push commits to current checked out pr branch
-    Push,
+    /// run with --nsec flag to change npub
+    Login(sub_commands::login::SubCommandArgs),
 }
 
 #[tokio::main]
