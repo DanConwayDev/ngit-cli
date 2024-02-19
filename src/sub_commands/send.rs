@@ -486,14 +486,17 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
         .unwrap_or(event.content.len() - 1 - title_index)
         + title_index;
 
+    let description_index_end = event.content[title_index..]
+        .find("\ndiff --git")
+        .unwrap_or(event.content.len() - 1)
+        + title_index;
+
     let title = if let Ok(msg) = tag_value(event, "description") {
         msg.split('\n').collect::<Vec<&str>>()[0].to_string()
     } else {
         event.content[title_index..description_index].to_string()
     };
 
-    // note: if the description field is removed from patch events like in gitstr,
-    // then this will show entire patch. I'm not sure it is ever displayed though
     let description = if let Ok(msg) = tag_value(event, "description") {
         if let Some((_before, after)) = msg.split_once('\n') {
             after.trim().to_string()
@@ -501,7 +504,9 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
             String::new()
         }
     } else {
-        event.content[description_index..].trim().to_string()
+        event.content[description_index..=description_index_end]
+            .trim()
+            .to_string()
     };
 
     Ok(CoverLetter {
