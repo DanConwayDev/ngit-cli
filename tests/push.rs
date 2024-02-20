@@ -208,7 +208,7 @@ mod when_branch_is_checked_out {
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
                     p.expect("finding proposal root event...\r\n")?;
                     p.expect("found proposal root event. finding commits...\r\n")?;
-                    p.expect("Error: nostr proposal already up-to-date with local branch\r\n")?;
+                    p.expect("Error: proposal already up-to-date with local branch\r\n")?;
                     p.expect_end()?;
 
                     for p in [51, 52, 53, 55, 56] {
@@ -271,7 +271,7 @@ mod when_branch_is_checked_out {
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
                     p.expect("finding proposal root event...\r\n")?;
                     p.expect("found proposal root event. finding commits...\r\n")?;
-                    p.expect("Error: nostr proposal is ahead of local branch\r\n")?;
+                    p.expect("Error: proposal is ahead of local branch\r\n")?;
                     p.expect_end()?;
 
                     for p in [51, 52, 53, 55, 56] {

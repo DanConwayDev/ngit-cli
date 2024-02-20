@@ -76,14 +76,14 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     .context("latest patch event commit tag isn't a valid SHA1 hash")?;
 
     if most_recent_patch_commit_id.eq(&branch_tip) {
-        bail!("nostr proposal already up-to-date with local branch");
+        bail!("proposal already up-to-date with local branch");
     }
 
     if most_recent_proposal_patch_chain.iter().any(|e| {
         let c = tag_value(e, "parent-commit").unwrap_or_default();
         c.eq(&branch_tip.to_string())
     }) {
-        bail!("nostr proposal is ahead of local branch");
+        bail!("proposal is ahead of local branch");
     }
 
     let (ahead, behind) = git_repo
