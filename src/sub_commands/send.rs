@@ -488,8 +488,7 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
 
     let description_index_end = event.content[title_index..]
         .find("\ndiff --git")
-        .unwrap_or(event.content.len() - 1)
-        + title_index;
+        .unwrap_or(event.content.len() - 1);
 
     let title = if let Ok(msg) = tag_value(event, "description") {
         msg.split('\n').collect::<Vec<&str>>()[0].to_string()
