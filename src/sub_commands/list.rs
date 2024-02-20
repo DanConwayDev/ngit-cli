@@ -720,6 +720,9 @@ pub fn get_most_recent_patch_with_ancestors(
         .find(|e| e.id.to_string().eq(&event_id_to_search))
     {
         res.push(event.clone());
+        if event_is_patch_set_root(event) {
+            break;
+        }
         event_id_to_search = get_event_parent_id(event).unwrap_or_default();
     }
     Ok(res)
