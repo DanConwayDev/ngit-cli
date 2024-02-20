@@ -249,8 +249,8 @@ mod when_main_branch_is_uptodate {
                     r55.events.push(generate_test_key_1_metadata_event("fred"));
                     r55.events.push(generate_test_key_1_relay_list_event());
 
-                    let cli_tester_handle =
-                        std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
+                    let cli_tester_handle = std::thread::spawn(
+                        move || -> Result<(GitTestRepo, GitTestRepo)> {
                             let originating_repo = cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
@@ -267,16 +267,29 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
-                            let mut confirm =
-                                p.expect_confirm_eventually("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect_end_eventually_and_print()?;
 
+                            p.expect("finding commits...\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!(
+                                        "create and checkout proposal branch (2 ahead 0 behind 'main')" ),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
+                            ))?;
+                            p.expect_end()?;
                             for p in [51, 52, 53, 55, 56] {
                                 relay::shutdown_relay(8000 + p)?;
                             }
                             Ok((originating_repo, test_repo))
-                        });
+                        },
+                    );
 
                     // launch relay
                     let _ = join!(
@@ -328,9 +341,20 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
-                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect("checked out proposal branch. pulled 2 new commits\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!(
+                                        "create and checkout proposal branch (2 ahead 0 behind 'main')" ),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
+                            ))?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -414,8 +438,8 @@ mod when_main_branch_is_uptodate {
                     r55.events.push(generate_test_key_1_metadata_event("fred"));
                     r55.events.push(generate_test_key_1_relay_list_event());
 
-                    let cli_tester_handle =
-                        std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
+                    let cli_tester_handle = std::thread::spawn(
+                        move || -> Result<(GitTestRepo, GitTestRepo)> {
                             let originating_repo = cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
@@ -432,16 +456,30 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true)?;
-                            let mut confirm =
-                                p.expect_confirm_eventually("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect_end_eventually_and_print()?;
+
+                            p.expect("finding commits...\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!(
+                                        "create and checkout proposal branch (2 ahead 0 behind 'main')" ),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_3}' branch\r\n"
+                            ))?;
+                            p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
                                 relay::shutdown_relay(8000 + p)?;
                             }
                             Ok((originating_repo, test_repo))
-                        });
+                        },
+                    );
 
                     // launch relay
                     let _ = join!(
@@ -493,9 +531,20 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(2, true)?;
                             p.expect("finding commits...\r\n")?;
-                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect("checked out proposal branch. pulled 2 new commits\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!(
+                                        "create and checkout proposal branch (2 ahead 0 behind 'main')" ),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_3}' branch\r\n"
+                            ))?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -579,8 +628,8 @@ mod when_main_branch_is_uptodate {
                     r55.events.push(generate_test_key_1_metadata_event("fred"));
                     r55.events.push(generate_test_key_1_relay_list_event());
 
-                    let cli_tester_handle =
-                        std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
+                    let cli_tester_handle = std::thread::spawn(
+                        move || -> Result<(GitTestRepo, GitTestRepo)> {
                             let originating_repo = cli_tester_create_proposals()?;
                             cli_tester_create_proposal(
                                 &originating_repo,
@@ -603,16 +652,29 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(3, true)?;
-                            let mut confirm =
-                                p.expect_confirm_eventually("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect_end_eventually_and_print()?;
+                            p.expect("finding commits...\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!(
+                                        "create and checkout proposal branch (2 ahead 0 behind 'main')" ),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_4}' branch\r\n"
+                            ))?;
+                            p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
                                 relay::shutdown_relay(8000 + p)?;
                             }
                             Ok((originating_repo, test_repo))
-                        });
+                        },
+                    );
 
                     // launch relay
                     let _ = join!(
@@ -670,9 +732,20 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(3, true)?;
                             p.expect("finding commits...\r\n")?;
-                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect("checked out proposal branch. pulled 2 new commits\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!(
+                                        "create and checkout proposal branch (2 ahead 0 behind 'main')" ),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_4}' branch\r\n"
+                            ))?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -789,10 +862,21 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
-                            let mut confirm =
-                                p.expect_confirm_eventually("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect_end_eventually_and_print()?;
+                            p.expect("finding commits...\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!("checkout proposal branch (2 ahead 0 behind 'main')"),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
+                            ))?;
+                            p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
                                 relay::shutdown_relay(8000 + p)?;
@@ -858,9 +942,19 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
-                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect("checked out proposal branch. no new commits to pull\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!("checkout proposal branch (2 ahead 0 behind 'main')"),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect(format!(
+                                "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
+                            ))?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
@@ -923,8 +1017,8 @@ mod when_main_branch_is_uptodate {
                     r55.events.push(generate_test_key_1_metadata_event("fred"));
                     r55.events.push(generate_test_key_1_relay_list_event());
 
-                    let cli_tester_handle =
-                        std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
+                    let cli_tester_handle = std::thread::spawn(
+                        move || -> Result<(GitTestRepo, GitTestRepo)> {
                             let originating_repo = cli_tester_create_proposals()?;
 
                             let test_repo = GitTestRepo::default();
@@ -949,16 +1043,26 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true)?;
-                            let mut confirm =
-                                p.expect_confirm_eventually("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect_end_eventually_and_print()?;
+                            p.expect("finding commits...\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!("checkout proposal branch and apply 1 appendments"),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect("checked out proposal branch and applied 1 appendments (2 ahead 0 behind 'main')\r\n")?;
+                            p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {
                                 relay::shutdown_relay(8000 + p)?;
                             }
                             Ok((originating_repo, test_repo))
-                        });
+                        },
+                    );
 
                     // launch relay
                     let _ = join!(
@@ -1018,9 +1122,17 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true)?;
                             p.expect("finding commits...\r\n")?;
-                            let mut confirm = p.expect_confirm("check out branch?", Some(true))?;
-                            confirm.succeeds_with(None)?;
-                            p.expect("checked out proposal branch. pulled 1 new commits\r\n")?;
+                            let mut c = p.expect_choice(
+                                "",
+                                vec![
+                                    format!("checkout proposal branch and apply 1 appendments"),
+                                    format!("apply to current branch with `git am`"),
+                                    format!("download to ./patches"),
+                                    format!("back"),
+                                ],
+                            )?;
+                            c.succeeds_with(0, false)?;
+                            p.expect("checked out proposal branch and applied 1 appendments (2 ahead 0 behind 'main')\r\n")?;
                             p.expect_end()?;
 
                             for p in [51, 52, 53, 55, 56] {

@@ -532,6 +532,13 @@ pub fn event_is_patch_set_root(event: &nostr::Event) -> bool {
     event.kind.as_u64().eq(&PATCH_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
 }
 
+pub fn patch_supports_commit_ids(event: &nostr::Event) -> bool {
+    event.kind.as_u64().eq(&PATCH_KIND)
+        && event
+            .iter_tags()
+            .any(|t| t.as_vec()[0].eq("commit-pgp-sig"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn generate_patch_event(
     git_repo: &Repo,
