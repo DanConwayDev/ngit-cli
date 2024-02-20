@@ -479,7 +479,16 @@ impl CliTesterChoicePrompt<'_> {
         Ok(self)
     }
 
-    pub fn succeeds_with(&mut self, chosen_index: u64, report: bool) -> Result<&mut Self> {
+    pub fn succeeds_with(
+        &mut self,
+        chosen_index: u64,
+        report: bool,
+        default_index: Option<u64>,
+    ) -> Result<&mut Self> {
+        if default_index.is_some() {
+            println!("TODO: add support for default choice")
+        }
+
         fn show_options(
             tester: &mut CliTester,
             choices: &Vec<String>,

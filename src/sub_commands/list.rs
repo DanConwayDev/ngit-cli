@@ -121,14 +121,16 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
 
         if no_support_for_patches_as_branch {
             println!("{patch_text_ref}");
-            return match Interactor::default().choice(PromptChoiceParms::default().with_choices(
-                vec![
-                    "learn why 'patch only' proposals can't be checked out".to_string(),
-                    format!("apply to current branch with `git am`"),
-                    format!("download to ./patches"),
-                    "back".to_string(),
-                ],
-            ))? {
+            return match Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
+                        "learn why 'patch only' proposals can't be checked out".to_string(),
+                        format!("apply to current branch with `git am`"),
+                        format!("download to ./patches"),
+                        "back".to_string(),
+                    ]),
+            )? {
                 0 => {
                     println!("Some proposals are posted as 'patch only'\n");
                     println!(
@@ -144,7 +146,9 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                         "by default ngit posts proposals that support both the branch and patch model so either workflow can be used"
                     );
                     Interactor::default().choice(
-                        PromptChoiceParms::default().with_choices(vec!["back".to_string()]),
+                        PromptChoiceParms::default()
+                            .with_default(0)
+                            .with_choices(vec!["back".to_string()]),
                     )?;
                     continue;
                 }
@@ -180,7 +184,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
         if !git_repo.does_commit_exist(&proposal_base_commit.to_string())? {
             println!("your '{main_branch_name}' branch may not be up-to-date.");
             println!("the proposal parent commit doesnt exist in your local repository.");
-            return match Interactor::default().choice(PromptChoiceParms::default().with_choices(
+            return match Interactor::default().choice(PromptChoiceParms::default().with_default(0).with_choices(
                 vec![
                     format!(
                         "manually run `git pull` on '{main_branch_name}' and select proposal again"
@@ -213,7 +217,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
         // branch doesnt exist
         if !branch_exists {
             return match Interactor::default()
-                .choice(PromptChoiceParms::default().with_choices(vec![
+                .choice(PromptChoiceParms::default().with_default(0).with_choices(vec![
                 format!(
                     "create and checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
                     most_recent_proposal_patch_chain.len(),
@@ -255,6 +259,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 println!("branch checked out and up-to-date");
                 return match Interactor::default().choice(
                     PromptChoiceParms::default()
+                        .with_default(0)
                         .with_choices(vec!["exit".to_string(), "back".to_string()]),
                 )? {
                     0 => Ok(()),
@@ -265,18 +270,20 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 };
             }
 
-            return match Interactor::default().choice(PromptChoiceParms::default().with_choices(
-                vec![
-                    format!(
-                        "checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
-                        most_recent_proposal_patch_chain.len(),
-                        proposal_behind_main.len(),
-                    ),
-                    format!("apply to current branch with `git am`"),
-                    format!("download to ./patches"),
-                    "back".to_string(),
-                ],
-            ))? {
+            return match Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
+                        format!(
+                            "checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
+                            most_recent_proposal_patch_chain.len(),
+                            proposal_behind_main.len(),
+                        ),
+                        format!("apply to current branch with `git am`"),
+                        format!("download to ./patches"),
+                        "back".to_string(),
+                    ]),
+            )? {
                 0 => {
                     check_clean(&git_repo)?;
                     git_repo.checkout(&cover_letter.branch_name)?;
@@ -304,14 +311,16 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 .unwrap_or_default()
                 .eq(&local_branch_tip.to_string())
         }) {
-            return match Interactor::default().choice(PromptChoiceParms::default().with_choices(
-                vec![
-                    format!("checkout proposal branch and apply {} appendments", &index,),
-                    format!("apply to current branch with `git am`"),
-                    format!("download to ./patches"),
-                    "back".to_string(),
-                ],
-            ))? {
+            return match Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
+                        format!("checkout proposal branch and apply {} appendments", &index,),
+                        format!("apply to current branch with `git am`"),
+                        format!("download to ./patches"),
+                        "back".to_string(),
+                    ]),
+            )? {
                 0 => {
                     check_clean(&git_repo)?;
                     git_repo.checkout(&cover_letter.branch_name)?;
@@ -346,7 +355,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 .eq(&local_branch_tip.to_string())
         }) {
             return match Interactor::default().choice(
-                PromptChoiceParms::default()
+                PromptChoiceParms::default().with_default(0)
                     .with_choices(
                         vec![
                             format!(
@@ -410,7 +419,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 local_ahead_of_proposal.len()
             );
             return match Interactor::default().choice(
-                PromptChoiceParms::default()
+                PromptChoiceParms::default().with_default(0)
                     .with_choices(
                         vec![
                             format!(
@@ -450,7 +459,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 local_beind_main.len(),
             );
             return match Interactor::default().choice(
-                PromptChoiceParms::default()
+                PromptChoiceParms::default().with_default(0)
                     .with_choices(
                         vec![
                             format!(
@@ -514,7 +523,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
         );
 
         return match Interactor::default().choice(
-                PromptChoiceParms::default()
+                PromptChoiceParms::default().with_default(0)
                     .with_choices(
                         vec![
                             format!(

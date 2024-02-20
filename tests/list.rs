@@ -266,7 +266,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true)?;
+                            c.succeeds_with(0, true, None)?;
 
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
@@ -279,7 +279,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
                             ))?;
@@ -339,7 +339,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -351,7 +351,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, None)?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
                             ))?;
@@ -455,7 +455,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(2, true)?;
+                            c.succeeds_with(2, true, None)?;
 
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
@@ -468,7 +468,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_3}' branch\r\n"
                             ))?;
@@ -529,7 +529,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(2, true)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -541,7 +541,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_3}' branch\r\n"
                             ))?;
@@ -651,7 +651,7 @@ mod when_main_branch_is_uptodate {
                                     format!("add d3.md"), // commit msg title
                                 ],
                             )?;
-                            c.succeeds_with(3, true)?;
+                            c.succeeds_with(3, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -663,7 +663,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_4}' branch\r\n"
                             ))?;
@@ -730,7 +730,7 @@ mod when_main_branch_is_uptodate {
                                     format!("add d3.md"), // commit msg title
                                 ],
                             )?;
-                            c.succeeds_with(3, true)?;
+                            c.succeeds_with(3, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -742,7 +742,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_4}' branch\r\n"
                             ))?;
@@ -861,7 +861,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -872,7 +872,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
                             ))?;
@@ -940,7 +940,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -951,7 +951,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect(format!(
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_1}' branch\r\n"
                             ))?;
@@ -1042,7 +1042,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -1053,7 +1053,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect("checked out proposal branch and applied 1 appendments (2 ahead 0 behind 'main')\r\n")?;
                             p.expect_end()?;
 
@@ -1120,7 +1120,7 @@ mod when_main_branch_is_uptodate {
                                     format!("\"{PROPOSAL_TITLE_3}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -1131,7 +1131,7 @@ mod when_main_branch_is_uptodate {
                                     format!("back"),
                                 ],
                             )?;
-                            c.succeeds_with(0, false)?;
+                            c.succeeds_with(0, false, Some(0))?;
                             p.expect("checked out proposal branch and applied 1 appendments (2 ahead 0 behind 'main')\r\n")?;
                             p.expect_end()?;
 
