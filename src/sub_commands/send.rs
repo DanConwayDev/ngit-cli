@@ -472,41 +472,38 @@ pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
         && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
         && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
+
+pub fn commit_msg_from_patch(patch: &nostr::Event) -> Result<String> {
+    if let Ok(msg) = tag_value(patch, "description") {
+        Ok(msg)
+    } else {
+        let start_index = patch
+            .content
+            .find("] ")
+            .context("event is not formatted as a patch or cover letter")?
+            + 2;
+        let end_index = patch.content[start_index..]
+            .find("\ndiff --git")
+            .unwrap_or(patch.content.len());
+        Ok(patch.content[start_index..end_index].to_string())
+    }
+}
+
+pub fn commit_msg_from_patch_oneliner(patch: &nostr::Event) -> Result<String> {
+    Ok(commit_msg_from_patch(patch)?
+        .split('\n')
+        .collect::<Vec<&str>>()[0]
+        .to_string())
+}
+
 pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
     if !event_is_patch_set_root(event) {
         bail!("event is not a patch set root event (root patch or cover letter)")
     }
-    let title_index = event
-        .content
-        .find("] ")
-        .context("event is not formatted as a patch or cover letter")?
-        + 2;
-    let description_index = event.content[title_index..]
-        .find('\n')
-        .unwrap_or(event.content.len() - 1 - title_index)
-        + title_index;
 
-    let description_index_end = event.content[title_index..]
-        .find("\ndiff --git")
-        .unwrap_or(event.content.len() - 1);
-
-    let title = if let Ok(msg) = tag_value(event, "description") {
-        msg.split('\n').collect::<Vec<&str>>()[0].to_string()
-    } else {
-        event.content[title_index..description_index].to_string()
-    };
-
-    let description = if let Ok(msg) = tag_value(event, "description") {
-        if let Some((_before, after)) = msg.split_once('\n') {
-            after.trim().to_string()
-        } else {
-            String::new()
-        }
-    } else {
-        event.content[description_index..=description_index_end]
-            .trim()
-            .to_string()
-    };
+    let title = commit_msg_from_patch_oneliner(event)?;
+    let full = commit_msg_from_patch(event)?;
+    let description = full[title.len()..].trim().to_string();
 
     Ok(CoverLetter {
         title: title.clone(),
