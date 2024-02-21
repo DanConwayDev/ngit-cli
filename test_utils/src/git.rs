@@ -56,6 +56,7 @@ impl GitTestRepo {
     pub fn populate_with_test_branch(&self) -> Result<Oid> {
         self.populate()?;
         self.create_branch("add-example-feature")?;
+        self.checkout("add-example-feature")?;
         fs::write(self.dir.join("f1.md"), "some content")?;
         self.stage_and_commit("add f1.md")?;
         fs::write(self.dir.join("f2.md"), "some content")?;

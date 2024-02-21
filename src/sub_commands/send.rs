@@ -21,8 +21,12 @@ use crate::{
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
-    #[clap(short, long)]
+    #[arg(default_value = "")]
+    /// starting commit (commits since in current branch) or commit range, like
+    /// in `git format-patch`
+    starting_commit: String,
     /// optional cover letter title
+    #[clap(short, long)]
     title: Option<String>,
     #[clap(short, long)]
     /// optional cover letter description
@@ -42,22 +46,24 @@ pub struct SubCommandArgs {
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
-    let (from_branch, to_branch, mut ahead, behind) =
-        identify_ahead_behind(&git_repo, &args.from_branch, &args.to_branch)?;
+    let mut commits: Vec<Sha1Hash> = {
+        if args.starting_commit.is_empty() {
+            let (from_branch, to_branch, ahead, behind) =
+                identify_ahead_behind(&git_repo, &args.from_branch, &args.to_branch)?;
 
-    if ahead.is_empty() {
-        bail!(format!(
-            "'{from_branch}' is 0 commits ahead of '{to_branch}' so no patches were created"
-        ));
-    }
+            if ahead.is_empty() {
+                bail!(format!(
+                    "'{from_branch}' is 0 commits ahead of '{to_branch}' so no patches were created"
+                ));
+            }
 
-    if behind.is_empty() {
-        println!(
-            "creating patch for {} commits from '{from_branch}' that can be merged into '{to_branch}'",
-            ahead.len(),
-        );
-    } else {
-        if !Interactor::default().confirm(
+            if behind.is_empty() {
+                println!(
+                    "creating patch for {} commits from '{from_branch}' that can be merged into '{to_branch}'",
+                    ahead.len(),
+                );
+            } else {
+                if !Interactor::default().confirm(
             PromptConfirmParms::default()
                 .with_prompt(
                     format!(
@@ -70,14 +76,23 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         ).context("failed to get confirmation response from interactor confirm")? {
             bail!("aborting so branch can be rebased");
         }
-        println!(
-            "creating patch for {} commit{} from '{from_branch}' that {} {} behind '{to_branch}'",
-            ahead.len(),
-            if ahead.len() > 1 { "s" } else { "" },
-            if ahead.len() > 1 { "are" } else { "is" },
-            behind.len(),
-        );
-    }
+                println!(
+                    "creating patch for {} commit{} from '{from_branch}' that {} {} behind '{to_branch}'",
+                    ahead.len(),
+                    if ahead.len() > 1 { "s" } else { "" },
+                    if ahead.len() > 1 { "are" } else { "is" },
+                    behind.len(),
+                );
+            }
+            ahead
+        } else {
+            let ahead = git_repo
+                .parse_starting_commits(&args.starting_commit)
+                .context("cannot parse specified starting commit or range")?;
+            println!("creating patch for {} commits", ahead.len(),);
+            ahead
+        }
+    };
 
     let title = if args.no_cover_letter {
         None
@@ -138,12 +153,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     .await?;
 
     // oldest first
-    ahead.reverse();
+    commits.reverse();
 
     let events = generate_cover_letter_and_patch_events(
         cover_letter_title_description.clone(),
         &git_repo,
-        &ahead,
+        &commits,
         &keys,
         &repo_ref,
     )?;

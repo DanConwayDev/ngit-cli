@@ -1130,4 +1130,230 @@ mod sends_2_patches_without_cover_letter {
         }
         Ok(())
     }
+    mod specify_starting_commits {
+        use super::*;
+        fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
+            let args = vec![
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "HEAD~3",
+                "--no-cover-letter",
+            ];
+            CliTester::new_from_dir(&git_repo.dir, args)
+        }
+        fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
+            p.expect("creating patch for 3 commits\r\n")?;
+            p.expect("searching for profile and relay updates...\r\n")?;
+            p.expect("\r")?;
+            p.expect("logged in as fred\r\n")?;
+            p.expect("posting 3 patches without a covering letter...\r\n")?;
+            Ok(())
+        }
+        async fn prep_run_create_proposal() -> Result<(
+            Relay<'static>,
+            Relay<'static>,
+            Relay<'static>,
+            Relay<'static>,
+            Relay<'static>,
+        )> {
+            let git_repo = prep_git_repo()?;
+            // fallback (51,52) user write (53, 55) repo (55, 56)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                Relay::new(
+                    8051,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![generate_repo_ref_event()],
+                        )?;
+                        Ok(())
+                    }),
+                ),
+                Relay::new(8056, None, None),
+            );
+
+            // // check relay had the right number of events
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                let mut p = cli_tester_create_proposal(&git_repo);
+                p.expect_end_eventually()?;
+                for p in [51, 52, 53, 55, 56] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+
+            // launch relay
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok((r51, r52, r53, r55, r56))
+        }
+        mod cli_ouput {
+            use super::*;
+
+            async fn run_test_async() -> Result<()> {
+                let git_repo = prep_git_repo()?;
+
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                    Relay::new(
+                        8051,
+                        None,
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event(),
+                                ],
+                            )?;
+                            Ok(())
+                        }),
+                    ),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(
+                        8055,
+                        None,
+                        Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_repo_ref_event()],
+                            )?;
+                            Ok(())
+                        }),
+                    ),
+                    Relay::new(8056, None, None),
+                );
+
+                // // check relay had the right number of events
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    let mut p = cli_tester_create_proposal(&git_repo);
+
+                    expect_msgs_first(&mut p)?;
+                    relay::expect_send_with_progress(
+                        &mut p,
+                        vec![
+                            (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
+                            (" [my-relay] ws://localhost:8053", true, ""),
+                            (" [repo-relay] ws://localhost:8056", true, ""),
+                            (" [default] ws://localhost:8051", true, ""),
+                            (" [default] ws://localhost:8052", true, ""),
+                        ],
+                        3,
+                    )?;
+                    p.expect_end_with_whitespace()?;
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
+            async fn check_cli_output() -> Result<()> {
+                run_test_async().await?;
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn three_patch_events() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
+            for relay in [&r53, &r55, &r56] {
+                assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 3);
+            }
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn first_patch_is_ancestor_and_root_others_in_correct_order() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
+            for relay in [&r53, &r55, &r56] {
+                let patch_events = relay
+                    .events
+                    .iter()
+                    .filter(|e| is_patch(e))
+                    .collect::<Vec<&nostr::Event>>();
+
+                // first patch tagged as root
+                assert!(
+                    patch_events[0]
+                        .iter_tags()
+                        .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq("root"))
+                );
+                // first patch is ancestor
+                assert_eq!(
+                    patch_events[0]
+                        .iter_tags()
+                        .find(|t| t.as_vec()[0].eq("commit"))
+                        .unwrap()
+                        .as_vec()[1],
+                    "431b84edc0d2fa118d63faa3c2db9c73d630a5ae"
+                );
+                // second patch not tagged as root
+                assert_eq!(
+                    patch_events[1]
+                        .iter_tags()
+                        .find(|t| t.as_vec()[0].eq("commit"))
+                        .unwrap()
+                        .as_vec()[1],
+                    "232efb37ebc67692c9e9ff58b83c0d3d63971a0a"
+                );
+                // second patch not tagged as root
+                assert_eq!(
+                    patch_events[2]
+                        .iter_tags()
+                        .find(|t| t.as_vec()[0].eq("commit"))
+                        .unwrap()
+                        .as_vec()[1],
+                    "fe973a840fba2a8ab37dd505c154854a69a6505c"
+                );
+            }
+            Ok(())
+        }
+    }
 }

@@ -67,6 +67,7 @@ pub trait RepoActions {
         branch_name: &str,
         patch_and_ancestors: Vec<nostr::Event>,
     ) -> Result<Vec<nostr::Event>>;
+    fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
 }
 
 impl RepoActions for Repo {
@@ -406,6 +407,49 @@ impl RepoActions for Repo {
             apply_patch(self, patch)?;
         }
         Ok(patches_to_apply)
+    }
+
+    fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>> {
+        let revspec = self
+            .git_repo
+            .revparse(starting_commits)
+            .context("specified value not in a valid format")?;
+        if revspec.mode().is_no_single() {
+            let (ahead, _) = self
+                .get_commits_ahead_behind(
+                    &oid_to_sha1(
+                        &revspec
+                            .from()
+                            .context("cannot get starting commit from specified value")?
+                            .id(),
+                    ),
+                    &self
+                        .get_head_commit()
+                        .context("cannot get head commit with gitlib2")?,
+                )
+                .context("specified commit is not an ancestor of current head")?;
+            Ok(ahead)
+        } else if revspec.mode().is_range() {
+            let (ahead, _) = self
+                .get_commits_ahead_behind(
+                    &oid_to_sha1(
+                        &revspec
+                            .from()
+                            .context("cannot get starting commit of range from specified value")?
+                            .id(),
+                    ),
+                    &oid_to_sha1(
+                        &revspec
+                            .to()
+                            .context("cannot get end of range commit from specified value")?
+                            .id(),
+                    ),
+                )
+                .context("specified commit is not an ancestor of current head")?;
+            Ok(ahead)
+        } else {
+            bail!("specified value not in a supported format")
+        }
     }
 }
 
@@ -1750,6 +1794,101 @@ mod tests {
                     assert_eq!(res.len(), 0);
                     Ok(())
                 }
+            }
+        }
+    }
+    mod parse_starting_commits {
+        use super::*;
+
+        mod head_1_returns_latest_commit {
+            use super::*;
+
+            #[test]
+            fn when_on_main_and_other_commits_are_more_recent_on_feature_branch() -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                let git_repo = Repo::from_path(&test_repo.dir)?;
+                test_repo.populate_with_test_branch()?;
+                test_repo.checkout("main")?;
+
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~1")?,
+                    vec![str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?],
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn when_checked_out_branch_ahead_of_main() -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                let git_repo = Repo::from_path(&test_repo.dir)?;
+                test_repo.populate_with_test_branch()?;
+
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~1")?,
+                    vec![str_to_sha1("82ff2bcc9aa94d1bd8faee723d4c8cc190d6061c")?],
+                );
+                Ok(())
+            }
+        }
+        mod head_2_returns_latest_2_commits_youngest_first {
+            use super::*;
+
+            #[test]
+            fn when_on_main_and_other_commits_are_more_recent_on_feature_branch() -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                let git_repo = Repo::from_path(&test_repo.dir)?;
+                test_repo.populate_with_test_branch()?;
+                test_repo.checkout("main")?;
+
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~2")?,
+                    vec![
+                        str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?,
+                        str_to_sha1("af474d8d271490e5c635aad337abdc050034b16a")?,
+                    ],
+                );
+                Ok(())
+            }
+        }
+        mod head_3_returns_latest_3_commits_youngest_first {
+            use super::*;
+
+            #[test]
+            fn when_checked_out_branch_ahead_of_main() -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                let git_repo = Repo::from_path(&test_repo.dir)?;
+                test_repo.populate_with_test_branch()?;
+
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~3")?,
+                    vec![
+                        str_to_sha1("82ff2bcc9aa94d1bd8faee723d4c8cc190d6061c")?,
+                        str_to_sha1("a23e6b05aaeb7d1471b4a838b51f337d5644eeb0")?,
+                        str_to_sha1("7ab82116068982671a8111f27dc10599172334b2")?,
+                    ],
+                );
+                Ok(())
+            }
+        }
+        mod range_of_3_commits_not_in_branch_history_returns_3_commits_youngest_first {
+            use super::*;
+
+            #[test]
+            fn when_checked_out_branch_ahead_of_main() -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                let git_repo = Repo::from_path(&test_repo.dir)?;
+                test_repo.populate_with_test_branch()?;
+                test_repo.checkout("main")?;
+
+                assert_eq!(
+                    git_repo.parse_starting_commits("af474d8..a23e6b0")?,
+                    vec![
+                        str_to_sha1("a23e6b05aaeb7d1471b4a838b51f337d5644eeb0")?,
+                        str_to_sha1("7ab82116068982671a8111f27dc10599172334b2")?,
+                        str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?,
+                    ],
+                );
+                Ok(())
             }
         }
     }
