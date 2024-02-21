@@ -1,9 +1,12 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use nostr::{prelude::sha1::Hash as Sha1Hash, EventBuilder, Marker, Tag, TagKind};
+use nostr::{
+    nips::nip19::Nip19, prelude::sha1::Hash as Sha1Hash, EventBuilder, FromBech32, Marker, Tag,
+    TagKind, UncheckedUrl,
+};
 
 use super::list::tag_value;
 #[cfg(not(test))]
@@ -25,6 +28,10 @@ pub struct SubCommandArgs {
     /// starting commit (commits since in current branch) or commit range, like
     /// in `git format-patch`
     starting_commit: String,
+    #[clap(long)]
+    /// nevent or event id of an existing proposal for which this is a new
+    /// version
+    in_reply_to: Option<String>,
     /// optional cover letter title
     #[clap(short, long)]
     title: Option<String>,
@@ -161,6 +168,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         &commits,
         &keys,
         &repo_ref,
+        &args.in_reply_to,
     )?;
 
     println!(
@@ -390,6 +398,7 @@ pub fn generate_cover_letter_and_patch_events(
     commits: &Vec<Sha1Hash>,
     keys: &nostr::Keys,
     repo_ref: &RepoRef,
+    in_reply_to: &Option<String>,
 ) -> Result<Vec<nostr::Event>> {
     let root_commit = git_repo
         .get_root_commit()
@@ -418,8 +427,19 @@ pub fn generate_cover_letter_and_patch_events(
                 },
                 Tag::Reference(format!("{root_commit}")),
                 Tag::Hashtag("cover-letter".to_string()),
-                Tag::Hashtag("root".to_string()),
             ],
+            if let Some(event_ref) = in_reply_to.clone() {
+                vec![
+                    Tag::Hashtag("root".to_string()),
+                    Tag::Hashtag("revision-root".to_string()),
+                    // TODO check if id is for a root proposal (perhaps its for an issue?)
+                    e_tag_from_nip19(&event_ref,"proposal",nostr::Marker::Reply)?,
+                ]
+            } else {
+                vec![
+                    Tag::Hashtag("root".to_string()),
+                ]
+            },
             // this is not strictly needed but makes for prettier branch names
             // eventually a prefix will be needed of the event id to stop 2 proposals with the same name colliding
             // a change like this, or the removal of this tag will require the actual branch name to be tracked
@@ -466,11 +486,57 @@ pub fn generate_cover_letter_and_patch_events(
                 } else {
                     None
                 },
+                in_reply_to,
             )
             .context("failed to generate patch event")?,
         );
     }
     Ok(events)
+}
+
+fn e_tag_from_nip19(
+    reference: &str,
+    reference_name: &str,
+    marker: nostr::Marker,
+) -> Result<nostr::Tag> {
+    let mut bech32 = reference.to_string();
+    loop {
+        if bech32.is_empty() {
+            bech32 = Interactor::default().input(
+                PromptInputParms::default().with_prompt(&format!("{reference_name} nevent")),
+            )?;
+        }
+
+        if let Ok(nip19) = Nip19::from_bech32(bech32.clone()) {
+            match nip19 {
+                Nip19::Event(n) => {
+                    break Ok(nostr::Tag::Event {
+                        event_id: n.event_id,
+                        relay_url: n.relays.first().map(UncheckedUrl::new),
+                        marker: Some(marker),
+                    });
+                }
+                Nip19::EventId(id) => {
+                    break Ok(nostr::Tag::Event {
+                        event_id: id,
+                        relay_url: None,
+                        marker: Some(marker),
+                    });
+                }
+                _ => {}
+            }
+        }
+        if let Ok(id) = nostr::EventId::from_str(&bech32) {
+            break Ok(nostr::Tag::Event {
+                event_id: id,
+                relay_url: None,
+                marker: Some(marker),
+            });
+        }
+        println!("not a valid {reference_name} event reference");
+
+        bech32 = String::new();
+    }
 }
 
 pub struct CoverLetter {
@@ -565,6 +631,7 @@ pub fn generate_patch_event(
     parent_patch_event_id: Option<nostr::EventId>,
     series_count: Option<(u64, u64)>,
     branch_name: Option<String>,
+    in_reply_to: &Option<String>,
 ) -> Result<nostr::Event> {
     let commit_parent = git_repo
         .get_commit_parent(commit)
@@ -592,16 +659,27 @@ pub fn generate_patch_event(
                 // code that makes it into the main branch, assuming
                 // the commit id is correct
                 Tag::Reference(commit.to_string()),
+            ],
 
-                if let Some(thread_event_id) = thread_event_id { Tag::Event {
+            if let Some(thread_event_id) = thread_event_id {
+                vec![Tag::Event {
                     event_id: thread_event_id,
                     relay_url: relay_hint.clone(),
                     marker: Some(Marker::Root),
-                } }
-                else {
-                    Tag::Hashtag("root".to_string())
-                },
-            ],
+                }]
+            } else if let Some(event_ref) = in_reply_to.clone() {
+                vec![
+                    Tag::Hashtag("root".to_string()),
+                    Tag::Hashtag("revision-root".to_string()),
+                    // TODO check if id is for a root proposal (perhaps its for an issue?)
+                    e_tag_from_nip19(&event_ref,"proposal",nostr::Marker::Reply)?,
+                ]
+            } else {
+                vec![
+                    Tag::Hashtag("root".to_string()),
+                ]
+            },
+
             if let Some(id) = parent_patch_event_id {
                 vec![Tag::Event {
                     event_id: id,
