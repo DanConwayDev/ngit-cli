@@ -613,6 +613,11 @@ pub fn event_is_patch_set_root(event: &nostr::Event) -> bool {
     event.kind.as_u64().eq(&PATCH_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
 }
 
+pub fn event_is_revision_root(event: &nostr::Event) -> bool {
+    event.kind.as_u64().eq(&PATCH_KIND)
+        && event.iter_tags().any(|t| t.as_vec()[1].eq("revision-root"))
+}
+
 pub fn patch_supports_commit_ids(event: &nostr::Event) -> bool {
     event.kind.as_u64().eq(&PATCH_KIND)
         && event

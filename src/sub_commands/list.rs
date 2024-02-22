@@ -13,8 +13,8 @@ use crate::{
     git::{str_to_sha1, Repo, RepoActions},
     repo_ref::{self, RepoRef, REPO_REF_KIND},
     sub_commands::send::{
-        commit_msg_from_patch_oneliner, event_is_cover_letter, event_to_cover_letter,
-        patch_supports_commit_ids, PATCH_KIND,
+        commit_msg_from_patch_oneliner, event_is_cover_letter, event_is_revision_root,
+        event_to_cover_letter, patch_supports_commit_ids, PATCH_KIND,
     },
     Cli,
 };
@@ -53,13 +53,17 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
 
     println!("finding proposals...");
 
-    let proposal_events: Vec<nostr::Event> =
+    let proposal_events_and_revisions: Vec<nostr::Event> =
         find_proposal_events(&client, &repo_ref, &root_commit.to_string()).await?;
 
-    if proposal_events.is_empty() {
+    if proposal_events_and_revisions.is_empty() {
         println!("no proposals found... create one? try `ngit send`");
         return Ok(());
     }
+    let proposal_events: Vec<&nostr::Event> = proposal_events_and_revisions
+        .iter()
+        .filter(|e| !event_is_revision_root(e))
+        .collect::<Vec<&nostr::Event>>();
 
     loop {
         let selected_index = Interactor::default().choice(
@@ -81,17 +85,32 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 ),
         )?;
 
-        let cover_letter = event_to_cover_letter(&proposal_events[selected_index])
+        let cover_letter = event_to_cover_letter(proposal_events[selected_index])
             .context("cannot extract proposal details from proposal root event")?;
 
         println!("finding commits...");
 
-        let commits_events: Vec<nostr::Event> = find_commits_for_proposal_root_event(
+        let commits_events: Vec<nostr::Event> = find_commits_for_proposal_root_events(
             &client,
-            &proposal_events[selected_index],
+            &[
+                vec![proposal_events[selected_index]],
+                proposal_events_and_revisions
+                    .iter()
+                    .filter(|e| {
+                        e.tags.iter().any(|t| {
+                            t.as_vec().len().gt(&1)
+                                && t.as_vec()[1].eq(&proposal_events[selected_index].id.to_string())
+                        })
+                    })
+                    .collect::<Vec<&nostr::Event>>(),
+            ]
+            .concat(),
             &repo_ref,
         )
         .await?;
+        // for commit in &commits_events {
+        //     println!("cevent: {:?}", commit.as_json());
+        // }
 
         let Ok(most_recent_proposal_patch_chain) =
             get_most_recent_patch_with_ancestors(commits_events.clone())
@@ -107,6 +126,9 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             }
             return Ok(());
         };
+        // for commit in &most_recent_proposal_patch_chain {
+        //     println!("recent_event: {:?}", commit.as_json());
+        // }
 
         let binding_patch_text_ref = format!("{} commits", most_recent_proposal_patch_chain.len());
         let patch_text_ref = if most_recent_proposal_patch_chain.len().gt(&1) {
@@ -354,59 +376,63 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 .unwrap_or_default()
                 .eq(&local_branch_tip.to_string())
         }) {
+            println!(
+                "updated proposal available ({} ahead {} behind '{main_branch_name}'). existing version is {} ahead {} behind '{main_branch_name}'",
+                most_recent_proposal_patch_chain.len(),
+                proposal_behind_main.len(),
+                local_ahead_of_main.len(),
+                local_beind_main.len(),
+            );
             return match Interactor::default().choice(
-                PromptChoiceParms::default().with_default(0)
-                    .with_choices(
-                        vec![
-                            format!(
-                                "checkout new version of proposal branch ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
-                                most_recent_proposal_patch_chain.len(),
-                                proposal_behind_main.len(),
-                                local_ahead_of_main.len(),
-                                local_beind_main.len(),
-                            ),
-                            format!(
-                                "checkout existing outdated proposal branch ({} ahead {} behind '{main_branch_name}')",
-                                local_ahead_of_main.len(),
-                                local_beind_main.len(),
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            "back".to_string(),
-                        ],
-                    )
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
+                        format!("checkout and overwrite existing proposal branch"),
+                        format!("checkout existing outdated proposal branch"),
+                        format!("apply to current branch with `git am`"),
+                        format!("download to ./patches"),
+                        "back".to_string(),
+                    ]),
             )? {
-                    0 => {
-                        check_clean(&git_repo)?;
-                        git_repo.create_branch_at_commit(&cover_letter.branch_name, &proposal_base_commit.to_string())?;
-                        git_repo.checkout(&cover_letter.branch_name)?;
-                        let chain_length = most_recent_proposal_patch_chain.len();
-                        let _ = git_repo
-                            .apply_patch_chain(&cover_letter.branch_name, most_recent_proposal_patch_chain)
-                            .context("cannot apply patch chain")?;
-                        format!(
-                            "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
-                            chain_length,
-                            proposal_behind_main.len(),
-                            local_ahead_of_main.len(),
-                            local_beind_main.len(),
-                        );
-                        Ok(())
-                    },
-                    1 => {
-                        check_clean(&git_repo)?;
-                        git_repo.checkout(&cover_letter.branch_name)?;
-                        format!(
-                            "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
-                            local_ahead_of_main.len(),
-                            local_beind_main.len(),
-                        );
-                        Ok(())
-                    },
-                    2 => {launch_git_am_with_patches(most_recent_proposal_patch_chain)},
-                    3 => {save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo)},
-                    4 => { continue },
-                    _ => { bail!("unexpected choice")}
+                0 => {
+                    check_clean(&git_repo)?;
+                    git_repo.create_branch_at_commit(
+                        &cover_letter.branch_name,
+                        &proposal_base_commit.to_string(),
+                    )?;
+                    git_repo.checkout(&cover_letter.branch_name)?;
+                    let chain_length = most_recent_proposal_patch_chain.len();
+                    let _ = git_repo
+                        .apply_patch_chain(
+                            &cover_letter.branch_name,
+                            most_recent_proposal_patch_chain,
+                        )
+                        .context("cannot apply patch chain")?;
+                    println!(
+                        "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
+                        chain_length,
+                        proposal_behind_main.len(),
+                        local_ahead_of_main.len(),
+                        local_beind_main.len(),
+                    );
+                    Ok(())
+                }
+                1 => {
+                    check_clean(&git_repo)?;
+                    git_repo.checkout(&cover_letter.branch_name)?;
+                    println!(
+                        "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
+                        local_ahead_of_main.len(),
+                        local_beind_main.len(),
+                    );
+                    Ok(())
+                }
+                2 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
+                3 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+                4 => continue,
+                _ => {
+                    bail!("unexpected choice")
+                }
             };
         }
 
@@ -699,11 +725,11 @@ pub fn get_most_recent_patch_with_ancestors(
 ) -> Result<Vec<nostr::Event>> {
     patches.sort_by_key(|e| e.created_at);
 
-    let first_patch = patches.first().context("no patches found")?;
+    let youngest_patch = patches.last().context("no patches found")?;
 
     let patches_with_youngest_created_at: Vec<&nostr::Event> = patches
         .iter()
-        .filter(|p| p.created_at.eq(&first_patch.created_at))
+        .filter(|p| p.created_at.eq(&youngest_patch.created_at))
         .collect();
 
     let mut res = vec![];
@@ -787,10 +813,10 @@ pub async fn find_proposal_events(
         .collect::<Vec<nostr::Event>>())
 }
 
-pub async fn find_commits_for_proposal_root_event(
+pub async fn find_commits_for_proposal_root_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    proposal_root_event: &nostr::Event,
+    proposal_root_events: &Vec<&nostr::Event>,
     repo_ref: &RepoRef,
 ) -> Result<Vec<nostr::Event>> {
     let mut patch_events: Vec<nostr::Event> = client
@@ -799,10 +825,12 @@ pub async fn find_commits_for_proposal_root_event(
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
-                    // this requires every patch to reference the root event
-                    // this will not pick up v2,v3 patch sets
-                    // TODO: fetch commits for v2.. patch sets
-                    .event(proposal_root_event.id),
+                    .events(
+                        proposal_root_events
+                            .iter()
+                            .map(|e| e.id)
+                            .collect::<Vec<nostr::EventId>>(),
+                    ),
             ],
         )
         .await
@@ -811,14 +839,19 @@ pub async fn find_commits_for_proposal_root_event(
         .filter(|e| {
             e.kind.as_u64() == PATCH_KIND
                 && e.tags.iter().any(|t| {
-                    t.as_vec().len() > 2 && t.as_vec()[1].eq(&proposal_root_event.id.to_string())
+                    t.as_vec().len() > 2
+                        && proposal_root_events
+                            .iter()
+                            .any(|e| t.as_vec()[1].eq(&e.id.to_string()))
                 })
         })
         .map(std::borrow::ToOwned::to_owned)
         .collect();
 
-    if !event_is_cover_letter(proposal_root_event) {
-        patch_events.push(proposal_root_event.clone());
+    for e in proposal_root_events {
+        if !event_is_cover_letter(e) && !patch_events.iter().any(|e2| e2.id.eq(&e.id)) {
+            patch_events.push(e.to_owned().clone());
+        }
     }
     Ok(patch_events)
 }

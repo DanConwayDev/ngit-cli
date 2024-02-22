@@ -12,10 +12,10 @@ use crate::{
     repo_ref::{self, RepoRef},
     sub_commands::{
         list::{
-            find_commits_for_proposal_root_event, find_proposal_events, get_commit_id_from_patch,
+            find_commits_for_proposal_root_events, find_proposal_events, get_commit_id_from_patch,
             get_most_recent_patch_with_ancestors, tag_value,
         },
-        send::{event_to_cover_letter, generate_patch_event, send_events},
+        send::{event_is_revision_root, event_to_cover_letter, generate_patch_event, send_events},
     },
     Cli,
 };
@@ -149,12 +149,17 @@ pub async fn fetch_proposal_root_and_most_recent_patch_chain(
 ) -> Result<(nostr::Event, Vec<nostr::Event>)> {
     println!("finding proposal root event...");
 
-    let proposal_events: Vec<nostr::Event> =
+    let proposal_events_and_revisions: Vec<nostr::Event> =
         find_proposal_events(client, repo_ref, &root_commit.to_string())
             .await
             .context("cannot get proposal events for repo")?;
 
-    let proposal_root_event: nostr::Event = proposal_events
+    let proposal_events: Vec<&nostr::Event> = proposal_events_and_revisions
+        .iter()
+        .filter(|e| !event_is_revision_root(e))
+        .collect::<Vec<&nostr::Event>>();
+
+    let proposal_root_event: &nostr::Event = proposal_events
         .iter()
         .find(|e| {
             event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(branch_name))
@@ -166,8 +171,24 @@ pub async fn fetch_proposal_root_and_most_recent_patch_chain(
 
     println!("found proposal root event. finding commits...");
 
-    let commits_events: Vec<nostr::Event> =
-        find_commits_for_proposal_root_event(client, &proposal_root_event, repo_ref).await?;
+    let commits_events: Vec<nostr::Event> = find_commits_for_proposal_root_events(
+        client,
+        &[
+            vec![proposal_root_event],
+            proposal_events_and_revisions
+                .iter()
+                .filter(|e| {
+                    e.tags.iter().any(|t| {
+                        t.as_vec().len().gt(&1)
+                            && t.as_vec()[1].eq(&proposal_root_event.id.to_string())
+                    })
+                })
+                .collect::<Vec<&nostr::Event>>(),
+        ]
+        .concat(),
+        repo_ref,
+    )
+    .await?;
 
-    Ok((proposal_root_event, commits_events))
+    Ok((proposal_root_event.clone(), commits_events))
 }
