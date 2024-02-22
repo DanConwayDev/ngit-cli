@@ -436,12 +436,13 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 }
             };
         }
-
         // tip of proposal in branch in history (local appendments made to up-to-date
         // proposal)
-        if let Ok((local_ahead_of_proposal, _)) =
-            git_repo.get_commits_ahead_behind(&proposal_tip, &local_branch_tip)
-        {
+        else if git_repo.ancestor_of(&local_branch_tip, &proposal_tip)? {
+            let (local_ahead_of_proposal, _) = git_repo
+                .get_commits_ahead_behind(&proposal_tip, &local_branch_tip)
+                .context("cannot get commits ahead behind for propsal_top and local_branch_tip")?;
+
             println!(
                 "local proposal branch exists with {} unpublished commits on top of the most up-to-date version of the proposal ({} ahead {} behind '{main_branch_name}')",
                 local_ahead_of_proposal.len(),
