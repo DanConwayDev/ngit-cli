@@ -439,11 +439,137 @@ mod when_branch_is_checked_out {
         }
     }
 
-    mod when_branch_is_ahead {
-        // use super::*;
-        // TODO latest commit in proposal builds off an older commit in proposal
-        // instead of previous.
-        // TODO current git user created commit on branch
+    mod when_local_commits_on_uptodate_proposal {
+        use super::*;
+        async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
+            // fallback (51,52) user write (53, 55) repo (55, 56)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+            );
+
+            r51.events.push(generate_test_key_1_relay_list_event());
+            r51.events.push(generate_test_key_1_metadata_event("fred"));
+            r51.events.push(generate_repo_ref_event());
+
+            r55.events.push(generate_repo_ref_event());
+            r55.events.push(generate_test_key_1_metadata_event("fred"));
+            r55.events.push(generate_test_key_1_relay_list_event());
+
+            let cli_tester_handle = std::thread::spawn(
+                move || -> Result<(GitTestRepo, GitTestRepo)> {
+                    let originating_repo = cli_tester_create_proposals()?;
+
+                    let test_repo = GitTestRepo::default();
+                    test_repo.populate()?;
+
+                    create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
+                    // add appended commit to local branch
+                    std::fs::write(test_repo.dir.join("appended.md"), "some content")?;
+                    test_repo.stage_and_commit("appended commit")?;
+
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
+                    p.expect("finding proposal root event...\r\n")?;
+                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal\r\n")?;
+                    p.expect_end()?;
+
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok((originating_repo, test_repo))
+                },
+            );
+
+            // launch relay
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+            );
+            let res = cli_tester_handle.join().unwrap()?;
+
+            Ok(res)
+        }
+
+        mod cli_prompts {
+            use super::*;
+            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                    Relay::new(8051, None, None),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(8056, None, None),
+                );
+
+                r51.events.push(generate_test_key_1_relay_list_event());
+                r51.events.push(generate_test_key_1_metadata_event("fred"));
+                r51.events.push(generate_repo_ref_event());
+
+                r55.events.push(generate_repo_ref_event());
+                r55.events.push(generate_test_key_1_metadata_event("fred"));
+                r55.events.push(generate_test_key_1_relay_list_event());
+
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    cli_tester_create_proposals()?;
+
+                    let test_repo = GitTestRepo::default();
+                    test_repo.populate()?;
+
+                    create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
+                    // add appended commit to local branch
+                    std::fs::write(test_repo.dir.join("appended.md"), "some content")?;
+                    test_repo.stage_and_commit("appended commit")?;
+
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
+                    p.expect("finding proposal root event...\r\n")?;
+                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal\r\n")?;
+                    p.expect_end()?;
+
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+                println!("{:?}", r55.events);
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
+            async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
+                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn didnt_overwrite_local_appendments() -> Result<()> {
+            let (originating_repo, test_repo) = prep_and_run().await?;
+            assert_ne!(
+                test_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
+                originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
+            );
+            Ok(())
+        }
     }
 
     mod when_latest_event_rebases_branch {
