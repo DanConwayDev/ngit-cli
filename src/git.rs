@@ -370,13 +370,16 @@ impl RepoActions for Repo {
         branch_name: &str,
         patch_and_ancestors: Vec<nostr::Event>,
     ) -> Result<Vec<nostr::Event>> {
-        // filter out existing ancestors
+        let branch_tip = self.get_tip_of_local_branch(branch_name)?;
+        // filter out existing ancestors in branch
         let mut patches_to_apply: Vec<nostr::Event> = patch_and_ancestors
             .into_iter()
             .filter(|e| {
-                !self
-                    .does_commit_exist(&get_commit_id_from_patch(e).unwrap())
-                    .unwrap()
+                let commit_id = get_commit_id_from_patch(e).unwrap();
+                !branch_tip.to_string().eq(&commit_id)
+                    || !self
+                        .ancestor_of(&branch_tip, &str_to_sha1(&commit_id).unwrap())
+                        .unwrap()
             })
             .collect();
 
@@ -395,16 +398,6 @@ impl RepoActions for Repo {
             bail!("cannot find parent commit ({parent_commit_id}). run git pull and try again.")
         }
 
-        // check for rebase or changes
-        if let Ok(current_tip) = self.get_tip_of_local_branch(branch_name) {
-            if !current_tip.to_string().eq(&parent_commit_id) {
-                // TODO: either changes have been made on the local branch or
-                // the latest commit in the prpoosal has rebased onto a newer
-                // commit that you havn't pulled yet ask user
-                // whether they want to proceed
-            }
-        }
-
         // checkout branch
         if !self.get_checked_out_branch_name()?.eq(&branch_name) {
             self.create_branch_at_commit(branch_name, &parent_commit_id)?;
@@ -415,7 +408,13 @@ impl RepoActions for Repo {
         patches_to_apply.reverse();
 
         for patch in &patches_to_apply {
-            apply_patch(self, patch)?;
+            let commit_id = get_commit_id_from_patch(patch)?;
+            // only create new commits - otherwise make them the tip
+            if self.does_commit_exist(&commit_id)? {
+                self.create_branch_at_commit(branch_name, &commit_id)?;
+            } else {
+                apply_patch(self, patch)?;
+            }
         }
         Ok(patches_to_apply)
     }
