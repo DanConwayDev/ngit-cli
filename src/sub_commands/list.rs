@@ -477,8 +477,6 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
-        // TODO: write tests
-
         println!("you have an ammended/rebase version the proposal that is unpublished");
         // user probably has a unpublished ammended or rebase version of the latest
         // proposal version
@@ -518,27 +516,16 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
         println!("if you are confident in your changes consider running `ngit push --force`");
 
         return match Interactor::default().choice(
-        PromptChoiceParms::default().with_default(0)
-            .with_choices(
-                vec![
-                    format!(
-                        "checkout local branch with unpublished changes ({} ahead {} behind '{main_branch_name}')",
-                        local_ahead_of_main.len(),
-                        local_beind_main.len(),
-                    ),
-                    format!(
-                        "discard local branch with old version ({} ahead {} behind '{main_branch_name}') and checkout latest published version ({} ahead {} behind '{main_branch_name}')",
-                        most_recent_proposal_patch_chain.len(),
-                        proposal_behind_main.len(),
-                        local_ahead_of_main.len(),
-                        local_beind_main.len(),
-                    ),
+            PromptChoiceParms::default()
+                .with_default(0)
+                .with_choices(vec![
+                    format!("checkout local branch with unpublished changes"),
+                    format!("discard unpublished changes and checkout new revision",),
                     format!("apply to current branch with `git am`"),
                     format!("download to ./patches"),
                     "back".to_string(),
-                ],
-            )
-    )? {
+                ]),
+        )? {
             0 => {
                 check_clean(&git_repo)?;
                 git_repo.checkout(&cover_letter.branch_name)?;
@@ -548,29 +535,35 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                     local_beind_main.len(),
                 );
                 Ok(())
-            },
+            }
             1 => {
                 check_clean(&git_repo)?;
-                git_repo.create_branch_at_commit(&cover_letter.branch_name, &proposal_base_commit.to_string())?;
-                git_repo.checkout(&cover_letter.branch_name)?;
+                git_repo.create_branch_at_commit(
+                    &cover_letter.branch_name,
+                    &proposal_base_commit.to_string(),
+                )?;
                 let chain_length = most_recent_proposal_patch_chain.len();
                 let _ = git_repo
                     .apply_patch_chain(&cover_letter.branch_name, most_recent_proposal_patch_chain)
                     .context("cannot apply patch chain")?;
+
+                git_repo.checkout(&cover_letter.branch_name)?;
                 println!(
-                    "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
+                    "checked out latest version of proposal ({} ahead {} behind '{main_branch_name}'), replacing unpublished version ({} ahead {} behind '{main_branch_name}')",
                     chain_length,
                     proposal_behind_main.len(),
                     local_ahead_of_main.len(),
                     local_beind_main.len(),
                 );
                 Ok(())
-            },
-            2 => {launch_git_am_with_patches(most_recent_proposal_patch_chain)},
-            3 => {save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo)},
-            4 => { continue },
-            _ => { bail!("unexpected choice")}
-    };
+            }
+            2 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
+            3 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+            4 => continue,
+            _ => {
+                bail!("unexpected choice")
+            }
+        };
     }
 }
 
