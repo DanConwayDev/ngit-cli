@@ -477,154 +477,99 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
         }
 
         // TODO: write tests
-        // user has probably has an unpublished rebase of the latest proposal version
+
+        println!("you have an ammended/rebase version the proposal that is unpublished");
+        // user probably has a unpublished ammended or rebase version of the latest
+        // proposal version
         // if tip of proposal commits exist (were once part of branch but have been
         // ammended and git clean up job hasn't removed them)
         if git_repo.does_commit_exist(&proposal_tip.to_string())? {
             println!(
-                "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has other unpublished changes ({} ahead {} behind '{main_branch_name}')",
+                "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has ammended or rebased it ({} ahead {} behind '{main_branch_name}')",
                 most_recent_proposal_patch_chain.len(),
                 proposal_behind_main.len(),
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
             );
-            println!(
-                "if this sounds right then consider publishing your rebase `ngit push --force` or discarding your local branch"
-            );
-            return match Interactor::default().choice(
-                PromptChoiceParms::default().with_default(0)
-                    .with_choices(
-                        vec![
-                            format!(
-                                "checkout local branch with unpublished changes ({} ahead {} behind '{main_branch_name}')",
-                                local_ahead_of_main.len(),
-                                local_beind_main.len(),
-                            ),
-                            format!(
-                                "discard local branch with old version ({} ahead {} behind '{main_branch_name}') and checkout latest published version ({} ahead {} behind '{main_branch_name}')",
-                                most_recent_proposal_patch_chain.len(),
-                                proposal_behind_main.len(),
-                                local_ahead_of_main.len(),
-                                local_beind_main.len(),
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            "back".to_string(),
-                        ],
-                    )
-            )? {
-                    0 => {
-                        check_clean(&git_repo)?;
-                        git_repo.checkout(&cover_letter.branch_name)?;
-                        println!(
-                            "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
-                            local_ahead_of_main.len(),
-                            local_beind_main.len(),
-                        );
-                        Ok(())
-                    },
-                    1 => {
-                        check_clean(&git_repo)?;
-                        git_repo.create_branch_at_commit(&cover_letter.branch_name, &proposal_base_commit.to_string())?;
-                        git_repo.checkout(&cover_letter.branch_name)?;
-                        let chain_length = most_recent_proposal_patch_chain.len();
-                        let _ = git_repo
-                            .apply_patch_chain(&cover_letter.branch_name, most_recent_proposal_patch_chain)
-                            .context("cannot apply patch chain")?;
-                        println!(
-                            "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
-                            chain_length,
-                            proposal_behind_main.len(),
-                            local_ahead_of_main.len(),
-                            local_beind_main.len(),
-                        );
-                        Ok(())
-                    },
-                    2 => {launch_git_am_with_patches(most_recent_proposal_patch_chain)},
-                    3 => {save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo)},
-                    4 => { continue },
-                    _ => { bail!("unexpected choice")}
-            };
         }
+        // user probably has a unpublished ammended or rebase version of an older
+        // proposal version
+        else {
+            println!(
+                "your local proposal branch ({} ahead {} behind '{main_branch_name}') has conflicting changes with the latest published proposal ({} ahead {} behind '{main_branch_name}')",
+                local_ahead_of_main.len(),
+                local_beind_main.len(),
+                most_recent_proposal_patch_chain.len(),
+                proposal_behind_main.len(),
+            );
 
-        // TODO: write tests
-        // user has probaly has an unpublished rebase of an older version of the
-        // proposal
-        println!(
-            "your local proposal branch ({} ahead {} behind '{main_branch_name}') has conflicting changes with the latest published proposal ({} ahead {} behind '{main_branch_name}')",
-            local_ahead_of_main.len(),
-            local_beind_main.len(),
-            most_recent_proposal_patch_chain.len(),
-            proposal_behind_main.len(),
-        );
-        println!(
-            "its likely that you are working off an old proposal version because git has no record of the latest proposal commit."
-        );
-        println!(
-            "it is possible that you have ammended the latest version and git has delete this commit as part of a clean up"
-        );
-
+            println!(
+                "its likely that you have rebased / ammended an old proposal version because git has no record of the latest proposal commit."
+            );
+            println!(
+                "it is possible that you have been working off the latest version and git has delete this commit as part of a clean up"
+            );
+        }
         println!("to view the latest proposal but retain your changes:");
-        println!("  1) checkout the local branch");
-        println!("  2) create a new branch off the tip commit to store your changes");
-        println!("  3) run `ngit list` and checkout the latest published version of this proposal");
+        println!("  1) create a new branch off the tip commit of this one to store your changes");
+        println!("  2) run `ngit list` and checkout the latest published version of this proposal");
 
         println!("if you are confident in your changes consider running `ngit push --force`");
 
         return match Interactor::default().choice(
-                PromptChoiceParms::default().with_default(0)
-                    .with_choices(
-                        vec![
-                            format!(
-                                "checkout local branch with unpublished changes ({} ahead {} behind '{main_branch_name}')",
-                                local_ahead_of_main.len(),
-                                local_beind_main.len(),
-                            ),
-                            format!(
-                                "discard local branch with unpublished version ({} ahead {} behind '{main_branch_name}') and checkout latest published version ({} ahead {} behind '{main_branch_name}'). consider creating a temporary branch with your existing unchanges first.",
-                                most_recent_proposal_patch_chain.len(),
-                                proposal_behind_main.len(),
-                                local_ahead_of_main.len(),
-                                local_beind_main.len(),
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            "back".to_string(),
-                        ],
-                    )
-            )? {
-                    0 => {
-                        check_clean(&git_repo)?;
-                        git_repo.checkout(&cover_letter.branch_name)?;
-                        println!(
-                            "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
-                            local_ahead_of_main.len(),
-                            local_beind_main.len(),
-                        );
-                        Ok(())
-                    },
-                    1 => {
-                        check_clean(&git_repo)?;
-                        git_repo.create_branch_at_commit(&cover_letter.branch_name, &proposal_base_commit.to_string())?;
-                        git_repo.checkout(&cover_letter.branch_name)?;
-                        let chain_length = most_recent_proposal_patch_chain.len();
-                        let _ = git_repo
-                            .apply_patch_chain(&cover_letter.branch_name, most_recent_proposal_patch_chain)
-                            .context("cannot apply patch chain")?;
-                        println!(
-                            "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}'). consider creating a temporary branch with your existing unchanges first.",
-                            chain_length,
-                            proposal_behind_main.len(),
-                            local_ahead_of_main.len(),
-                            local_beind_main.len(),
-                        );
-                        Ok(())
-                    },
-                    2 => {launch_git_am_with_patches(most_recent_proposal_patch_chain)},
-                    3 => {save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo)},
-                    4 => { continue },
-                    _ => { bail!("unexpected choice")}
-            };
+        PromptChoiceParms::default().with_default(0)
+            .with_choices(
+                vec![
+                    format!(
+                        "checkout local branch with unpublished changes ({} ahead {} behind '{main_branch_name}')",
+                        local_ahead_of_main.len(),
+                        local_beind_main.len(),
+                    ),
+                    format!(
+                        "discard local branch with old version ({} ahead {} behind '{main_branch_name}') and checkout latest published version ({} ahead {} behind '{main_branch_name}')",
+                        most_recent_proposal_patch_chain.len(),
+                        proposal_behind_main.len(),
+                        local_ahead_of_main.len(),
+                        local_beind_main.len(),
+                    ),
+                    format!("apply to current branch with `git am`"),
+                    format!("download to ./patches"),
+                    "back".to_string(),
+                ],
+            )
+    )? {
+            0 => {
+                check_clean(&git_repo)?;
+                git_repo.checkout(&cover_letter.branch_name)?;
+                println!(
+                    "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
+                    local_ahead_of_main.len(),
+                    local_beind_main.len(),
+                );
+                Ok(())
+            },
+            1 => {
+                check_clean(&git_repo)?;
+                git_repo.create_branch_at_commit(&cover_letter.branch_name, &proposal_base_commit.to_string())?;
+                git_repo.checkout(&cover_letter.branch_name)?;
+                let chain_length = most_recent_proposal_patch_chain.len();
+                let _ = git_repo
+                    .apply_patch_chain(&cover_letter.branch_name, most_recent_proposal_patch_chain)
+                    .context("cannot apply patch chain")?;
+                println!(
+                    "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
+                    chain_length,
+                    proposal_behind_main.len(),
+                    local_ahead_of_main.len(),
+                    local_beind_main.len(),
+                );
+                Ok(())
+            },
+            2 => {launch_git_am_with_patches(most_recent_proposal_patch_chain)},
+            3 => {save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo)},
+            4 => { continue },
+            _ => { bail!("unexpected choice")}
+    };
     }
 }
 
