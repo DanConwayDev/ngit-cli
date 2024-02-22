@@ -369,6 +369,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
+        // new proposal revision / rebase
         // tip of local in proposal history (new, ammended or rebased version but no
         // local changes)
         if commits_events.iter().any(|patch| {
@@ -436,43 +437,42 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
-        // TODO: write tests
         // tip of proposal in branch in history (local appendments made to up-to-date
         // proposal)
         if let Ok((local_ahead_of_proposal, _)) =
             git_repo.get_commits_ahead_behind(&proposal_tip, &local_branch_tip)
         {
             println!(
-                "local proposal branch exists with {} unpublished commits on top of the most up-to-date version of the proposal",
-                local_ahead_of_proposal.len()
+                "local proposal branch exists with {} unpublished commits on top of the most up-to-date version of the proposal ({} ahead {} behind '{main_branch_name}')",
+                local_ahead_of_proposal.len(),
+                local_ahead_of_main.len(),
+                proposal_behind_main.len(),
             );
             return match Interactor::default().choice(
-                PromptChoiceParms::default().with_default(0)
-                    .with_choices(
-                        vec![
-                            format!(
-                                "checkout proposal branch with {} unpublished commits ({} ahead {} behind '{main_branch_name}')",
-                                local_ahead_of_proposal.len(),
-                                local_ahead_of_main.len(),
-                                proposal_behind_main.len(),
-                            ),
-                            "back".to_string(),
-                        ],
-                    )
-            )? {
-                    0 => {
-                        git_repo.checkout(&cover_letter.branch_name)?;
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
                         format!(
-                            "checked out proposal branch with {} unpublished commits ({} ahead {} behind '{main_branch_name}')",
+                            "checkout proposal branch with {} unpublished commits",
                             local_ahead_of_proposal.len(),
-                            local_ahead_of_main.len(),
-                            proposal_behind_main.len(),
-                        );
-                        Ok(())
-
-                     },
-                    1 => { continue },
-                    _ => { bail!("unexpected choice")}
+                        ),
+                        "back".to_string(),
+                    ]),
+            )? {
+                0 => {
+                    git_repo.checkout(&cover_letter.branch_name)?;
+                    println!(
+                        "checked out proposal branch with {} unpublished commits ({} ahead {} behind '{main_branch_name}')",
+                        local_ahead_of_proposal.len(),
+                        local_ahead_of_main.len(),
+                        proposal_behind_main.len(),
+                    );
+                    Ok(())
+                }
+                1 => continue,
+                _ => {
+                    bail!("unexpected choice")
+                }
             };
         }
 
@@ -516,7 +516,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                     0 => {
                         check_clean(&git_repo)?;
                         git_repo.checkout(&cover_letter.branch_name)?;
-                        format!(
+                        println!(
                             "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
                             local_ahead_of_main.len(),
                             local_beind_main.len(),
@@ -531,7 +531,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                         let _ = git_repo
                             .apply_patch_chain(&cover_letter.branch_name, most_recent_proposal_patch_chain)
                             .context("cannot apply patch chain")?;
-                        format!(
+                        println!(
                             "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
                             chain_length,
                             proposal_behind_main.len(),
@@ -596,7 +596,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                     0 => {
                         check_clean(&git_repo)?;
                         git_repo.checkout(&cover_letter.branch_name)?;
-                        format!(
+                        println!(
                             "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
                             local_ahead_of_main.len(),
                             local_beind_main.len(),
@@ -611,7 +611,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                         let _ = git_repo
                             .apply_patch_chain(&cover_letter.branch_name, most_recent_proposal_patch_chain)
                             .context("cannot apply patch chain")?;
-                        format!(
+                        println!(
                             "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}'). consider creating a temporary branch with your existing unchanges first.",
                             chain_length,
                             proposal_behind_main.len(),
