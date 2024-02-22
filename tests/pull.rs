@@ -18,22 +18,22 @@ fn cli_tester_create_proposals() -> Result<GitTestRepo> {
         &git_repo,
         FEATURE_BRANCH_NAME_1,
         "a",
-        PROPOSAL_TITLE_1,
-        "proposal a description",
+        Some((PROPOSAL_TITLE_1, "proposal a description")),
+        None,
     )?;
     cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_2,
         "b",
-        PROPOSAL_TITLE_2,
-        "proposal b description",
+        Some((PROPOSAL_TITLE_2, "proposal b description")),
+        None,
     )?;
     cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_3,
         "c",
-        PROPOSAL_TITLE_3,
-        "proposal c description",
+        Some((PROPOSAL_TITLE_3, "proposal c description")),
+        None,
     )?;
     Ok(git_repo)
 }
@@ -66,27 +66,59 @@ fn cli_tester_create_proposal(
     test_repo: &GitTestRepo,
     branch_name: &str,
     prefix: &str,
-    title: &str,
-    description: &str,
+    cover_letter_title_and_description: Option<(&str, &str)>,
+    in_reply_to: Option<String>,
 ) -> Result<()> {
     create_and_populate_branch(test_repo, branch_name, prefix, false)?;
 
-    let mut p = CliTester::new_from_dir(
-        &test_repo.dir,
-        [
-            "--nsec",
-            TEST_KEY_1_NSEC,
-            "--password",
-            TEST_PASSWORD,
-            "--disable-cli-spinners",
-            "send",
-            "--title",
-            format!("\"{title}\"").as_str(),
-            "--description",
-            format!("\"{description}\"").as_str(),
-        ],
-    );
-    p.expect_end_eventually()?;
+    if let Some(in_reply_to) = in_reply_to {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "--no-cover-letter",
+                "--in-reply-to",
+                in_reply_to.as_str(),
+            ],
+        );
+        p.expect_end_eventually()?;
+    } else if let Some((title, description)) = cover_letter_title_and_description {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "--title",
+                format!("\"{title}\"").as_str(),
+                "--description",
+                format!("\"{description}\"").as_str(),
+            ],
+        );
+        p.expect_end_eventually()?;
+    } else {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "--no-cover-letter",
+            ],
+        );
+        p.expect_end_eventually()?;
+    }
     Ok(())
 }
 
@@ -415,7 +447,219 @@ mod when_branch_is_checked_out {
     }
 
     mod when_latest_event_rebases_branch {
-        // use super::*;
-        // TODO
+        use std::time::Duration;
+
+        use nostr_sdk::blocking::Client;
+
+        use super::*;
+
+        async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
+            // fallback (51,52) user write (53, 55) repo (55, 56)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+            );
+
+            r51.events.push(generate_test_key_1_relay_list_event());
+            r51.events.push(generate_test_key_1_metadata_event("fred"));
+            r51.events.push(generate_repo_ref_event());
+
+            r55.events.push(generate_repo_ref_event());
+            r55.events.push(generate_test_key_1_metadata_event("fred"));
+            r55.events.push(generate_test_key_1_relay_list_event());
+
+            let cli_tester_handle =
+                std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
+                    // create 3 proposals
+                    let _ = cli_tester_create_proposals()?;
+                    // get proposal id of first
+                    let client = Client::new(&nostr::Keys::generate());
+                    client.add_relay("ws://localhost:8055")?;
+                    client.connect_relay("ws://localhost:8055")?;
+                    let proposals = client.get_events_of(
+                        vec![
+                            nostr::Filter::default()
+                                .kind(nostr::Kind::Custom(PATCH_KIND))
+                                .custom_tag(nostr::Alphabet::T, vec!["root"]),
+                        ],
+                        Some(Duration::from_millis(500)),
+                    )?;
+                    client.disconnect()?;
+
+                    let proposal_1_id = proposals
+                        .iter()
+                        .find(|e| {
+                            e.tags
+                                .iter()
+                                .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
+                        })
+                        .unwrap()
+                        .id;
+                    // recreate proposal 1 on top of a another commit (like a rebase on top
+                    // of one extra commit)
+                    let second_originating_repo = GitTestRepo::default();
+                    second_originating_repo.populate()?;
+                    std::fs::write(
+                        second_originating_repo.dir.join("amazing.md"),
+                        "some content",
+                    )?;
+                    second_originating_repo.stage_and_commit("commit for rebasing on top of")?;
+                    cli_tester_create_proposal(
+                        &second_originating_repo,
+                        FEATURE_BRANCH_NAME_1,
+                        "a",
+                        Some((PROPOSAL_TITLE_1, "proposal a description")),
+                        Some(proposal_1_id.to_string()),
+                    )?;
+
+                    // pretend we have downloaded the origianl version of the first proposal
+                    let test_repo = GitTestRepo::default();
+                    test_repo.populate()?;
+                    create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
+                    // pretend we have pulled the updated main branch
+                    test_repo.checkout("main")?;
+                    std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
+                    test_repo.stage_and_commit("commit for rebasing on top of")?;
+                    test_repo.checkout(FEATURE_BRANCH_NAME_1)?;
+
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
+                    p.expect_end_eventually_and_print()?;
+
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok((second_originating_repo, test_repo))
+                });
+
+            // launch relay
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+            );
+            let res = cli_tester_handle.join().unwrap()?;
+
+            Ok(res)
+        }
+
+        mod cli_prompts {
+            use super::*;
+            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                    Relay::new(8051, None, None),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(8056, None, None),
+                );
+
+                r51.events.push(generate_test_key_1_relay_list_event());
+                r51.events.push(generate_test_key_1_metadata_event("fred"));
+                r51.events.push(generate_repo_ref_event());
+
+                r55.events.push(generate_repo_ref_event());
+                r55.events.push(generate_test_key_1_metadata_event("fred"));
+                r55.events.push(generate_test_key_1_relay_list_event());
+
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    // create 3 proposals
+                    let _ = cli_tester_create_proposals()?;
+                    // get proposal id of first
+                    let client = Client::new(&nostr::Keys::generate());
+                    client.add_relay("ws://localhost:8055")?;
+                    client.connect_relay("ws://localhost:8055")?;
+                    let proposals = client.get_events_of(
+                        vec![
+                            nostr::Filter::default()
+                                .kind(nostr::Kind::Custom(PATCH_KIND))
+                                .custom_tag(nostr::Alphabet::T, vec!["root"]),
+                        ],
+                        Some(Duration::from_millis(500)),
+                    )?;
+                    client.disconnect()?;
+
+                    let proposal_1_id = proposals
+                        .iter()
+                        .find(|e| {
+                            e.tags
+                                .iter()
+                                .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
+                        })
+                        .unwrap()
+                        .id;
+                    // recreate proposal 1 on top of a another commit (like a rebase on top
+                    // of one extra commit)
+                    let second_originating_repo = GitTestRepo::default();
+                    second_originating_repo.populate()?;
+                    std::fs::write(
+                        second_originating_repo.dir.join("amazing.md"),
+                        "some content",
+                    )?;
+                    second_originating_repo.stage_and_commit("commit for rebasing on top of")?;
+                    cli_tester_create_proposal(
+                        &second_originating_repo,
+                        FEATURE_BRANCH_NAME_1,
+                        "a",
+                        Some((PROPOSAL_TITLE_1, "proposal a description")),
+                        Some(proposal_1_id.to_string()),
+                    )?;
+
+                    // pretend we have downloaded the origianl version of the first proposal
+                    let test_repo = GitTestRepo::default();
+                    test_repo.populate()?;
+                    create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
+                    // pretend we have pulled the updated main branch
+                    test_repo.checkout("main")?;
+                    std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
+                    test_repo.stage_and_commit("commit for rebasing on top of")?;
+                    test_repo.checkout(FEATURE_BRANCH_NAME_1)?;
+
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
+                    p.expect("finding proposal root event...\r\n")?;
+                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect_end_with("pulled new version of proposal (2 ahead 0 behind 'main'), replacing old version (2 ahead 1 behind 'main')\r\n")?;
+
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+                println!("{:?}", r55.events);
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
+            async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
+                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn proposal_branch_tip_is_most_recent_proposal_revision_tip() -> Result<()> {
+            let (originating_repo, test_repo) = prep_and_run().await?;
+            assert_eq!(
+                originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
+                test_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
+            );
+            Ok(())
+        }
     }
 }

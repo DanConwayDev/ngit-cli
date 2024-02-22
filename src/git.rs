@@ -344,6 +344,12 @@ impl RepoActions for Repo {
     }
 
     fn create_branch_at_commit(&self, branch_name: &str, commit: &str) -> Result<()> {
+        let branch_checkedout = self.get_checked_out_branch_name()?.eq(branch_name);
+        if branch_checkedout {
+            let (name, _) = self.get_main_or_master_branch()?;
+            self.checkout(name)?;
+        }
+
         self.git_repo
             .branch(
                 branch_name,
@@ -351,6 +357,10 @@ impl RepoActions for Repo {
                 true,
             )
             .context("branch could not be created")?;
+
+        if branch_checkedout {
+            self.checkout(branch_name)?;
+        }
         Ok(())
     }
     /* returns patches applied */
@@ -1290,6 +1300,30 @@ mod tests {
 
                 git_repo.create_branch_at_commit(branch_name, &ahead_1_oid.to_string())?;
                 assert_eq!(test_repo.checkout(branch_name)?, ahead_1_oid);
+                Ok(())
+            }
+
+            #[test]
+            fn when_branch_is_checkedout_new_tip_specified_it_is_updated() -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                test_repo.populate()?;
+                // create feature branch and add 2 commits
+                test_repo.create_branch("feature")?;
+                test_repo.checkout("feature")?;
+                std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+                let ahead_1_oid = test_repo.stage_and_commit("add t3.md")?;
+                std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+                let ahead_2_oid = test_repo.stage_and_commit("add t4.md")?;
+
+                let git_repo = Repo::from_path(&test_repo.dir)?;
+
+                let branch_name = "test-name-1";
+                git_repo.create_branch_at_commit(branch_name, &ahead_1_oid.to_string())?;
+                test_repo.checkout(branch_name)?;
+                git_repo.create_branch_at_commit(branch_name, &ahead_2_oid.to_string())?;
+                test_repo.checkout("main")?;
+
+                assert_eq!(test_repo.checkout(branch_name)?, ahead_2_oid);
                 Ok(())
             }
         }
