@@ -39,7 +39,7 @@ enum Commands {
     Send(sub_commands::send::SubCommandArgs),
     /// list proposals; optionally apply them as a new branch
     List(sub_commands::list::SubCommandArgs),
-    /// send new commits as proposal ammendments
+    /// send new commits as proposal amendments
     Push,
     /// pull latest commits in proposal linked to checked out branch
     Pull,

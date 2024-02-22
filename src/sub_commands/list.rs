@@ -370,7 +370,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
         }
 
         // new proposal revision / rebase
-        // tip of local in proposal history (new, ammended or rebased version but no
+        // tip of local in proposal history (new, amended or rebased version but no
         // local changes)
         if commits_events.iter().any(|patch| {
             get_commit_id_from_patch(patch)
@@ -477,21 +477,21 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
-        println!("you have an ammended/rebase version the proposal that is unpublished");
-        // user probably has a unpublished ammended or rebase version of the latest
+        println!("you have an amended/rebase version the proposal that is unpublished");
+        // user probably has a unpublished amended or rebase version of the latest
         // proposal version
         // if tip of proposal commits exist (were once part of branch but have been
-        // ammended and git clean up job hasn't removed them)
+        // amended and git clean up job hasn't removed them)
         if git_repo.does_commit_exist(&proposal_tip.to_string())? {
             println!(
-                "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has ammended or rebased it ({} ahead {} behind '{main_branch_name}')",
+                "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has amended or rebased it ({} ahead {} behind '{main_branch_name}')",
                 most_recent_proposal_patch_chain.len(),
                 proposal_behind_main.len(),
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
             );
         }
-        // user probably has a unpublished ammended or rebase version of an older
+        // user probably has a unpublished amended or rebase version of an older
         // proposal version
         else {
             println!(
@@ -503,7 +503,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             );
 
             println!(
-                "its likely that you have rebased / ammended an old proposal version because git has no record of the latest proposal commit."
+                "its likely that you have rebased / amended an old proposal version because git has no record of the latest proposal commit."
             );
             println!(
                 "it is possible that you have been working off the latest version and git has delete this commit as part of a clean up"

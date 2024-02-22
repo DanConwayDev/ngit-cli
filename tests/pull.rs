@@ -439,7 +439,7 @@ mod when_branch_is_checked_out {
         }
     }
 
-    mod when_old_proposal_revision_ammended_locally {
+    mod when_old_proposal_revision_amended_locally {
         use super::*;
 
         mod cli_prompts {
@@ -467,7 +467,7 @@ mod when_branch_is_checked_out {
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
 
-                    // simulating ammending an older version of the proposal commits on the current
+                    // simulating amending an older version of the proposal commits on the current
                     // branch
                     create_and_populate_branch(
                         &test_repo,
@@ -480,10 +480,10 @@ mod when_branch_is_checked_out {
                     p.expect("finding proposal root event...\r\n")?;
                     p.expect("found proposal root event. finding commits...\r\n")?;
                     p.expect(
-                        "you have an ammended/rebase version the proposal that is unpublished\r\n",
+                        "you have an amended/rebase version the proposal that is unpublished\r\n",
                     )?;
                     p.expect("your local proposal branch (2 ahead 0 behind 'main') has conflicting changes with the latest published proposal (2 ahead 0 behind 'main')\r\n")?;
-                    p.expect("its likely that you have rebased / ammended an old proposal version because git has no record of the latest proposal commit.\r\n")?;
+                    p.expect("its likely that you have rebased / amended an old proposal version because git has no record of the latest proposal commit.\r\n")?;
                     p.expect("it is possible that you have been working off the latest version and git has delete this commit as part of a clean up\r\n")?;
                     p.expect("to view the latest proposal but retain your changes:\r\n")?;
                     p.expect("  1) create a new branch off the tip commit of this one to store your changes\r\n")?;
@@ -519,7 +519,7 @@ mod when_branch_is_checked_out {
         }
     }
 
-    mod when_latest_proposal_ammended_locally {
+    mod when_latest_proposal_amended_locally {
         use super::*;
 
         mod cli_prompts {
@@ -550,7 +550,7 @@ mod when_branch_is_checked_out {
                     // simulating checking out the proposal (the commits_ids will match)
                     create_and_populate_branch(&test_repo, "different-branch-name", "a", false)?;
                     test_repo.checkout("main")?;
-                    // simulating ammending the proposal
+                    // simulating amending the proposal
                     create_and_populate_branch(
                         &test_repo,
                         FEATURE_BRANCH_NAME_1,
@@ -562,9 +562,9 @@ mod when_branch_is_checked_out {
                     p.expect("finding proposal root event...\r\n")?;
                     p.expect("found proposal root event. finding commits...\r\n")?;
                     p.expect(
-                        "you have an ammended/rebase version the proposal that is unpublished\r\n",
+                        "you have an amended/rebase version the proposal that is unpublished\r\n",
                     )?;
-                    p.expect("you have previously applied the latest version of the proposal (2 ahead 0 behind 'main') but your local proposal branch has ammended or rebased it (2 ahead 0 behind 'main')\r\n")?;
+                    p.expect("you have previously applied the latest version of the proposal (2 ahead 0 behind 'main') but your local proposal branch has amended or rebased it (2 ahead 0 behind 'main')\r\n")?;
                     p.expect("to view the latest proposal but retain your changes:\r\n")?;
                     p.expect("  1) create a new branch off the tip commit of this one to store your changes\r\n")?;
                     p.expect("  2) run `ngit list` and checkout the latest published version of this proposal\r\n")?;

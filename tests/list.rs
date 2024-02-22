@@ -1208,7 +1208,7 @@ mod when_main_branch_is_uptodate {
                 }
             }
 
-            mod when_latest_proposal_ammended_locally {
+            mod when_latest_proposal_amended_locally {
                 // other rebase scenarios should work if this test passes
                 use super::*;
                 async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
@@ -1244,7 +1244,7 @@ mod when_main_branch_is_uptodate {
                                 "a",
                                 false,
                             )?;
-                            // simulating ammending the proposal
+                            // simulating amending the proposal
                             create_and_populate_branch(
                                 &test_repo,
                                 FEATURE_BRANCH_NAME_1,
@@ -1333,7 +1333,7 @@ mod when_main_branch_is_uptodate {
                                 "a",
                                 false,
                             )?;
-                            // simulating ammending the proposal
+                            // simulating amending the proposal
                             create_and_populate_branch(
                                 &test_repo,
                                 FEATURE_BRANCH_NAME_1,
@@ -1353,8 +1353,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
-                            p.expect("you have an ammended/rebase version the proposal that is unpublished\r\n")?;
-                            p.expect("you have previously applied the latest version of the proposal (2 ahead 0 behind 'main') but your local proposal branch has ammended or rebased it (2 ahead 0 behind 'main')\r\n")?;
+                            p.expect("you have an amended/rebase version the proposal that is unpublished\r\n")?;
+                            p.expect("you have previously applied the latest version of the proposal (2 ahead 0 behind 'main') but your local proposal branch has amended or rebased it (2 ahead 0 behind 'main')\r\n")?;
                             p.expect("to view the latest proposal but retain your changes:\r\n")?;
                             p.expect("  1) create a new branch off the tip commit of this one to store your changes\r\n")?;
                             p.expect("  2) run `ngit list` and checkout the latest published version of this proposal\r\n")?;

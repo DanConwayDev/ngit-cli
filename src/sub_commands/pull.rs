@@ -142,21 +142,21 @@ pub async fn launch() -> Result<()> {
             local_ahead_of_proposal.len()
         );
     } else {
-        println!("you have an ammended/rebase version the proposal that is unpublished");
-        // user probably has a unpublished ammended or rebase version of the latest
+        println!("you have an amended/rebase version the proposal that is unpublished");
+        // user probably has a unpublished amended or rebase version of the latest
         // proposal version
         // if tip of proposal commits exist (were once part of branch but have been
-        // ammended and git clean up job hasn't removed them)
+        // amended and git clean up job hasn't removed them)
         if git_repo.does_commit_exist(&proposal_tip.to_string())? {
             println!(
-                "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has ammended or rebased it ({} ahead {} behind '{main_branch_name}')",
+                "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has amended or rebased it ({} ahead {} behind '{main_branch_name}')",
                 most_recent_proposal_patch_chain.len(),
                 proposal_behind_main.len(),
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
             );
         }
-        // user probably has a unpublished ammended or rebase version of an older
+        // user probably has a unpublished amended or rebase version of an older
         // proposal version
         else {
             println!(
@@ -168,7 +168,7 @@ pub async fn launch() -> Result<()> {
             );
 
             println!(
-                "its likely that you have rebased / ammended an old proposal version because git has no record of the latest proposal commit."
+                "its likely that you have rebased / amended an old proposal version because git has no record of the latest proposal commit."
             );
             println!(
                 "it is possible that you have been working off the latest version and git has delete this commit as part of a clean up"
@@ -183,7 +183,7 @@ pub async fn launch() -> Result<()> {
         // TODO: this copy could be refined further based on this:
         //  - amended commits in the proposal
         //     - if local_base eq proposal base
-        //  - ammended an older version of proposal
+        //  - amended an older version of proposal
         //     - if local_base is behind proposal_base
         //  - rebased the proposal
         //     - if local_base is ahead of proposal_base

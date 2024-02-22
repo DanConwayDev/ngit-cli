@@ -632,7 +632,7 @@ fn validate_patch_applied(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
                     None,
                     None,
                 )
-                .context("cannot ammend commit to produce new oid")?;
+                .context("cannot amend commit to produce new oid")?;
             // replace the commit with the wrong oid with the newly created one with the
             // correct oid
             git_repo
