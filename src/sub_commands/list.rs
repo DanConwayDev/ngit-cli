@@ -436,7 +436,9 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
-        // tip of proposal in branch in history (local appendments made)
+        // TODO: write tests
+        // tip of proposal in branch in history (local appendments made to up-to-date
+        // proposal)
         if let Ok((local_ahead_of_proposal, _)) =
             git_repo.get_commits_ahead_behind(&proposal_tip, &local_branch_tip)
         {
@@ -474,6 +476,8 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
+        // TODO: write tests
+        // user has probably has an unpublished rebase of the latest proposal version
         // if tip of proposal commits exist (were once part of branch but have been
         // ammended and git clean up job hasn't removed them)
         if git_repo.does_commit_exist(&proposal_tip.to_string())? {
@@ -483,6 +487,9 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
                 proposal_behind_main.len(),
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
+            );
+            println!(
+                "if this sounds right then consider publishing your rebase `ngit push --force` or discarding your local branch"
             );
             return match Interactor::default().choice(
                 PromptChoiceParms::default().with_default(0)
@@ -540,6 +547,9 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
+        // TODO: write tests
+        // user has probaly has an unpublished rebase of an older version of the
+        // proposal
         println!(
             "your local proposal branch ({} ahead {} behind '{main_branch_name}') has conflicting changes with the latest published proposal ({} ahead {} behind '{main_branch_name}')",
             local_ahead_of_main.len(),
@@ -547,6 +557,19 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             most_recent_proposal_patch_chain.len(),
             proposal_behind_main.len(),
         );
+        println!(
+            "its likely that you are working off an old proposal version because git has no record of the latest proposal commit."
+        );
+        println!(
+            "it is possible that you have ammended the latest version and git has delete this commit as part of a clean up"
+        );
+
+        println!("to view the latest proposal but retain your changes:");
+        println!("  1) checkout the local branch");
+        println!("  2) create a new branch off the tip commit to store your changes");
+        println!("  3) run `ngit list` and checkout the latest published version of this proposal");
+
+        println!("if you are confident in your changes consider running `ngit push --force`");
 
         return match Interactor::default().choice(
                 PromptChoiceParms::default().with_default(0)
