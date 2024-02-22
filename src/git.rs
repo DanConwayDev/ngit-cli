@@ -370,16 +370,21 @@ impl RepoActions for Repo {
         branch_name: &str,
         patch_and_ancestors: Vec<nostr::Event>,
     ) -> Result<Vec<nostr::Event>> {
-        let branch_tip = self.get_tip_of_local_branch(branch_name)?;
+        let branch_tip_result = self.get_tip_of_local_branch(branch_name);
+
         // filter out existing ancestors in branch
         let mut patches_to_apply: Vec<nostr::Event> = patch_and_ancestors
             .into_iter()
             .filter(|e| {
                 let commit_id = get_commit_id_from_patch(e).unwrap();
-                !branch_tip.to_string().eq(&commit_id)
-                    || !self
-                        .ancestor_of(&branch_tip, &str_to_sha1(&commit_id).unwrap())
-                        .unwrap()
+                if let Ok(branch_tip) = branch_tip_result {
+                    !branch_tip.to_string().eq(&commit_id)
+                        && !self
+                            .ancestor_of(&branch_tip, &str_to_sha1(&commit_id).unwrap())
+                            .unwrap()
+                } else {
+                    true
+                }
             })
             .collect();
 
@@ -387,7 +392,8 @@ impl RepoActions for Repo {
             if let Ok(last_patch) = patches_to_apply.last().context("no patches") {
                 last_patch
             } else {
-                self.checkout(branch_name).context("the parent commit of the proposal doesnt exist in your local repoistory. Try a git pull on master first.")?;
+                self.checkout(branch_name)
+                    .context("no patches and so cannot create a proposal branch")?;
                 return Ok(vec![]);
             },
             "parent-commit",
@@ -399,9 +405,7 @@ impl RepoActions for Repo {
         }
 
         // checkout branch
-        if !self.get_checked_out_branch_name()?.eq(&branch_name) {
-            self.create_branch_at_commit(branch_name, &parent_commit_id)?;
-        }
+        self.create_branch_at_commit(branch_name, &parent_commit_id)?;
         self.checkout(branch_name)?;
 
         // apply commits
@@ -1938,6 +1942,99 @@ mod tests {
                 );
                 Ok(())
             }
+        }
+    }
+    mod ancestor_of {
+        use super::*;
+
+        #[test]
+        fn deep_ancestor_returns_true() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let from_main_in_feature_history = test_repo.populate()?;
+
+            // create feature branch and add 2 commits
+            test_repo.create_branch("feature")?;
+
+            test_repo.checkout("feature")?;
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            test_repo.stage_and_commit("add t3.md")?;
+            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+            let ahead_2_oid = test_repo.stage_and_commit("add t4.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert!(git_repo.ancestor_of(
+                &oid_to_sha1(&ahead_2_oid),
+                &oid_to_sha1(&from_main_in_feature_history)
+            )?);
+            Ok(())
+        }
+
+        #[test]
+        fn commit_parent_returns_true() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            // create feature branch and add 2 commits
+            test_repo.create_branch("feature")?;
+
+            test_repo.checkout("feature")?;
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            let ahead_1_oid = test_repo.stage_and_commit("add t3.md")?;
+            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+            let ahead_2_oid = test_repo.stage_and_commit("add t4.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert!(git_repo.ancestor_of(&oid_to_sha1(&ahead_2_oid), &oid_to_sha1(&ahead_1_oid))?);
+            Ok(())
+        }
+
+        #[test]
+        fn same_commit_returns_false() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            // create feature branch and add 2 commits
+            test_repo.create_branch("feature")?;
+
+            test_repo.checkout("feature")?;
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            test_repo.stage_and_commit("add t3.md")?;
+            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+            let ahead_2_oid = test_repo.stage_and_commit("add t4.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert!(!git_repo.ancestor_of(&oid_to_sha1(&ahead_2_oid), &oid_to_sha1(&ahead_2_oid))?);
+            Ok(())
+        }
+
+        #[test]
+        fn commit_not_in_history_returns_false() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            // create feature branch and add 2 commits
+            test_repo.create_branch("feature")?;
+
+            // create commit not in feature history
+            std::fs::write(test_repo.dir.join("notfeature.md"), "some content")?;
+            let on_main_after_feature = test_repo.stage_and_commit("add notfeature.md")?;
+
+            test_repo.checkout("feature")?;
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            test_repo.stage_and_commit("add t3.md")?;
+            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+            let ahead_2_oid = test_repo.stage_and_commit("add t4.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert!(!git_repo.ancestor_of(
+                &oid_to_sha1(&ahead_2_oid),
+                &oid_to_sha1(&on_main_after_feature)
+            )?);
+            Ok(())
         }
     }
 }
