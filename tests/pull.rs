@@ -439,6 +439,166 @@ mod when_branch_is_checked_out {
         }
     }
 
+    mod when_old_proposal_revision_ammended_locally {
+        use super::*;
+
+        mod cli_prompts {
+            use super::*;
+            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                    Relay::new(8051, None, None),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(8056, None, None),
+                );
+
+                r51.events.push(generate_test_key_1_relay_list_event());
+                r51.events.push(generate_test_key_1_metadata_event("fred"));
+                r51.events.push(generate_repo_ref_event());
+
+                r55.events.push(generate_repo_ref_event());
+                r55.events.push(generate_test_key_1_metadata_event("fred"));
+                r55.events.push(generate_test_key_1_relay_list_event());
+
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    cli_tester_create_proposals()?;
+
+                    let test_repo = GitTestRepo::default();
+                    test_repo.populate()?;
+
+                    // simulating ammending an older version of the proposal commits on the current
+                    // branch
+                    create_and_populate_branch(
+                        &test_repo,
+                        FEATURE_BRANCH_NAME_1,
+                        "a-changed",
+                        false,
+                    )?;
+
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
+                    p.expect("finding proposal root event...\r\n")?;
+                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect(
+                        "you have an ammended/rebase version the proposal that is unpublished\r\n",
+                    )?;
+                    p.expect("your local proposal branch (2 ahead 0 behind 'main') has conflicting changes with the latest published proposal (2 ahead 0 behind 'main')\r\n")?;
+                    p.expect("its likely that you have rebased / ammended an old proposal version because git has no record of the latest proposal commit.\r\n")?;
+                    p.expect("it is possible that you have been working off the latest version and git has delete this commit as part of a clean up\r\n")?;
+                    p.expect("to view the latest proposal but retain your changes:\r\n")?;
+                    p.expect("  1) create a new branch off the tip commit of this one to store your changes\r\n")?;
+                    p.expect("  2) run `ngit list` and checkout the latest published version of this proposal\r\n")?;
+                    p.expect("if you are confident in your changes consider running `ngit push --force`\r\n")?;
+                    p.expect_end()?;
+
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+                println!("{:?}", r55.events);
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
+            async fn cli_output_correct() -> Result<()> {
+                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
+                Ok(())
+            }
+        }
+    }
+
+    mod when_latest_proposal_ammended_locally {
+        use super::*;
+
+        mod cli_prompts {
+            use super::*;
+            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                    Relay::new(8051, None, None),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(8056, None, None),
+                );
+
+                r51.events.push(generate_test_key_1_relay_list_event());
+                r51.events.push(generate_test_key_1_metadata_event("fred"));
+                r51.events.push(generate_repo_ref_event());
+
+                r55.events.push(generate_repo_ref_event());
+                r55.events.push(generate_test_key_1_metadata_event("fred"));
+                r55.events.push(generate_test_key_1_relay_list_event());
+
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    cli_tester_create_proposals()?;
+
+                    let test_repo = GitTestRepo::default();
+                    test_repo.populate()?;
+
+                    // simulating checking out the proposal (the commits_ids will match)
+                    create_and_populate_branch(&test_repo, "different-branch-name", "a", false)?;
+                    test_repo.checkout("main")?;
+                    // simulating ammending the proposal
+                    create_and_populate_branch(
+                        &test_repo,
+                        FEATURE_BRANCH_NAME_1,
+                        "a-changed",
+                        false,
+                    )?;
+
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
+                    p.expect("finding proposal root event...\r\n")?;
+                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect(
+                        "you have an ammended/rebase version the proposal that is unpublished\r\n",
+                    )?;
+                    p.expect("you have previously applied the latest version of the proposal (2 ahead 0 behind 'main') but your local proposal branch has ammended or rebased it (2 ahead 0 behind 'main')\r\n")?;
+                    p.expect("to view the latest proposal but retain your changes:\r\n")?;
+                    p.expect("  1) create a new branch off the tip commit of this one to store your changes\r\n")?;
+                    p.expect("  2) run `ngit list` and checkout the latest published version of this proposal\r\n")?;
+                    p.expect("if you are confident in your changes consider running `ngit push --force`\r\n")?;
+                    p.expect_end()?;
+
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+                println!("{:?}", r55.events);
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
+            async fn cli_output_correct() -> Result<()> {
+                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
+                Ok(())
+            }
+        }
+    }
+
     mod when_local_commits_on_uptodate_proposal {
         use super::*;
         async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 
 use super::list::{get_commit_id_from_patch, tag_value};
 #[cfg(not(test))]
