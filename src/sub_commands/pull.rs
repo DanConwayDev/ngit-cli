@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use super::list::{get_commit_id_from_patch, tag_value};
 #[cfg(not(test))]
@@ -110,8 +110,7 @@ pub async fn launch() -> Result<()> {
         println!("your '{main_branch_name}' branch may not be up-to-date.");
         println!("manually run `git pull` on '{main_branch_name}' and try again");
     }
-    // if tip of local in proposal history (new, ammended or rebased version but no
-    // local changes)
+    // if new revision and no local changes (tip of local in proposal history)
     else if commit_events.iter().any(|patch| {
         get_commit_id_from_patch(patch)
             .unwrap_or_default()
@@ -134,51 +133,60 @@ pub async fn launch() -> Result<()> {
     }
     // if tip of proposal in branch in history (local appendments made to up-to-date
     // proposal)
-    else if let Ok((local_ahead_of_proposal, _)) =
-        git_repo.get_commits_ahead_behind(&proposal_tip, &local_branch_tip)
-    {
+    else if git_repo.ancestor_of(&local_branch_tip, &proposal_tip)? {
+        let (local_ahead_of_proposal, _) = git_repo
+            .get_commits_ahead_behind(&proposal_tip, &local_branch_tip)
+            .context("cannot get commits ahead behind for propsal_top and local_branch_tip")?;
         println!(
             "local proposal branch exists with {} unpublished commits on top of the most up-to-date version of the proposal",
             local_ahead_of_proposal.len()
         );
-    }
-    // user has probably has an unpublished rebase of the latest proposal version
-    // if tip of proposal commits exist (were once part of branch but have been
-    // ammended and git clean up job hasn't removed them)
-    else if git_repo.does_commit_exist(&proposal_tip.to_string())? {
-        println!(
-            "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has other unpublished changes ({} ahead {} behind '{main_branch_name}')",
-            most_recent_proposal_patch_chain.len(),
-            proposal_behind_main.len(),
-            local_ahead_of_main.len(),
-            local_beind_main.len(),
-        );
-        println!(
-            "if this sounds right then consider publishing your rebase `ngit push --force` or discarding your local branch"
-        );
-    }
-    // user has probaly has an unpublished rebase of an older version of the
-    // proposal
-    else {
-        println!(
-            "your local proposal branch ({} ahead {} behind '{main_branch_name}') has conflicting changes with the latest published proposal ({} ahead {} behind '{main_branch_name}')",
-            local_ahead_of_main.len(),
-            local_beind_main.len(),
-            most_recent_proposal_patch_chain.len(),
-            proposal_behind_main.len(),
-        );
-        println!(
-            "its likely that you are working off an old proposal version because git has no record of the latest proposal commit."
-        );
-        println!(
-            "it is possible that you have ammended the latest version and git has delete this commit as part of a clean up"
-        );
+    } else {
+        println!("you have an ammended/rebase version the proposal that is unpublished");
+        // user probably has a unpublished ammended or rebase version of the latest
+        // proposal version
+        // if tip of proposal commits exist (were once part of branch but have been
+        // ammended and git clean up job hasn't removed them)
+        if git_repo.does_commit_exist(&proposal_tip.to_string())? {
+            println!(
+                "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has ammended or rebased it ({} ahead {} behind '{main_branch_name}')",
+                most_recent_proposal_patch_chain.len(),
+                proposal_behind_main.len(),
+                local_ahead_of_main.len(),
+                local_beind_main.len(),
+            );
+        }
+        // user probably has a unpublished ammended or rebase version of an older
+        // proposal version
+        else {
+            println!(
+                "your local proposal branch ({} ahead {} behind '{main_branch_name}') has conflicting changes with the latest published proposal ({} ahead {} behind '{main_branch_name}')",
+                local_ahead_of_main.len(),
+                local_beind_main.len(),
+                most_recent_proposal_patch_chain.len(),
+                proposal_behind_main.len(),
+            );
 
+            println!(
+                "its likely that you have rebased / ammended an old proposal version because git has no record of the latest proposal commit."
+            );
+            println!(
+                "it is possible that you have been working off the latest version and git has delete this commit as part of a clean up"
+            );
+        }
         println!("to view the latest proposal but retain your changes:");
         println!("  1) create a new branch off the tip commit of this one to store your changes");
         println!("  2) run `ngit list` and checkout the latest published version of this proposal");
 
         println!("if you are confident in your changes consider running `ngit push --force`");
+
+        // TODO: this copy could be refined further based on this:
+        //  - amended commits in the proposal
+        //     - if local_base eq proposal base
+        //  - ammended an older version of proposal
+        //     - if local_base is behind proposal_base
+        //  - rebased the proposal
+        //     - if local_base is ahead of proposal_base
     }
     Ok(())
 }

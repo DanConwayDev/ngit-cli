@@ -68,6 +68,7 @@ pub trait RepoActions {
         patch_and_ancestors: Vec<nostr::Event>,
     ) -> Result<Vec<nostr::Event>>;
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
+    fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool>;
 }
 
 impl RepoActions for Repo {
@@ -459,6 +460,18 @@ impl RepoActions for Repo {
             Ok(ahead)
         } else {
             bail!("specified value not in a supported format")
+        }
+    }
+
+    fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool> {
+        if let Ok(res) = self
+            .git_repo
+            .graph_descendant_of(sha1_to_oid(decendant)?, sha1_to_oid(ancestor)?)
+            .context("could not run graph_descendant_of in gitlib2")
+        {
+            Ok(res)
+        } else {
+            Ok(false)
         }
     }
 }
