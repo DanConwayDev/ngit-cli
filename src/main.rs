@@ -40,7 +40,7 @@ enum Commands {
     /// list proposals; optionally apply them as a new branch
     List(sub_commands::list::SubCommandArgs),
     /// send new commits as proposal amendments
-    Push,
+    Push(sub_commands::push::SubCommandArgs),
     /// pull latest commits in proposal linked to checked out branch
     Pull,
     /// run with --nsec flag to change npub
@@ -56,6 +56,6 @@ async fn main() -> Result<()> {
         Commands::Send(args) => sub_commands::send::launch(&cli, args).await,
         Commands::List(args) => sub_commands::list::launch(&cli, args).await,
         Commands::Pull => sub_commands::pull::launch().await,
-        Commands::Push => sub_commands::push::launch(&cli).await,
+        Commands::Push(args) => sub_commands::push::launch(&cli, args).await,
     }
 }

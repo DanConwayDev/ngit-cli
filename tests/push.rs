@@ -243,7 +243,7 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_cli_show_up_to_date() -> Result<()> {
+            async fn run_async_cli_shows_proposal_ahead_error() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -294,8 +294,8 @@ mod when_branch_is_checked_out {
 
             #[tokio::test]
             #[serial]
-            async fn cli_show_up_to_date() -> Result<()> {
-                let _ = run_async_cli_show_up_to_date().await;
+            async fn cli_show_proposal_ahead_error() -> Result<()> {
+                let _ = run_async_cli_shows_proposal_ahead_error().await;
                 Ok(())
             }
         }
@@ -476,7 +476,167 @@ mod when_branch_is_checked_out {
     }
 
     mod when_branch_has_been_rebased {
-        // use super::*;
-        // TODO
+        use super::*;
+
+        mod cli_prompts {
+            use super::*;
+            async fn run_async_cli_shows_unpublished_rebase_error() -> Result<()> {
+                let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                    Relay::new(8051, None, None),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(8056, None, None),
+                );
+
+                r51.events.push(generate_test_key_1_relay_list_event());
+                r51.events.push(generate_test_key_1_metadata_event("fred"));
+                r51.events.push(generate_repo_ref_event());
+
+                r55.events.push(generate_repo_ref_event());
+                r55.events.push(generate_test_key_1_metadata_event("fred"));
+                r55.events.push(generate_test_key_1_relay_list_event());
+
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    cli_tester_create_proposals()?;
+
+                    let test_repo = GitTestRepo::default();
+                    test_repo.populate()?;
+
+                    // simulate rebase
+                    std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
+                    test_repo.stage_and_commit("commit for rebasing on top of")?;
+                    create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", true)?;
+
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
+                    // p.expect_end_eventually_and_print()?;
+
+                    p.expect("finding proposal root event...\r\n")?;
+                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("Error: local unpublished proposal has been rebased. consider force pushing\r\n")?;
+                    p.expect_end()?;
+
+                    for p in [51, 52, 53, 55, 56] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
+                });
+
+                // launch relay
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
+                );
+                cli_tester_handle.join().unwrap()?;
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
+            async fn cli_shows_unpublished_rebase_error() -> Result<()> {
+                let _ = run_async_cli_shows_unpublished_rebase_error().await;
+                Ok(())
+            }
+        }
+        mod with_force_flag {
+            use super::*;
+
+            mod cli_prompts {
+                use super::*;
+                async fn run_async_cli_shows_revision_sent() -> Result<()> {
+                    let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+                        Relay::new(8051, None, None),
+                        Relay::new(8052, None, None),
+                        Relay::new(8053, None, None),
+                        Relay::new(8055, None, None),
+                        Relay::new(8056, None, None),
+                    );
+
+                    r51.events.push(generate_test_key_1_relay_list_event());
+                    r51.events.push(generate_test_key_1_metadata_event("fred"));
+                    r51.events.push(generate_repo_ref_event());
+
+                    r55.events.push(generate_repo_ref_event());
+                    r55.events.push(generate_test_key_1_metadata_event("fred"));
+                    r55.events.push(generate_test_key_1_relay_list_event());
+
+                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                        cli_tester_create_proposals()?;
+
+                        let test_repo = GitTestRepo::default();
+                        test_repo.populate()?;
+
+                        // simulate rebase
+                        std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
+                        test_repo.stage_and_commit("commit for rebasing on top of")?;
+                        create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
+                        let mut p = CliTester::new_from_dir(
+                            &test_repo.dir,
+                            [
+                                "--nsec",
+                                TEST_KEY_1_NSEC,
+                                "--password",
+                                TEST_PASSWORD,
+                                "--disable-cli-spinners",
+                                "push",
+                                "--force",
+                                "--no-cover-letter",
+                            ],
+                        );
+                        p.expect("finding proposal root event...\r\n")?;
+                        p.expect("found proposal root event. finding commits...\r\n")?;
+                        p.expect("preparing to force push proposal revision...\r\n")?;
+
+                        // standard output from `ngit send`
+                        p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("\r")?;
+                        p.expect("logged in as fred\r\n")?;
+                        p.expect("posting 2 patches without a covering letter...\r\n")?;
+
+                        relay::expect_send_with_progress(
+                            &mut p,
+                            vec![
+                                (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
+                                (" [my-relay] ws://localhost:8053", true, ""),
+                                (" [repo-relay] ws://localhost:8056", true, ""),
+                                (" [default] ws://localhost:8051", true, ""),
+                                (" [default] ws://localhost:8052", true, ""),
+                            ],
+                            2,
+                        )?;
+                        // end standard `ngit send output`
+                        p.expect_after_whitespace("force pushed proposal revision\r\n")?;
+                        p.expect_end()?;
+
+                        for p in [51, 52, 53, 55, 56] {
+                            relay::shutdown_relay(8000 + p)?;
+                        }
+                        Ok(())
+                    });
+
+                    // launch relay
+                    let _ = join!(
+                        r51.listen_until_close(),
+                        r52.listen_until_close(),
+                        r53.listen_until_close(),
+                        r55.listen_until_close(),
+                        r56.listen_until_close(),
+                    );
+                    cli_tester_handle.join().unwrap()?;
+                    Ok(())
+                }
+
+                #[tokio::test]
+                #[serial]
+                async fn cli_shows_revision_sent() -> Result<()> {
+                    let _ = run_async_cli_shows_revision_sent().await;
+                    Ok(())
+                }
+            }
+        }
     }
 }

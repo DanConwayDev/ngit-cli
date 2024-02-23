@@ -27,26 +27,26 @@ pub struct SubCommandArgs {
     #[arg(default_value = "")]
     /// starting commit (commits since in current branch) or commit range, like
     /// in `git format-patch`
-    starting_commit: String,
+    pub(crate) starting_commit: String,
     #[clap(long)]
     /// nevent or event id of an existing proposal for which this is a new
     /// version
-    in_reply_to: Option<String>,
+    pub(crate) in_reply_to: Option<String>,
     /// optional cover letter title
     #[clap(short, long)]
-    title: Option<String>,
+    pub(crate) title: Option<String>,
     #[clap(short, long)]
     /// optional cover letter description
-    description: Option<String>,
+    pub(crate) description: Option<String>,
     #[clap(long)]
     /// branch to get changes from (defaults to head)
-    from_branch: Option<String>,
+    pub(crate) from_branch: Option<String>,
     #[clap(long)]
     /// destination branch (defaults to main or master)
-    to_branch: Option<String>,
+    pub(crate) to_branch: Option<String>,
     /// don't ask about a cover letter
     #[arg(long, action)]
-    no_cover_letter: bool,
+    pub(crate) no_cover_letter: bool,
 }
 
 #[allow(clippy::too_many_lines)]

@@ -11,6 +11,7 @@ use crate::{
     login,
     repo_ref::{self, RepoRef},
     sub_commands::{
+        self,
         list::{
             find_commits_for_proposal_root_events, find_proposal_events, get_commit_id_from_patch,
             get_most_recent_patch_with_ancestors, tag_value,
@@ -20,7 +21,18 @@ use crate::{
     Cli,
 };
 
-pub async fn launch(cli_args: &Cli) -> Result<()> {
+#[derive(Debug, clap::Args)]
+pub struct SubCommandArgs {
+    #[arg(long, action)]
+    /// send proposal revision from checked out proposal branch
+    force: bool,
+    #[arg(long, action)]
+    /// dont prompt for cover letter when force pushing
+    no_cover_letter: bool,
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
     let (main_or_master_branch_name, _) = git_repo
@@ -59,24 +71,53 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
     )
     .await?;
 
-    // TODO: fix these scenarios:
-    // - local proposal branch is 2 behind and 1 ahead. intructions: ...
-    // - proposal has been rebased. (against commit in main) instructions: ...
-    // - proposal has been rebased. (against commit not in repo) instructions: ..
-
     let most_recent_proposal_patch_chain = get_most_recent_patch_with_ancestors(commit_events)
         .context("cannot get most recent patch for proposal")?;
 
     let branch_tip = git_repo.get_tip_of_local_branch(&branch_name)?;
 
     let most_recent_patch_commit_id = str_to_sha1(
-        &get_commit_id_from_patch(&most_recent_proposal_patch_chain[0])
-            .context("latest patch event doesnt have a commit tag")?,
+        &get_commit_id_from_patch(
+            most_recent_proposal_patch_chain
+                .first()
+                .context("no patches found")?,
+        )
+        .context("latest patch event doesnt have a commit tag")?,
     )
     .context("latest patch event commit tag isn't a valid SHA1 hash")?;
 
+    let proposal_base_commit_id = str_to_sha1(
+        &tag_value(
+            most_recent_proposal_patch_chain
+                .last()
+                .context("no patches found")?,
+            "parent-commit",
+        )
+        .context("patch is incorrectly formatted")?,
+    )
+    .context("latest patch event parent-commit tag isn't a valid SHA1 hash")?;
+
     if most_recent_patch_commit_id.eq(&branch_tip) {
         bail!("proposal already up-to-date with local branch");
+    }
+
+    if args.force {
+        println!("preparing to force push proposal revision...");
+        sub_commands::send::launch(
+            cli_args,
+            &sub_commands::send::SubCommandArgs {
+                starting_commit: String::new(),
+                in_reply_to: Some(proposal_root_event.id.to_string()),
+                title: None,
+                description: None,
+                from_branch: None,
+                to_branch: None,
+                no_cover_letter: args.no_cover_letter,
+            },
+        )
+        .await?;
+        println!("force pushed proposal revision");
+        return Ok(());
     }
 
     if most_recent_proposal_patch_chain.iter().any(|e| {
@@ -86,9 +127,15 @@ pub async fn launch(cli_args: &Cli) -> Result<()> {
         bail!("proposal is ahead of local branch");
     }
 
-    let (ahead, behind) = git_repo
+    let Ok((ahead, behind)) = git_repo
         .get_commits_ahead_behind(&most_recent_patch_commit_id, &branch_tip)
-        .context("the latest patch in proposal doesnt share an ancestor with your branch.")?;
+        .context("the latest patch in proposal doesnt share an ancestor with your branch.")
+    else {
+        if git_repo.ancestor_of(&proposal_base_commit_id, &branch_tip)? {
+            bail!("local unpublished proposal ammendments. consider force pushing.");
+        }
+        bail!("local unpublished proposal has been rebased. consider force pushing");
+    };
 
     if !behind.is_empty() {
         bail!(
