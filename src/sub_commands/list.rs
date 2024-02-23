@@ -732,7 +732,7 @@ pub async fn find_proposal_events(
     repo_ref: &RepoRef,
     root_commit: &str,
 ) -> Result<Vec<nostr::Event>> {
-    Ok(client
+    let mut proposals = client
         .get_events(
             repo_ref.relays.clone(),
             vec![
@@ -773,7 +773,10 @@ pub async fn find_proposal_events(
                     }))
         })
         .map(std::borrow::ToOwned::to_owned)
-        .collect::<Vec<nostr::Event>>())
+        .collect::<Vec<nostr::Event>>();
+    proposals.sort_by_key(|e| e.created_at);
+    proposals.reverse();
+    Ok(proposals)
 }
 
 pub async fn find_commits_for_proposal_root_events(

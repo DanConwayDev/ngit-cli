@@ -282,12 +282,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
 
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
@@ -355,12 +355,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -471,12 +471,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(2, true, None)?;
+                            c.succeeds_with(0, true, None)?;
 
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
@@ -545,12 +545,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(2, true, None)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -667,13 +667,13 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
-                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                     format!("add d3.md"), // commit msg title
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(3, true, None)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -747,13 +747,13 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
-                                    format!("\"{PROPOSAL_TITLE_3}\""),
                                     format!("add d3.md"), // commit msg title
+                                    format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(3, true, None)?;
+                            c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -879,12 +879,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -958,12 +958,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -1060,12 +1060,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -1138,12 +1138,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -1257,12 +1257,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             p.expect_eventually("--force`\r\n")?;
 
@@ -1346,12 +1346,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             p.expect("you have an amended/rebase version the proposal that is unpublished\r\n")?;
                             p.expect("you have previously applied the latest version of the proposal (2 ahead 0 behind 'main') but your local proposal branch has amended or rebased it (2 ahead 0 behind 'main')\r\n")?;
@@ -1460,12 +1460,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             p.expect(
                                 "local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal (3 ahead 0 behind 'main')\r\n",
@@ -1543,12 +1543,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             p.expect(
                                 "local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal (3 ahead 0 behind 'main')\r\n",
@@ -1702,12 +1702,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             p.expect("updated proposal available (2 ahead 0 behind 'main'). existing version is 2 ahead 1 behind 'main'\r\n")?;
                             let mut c = p.expect_choice(
@@ -1826,12 +1826,12 @@ mod when_main_branch_is_uptodate {
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
                                     format!("\"{PROPOSAL_TITLE_3}\""),
+                                    format!("\"{PROPOSAL_TITLE_2}\""),
+                                    format!("\"{PROPOSAL_TITLE_1}\""),
                                 ],
                             )?;
-                            c.succeeds_with(0, true, None)?;
+                            c.succeeds_with(2, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             p.expect("updated proposal available (2 ahead 0 behind 'main'). existing version is 2 ahead 1 behind 'main'\r\n")?;
                             let mut c = p.expect_choice(
