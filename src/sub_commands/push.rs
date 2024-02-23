@@ -60,6 +60,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         root_commit.to_string(),
         &client,
         client.get_fallback_relays().clone(),
+        true,
     )
     .await?;
 

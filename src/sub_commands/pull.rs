@@ -44,6 +44,7 @@ pub async fn launch() -> Result<()> {
         root_commit.to_string(),
         &client,
         client.get_fallback_relays().clone(),
+        true,
     )
     .await?;
 

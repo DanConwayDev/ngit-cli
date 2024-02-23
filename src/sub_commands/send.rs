@@ -151,6 +151,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             .to_string(),
         &client,
         user_ref.relays.write(),
+        true,
     )
     .await?;
 

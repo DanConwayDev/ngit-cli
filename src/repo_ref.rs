@@ -152,6 +152,7 @@ pub async fn fetch(
     #[cfg(not(test))] client: &Client,
     // TODO: more rubust way of finding repo events
     fallback_relays: Vec<String>,
+    prompt_for_nevent_if_cant_event: bool,
 ) -> Result<RepoRef> {
     let repo_config = get_repo_config_from_yaml(git_repo);
 
@@ -186,6 +187,9 @@ pub async fn fetch(
             .max_by_key(|e| e.created_at)
         {
             break event.clone();
+        }
+        if !prompt_for_nevent_if_cant_event {
+            bail!("cannot find repo event");
         }
         println!("cannot find repo event");
         loop {
