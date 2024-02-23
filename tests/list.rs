@@ -1710,8 +1710,6 @@ mod when_main_branch_is_uptodate {
                             c.succeeds_with(0, true, None)?;
                             p.expect("finding commits...\r\n")?;
                             p.expect("updated proposal available (2 ahead 0 behind 'main'). existing version is 2 ahead 1 behind 'main'\r\n")?;
-                            // its got here but tmpgit-32.. indicates that creatubg the eature
-                            // branch in line 1291 didnt work so the choices will be different
                             let mut c = p.expect_choice(
                                 "",
                                 vec![

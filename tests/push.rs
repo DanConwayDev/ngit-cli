@@ -591,7 +591,7 @@ mod when_branch_is_checked_out {
                         p.expect("preparing to force push proposal revision...\r\n")?;
 
                         // standard output from `ngit send`
-                        p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
+                        p.expect(format!("creating patch for 2 commits from '{FEATURE_BRANCH_NAME_1}' that can be merged into 'main'\r\n"))?;
                         p.expect("searching for profile and relay updates...\r\n")?;
                         p.expect("\r")?;
                         p.expect("logged in as fred\r\n")?;

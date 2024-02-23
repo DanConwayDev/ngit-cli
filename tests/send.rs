@@ -39,7 +39,7 @@ fn when_no_commits_ahead_of_main_return_error() -> Result<()> {
     test_repo.checkout("feature")?;
 
     let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
-    p.expect("Error: 'head' is 0 commits ahead of 'main' so no patches were created")?;
+    p.expect("Error: 'feature' is 0 commits ahead of 'main' so no patches were created")?;
     Ok(())
 }
 
@@ -73,7 +73,7 @@ mod when_commits_behind_ask_to_proceed {
         ahead: u8,
     ) -> Result<CliTesterConfirmPrompt> {
         p.expect_confirm(
-            format!("'head' is {behind} commits behind 'main' and {ahead} ahead. Consider rebasing before sending patches. Proceed anyway?").as_str(),
+            format!("'feature' is {behind} commits behind 'main' and {ahead} ahead. Consider rebasing before sending patches. Proceed anyway?").as_str(),
             Some(false),
         )
     }
@@ -108,7 +108,7 @@ mod when_commits_behind_ask_to_proceed {
         let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
         expect_confirm_prompt(&mut p, BEHIND_LEN, AHEAD_LEN)?.succeeds_with(Some(true))?;
         p.expect(
-            format!("creating patch for {AHEAD_LEN} commits from 'head' that are {BEHIND_LEN} behind 'main'",)
+            format!("creating patch for {AHEAD_LEN} commits from 'feature' that are {BEHIND_LEN} behind 'main'",)
                 .as_str(),
         )?;
         p.exit()?;
@@ -131,7 +131,7 @@ fn cli_message_creating_patches() -> Result<()> {
 
     let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
 
-    p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'")?;
+    p.expect("creating patch for 2 commits from 'feature' that can be merged into 'main'")?;
     p.exit()?;
     Ok(())
 }
@@ -184,7 +184,7 @@ fn cli_tester_create_proposal(git_repo: &GitTestRepo, include_cover_letter: bool
 }
 
 fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
-    p.expect("creating patch for 2 commits from 'head' that can be merged into 'main'\r\n")?;
+    p.expect("creating patch for 2 commits from 'feature' that can be merged into 'main'\r\n")?;
     p.expect("searching for profile and relay updates...\r\n")?;
     p.expect("\r")?;
     p.expect("logged in as fred\r\n")?;

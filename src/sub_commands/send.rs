@@ -777,7 +777,11 @@ fn identify_ahead_behind(
                 .context(format!("cannot find from_branch '{name}'"))?,
         ),
         None => (
-            "head".to_string(),
+            if let Ok(name) = git_repo.get_checked_out_branch_name() {
+                name
+            } else {
+                "head".to_string()
+            },
             git_repo
                 .get_head_commit()
                 .context("failed to get head commit")
@@ -872,35 +876,6 @@ mod tests {
                     .to_string(),
                 "a destination branch (to_branch) is not specified and the defaults (main or master) do not exist",
             );
-            Ok(())
-        }
-
-        #[test]
-        fn when_from_branch_is_none_return_as_head() -> Result<()> {
-            let test_repo = GitTestRepo::default();
-            let git_repo = Repo::from_path(&test_repo.dir)?;
-
-            test_repo.populate()?;
-            // create feature branch with 1 commit ahead
-            test_repo.create_branch("feature")?;
-            test_repo.checkout("feature")?;
-            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
-            let head_oid = test_repo.stage_and_commit("add t3.md")?;
-
-            // make feature branch 1 commit behind
-            test_repo.checkout("main")?;
-            std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
-            let main_oid = test_repo.stage_and_commit("add t4.md")?;
-            // checkout feature
-            test_repo.checkout("feature")?;
-
-            let (from_branch, to_branch, ahead, behind) =
-                identify_ahead_behind(&git_repo, &None, &None)?;
-
-            assert_eq!(from_branch, "head");
-            assert_eq!(ahead, vec![oid_to_sha1(&head_oid)]);
-            assert_eq!(to_branch, "main");
-            assert_eq!(behind, vec![oid_to_sha1(&main_oid)]);
             Ok(())
         }
 
