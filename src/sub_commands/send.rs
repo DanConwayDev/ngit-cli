@@ -24,29 +24,22 @@ use crate::{
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
-    #[arg(default_value = "")]
-    /// starting commit (commits since in current branch) or commit range, like
-    /// in `git format-patch`
-    pub(crate) starting_commit: String,
+    #[arg(default_value = "master..HEAD")]
+    /// commits to send as proposal; like in `git format-patch`
+    pub(crate) since_or_revision_range: String,
     #[clap(long)]
     /// nevent or event id of an existing proposal for which this is a new
     /// version
     pub(crate) in_reply_to: Option<String>,
+    /// don't prompt for a cover letter
+    #[arg(long, action)]
+    pub(crate) no_cover_letter: bool,
     /// optional cover letter title
     #[clap(short, long)]
     pub(crate) title: Option<String>,
     #[clap(short, long)]
     /// optional cover letter description
     pub(crate) description: Option<String>,
-    #[clap(long)]
-    /// branch to get changes from (defaults to head)
-    pub(crate) from_branch: Option<String>,
-    #[clap(long)]
-    /// destination branch (defaults to main or master)
-    pub(crate) to_branch: Option<String>,
-    /// don't ask about a cover letter
-    #[arg(long, action)]
-    pub(crate) no_cover_letter: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -54,9 +47,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
     let mut commits: Vec<Sha1Hash> = {
-        if args.starting_commit.is_empty() {
+        if args.since_or_revision_range.eq("master..HEAD") {
             let (from_branch, to_branch, ahead, behind) =
-                identify_ahead_behind(&git_repo, &args.from_branch, &args.to_branch)?;
+                identify_ahead_behind(&git_repo, &None, &None)?;
 
             if ahead.is_empty() {
                 bail!(format!(
@@ -94,7 +87,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             ahead
         } else {
             let ahead = git_repo
-                .parse_starting_commits(&args.starting_commit)
+                .parse_starting_commits(&args.since_or_revision_range)
                 .context("cannot parse specified starting commit or range")?;
             println!("creating patch for {} commits", ahead.len(),);
             ahead

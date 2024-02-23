@@ -32,16 +32,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// issue a repo event as a maintainers to signal you are accepting
-    /// proposals via nostr
+    /// signal you are this repo's maintainer accepting proposals via nostr
     Init(sub_commands::init::SubCommandArgs),
-    /// issue commits on current branch as a new proposal
+    /// issue commits as a proposal
     Send(sub_commands::send::SubCommandArgs),
-    /// list proposals; optionally apply them as a new branch
+    /// list proposals; checkout, apply or donwload selected
     List(sub_commands::list::SubCommandArgs),
-    /// send new commits as proposal amendments
+    /// send proposal revision
     Push(sub_commands::push::SubCommandArgs),
-    /// pull latest commits in proposal linked to checked out branch
+    /// fetch and apply new proposal commits / revisions linked to branch
     Pull,
     /// run with --nsec flag to change npub
     Login(sub_commands::login::SubCommandArgs),

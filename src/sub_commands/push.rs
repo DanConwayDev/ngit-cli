@@ -106,12 +106,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         sub_commands::send::launch(
             cli_args,
             &sub_commands::send::SubCommandArgs {
-                starting_commit: String::new(),
+                since_or_revision_range: String::new(),
                 in_reply_to: Some(proposal_root_event.id.to_string()),
                 title: None,
                 description: None,
-                from_branch: None,
-                to_branch: None,
                 no_cover_letter: args.no_cover_letter,
             },
         )
