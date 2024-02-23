@@ -4,29 +4,11 @@ use serial_test::serial;
 use test_utils::{git::GitTestRepo, relay::Relay, *};
 
 #[test]
-fn when_to_branch_doesnt_exist_return_error() -> Result<()> {
-    let test_repo = GitTestRepo::default();
-    test_repo.populate()?;
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--to-branch", "nonexistant"]);
-    p.expect("Error: cannot find to_branch 'nonexistant'")?;
-    Ok(())
-}
-
-#[test]
-fn when_no_to_branch_specified_and_no_main_or_master_branch_return_error() -> Result<()> {
+fn when_no_main_or_master_branch_return_error() -> Result<()> {
     let test_repo = GitTestRepo::new("notmain")?;
     test_repo.populate()?;
     let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
-    p.expect("Error: a destination branch (to_branch) is not specified and the defaults (main or master) do not exist")?;
-    Ok(())
-}
-
-#[test]
-fn when_from_branch_doesnt_exist_return_error() -> Result<()> {
-    let test_repo = GitTestRepo::default();
-    test_repo.populate()?;
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--from-branch", "nonexistant"]);
-    p.expect("Error: cannot find from_branch 'nonexistant'")?;
+    p.expect("Error: the default branches (main or master) do not exist")?;
     Ok(())
 }
 

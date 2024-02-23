@@ -47,7 +47,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
     let mut commits: Vec<Sha1Hash> = {
-        if args.since_or_revision_range.eq("master..HEAD") {
+        if args.since_or_revision_range.is_empty()
+            || args.since_or_revision_range.eq("master..HEAD")
+        {
             let (from_branch, to_branch, ahead, behind) =
                 identify_ahead_behind(&git_repo, &None, &None)?;
 
@@ -794,7 +796,7 @@ fn identify_ahead_behind(
         None => {
             let (name, commit) = git_repo
                 .get_main_or_master_branch()
-                .context("a destination branch (to_branch) is not specified and the defaults (main or master) do not exist")?;
+                .context("the default branches (main or master) do not exist")?;
             (name.to_string(), commit)
         }
     };
@@ -867,7 +869,7 @@ mod tests {
                 identify_ahead_behind(&git_repo, &None, &None)
                     .unwrap_err()
                     .to_string(),
-                "a destination branch (to_branch) is not specified and the defaults (main or master) do not exist",
+                "the default branches (main or master) do not exist",
             );
             Ok(())
         }
