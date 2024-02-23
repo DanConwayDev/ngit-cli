@@ -7,9 +7,15 @@ fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
     p.expect("\r")?;
     p.expect("logged in as fred\r\n")?;
     // // p.expect("searching for existing claims on repository...\r\n")?;
-    p.expect("maintainers.yaml created. commit and push.\r\n")?;
-    p.expect("this enables existing contributors to automatically fetch your repo event (instead of one from a pubkey pretending to be the maintainer) publishing repostory reference...\r\n")?;
     p.expect("publishing repostory reference...\r\n")?;
+    Ok(())
+}
+
+fn expect_msgs_after(p: &mut CliTester) -> Result<()> {
+    p.expect_after_whitespace("maintainers.yaml created. commit and push.\r\n")?;
+    p.expect(
+        "this optional file enables existing contributors to automatically fetch your repo event (instead of one from a pubkey pretending to be the maintainer)\r\n",
+    )?;
     Ok(())
 }
 
@@ -478,7 +484,8 @@ mod when_repo_not_previously_claimed {
                         ],
                         1,
                     )?;
-                    p.expect_end_with_whitespace()?;
+                    expect_msgs_after(&mut p)?;
+                    p.expect_end()?;
                     for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
                     }

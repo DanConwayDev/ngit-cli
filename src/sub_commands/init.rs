@@ -279,6 +279,29 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         }
     };
 
+    println!("publishing repostory reference...");
+
+    let repo_event = RepoRef {
+        identifier,
+        name,
+        description,
+        root_commit: earliest_unique_commit,
+        git_server,
+        web,
+        relays: relays.clone(),
+        maintainers: maintainers.clone(),
+    }
+    .to_event(&keys)?;
+
+    send_events(
+        &client,
+        vec![repo_event],
+        user_ref.relays.write(),
+        relays.clone(),
+        !cli_args.disable_cli_spinners,
+    )
+    .await?;
+
     // if yaml file doesnt exist or needs updating
     if match &repo_config_result {
         Ok(config) => {
@@ -297,32 +320,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         );
         println!(
-            "this enables existing contributors to automatically fetch your repo event (instead of one from a pubkey pretending to be the maintainer)"
+            "this optional file enables existing contributors to automatically fetch your repo event (instead of one from a pubkey pretending to be the maintainer)"
         );
     }
-
-    println!("publishing repostory reference...");
-
-    let repo_event = RepoRef {
-        identifier,
-        name,
-        description,
-        root_commit: earliest_unique_commit,
-        git_server,
-        web,
-        relays: relays.clone(),
-        maintainers,
-    }
-    .to_event(&keys)?;
-
-    send_events(
-        &client,
-        vec![repo_event],
-        user_ref.relays.write(),
-        relays,
-        !cli_args.disable_cli_spinners,
-    )
-    .await?;
-
     Ok(())
 }
