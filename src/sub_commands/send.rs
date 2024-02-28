@@ -441,10 +441,13 @@ pub fn generate_cover_letter_and_patch_events(
             // a change like this, or the removal of this tag will require the actual branch name to be tracked
             // so pulling and pushing still work
             if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
-                vec![Tag::Generic(
-                    TagKind::Custom("branch-name".to_string()),
-                    vec![branch_name],
-                )]
+                if !branch_name.eq("main") && !branch_name.eq("master") {
+                    vec![Tag::Generic(
+                        TagKind::Custom("branch-name".to_string()),
+                        vec![branch_name],
+                    )]
+                }
+                else { vec![] }
             } else {
                 vec![]
             },
@@ -475,7 +478,11 @@ pub fn generate_cover_letter_and_patch_events(
                 },
                 if events.is_empty() {
                     if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
-                        Some(branch_name)
+                        if !branch_name.eq("main") && !branch_name.eq("master") {
+                            Some(branch_name)
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -586,7 +593,16 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
         title: title.clone(),
         description,
         // TODO should this be prefixed by format!("{}-"e.id.to_string()[..5]?)
-        branch_name: if let Ok(name) = tag_value(event, "branch-name") {
+        branch_name: if let Ok(name) = match tag_value(event, "branch-name") {
+            Ok(name) => {
+                if !name.eq("main") && !name.eq("master") {
+                    Ok(name)
+                } else {
+                    Err(())
+                }
+            }
+            _ => Err(()),
+        } {
             name
         } else {
             let s = title

@@ -1090,6 +1090,30 @@ mod sends_2_patches_without_cover_letter {
 
     #[tokio::test]
     #[serial]
+    async fn root_patch_tags_branch_name() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_proposal(false).await?;
+        for relay in [&r53, &r55, &r56] {
+            let patch_events = relay
+                .events
+                .iter()
+                .filter(|e| is_patch(e))
+                .collect::<Vec<&nostr::Event>>();
+
+            // branch-name tag
+            assert_eq!(
+                patch_events[0]
+                    .iter_tags()
+                    .find(|t| t.as_vec()[0].eq("branch-name"))
+                    .unwrap()
+                    .as_vec()[1],
+                "feature"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn second_patch_lists_first_as_root() -> Result<()> {
         let (_, _, r53, r55, r56) = prep_run_create_proposal(false).await?;
         for relay in [&r53, &r55, &r56] {
@@ -1113,8 +1137,20 @@ mod sends_2_patches_without_cover_letter {
         Ok(())
     }
 }
-mod specify_starting_commits {
+mod specify_starting_commits_whist_on_main_branch {
     use super::*;
+
+    fn prep_git_repo() -> Result<GitTestRepo> {
+        let test_repo = GitTestRepo::default();
+        test_repo.populate()?;
+        // dont checkout feature branch
+        std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+        test_repo.stage_and_commit("add t3.md")?;
+        std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
+        test_repo.stage_and_commit("add t4.md")?;
+        Ok(test_repo)
+    }
+
     fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
         let args = vec![
             "--nsec",
@@ -1144,6 +1180,7 @@ mod specify_starting_commits {
         Relay<'static>,
     )> {
         let git_repo = prep_git_repo()?;
+
         // fallback (51,52) user write (53, 55) repo (55, 56)
         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
             Relay::new(
@@ -1287,6 +1324,26 @@ mod specify_starting_commits {
         let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
         for relay in [&r53, &r55, &r56] {
             assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 3);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn root_patch_doesnt_have_a_branch_name_tag() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
+        for relay in [&r53, &r55, &r56] {
+            let patch_events = relay
+                .events
+                .iter()
+                .filter(|e| is_patch(e))
+                .collect::<Vec<&nostr::Event>>();
+
+            assert!(
+                !patch_events[0]
+                    .iter_tags()
+                    .any(|t| t.as_vec()[0].eq("branch-name"))
+            );
         }
         Ok(())
     }
