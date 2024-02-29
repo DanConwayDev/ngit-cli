@@ -676,7 +676,7 @@ impl CliTester {
         let message = message_string.as_str();
         let before = self.expect_eventually(message)?;
         if !before.is_empty() {
-            std::fs::write("aaaaaaaaaaaa.txt", before.clone())?;
+            std::fs::write("test-cli-expect-output.txt", before.clone())?;
 
             // let mut output = std::fs::File::create("aaaaaaaaaaa.txt")?;
             // write!(output, "{}", *before);

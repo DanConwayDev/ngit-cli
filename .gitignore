@@ -1,2 +1,6 @@
 /target
 .direnv
+tmpgit-*
+test-utils/tmpgit-*
+tmp
+test-cli-expect-output.txt
