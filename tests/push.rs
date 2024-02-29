@@ -592,6 +592,10 @@ mod when_branch_is_checked_out {
 
                         // standard output from `ngit send`
                         p.expect(format!("creating patch for 2 commits from '{FEATURE_BRANCH_NAME_1}' that can be merged into 'main'\r\n"))?;
+                        p.expect("as a revision to proposal: ")?;
+                        // proposal id will be printed in this gap
+                        p.expect_eventually("\r\n")?;
+
                         p.expect("searching for profile and relay updates...\r\n")?;
                         p.expect("\r")?;
                         p.expect("logged in as fred\r\n")?;

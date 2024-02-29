@@ -96,6 +96,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         }
     };
 
+    if let Some(id) = &args.in_reply_to {
+        println!("as a revision to proposal: {id}");
+    }
+
     let title = if args.no_cover_letter {
         None
     } else {

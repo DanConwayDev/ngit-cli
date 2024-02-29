@@ -1416,6 +1416,22 @@ mod specify_in_reply_to {
         ];
         CliTester::new_from_dir(&git_repo.dir, args)
     }
+    fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
+        p.expect("creating patch for 2 commits from 'feature' that can be merged into 'main'\r\n")?;
+        p.expect("as a revision to proposal: nevent1qqsypm62fzw7qynvlc4gjl3tr0jw4vmh659nvr2cc5qyhdg92a5yy0qzypumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtesxygzam\r\n")?;
+        p.expect("searching for profile and relay updates...\r\n")?;
+        p.expect("\r")?;
+        p.expect("logged in as fred\r\n")?;
+        p.expect(format!(
+            "posting 2 patches {} a covering letter...\r\n",
+            if include_cover_letter {
+                "with"
+            } else {
+                "without"
+            }
+        ))?;
+        Ok(())
+    }
 
     async fn prep_run_create_proposal() -> Result<(
         Relay<'static>,
