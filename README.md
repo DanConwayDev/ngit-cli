@@ -1,18 +1,12 @@
 # ngit
 
-cli for code collaboration over nostr
+a command-line tool to send and review patches via nostr
 
-It supports both:
+* works seemlessly with [gitworkshop.dev](https://gitworkshop.dev)
+* fully compatible with [nip34 draft](https://github.com/nostr-protocol/nips/pull/997)
+* enables proposals to be managed as branches, similar to GitHub PRs via nip34+
 
-* patches over nostr similar to `git format-patch` and `git send-email` following the [nip34 daft spec](https://github.com/nostr-protocol/nips/pull/997)
-* branches similar to pull request model popularised by github
-
-so that users can decide to work with either model using the same nost events.
-
-the term 'proposals' is used to bridge the divide between 'patches and patch sets over email' and 'PRs'
-
-patches produced using other nip34 clients will work with the nip34 patch model but wont have branch support.
-
+see [gitworkshop.dev/ngit](https://gitworkshop.dev/ngit) and [gitworkshop.dev/about](https://gitworkshop.dev/about) for more details
 
 ### Commands
 
@@ -32,5 +26,7 @@ and when on a proposal branch:
 ## Contributions Welcome!
 
 use ngit to submit proposals!
+
+[gitworkshop.dev/repo/ngit](https://gitworkshop.dev/repo/ngit) to report issues and see proposals
 
 install the tool with `cargo install ngit`, use a prebuilt binary or build from source off the master branch.
