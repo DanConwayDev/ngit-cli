@@ -178,11 +178,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     )?;
 
     println!(
-        "posting {} patches {} a covering letter...",
+        "posting {} patch{} {} a covering letter...",
         if cover_letter_title_description.is_none() {
             events.len()
         } else {
             events.len() - 1
+        },
+        if cover_letter_title_description.is_none() && events.len().eq(&1)
+            || cover_letter_title_description.is_some() && events.len().eq(&2)
+        {
+            "es"
+        } else {
+            ""
         },
         if cover_letter_title_description.is_none() {
             "without"

@@ -1169,7 +1169,7 @@ mod when_on_main_branch_defaults_to_last_commit {
         p.expect("searching for profile and relay updates...\r\n")?;
         p.expect("\r")?;
         p.expect("logged in as fred\r\n")?;
-        p.expect("posting 1 patches without a covering letter...\r\n")?;
+        p.expect("posting 1 patch without a covering letter...\r\n")?;
         Ok(())
     }
     async fn prep_run_create_proposal() -> Result<(
