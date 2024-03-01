@@ -50,43 +50,49 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         if args.since_or_revision_range.is_empty()
             || args.since_or_revision_range.eq("master..HEAD")
         {
-            let (from_branch, to_branch, ahead, behind) =
-                identify_ahead_behind(&git_repo, &None, &None)?;
-
-            if ahead.is_empty() {
-                bail!(format!(
-                    "'{from_branch}' is 0 commits ahead of '{to_branch}' so no patches were created"
-                ));
-            }
-
-            if behind.is_empty() {
-                println!(
-                    "creating patch for {} commits from '{from_branch}' that can be merged into '{to_branch}'",
-                    ahead.len(),
-                );
+            let (branch_name, tip) = git_repo.get_main_or_master_branch()?;
+            if branch_name.eq("main") || branch_name.eq("master") {
+                println!("creating 1 patch from latest commit");
+                vec![tip]
             } else {
-                if !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!(
-                        "'{from_branch}' is {} commits behind '{to_branch}' and {} ahead. Consider rebasing before sending patches. Proceed anyway?",
-                        behind.len(),
+                let (from_branch, to_branch, ahead, behind) =
+                    identify_ahead_behind(&git_repo, &None, &None)?;
+
+                if ahead.is_empty() {
+                    bail!(format!(
+                        "'{from_branch}' is 0 commits ahead of '{to_branch}' so no patches were created"
+                    ));
+                }
+
+                if behind.is_empty() {
+                    println!(
+                        "creating patch for {} commits from '{from_branch}' that can be merged into '{to_branch}'",
                         ahead.len(),
-                    )
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-            bail!("aborting so branch can be rebased");
-        }
-                println!(
-                    "creating patch for {} commit{} from '{from_branch}' that {} {} behind '{to_branch}'",
-                    ahead.len(),
-                    if ahead.len() > 1 { "s" } else { "" },
-                    if ahead.len() > 1 { "are" } else { "is" },
-                    behind.len(),
-                );
+                    );
+                } else {
+                    if !Interactor::default().confirm(
+                    PromptConfirmParms::default()
+                        .with_prompt(
+                            format!(
+                                "'{from_branch}' is {} commits behind '{to_branch}' and {} ahead. Consider rebasing before sending patches. Proceed anyway?",
+                                behind.len(),
+                                ahead.len(),
+                            )
+                        )
+                        .with_default(false)
+                ).context("failed to get confirmation response from interactor confirm")? {
+                    bail!("aborting so branch can be rebased");
+                }
+                    println!(
+                        "creating patch for {} commit{} from '{from_branch}' that {} {} behind '{to_branch}'",
+                        ahead.len(),
+                        if ahead.len() > 1 { "s" } else { "" },
+                        if ahead.len() > 1 { "are" } else { "is" },
+                        behind.len(),
+                    );
+                }
+                ahead
             }
-            ahead
         } else {
             let ahead = git_repo
                 .parse_starting_commits(&args.since_or_revision_range)
