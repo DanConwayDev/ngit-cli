@@ -36,7 +36,7 @@ enum Commands {
     Init(sub_commands::init::SubCommandArgs),
     /// issue commits as a proposal
     Send(sub_commands::send::SubCommandArgs),
-    /// list proposals; checkout, apply or donwload selected
+    /// list proposals; checkout, apply or download selected
     List(sub_commands::list::SubCommandArgs),
     /// send proposal revision
     Push(sub_commands::push::SubCommandArgs),
