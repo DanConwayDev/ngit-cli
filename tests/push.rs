@@ -112,7 +112,10 @@ mod when_proposal_isnt_associated_with_branch_name {
     mod cli_prompts {
 
         use super::*;
-        async fn run_async_cli_show_error() -> Result<()> {
+
+        #[tokio::test]
+        #[serial]
+        async fn cli_show_error() -> Result<()> {
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                 Relay::new(8051, None, None),
                 Relay::new(8052, None, None),
@@ -163,12 +166,6 @@ mod when_proposal_isnt_associated_with_branch_name {
             cli_tester_handle.join().unwrap()?;
             Ok(())
         }
-
-        #[tokio::test]
-        #[serial]
-        async fn cli_show_error() -> Result<()> {
-            run_async_cli_show_error().await
-        }
     }
 }
 
@@ -180,7 +177,9 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_cli_show_up_to_date() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn cli_show_up_to_date() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -228,13 +227,6 @@ mod when_branch_is_checked_out {
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_show_up_to_date() -> Result<()> {
-                let _ = run_async_cli_show_up_to_date().await;
-                Ok(())
-            }
         }
     }
 
@@ -243,7 +235,10 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_cli_shows_proposal_ahead_error() -> Result<()> {
+
+            #[tokio::test]
+            #[serial]
+            async fn cli_show_proposal_ahead_error() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -291,13 +286,6 @@ mod when_branch_is_checked_out {
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_show_proposal_ahead_error() -> Result<()> {
-                let _ = run_async_cli_shows_proposal_ahead_error().await;
-                Ok(())
-            }
         }
     }
 
@@ -309,7 +297,9 @@ mod when_branch_is_checked_out {
 
             use super::*;
 
-            async fn run_async_cli_applied_1_commit() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn cli_applied_1_commit() -> Result<()> {
                 // fallback (51,52) user write (53, 55) repo (55, 56)
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
@@ -390,13 +380,6 @@ mod when_branch_is_checked_out {
                 );
                 cli_tester_handle.join().unwrap()?;
 
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_applied_1_commit() -> Result<()> {
-                let _ = run_async_cli_applied_1_commit().await;
                 Ok(())
             }
         }
@@ -480,7 +463,10 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_cli_shows_unpublished_rebase_error() -> Result<()> {
+
+            #[tokio::test]
+            #[serial]
+            async fn cli_shows_unpublished_rebase_error() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -533,20 +519,16 @@ mod when_branch_is_checked_out {
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_shows_unpublished_rebase_error() -> Result<()> {
-                let _ = run_async_cli_shows_unpublished_rebase_error().await;
-                Ok(())
-            }
         }
         mod with_force_flag {
             use super::*;
 
             mod cli_prompts {
                 use super::*;
-                async fn run_async_cli_shows_revision_sent() -> Result<()> {
+
+                #[tokio::test]
+                #[serial]
+                async fn cli_shows_revision_sent() -> Result<()> {
                     let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                         Relay::new(8051, None, None),
                         Relay::new(8052, None, None),
@@ -631,13 +613,6 @@ mod when_branch_is_checked_out {
                         r56.listen_until_close(),
                     );
                     cli_tester_handle.join().unwrap()?;
-                    Ok(())
-                }
-
-                #[tokio::test]
-                #[serial]
-                async fn cli_shows_revision_sent() -> Result<()> {
-                    let _ = run_async_cli_shows_revision_sent().await;
                     Ok(())
                 }
             }

@@ -646,6 +646,22 @@ impl CliTester {
         }
     }
 
+    fn exp_string(&mut self, message: &str) -> Result<String> {
+        match self
+            .rexpect_session
+            .exp_string(message)
+            .context("expected immediate end but got timed out")
+        {
+            Ok(before) => Ok(before),
+            Err(e) => {
+                for p in [51, 52, 53, 55, 56, 57] {
+                    let _ = relay::shutdown_relay(8000 + p);
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// returns what came before expected message
     pub fn expect_eventually<S>(&mut self, message: S) -> Result<String>
     where
@@ -653,10 +669,7 @@ impl CliTester {
     {
         let message_string = message.into();
         let message = message_string.as_str();
-        let before = self
-            .rexpect_session
-            .exp_string(message)
-            .context("exp_string failed")?;
+        let before = self.exp_string(message).context("exp_string failed")?;
         Ok(before)
     }
 
@@ -692,9 +705,24 @@ impl CliTester {
         Ok(self)
     }
 
+    fn exp_eof(&mut self) -> Result<String> {
+        match self
+            .rexpect_session
+            .exp_eof()
+            .context("expected immediate end but got timed out")
+        {
+            Ok(before) => Ok(before),
+            Err(e) => {
+                for p in [51, 52, 53, 55, 56, 57] {
+                    let _ = relay::shutdown_relay(8000 + p);
+                }
+                Err(e)
+            }
+        }
+    }
+
     pub fn expect_end(&mut self) -> Result<()> {
         let before = self
-            .rexpect_session
             .exp_eof()
             .context("expected immediate end but got timed out")?;
         ensure!(
@@ -709,7 +737,6 @@ impl CliTester {
 
     pub fn expect_end_with(&mut self, message: &str) -> Result<()> {
         let before = self
-            .rexpect_session
             .exp_eof()
             .context("expected immediate end but got timed out")?;
         assert_eq!(before, message);
@@ -718,7 +745,6 @@ impl CliTester {
 
     pub fn expect_end_eventually_and_print(&mut self) -> Result<()> {
         let before = self
-            .rexpect_session
             .exp_eof()
             .context("expected immediate end but got timed out")?;
         println!("ended eventually with:");
@@ -728,7 +754,6 @@ impl CliTester {
 
     pub fn expect_end_with_whitespace(&mut self) -> Result<()> {
         let before = self
-            .rexpect_session
             .exp_eof()
             .context("expected immediate end but got timed out")?;
         assert_eq!(before.trim(), "");
@@ -736,8 +761,7 @@ impl CliTester {
     }
 
     pub fn expect_end_eventually(&mut self) -> Result<String> {
-        self.rexpect_session
-            .exp_eof()
+        self.exp_eof()
             .context("expected end eventually but got timed out")
     }
 

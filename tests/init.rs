@@ -441,7 +441,9 @@ mod when_repo_not_previously_claimed {
         mod cli_ouput {
             use super::*;
 
-            async fn run_test_async() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn check_cli_output() -> Result<()> {
                 let git_repo = prep_git_repo()?;
 
                 // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
@@ -502,13 +504,6 @@ mod when_repo_not_previously_claimed {
                     r57.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn check_cli_output() -> Result<()> {
-                run_test_async().await?;
                 Ok(())
             }
         }

@@ -696,7 +696,9 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
     mod cli_ouput {
         use super::*;
 
-        async fn run_test_async() -> Result<()> {
+        #[tokio::test]
+        #[serial]
+        async fn check_cli_output() -> Result<()> {
             let git_repo = prep_git_repo()?;
 
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -765,13 +767,6 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
             cli_tester_handle.join().unwrap()?;
             Ok(())
         }
-
-        #[tokio::test]
-        #[serial]
-        async fn check_cli_output() -> Result<()> {
-            run_test_async().await?;
-            Ok(())
-        }
     }
 
     mod first_event_rejected_by_1_relay {
@@ -780,7 +775,9 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
         mod only_first_rejected_event_sent_to_relay {
             use super::*;
 
-            async fn run_test_async() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn only_first_rejected_event_sent_to_relay() -> Result<()> {
                 let git_repo = prep_git_repo()?;
 
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -847,19 +844,14 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
 
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn only_first_rejected_event_sent_to_relay() -> Result<()> {
-                run_test_async().await?;
-                Ok(())
-            }
         }
 
         mod cli_show_rejection_with_comment {
             use super::*;
 
-            async fn run_test_async() -> Result<(Relay<'static>, Relay<'static>, Relay<'static>)> {
+            #[tokio::test]
+            #[serial]
+            async fn cli_show_rejection_with_comment() -> Result<()> {
                 let git_repo = prep_git_repo()?;
 
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -939,13 +931,6 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
                     r56.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
-                Ok((r51, r52, r53))
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_show_rejection_with_comment() -> Result<()> {
-                run_test_async().await?;
                 Ok(())
             }
         }
@@ -958,7 +943,9 @@ mod sends_2_patches_without_cover_letter {
     mod cli_ouput {
         use super::*;
 
-        async fn run_test_async() -> Result<()> {
+        #[tokio::test]
+        #[serial]
+        async fn check_cli_output() -> Result<()> {
             let git_repo = prep_git_repo()?;
 
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -1026,13 +1013,6 @@ mod sends_2_patches_without_cover_letter {
                 r56.listen_until_close(),
             );
             cli_tester_handle.join().unwrap()?;
-            Ok(())
-        }
-
-        #[tokio::test]
-        #[serial]
-        async fn check_cli_output() -> Result<()> {
-            run_test_async().await?;
             Ok(())
         }
     }
@@ -1239,7 +1219,9 @@ mod when_on_main_branch_defaults_to_last_commit {
     mod cli_ouput {
         use super::*;
 
-        async fn run_test_async() -> Result<()> {
+        #[tokio::test]
+        #[serial]
+        async fn check_cli_output() -> Result<()> {
             let git_repo = prep_git_repo()?;
 
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -1307,13 +1289,6 @@ mod when_on_main_branch_defaults_to_last_commit {
                 r56.listen_until_close(),
             );
             cli_tester_handle.join().unwrap()?;
-            Ok(())
-        }
-
-        #[tokio::test]
-        #[serial]
-        async fn check_cli_output() -> Result<()> {
-            run_test_async().await?;
             Ok(())
         }
     }
@@ -1431,7 +1406,9 @@ mod specify_starting_commits_whist_on_main_branch {
     mod cli_ouput {
         use super::*;
 
-        async fn run_test_async() -> Result<()> {
+        #[tokio::test]
+        #[serial]
+        async fn check_cli_output() -> Result<()> {
             let git_repo = prep_git_repo()?;
 
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -1499,13 +1476,6 @@ mod specify_starting_commits_whist_on_main_branch {
                 r56.listen_until_close(),
             );
             cli_tester_handle.join().unwrap()?;
-            Ok(())
-        }
-
-        #[tokio::test]
-        #[serial]
-        async fn check_cli_output() -> Result<()> {
-            run_test_async().await?;
             Ok(())
         }
     }
@@ -1691,7 +1661,9 @@ mod specify_in_reply_to {
     mod cli_ouput {
         use super::*;
 
-        async fn run_test_async() -> Result<()> {
+        #[tokio::test]
+        #[serial]
+        async fn check_cli_output() -> Result<()> {
             let git_repo = prep_git_repo()?;
 
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
@@ -1759,13 +1731,6 @@ mod specify_in_reply_to {
                 r56.listen_until_close(),
             );
             cli_tester_handle.join().unwrap()?;
-            Ok(())
-        }
-
-        #[tokio::test]
-        #[serial]
-        async fn check_cli_output() -> Result<()> {
-            run_test_async().await?;
             Ok(())
         }
     }

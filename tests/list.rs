@@ -219,22 +219,19 @@ mod cannot_find_repo_event {
         #[tokio::test]
         #[serial]
         async fn warns_not_valid_input_and_asks_again() -> Result<()> {
-            let _ = run_async_repo_event_ref_needed(true, false, false).await;
-            Ok(())
+            run_async_repo_event_ref_needed(true, false, false).await
         }
 
         #[tokio::test]
         #[serial]
         async fn finds_based_on_nevent_on_embeded_relay() -> Result<()> {
-            let _ = run_async_repo_event_ref_needed(false, true, false).await;
-            Ok(())
+            run_async_repo_event_ref_needed(false, true, false).await
         }
 
         #[tokio::test]
         #[serial]
         async fn finds_based_on_naddr_on_embeded_relay() -> Result<()> {
-            let _ = run_async_repo_event_ref_needed(false, false, true).await;
-            Ok(())
+            run_async_repo_event_ref_needed(false, false, true).await
         }
     }
 }
@@ -327,7 +324,9 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -394,13 +393,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
@@ -517,7 +509,10 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -584,13 +579,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
@@ -713,7 +701,10 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -787,13 +778,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
@@ -922,7 +906,10 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -996,13 +983,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
@@ -1102,7 +1082,10 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -1174,13 +1157,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
@@ -1302,7 +1278,11 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn out_reflects_second_choice_discarding_old_and_applying_new()
+                    -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -1391,14 +1371,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn out_reflects_second_choice_discarding_old_and_applying_new()
-                    -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
@@ -1504,7 +1476,10 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -1581,13 +1556,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }
@@ -1746,7 +1714,10 @@ mod when_main_branch_is_uptodate {
 
                 mod cli_prompts {
                     use super::*;
-                    async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+                    #[tokio::test]
+                    #[serial]
+                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                         let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                             Relay::new(8051, None, None),
                             Relay::new(8052, None, None),
@@ -1864,13 +1835,6 @@ mod when_main_branch_is_uptodate {
                         );
                         cli_tester_handle.join().unwrap()?;
                         println!("{:?}", r55.events);
-                        Ok(())
-                    }
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                        let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                         Ok(())
                     }
                 }

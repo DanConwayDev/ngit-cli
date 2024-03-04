@@ -127,7 +127,10 @@ mod when_main_is_checked_out {
 
     mod cli_prompts {
         use super::*;
-        async fn run_async_cli_show_error() -> Result<()> {
+
+        #[tokio::test]
+        #[serial]
+        async fn cli_show_error() -> Result<()> {
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                 Relay::new(8051, None, None),
                 Relay::new(8052, None, None),
@@ -174,12 +177,6 @@ mod when_main_is_checked_out {
             cli_tester_handle.join().unwrap()?;
             Ok(())
         }
-
-        #[tokio::test]
-        #[serial]
-        async fn cli_show_error() -> Result<()> {
-            run_async_cli_show_error().await
-        }
     }
 }
 
@@ -188,7 +185,10 @@ mod when_branch_doesnt_exist {
 
     mod cli_prompts {
         use super::*;
-        async fn run_async_cli_show_error() -> Result<()> {
+
+        #[tokio::test]
+        #[serial]
+        async fn cli_show_error() -> Result<()> {
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                 Relay::new(8051, None, None),
                 Relay::new(8052, None, None),
@@ -239,12 +239,6 @@ mod when_branch_doesnt_exist {
             cli_tester_handle.join().unwrap()?;
             Ok(())
         }
-
-        #[tokio::test]
-        #[serial]
-        async fn cli_show_error() -> Result<()> {
-            run_async_cli_show_error().await
-        }
     }
 }
 
@@ -256,7 +250,9 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_cli_show_up_to_date() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn cli_show_up_to_date() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -303,12 +299,6 @@ mod when_branch_is_checked_out {
                 );
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_show_up_to_date() -> Result<()> {
-                run_async_cli_show_up_to_date().await
             }
         }
     }
@@ -368,7 +358,9 @@ mod when_branch_is_checked_out {
         mod cli_prompts {
             use super::*;
 
-            async fn run_async_cli_applied_1_commit() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn cli_applied_1_commit() -> Result<()> {
                 // fallback (51,52) user write (53, 55) repo (55, 56)
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
@@ -419,12 +411,6 @@ mod when_branch_is_checked_out {
 
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_applied_1_commit() -> Result<()> {
-                run_async_cli_applied_1_commit().await
-            }
         }
 
         #[tokio::test]
@@ -444,7 +430,10 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+            #[tokio::test]
+            #[serial]
+            async fn cli_output_correct() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -509,13 +498,6 @@ mod when_branch_is_checked_out {
                 println!("{:?}", r55.events);
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_output_correct() -> Result<()> {
-                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
-                Ok(())
-            }
         }
     }
 
@@ -524,7 +506,10 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+            #[tokio::test]
+            #[serial]
+            async fn cli_output_correct() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -587,13 +572,6 @@ mod when_branch_is_checked_out {
                 );
                 cli_tester_handle.join().unwrap()?;
                 println!("{:?}", r55.events);
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn cli_output_correct() -> Result<()> {
-                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                 Ok(())
             }
         }
@@ -659,7 +637,10 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+            #[tokio::test]
+            #[serial]
+            async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -709,13 +690,6 @@ mod when_branch_is_checked_out {
                 );
                 cli_tester_handle.join().unwrap()?;
                 println!("{:?}", r55.events);
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                 Ok(())
             }
         }
@@ -835,7 +809,10 @@ mod when_branch_is_checked_out {
 
         mod cli_prompts {
             use super::*;
-            async fn run_async_prompts_to_choose_from_proposal_titles() -> Result<()> {
+
+            #[tokio::test]
+            #[serial]
+            async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
                 let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                     Relay::new(8051, None, None),
                     Relay::new(8052, None, None),
@@ -926,13 +903,6 @@ mod when_branch_is_checked_out {
                 );
                 cli_tester_handle.join().unwrap()?;
                 println!("{:?}", r55.events);
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn prompts_to_choose_from_proposal_titles() -> Result<()> {
-                let _ = run_async_prompts_to_choose_from_proposal_titles().await;
                 Ok(())
             }
         }
