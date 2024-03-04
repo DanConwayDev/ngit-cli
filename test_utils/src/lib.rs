@@ -709,7 +709,7 @@ impl CliTester {
         match self
             .rexpect_session
             .exp_eof()
-            .context("expected immediate end but got timed out")
+            .context("expected end but got timed out")
         {
             Ok(before) => Ok(before),
             Err(e) => {
@@ -744,9 +744,7 @@ impl CliTester {
     }
 
     pub fn expect_end_eventually_and_print(&mut self) -> Result<()> {
-        let before = self
-            .exp_eof()
-            .context("expected immediate end but got timed out")?;
+        let before = self.exp_eof().context("expected end but got timed out")?;
         println!("ended eventually with:");
         println!("{}", &before);
         Ok(())
