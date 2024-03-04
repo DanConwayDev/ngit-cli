@@ -51,7 +51,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             || args.since_or_revision_range.eq("master..HEAD")
         {
             let branch_name = git_repo.get_checked_out_branch_name()?;
-            let (main_branch_name, main_tip) = git_repo.get_main_or_master_branch()?;
+            let (main_branch_name, main_tip) = git_repo
+                .get_main_or_master_branch()
+                .context("the default branches (main or master) do not exist")?;
             if branch_name.eq(main_branch_name) {
                 println!("creating 1 patch from latest commit");
                 vec![main_tip]
