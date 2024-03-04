@@ -188,9 +188,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         if cover_letter_title_description.is_none() && events.len().eq(&1)
             || cover_letter_title_description.is_some() && events.len().eq(&2)
         {
-            "es"
-        } else {
             ""
+        } else {
+            "es"
         },
         if cover_letter_title_description.is_none() {
             "without"
