@@ -50,10 +50,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         if args.since_or_revision_range.is_empty()
             || args.since_or_revision_range.eq("master..HEAD")
         {
-            let (branch_name, tip) = git_repo.get_main_or_master_branch()?;
-            if branch_name.eq("main") || branch_name.eq("master") {
+            let branch_name = git_repo.get_checked_out_branch_name()?;
+            let (main_branch_name, main_tip) = git_repo.get_main_or_master_branch()?;
+            if branch_name.eq(main_branch_name) {
                 println!("creating 1 patch from latest commit");
-                vec![tip]
+                vec![main_tip]
             } else {
                 let (from_branch, to_branch, ahead, behind) =
                     identify_ahead_behind(&git_repo, &None, &None)?;
