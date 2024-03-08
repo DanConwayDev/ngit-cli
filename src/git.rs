@@ -41,6 +41,7 @@ pub trait RepoActions {
     fn get_head_commit(&self) -> Result<Sha1Hash>;
     fn get_commit_parent(&self, commit: &Sha1Hash) -> Result<Sha1Hash>;
     fn get_commit_message(&self, commit: &Sha1Hash) -> Result<String>;
+    fn get_commit_message_summary(&self, commit: &Sha1Hash) -> Result<String>;
     /// returns vector ["name", "email", "unixtime", "offset"]
     /// eg ["joe bloggs", "joe@pm.me", "12176","-300"]
     fn get_commit_author(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
@@ -52,6 +53,7 @@ pub trait RepoActions {
         base_commit: &Sha1Hash,
         latest_commit: &Sha1Hash,
     ) -> Result<(Vec<Sha1Hash>, Vec<Sha1Hash>)>;
+    fn get_refs(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
     // including (un)staged changes and (un)tracked files
     fn has_outstanding_changes(&self) -> Result<bool>;
     fn make_patch_from_commit(
@@ -199,6 +201,22 @@ impl RepoActions for Repo {
             .to_string())
     }
 
+    fn get_commit_message_summary(&self, commit: &Sha1Hash) -> Result<String> {
+        Ok(self
+            .git_repo
+            .find_commit(sha1_to_oid(commit)?)
+            .context(format!("could not find commit {commit}"))?
+            .message_raw()
+            .context("commit message has unusual characters in (not valid utf-8)")?
+            .split('\r')
+            .collect::<Vec<&str>>()[0]
+            .split('\n')
+            .collect::<Vec<&str>>()[0]
+            .to_string()
+            .trim()
+            .to_string())
+    }
+
     fn get_commit_author(&self, commit: &Sha1Hash) -> Result<Vec<String>> {
         let commit = self
             .git_repo
@@ -215,6 +233,25 @@ impl RepoActions for Repo {
             .context(format!("could not find commit {commit}"))?;
         let sig = commit.committer();
         Ok(git_sig_to_tag_vec(&sig))
+    }
+
+    fn get_refs(&self, commit: &Sha1Hash) -> Result<Vec<String>> {
+        Ok(self
+            .git_repo
+            .references()?
+            .filter(|r| {
+                if let Ok(r) = r {
+                    if let Ok(ref_tip) = r.peel_to_commit() {
+                        ref_tip.id().to_string().eq(&commit.to_string())
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            })
+            .map(|r| r.unwrap().shorthand().unwrap().to_string())
+            .collect::<Vec<String>>())
     }
 
     fn make_patch_from_commit(
@@ -741,6 +778,43 @@ mod tests {
         #[test]
         fn unicode_characters() -> Result<()> {
             run("add t100.md ❤️")
+        }
+    }
+
+    mod get_commit_message_summary {
+        use super::*;
+        fn run(message: &str, summary: &str) -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+            std::fs::write(test_repo.dir.join("t100.md"), "some content")?;
+            let oid = test_repo.stage_and_commit(message)?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert_eq!(
+                summary,
+                git_repo.get_commit_message_summary(&oid_to_sha1(&oid))?,
+            );
+            Ok(())
+        }
+        #[test]
+        fn one_liner() -> Result<()> {
+            run("add t100.md", "add t100.md")
+        }
+
+        #[test]
+        fn multiline() -> Result<()> {
+            run("add t100.md\r\nanother line\r\nthird line", "add t100.md")
+        }
+
+        #[test]
+        fn trailing_newlines() -> Result<()> {
+            run("add t100.md\r\n\r\n\r\n\r\n\r\n\r\n", "add t100.md")
+        }
+
+        #[test]
+        fn unicode_characters() -> Result<()> {
+            run("add t100.md ❤️", "add t100.md ❤️")
         }
     }
 

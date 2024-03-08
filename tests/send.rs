@@ -12,19 +12,8 @@ fn when_no_main_or_master_branch_return_error() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn when_no_commits_ahead_of_main_return_error() -> Result<()> {
-    let test_repo = GitTestRepo::default();
-    test_repo.populate()?;
-    // create feature branch with 1 commit ahead
-    test_repo.create_branch("feature")?;
-    test_repo.checkout("feature")?;
-
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
-    p.expect("Error: 'feature' is 0 commits ahead of 'main' so no patches were created")?;
-    Ok(())
-}
-
+// TODO when commits ahead of origin/master - test ask to proceed
+// TODO when commits in origin/master - test ask to proceed
 mod when_commits_behind_ask_to_proceed {
     use super::*;
 
@@ -46,16 +35,13 @@ mod when_commits_behind_ask_to_proceed {
         test_repo.checkout("feature")?;
         Ok(test_repo)
     }
-    static BEHIND_LEN: u8 = 1;
-    static AHEAD_LEN: u8 = 2;
 
-    fn expect_confirm_prompt(
-        p: &mut CliTester,
-        behind: u8,
-        ahead: u8,
-    ) -> Result<CliTesterConfirmPrompt> {
+    fn expect_confirm_prompt(p: &mut CliTester) -> Result<CliTesterConfirmPrompt> {
+        p.expect("creating proposal from 2 commits:\r\n")?;
+        p.expect("fe973a8 add t4.md\r\n")?;
+        p.expect("232efb3 add t3.md\r\n")?;
         p.expect_confirm(
-            format!("'feature' is {behind} commits behind 'main' and {ahead} ahead. Consider rebasing before sending patches. Proceed anyway?").as_str(),
+            "proposal is 1 behind 'main'. consider rebasing before submission. proceed anyway?",
             Some(false),
         )
     }
@@ -64,8 +50,8 @@ mod when_commits_behind_ask_to_proceed {
     fn asked_with_default_no() -> Result<()> {
         let test_repo = prep_test_repo()?;
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
-        expect_confirm_prompt(&mut p, BEHIND_LEN, AHEAD_LEN)?;
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+        expect_confirm_prompt(&mut p)?;
         p.exit()?;
         Ok(())
     }
@@ -74,11 +60,11 @@ mod when_commits_behind_ask_to_proceed {
     fn when_response_is_false_aborts() -> Result<()> {
         let test_repo = prep_test_repo()?;
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
 
-        expect_confirm_prompt(&mut p, BEHIND_LEN, AHEAD_LEN)?.succeeds_with(Some(false))?;
+        expect_confirm_prompt(&mut p)?.succeeds_with(Some(false))?;
 
-        p.expect_end_with("Error: aborting so branch can be rebased\r\n")?;
+        p.expect_end_with("Error: aborting so commits can be rebased\r\n")?;
 
         Ok(())
     }
@@ -87,35 +73,12 @@ mod when_commits_behind_ask_to_proceed {
     fn when_response_is_true_proceeds() -> Result<()> {
         let test_repo = prep_test_repo()?;
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
-        expect_confirm_prompt(&mut p, BEHIND_LEN, AHEAD_LEN)?.succeeds_with(Some(true))?;
-        p.expect(
-            format!("creating patch for {AHEAD_LEN} commits from 'feature' that are {BEHIND_LEN} behind 'main'",)
-                .as_str(),
-        )?;
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+        expect_confirm_prompt(&mut p)?.succeeds_with(Some(true))?;
+        p.expect("? include cover letter")?;
         p.exit()?;
         Ok(())
     }
-}
-
-#[test]
-#[serial]
-fn cli_message_creating_patches() -> Result<()> {
-    let test_repo = GitTestRepo::default();
-    test_repo.populate()?;
-    // create feature branch with 2 commit ahead
-    test_repo.create_branch("feature")?;
-    test_repo.checkout("feature")?;
-    std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
-    test_repo.stage_and_commit("add t3.md")?;
-    std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
-    test_repo.stage_and_commit("add t4.md")?;
-
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
-
-    p.expect("creating patch for 2 commits from 'feature' that can be merged into 'main'")?;
-    p.exit()?;
-    Ok(())
 }
 
 fn is_cover_letter(event: &nostr::Event) -> bool {
@@ -149,6 +112,7 @@ fn cli_tester_create_proposal(git_repo: &GitTestRepo, include_cover_letter: bool
         TEST_PASSWORD,
         "--disable-cli-spinners",
         "send",
+        "HEAD~2",
     ];
     if include_cover_letter {
         for arg in [
@@ -166,7 +130,9 @@ fn cli_tester_create_proposal(git_repo: &GitTestRepo, include_cover_letter: bool
 }
 
 fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
-    p.expect("creating patch for 2 commits from 'feature' that can be merged into 'main'\r\n")?;
+    p.expect("creating proposal from 2 commits:\r\n")?;
+    p.expect("fe973a8 add t4.md\r\n")?;
+    p.expect("232efb3 add t3.md\r\n")?;
     p.expect("searching for profile and relay updates...\r\n")?;
     p.expect("\r")?;
     p.expect("logged in as fred\r\n")?;
@@ -247,7 +213,7 @@ async fn prep_run_create_proposal(
     Ok((r51, r52, r53, r55, r56))
 }
 
-mod sends_cover_letter_and_2_patches_to_3_relays {
+mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_and_2_patches_to_3_relays {
 
     use super::*;
     #[tokio::test]
@@ -937,7 +903,7 @@ mod sends_cover_letter_and_2_patches_to_3_relays {
     }
 }
 
-mod sends_2_patches_without_cover_letter {
+mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_cover_letter {
     use super::*;
 
     mod cli_ouput {
@@ -1118,19 +1084,8 @@ mod sends_2_patches_without_cover_letter {
     }
 }
 
-mod when_on_main_branch_defaults_to_last_commit {
+mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
     use super::*;
-
-    fn prep_git_repo() -> Result<GitTestRepo> {
-        let test_repo = GitTestRepo::default();
-        test_repo.populate()?;
-        // dont checkout feature branch
-        std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
-        test_repo.stage_and_commit("add t3.md")?;
-        std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
-        test_repo.stage_and_commit("add t4.md")?;
-        Ok(test_repo)
-    }
 
     fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
         let args = vec![
@@ -1145,11 +1100,24 @@ mod when_on_main_branch_defaults_to_last_commit {
         CliTester::new_from_dir(&git_repo.dir, args)
     }
     fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
-        p.expect("creating 1 patch from latest commit\r\n")?;
+        let mut selector = p.expect_multi_select(
+            "select commits for proposal",
+            vec![
+                "(Joe Bloggs) add t4.md [feature] fe973a8".to_string(),
+                "(Joe Bloggs) add t3.md 232efb3".to_string(),
+                "(Joe Bloggs) add t2.md [main] 431b84e".to_string(),
+                "(Joe Bloggs) add t1.md af474d8".to_string(),
+                "(Joe Bloggs) Initial commit 9ee507f".to_string(),
+            ],
+        )?;
+        selector.succeeds_with(vec![0, 1], false, vec![0, 1])?;
+        p.expect("creating proposal from 2 commits:\r\n")?;
+        p.expect("fe973a8 add t4.md\r\n")?;
+        p.expect("232efb3 add t3.md\r\n")?;
         p.expect("searching for profile and relay updates...\r\n")?;
         p.expect("\r")?;
         p.expect("logged in as fred\r\n")?;
-        p.expect("posting 1 patch without a covering letter...\r\n")?;
+        p.expect("posting 2 patches without a covering letter...\r\n")?;
         Ok(())
     }
     async fn prep_run_create_proposal() -> Result<(
@@ -1198,6 +1166,7 @@ mod when_on_main_branch_defaults_to_last_commit {
         // // check relay had the right number of events
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = cli_tester_create_proposal(&git_repo);
+            expect_msgs_first(&mut p)?;
             p.expect_end_eventually()?;
             for p in [51, 52, 53, 55, 56] {
                 relay::shutdown_relay(8000 + p)?;
@@ -1257,7 +1226,6 @@ mod when_on_main_branch_defaults_to_last_commit {
                 Relay::new(8056, None, None),
             );
 
-            // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_create_proposal(&git_repo);
 
@@ -1271,7 +1239,7 @@ mod when_on_main_branch_defaults_to_last_commit {
                         (" [default] ws://localhost:8051", true, ""),
                         (" [default] ws://localhost:8052", true, ""),
                     ],
-                    1,
+                    2,
                 )?;
                 p.expect_end_with_whitespace()?;
                 for p in [51, 52, 53, 55, 56] {
@@ -1295,271 +1263,16 @@ mod when_on_main_branch_defaults_to_last_commit {
 
     #[tokio::test]
     #[serial]
-    async fn one_patch_event_sent() -> Result<()> {
+    async fn two_patch_events_sent() -> Result<()> {
         let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
         for relay in [&r53, &r55, &r56] {
-            assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 1);
+            assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 2);
         }
         Ok(())
     }
 }
 
-mod specify_starting_commits_whist_on_main_branch {
-    use super::*;
-
-    fn prep_git_repo() -> Result<GitTestRepo> {
-        let test_repo = GitTestRepo::default();
-        test_repo.populate()?;
-        // dont checkout feature branch
-        std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
-        test_repo.stage_and_commit("add t3.md")?;
-        std::fs::write(test_repo.dir.join("t4.md"), "some content")?;
-        test_repo.stage_and_commit("add t4.md")?;
-        Ok(test_repo)
-    }
-
-    fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
-        let args = vec![
-            "--nsec",
-            TEST_KEY_1_NSEC,
-            "--password",
-            TEST_PASSWORD,
-            "--disable-cli-spinners",
-            "send",
-            "HEAD~3",
-            "--no-cover-letter",
-        ];
-        CliTester::new_from_dir(&git_repo.dir, args)
-    }
-    fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
-        p.expect("creating patch for 3 commits\r\n")?;
-        p.expect("searching for profile and relay updates...\r\n")?;
-        p.expect("\r")?;
-        p.expect("logged in as fred\r\n")?;
-        p.expect("posting 3 patches without a covering letter...\r\n")?;
-        Ok(())
-    }
-    async fn prep_run_create_proposal() -> Result<(
-        Relay<'static>,
-        Relay<'static>,
-        Relay<'static>,
-        Relay<'static>,
-        Relay<'static>,
-    )> {
-        let git_repo = prep_git_repo()?;
-
-        // fallback (51,52) user write (53, 55) repo (55, 56)
-        let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
-            Relay::new(
-                8051,
-                None,
-                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(
-                        client_id,
-                        &subscription_id,
-                        &vec![
-                            generate_test_key_1_metadata_event("fred"),
-                            generate_test_key_1_relay_list_event(),
-                        ],
-                    )?;
-                    Ok(())
-                }),
-            ),
-            Relay::new(8052, None, None),
-            Relay::new(8053, None, None),
-            Relay::new(
-                8055,
-                None,
-                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(
-                        client_id,
-                        &subscription_id,
-                        &vec![generate_repo_ref_event()],
-                    )?;
-                    Ok(())
-                }),
-            ),
-            Relay::new(8056, None, None),
-        );
-
-        // // check relay had the right number of events
-        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-            let mut p = cli_tester_create_proposal(&git_repo);
-            p.expect_end_eventually()?;
-            for p in [51, 52, 53, 55, 56] {
-                relay::shutdown_relay(8000 + p)?;
-            }
-            Ok(())
-        });
-
-        // launch relay
-        let _ = join!(
-            r51.listen_until_close(),
-            r52.listen_until_close(),
-            r53.listen_until_close(),
-            r55.listen_until_close(),
-            r56.listen_until_close(),
-        );
-        cli_tester_handle.join().unwrap()?;
-        Ok((r51, r52, r53, r55, r56))
-    }
-    mod cli_ouput {
-        use super::*;
-
-        #[tokio::test]
-        #[serial]
-        async fn check_cli_output() -> Result<()> {
-            let git_repo = prep_git_repo()?;
-
-            let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
-                Relay::new(
-                    8051,
-                    None,
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
-                        Ok(())
-                    }),
-                ),
-                Relay::new(8052, None, None),
-                Relay::new(8053, None, None),
-                Relay::new(
-                    8055,
-                    None,
-                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![generate_repo_ref_event()],
-                        )?;
-                        Ok(())
-                    }),
-                ),
-                Relay::new(8056, None, None),
-            );
-
-            // // check relay had the right number of events
-            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_create_proposal(&git_repo);
-
-                expect_msgs_first(&mut p)?;
-                relay::expect_send_with_progress(
-                    &mut p,
-                    vec![
-                        (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
-                        (" [my-relay] ws://localhost:8053", true, ""),
-                        (" [repo-relay] ws://localhost:8056", true, ""),
-                        (" [default] ws://localhost:8051", true, ""),
-                        (" [default] ws://localhost:8052", true, ""),
-                    ],
-                    3,
-                )?;
-                p.expect_end_with_whitespace()?;
-                for p in [51, 52, 53, 55, 56] {
-                    relay::shutdown_relay(8000 + p)?;
-                }
-                Ok(())
-            });
-
-            // launch relay
-            let _ = join!(
-                r51.listen_until_close(),
-                r52.listen_until_close(),
-                r53.listen_until_close(),
-                r55.listen_until_close(),
-                r56.listen_until_close(),
-            );
-            cli_tester_handle.join().unwrap()?;
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn three_patch_events() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
-        for relay in [&r53, &r55, &r56] {
-            assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 3);
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn root_patch_doesnt_have_a_branch_name_tag() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
-        for relay in [&r53, &r55, &r56] {
-            let patch_events = relay
-                .events
-                .iter()
-                .filter(|e| is_patch(e))
-                .collect::<Vec<&nostr::Event>>();
-
-            assert!(
-                !patch_events[0]
-                    .iter_tags()
-                    .any(|t| t.as_vec()[0].eq("branch-name"))
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn first_patch_is_ancestor_and_root_others_in_correct_order() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
-        for relay in [&r53, &r55, &r56] {
-            let patch_events = relay
-                .events
-                .iter()
-                .filter(|e| is_patch(e))
-                .collect::<Vec<&nostr::Event>>();
-
-            // first patch tagged as root
-            assert!(
-                patch_events[0]
-                    .iter_tags()
-                    .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq("root"))
-            );
-            // first patch is ancestor
-            assert_eq!(
-                patch_events[0]
-                    .iter_tags()
-                    .find(|t| t.as_vec()[0].eq("commit"))
-                    .unwrap()
-                    .as_vec()[1],
-                "431b84edc0d2fa118d63faa3c2db9c73d630a5ae"
-            );
-            // second patch not tagged as root
-            assert_eq!(
-                patch_events[1]
-                    .iter_tags()
-                    .find(|t| t.as_vec()[0].eq("commit"))
-                    .unwrap()
-                    .as_vec()[1],
-                "232efb37ebc67692c9e9ff58b83c0d3d63971a0a"
-            );
-            // second patch not tagged as root
-            assert_eq!(
-                patch_events[2]
-                    .iter_tags()
-                    .find(|t| t.as_vec()[0].eq("commit"))
-                    .unwrap()
-                    .as_vec()[1],
-                "fe973a840fba2a8ab37dd505c154854a69a6505c"
-            );
-        }
-        Ok(())
-    }
-}
-
-mod specify_in_reply_to {
+mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specified {
     use super::*;
     fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
         let args = vec![
@@ -1569,6 +1282,7 @@ mod specify_in_reply_to {
             TEST_PASSWORD,
             "--disable-cli-spinners",
             "send",
+            "HEAD~2",
             "--in-reply-to",
             "nevent1qqsypm62fzw7qynvlc4gjl3tr0jw4vmh659nvr2cc5qyhdg92a5yy0qzypumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtesxygzam",
             "--title",
@@ -1579,8 +1293,10 @@ mod specify_in_reply_to {
         CliTester::new_from_dir(&git_repo.dir, args)
     }
     fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
-        p.expect("creating patch for 2 commits from 'feature' that can be merged into 'main'\r\n")?;
-        p.expect("as a revision to proposal: nevent1qqsypm62fzw7qynvlc4gjl3tr0jw4vmh659nvr2cc5qyhdg92a5yy0qzypumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtesxygzam\r\n")?;
+        p.expect("creating proposal revision for: nevent1qqsypm62fzw7qynvlc4gjl3tr0jw4vmh659nvr2cc5qyhdg92a5yy0qzypumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtesxygzam\r\n")?;
+        p.expect("creating proposal from 2 commits:\r\n")?;
+        p.expect("fe973a8 add t4.md\r\n")?;
+        p.expect("232efb3 add t3.md\r\n")?;
         p.expect("searching for profile and relay updates...\r\n")?;
         p.expect("\r")?;
         p.expect("logged in as fred\r\n")?;

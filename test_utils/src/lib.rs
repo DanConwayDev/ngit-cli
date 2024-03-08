@@ -1,6 +1,6 @@
 use std::{ffi::OsStr, path::PathBuf};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
 use nostr::{self, prelude::FromSkStr, Kind, Tag};
@@ -259,6 +259,20 @@ impl CliTester {
         i.prompt(false).context("initial confirm prompt")?;
         Ok(i)
     }
+
+    pub fn expect_multi_select(
+        &mut self,
+        prompt: &str,
+        choices: Vec<String>,
+    ) -> Result<CliTesterMultiSelectPrompt> {
+        let mut i = CliTesterMultiSelectPrompt {
+            tester: self,
+            prompt: prompt.to_string(),
+            choices,
+        };
+        i.prompt(false).context("initial confirm prompt")?;
+        Ok(i)
+    }
 }
 
 pub struct CliTesterInputPrompt<'a> {
@@ -444,6 +458,75 @@ impl CliTesterConfirmPrompt<'_> {
         self.tester
             .expect(formatted_success.as_str())
             .context("expect immediate prompt success")?;
+        Ok(self)
+    }
+}
+
+pub struct CliTesterMultiSelectPrompt<'a> {
+    tester: &'a mut CliTester,
+    prompt: String,
+    choices: Vec<String>,
+}
+
+impl CliTesterMultiSelectPrompt<'_> {
+    fn prompt(&mut self, eventually: bool) -> Result<&mut Self> {
+        if eventually {
+            self.tester
+                .expect_eventually(format!("{}:\r\n", self.prompt))
+                .context("expect multi-select prompt eventually")?;
+        } else {
+            self.tester
+                .expect(format!("{}:\r\n", self.prompt))
+                .context("expect multi-select prompt")?;
+        }
+        Ok(self)
+    }
+
+    pub fn succeeds_with(
+        &mut self,
+        chosen_indexes: Vec<usize>,
+        report: bool,
+        default_indexes: Vec<usize>,
+    ) -> Result<&mut Self> {
+        if report {
+            bail!("TODO: add support for report")
+        }
+
+        fn show_options(
+            tester: &mut CliTester,
+            choices: &[String],
+            active_index: usize,
+            selected_indexes: &[usize],
+        ) -> Result<()> {
+            for (index, item) in choices.iter().enumerate() {
+                tester.expect(format!(
+                    "{}{}{}\r\n",
+                    if active_index.eq(&index) { "> " } else { "  " },
+                    if selected_indexes.iter().any(|i| i.eq(&index)) {
+                        "[x] "
+                    } else {
+                        "[ ] "
+                    },
+                    item,
+                ))?;
+            }
+            Ok(())
+        }
+
+        show_options(self.tester, &self.choices, 0, &default_indexes)?;
+
+        if default_indexes.eq(&chosen_indexes) {
+            self.tester.send("\r\n")?;
+        } else {
+            bail!("TODO: add support changing options");
+        }
+
+        for _ in self.choices.iter() {
+            self.tester.expect("\r")?;
+        }
+        // one for removing prompt maybe?
+        self.tester.expect("\r")?;
+
         Ok(self)
     }
 }

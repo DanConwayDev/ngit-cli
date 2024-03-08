@@ -80,6 +80,7 @@ fn cli_tester_create_proposal(
             TEST_PASSWORD,
             "--disable-cli-spinners",
             "send",
+            "HEAD~2",
             "--title",
             format!("\"{title}\"").as_str(),
             "--description",
@@ -571,13 +572,26 @@ mod when_branch_is_checked_out {
                         p.expect("finding proposal root event...\r\n")?;
                         p.expect("found proposal root event. finding commits...\r\n")?;
                         p.expect("preparing to force push proposal revision...\r\n")?;
-
                         // standard output from `ngit send`
-                        p.expect(format!("creating patch for 2 commits from '{FEATURE_BRANCH_NAME_1}' that can be merged into 'main'\r\n"))?;
-                        p.expect("as a revision to proposal: ")?;
+                        p.expect("creating proposal revision for: ")?;
                         // proposal id will be printed in this gap
                         p.expect_eventually("\r\n")?;
-
+                        let mut selector = p.expect_multi_select(
+                            "select commits for proposal",
+                            vec![
+                                "(Joe Bloggs) add a4.md [feature-example-t] 355bdf1".to_string(),
+                                "(Joe Bloggs) add a3.md dbd1115".to_string(),
+                                "(Joe Bloggs) commit for rebasing on top of [main] 1aa2cfe"
+                                    .to_string(),
+                                "(Joe Bloggs) add t2.md 431b84e".to_string(),
+                                "(Joe Bloggs) add t1.md af474d8".to_string(),
+                                "(Joe Bloggs) Initial commit 9ee507f".to_string(),
+                            ],
+                        )?;
+                        selector.succeeds_with(vec![0, 1], false, vec![0, 1])?;
+                        p.expect("creating proposal from 2 commits:\r\n")?;
+                        p.expect("355bdf1 add a4.md\r\n")?;
+                        p.expect("dbd1115 add a3.md\r\n")?;
                         p.expect("searching for profile and relay updates...\r\n")?;
                         p.expect("\r")?;
                         p.expect("logged in as fred\r\n")?;

@@ -81,6 +81,7 @@ fn cli_tester_create_proposal(
                 TEST_PASSWORD,
                 "--disable-cli-spinners",
                 "send",
+                "HEAD~2",
                 "--no-cover-letter",
                 "--in-reply-to",
                 in_reply_to.as_str(),
@@ -97,6 +98,7 @@ fn cli_tester_create_proposal(
                 TEST_PASSWORD,
                 "--disable-cli-spinners",
                 "send",
+                "HEAD~2",
                 "--title",
                 format!("\"{title}\"").as_str(),
                 "--description",
@@ -114,6 +116,7 @@ fn cli_tester_create_proposal(
                 TEST_PASSWORD,
                 "--disable-cli-spinners",
                 "send",
+                "HEAD~2",
                 "--no-cover-letter",
             ],
         );

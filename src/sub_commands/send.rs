@@ -1,6 +1,7 @@
 use std::{str::FromStr, time::Duration};
 
 use anyhow::{bail, Context, Result};
+use console::Style;
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nostr::{
@@ -14,7 +15,9 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
-    cli_interactor::{Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms},
+    cli_interactor::{
+        Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
+    },
     client::Connect,
     git::{Repo, RepoActions},
     login,
@@ -24,9 +27,9 @@ use crate::{
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
-    #[arg(default_value = "master..HEAD")]
-    /// commits to send as proposal; like in `git format-patch`
-    pub(crate) since_or_revision_range: String,
+    #[arg(default_value = "")]
+    /// commits to send as proposal; like in `git format-patch` eg. HEAD~2
+    pub(crate) since_or_range: String,
     #[clap(long)]
     /// nevent or event id of an existing proposal for which this is a new
     /// version
@@ -46,67 +49,83 @@ pub struct SubCommandArgs {
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
+    if let Some(id) = &args.in_reply_to {
+        println!("creating proposal revision for: {id}");
+    }
+
     let mut commits: Vec<Sha1Hash> = {
-        if args.since_or_revision_range.is_empty()
-            || args.since_or_revision_range.eq("master..HEAD")
-        {
+        if args.since_or_range.is_empty() {
             let branch_name = git_repo.get_checked_out_branch_name()?;
             let (main_branch_name, main_tip) = git_repo
                 .get_main_or_master_branch()
                 .context("the default branches (main or master) do not exist")?;
-            if branch_name.eq(main_branch_name) {
-                println!("creating 1 patch from latest commit");
+
+            let proposed_commits = if branch_name.eq(main_branch_name) {
                 vec![main_tip]
             } else {
-                let (from_branch, to_branch, ahead, behind) =
-                    identify_ahead_behind(&git_repo, &None, &None)?;
-
-                if ahead.is_empty() {
-                    bail!(format!(
-                        "'{from_branch}' is 0 commits ahead of '{to_branch}' so no patches were created"
-                    ));
-                }
-
-                if behind.is_empty() {
-                    println!(
-                        "creating patch for {} commits from '{from_branch}' that can be merged into '{to_branch}'",
-                        ahead.len(),
-                    );
-                } else {
-                    if !Interactor::default().confirm(
-                    PromptConfirmParms::default()
-                        .with_prompt(
-                            format!(
-                                "'{from_branch}' is {} commits behind '{to_branch}' and {} ahead. Consider rebasing before sending patches. Proceed anyway?",
-                                behind.len(),
-                                ahead.len(),
-                            )
-                        )
-                        .with_default(false)
-                ).context("failed to get confirmation response from interactor confirm")? {
-                    bail!("aborting so branch can be rebased");
-                }
-                    println!(
-                        "creating patch for {} commit{} from '{from_branch}' that {} {} behind '{to_branch}'",
-                        ahead.len(),
-                        if ahead.len() > 1 { "s" } else { "" },
-                        if ahead.len() > 1 { "are" } else { "is" },
-                        behind.len(),
-                    );
-                }
+                let (_, _, ahead, _) = identify_ahead_behind(&git_repo, &None, &None)?;
                 ahead
-            }
+            };
+            choose_commits(&git_repo, proposed_commits)?
         } else {
-            let ahead = git_repo
-                .parse_starting_commits(&args.since_or_revision_range)
-                .context("cannot parse specified starting commit or range")?;
-            println!("creating patch for {} commits", ahead.len(),);
-            ahead
+            git_repo
+                .parse_starting_commits(&args.since_or_range)
+                .context("cannot parse specified starting commit or range")?
         }
     };
 
-    if let Some(id) = &args.in_reply_to {
-        println!("as a revision to proposal: {id}");
+    if commits.is_empty() {
+        bail!("no commits selected");
+    }
+    println!("creating proposal from {} commits:", commits.len());
+
+    let dim = Style::new().color256(247);
+    for commit in &commits {
+        println!(
+            "{} {}",
+            dim.apply_to(commit.to_string().chars().take(7).collect::<String>()),
+            git_repo.get_commit_message_summary(commit)?
+        );
+    }
+
+    let (main_branch_name, main_tip) = git_repo
+        .get_main_or_master_branch()
+        .context("the default branches (main or master) do not exist")?;
+    let (first_commit_ahead, behind) =
+        git_repo.get_commits_ahead_behind(&main_tip, commits.last().context("no commits")?)?;
+
+    // check proposal ahead of origin/main
+    if first_commit_ahead.len().gt(&1) && !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal builds on a commit {} ahead of '{main_branch_name}' - do you want to continue?", first_commit_ahead.len() - 1)
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+        bail!("aborting because selected commits were ahead of origin/master");
+    }
+
+    // check if a selected commit is already in origin
+    if commits.iter().any(|c| c.eq(&main_tip)) {
+        if !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal contains commit(s) already in  '{main_branch_name}'. proceed anyway?")
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+            bail!("aborting as proposal contains commit(s) already in '{main_branch_name}'");
+        }
+    }
+    // check proposal isn't behind origin/main
+    else if !behind.is_empty() && !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal is {} behind '{main_branch_name}'. consider rebasing before submission. proceed anyway?", behind.len())
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+        bail!("aborting so commits can be rebased");
     }
 
     let title = if args.no_cover_letter {
@@ -357,6 +376,97 @@ where
         }
     }
     (vec1_u, vec2_u, dup, all)
+}
+
+fn choose_commits(git_repo: &Repo, proposed_commits: Vec<Sha1Hash>) -> Result<Vec<Sha1Hash>> {
+    let mut proposed_commits = if proposed_commits.len().gt(&10) {
+        vec![]
+    } else {
+        proposed_commits
+    };
+
+    let tip_of_head = git_repo.get_tip_of_local_branch(&git_repo.get_checked_out_branch_name()?)?;
+    let most_recent_commit = proposed_commits.first().unwrap_or(&tip_of_head);
+
+    let mut last_15_commits = vec![*most_recent_commit];
+
+    while last_15_commits.len().lt(&15) {
+        if let Ok(parent_commit) = git_repo.get_commit_parent(last_15_commits.last().unwrap()) {
+            last_15_commits.push(parent_commit);
+        } else {
+            break;
+        }
+    }
+
+    let term = console::Term::stderr();
+    let mut printed_error_line = false;
+
+    let selected_commits = 'outer: loop {
+        let selected = Interactor::default().multi_choice(
+            PromptMultiChoiceParms::default()
+                .with_prompt("select commits for proposal")
+                .dont_report()
+                .with_choices(
+                    last_15_commits
+                        .iter()
+                        .map(|h| summarise_commit_for_selection(git_repo, h).unwrap())
+                        .collect(),
+                )
+                .with_defaults(
+                    last_15_commits
+                        .iter()
+                        .map(|h| proposed_commits.iter().any(|c| c.eq(h)))
+                        .collect(),
+                ),
+        )?;
+        proposed_commits = selected.iter().map(|i| last_15_commits[*i]).collect();
+
+        if printed_error_line {
+            term.clear_last_lines(1)?;
+        }
+
+        if proposed_commits.is_empty() {
+            term.write_line("no commits selected")?;
+            printed_error_line = true;
+            continue;
+        }
+        for (i, selected_i) in selected.iter().enumerate() {
+            if i.gt(&0) && selected_i.ne(&(selected[i - 1] + 1)) {
+                term.write_line("commits must be consecutive. try again.")?;
+                printed_error_line = true;
+                continue 'outer;
+            }
+        }
+
+        break proposed_commits;
+    };
+    Ok(selected_commits)
+}
+
+fn summarise_commit_for_selection(git_repo: &Repo, commit: &Sha1Hash) -> Result<String> {
+    let references = git_repo.get_refs(commit)?;
+    let dim = Style::new().color256(247);
+    let prefix = format!("({})", git_repo.get_commit_author(commit)?[0],);
+    let references_string = if references.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            references
+                .iter()
+                .map(|r| format!("[{r}]"))
+                .collect::<Vec<String>>()
+                .join(" ")
+        )
+    };
+
+    Ok(format!(
+        "{} {}{} {}",
+        dim.apply_to(prefix),
+        git_repo.get_commit_message_summary(commit)?,
+        Style::new().magenta().apply_to(references_string),
+        dim.apply_to(commit.to_string().chars().take(7).collect::<String>(),),
+    ))
 }
 
 mod tests_unique_and_duplicate {
