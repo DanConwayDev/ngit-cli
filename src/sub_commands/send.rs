@@ -53,13 +53,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         println!("creating proposal revision for: {id}");
     }
 
+    let (main_branch_name, main_tip) = git_repo
+        .get_main_or_master_branch()
+        .context("the default branches (main or master) do not exist")?;
+
     let mut commits: Vec<Sha1Hash> = {
         if args.since_or_range.is_empty() {
             let branch_name = git_repo.get_checked_out_branch_name()?;
-            let (main_branch_name, main_tip) = git_repo
-                .get_main_or_master_branch()
-                .context("the default branches (main or master) do not exist")?;
-
             let proposed_commits = if branch_name.eq(main_branch_name) {
                 vec![main_tip]
             } else {
@@ -88,9 +88,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         );
     }
 
-    let (main_branch_name, main_tip) = git_repo
-        .get_main_or_master_branch()
-        .context("the default branches (main or master) do not exist")?;
     let (first_commit_ahead, behind) =
         git_repo.get_commits_ahead_behind(&main_tip, commits.last().context("no commits")?)?;
 
@@ -385,7 +382,7 @@ fn choose_commits(git_repo: &Repo, proposed_commits: Vec<Sha1Hash>) -> Result<Ve
         proposed_commits
     };
 
-    let tip_of_head = git_repo.get_tip_of_local_branch(&git_repo.get_checked_out_branch_name()?)?;
+    let tip_of_head = git_repo.get_tip_of_branch(&git_repo.get_checked_out_branch_name()?)?;
     let most_recent_commit = proposed_commits.first().unwrap_or(&tip_of_head);
 
     let mut last_15_commits = vec![*most_recent_commit];
@@ -571,7 +568,11 @@ pub fn generate_cover_letter_and_patch_events(
             // a change like this, or the removal of this tag will require the actual branch name to be tracked
             // so pulling and pushing still work
             if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
-                if !branch_name.eq("main") && !branch_name.eq("master") {
+                if !branch_name.eq("main")
+                    && !branch_name.eq("master")
+                    && !branch_name.eq("origin/main")
+                    && !branch_name.eq("origin/master")
+                {
                     vec![Tag::Generic(
                         TagKind::Custom("branch-name".to_string()),
                         vec![branch_name],
@@ -608,7 +609,11 @@ pub fn generate_cover_letter_and_patch_events(
                 },
                 if events.is_empty() {
                     if let Ok(branch_name) = git_repo.get_checked_out_branch_name() {
-                        if !branch_name.eq("main") && !branch_name.eq("master") {
+                        if !branch_name.eq("main")
+                            && !branch_name.eq("master")
+                            && !branch_name.eq("origin/main")
+                            && !branch_name.eq("origin/master")
+                        {
                             Some(branch_name)
                         } else {
                             None
@@ -915,7 +920,7 @@ fn identify_ahead_behind(
         Some(name) => (
             name.to_string(),
             git_repo
-                .get_tip_of_local_branch(name)
+                .get_tip_of_branch(name)
                 .context(format!("cannot find from_branch '{name}'"))?,
         ),
         None => (
@@ -937,7 +942,7 @@ fn identify_ahead_behind(
         Some(name) => (
             name.to_string(),
             git_repo
-                .get_tip_of_local_branch(name)
+                .get_tip_of_branch(name)
                 .context(format!("cannot find to_branch '{name}'"))?,
         ),
         None => {

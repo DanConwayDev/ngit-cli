@@ -274,7 +274,7 @@ pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
             };
         }
 
-        let local_branch_tip = git_repo.get_tip_of_local_branch(&cover_letter.branch_name)?;
+        let local_branch_tip = git_repo.get_tip_of_branch(&cover_letter.branch_name)?;
 
         // up-to-date
         if proposal_tip.eq(&local_branch_tip) {

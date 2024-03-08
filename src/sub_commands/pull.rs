@@ -60,7 +60,7 @@ pub async fn launch() -> Result<()> {
         get_most_recent_patch_with_ancestors(commit_events.clone())
             .context("cannot get most recent patch for proposal")?;
 
-    let local_branch_tip = git_repo.get_tip_of_local_branch(&branch_name)?;
+    let local_branch_tip = git_repo.get_tip_of_branch(&branch_name)?;
 
     let (main_branch_name, master_tip) = git_repo.get_main_or_master_branch()?;
 

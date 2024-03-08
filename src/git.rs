@@ -32,10 +32,13 @@ impl Repo {
 pub trait RepoActions {
     fn get_path(&self) -> Result<&Path>;
     fn get_origin_url(&self) -> Result<String>;
+    fn get_remote_branch_names(&self) -> Result<Vec<String>>;
     fn get_local_branch_names(&self) -> Result<Vec<String>>;
+    fn get_origin_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
+    fn get_local_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_checked_out_branch_name(&self) -> Result<String>;
-    fn get_tip_of_local_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
+    fn get_tip_of_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
     fn get_root_commit(&self) -> Result<Sha1Hash>;
     fn does_commit_exist(&self, commit: &str) -> Result<bool>;
     fn get_head_commit(&self) -> Result<Sha1Hash>;
@@ -91,7 +94,30 @@ impl RepoActions for Repo {
             .to_string())
     }
 
-    fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)> {
+    fn get_origin_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)> {
+        let main_branch_name = {
+            let remote_branches = self
+                .get_remote_branch_names()
+                .context("cannot find any local branches")?;
+            if remote_branches.contains(&"origin/main".to_string()) {
+                "origin/main"
+            } else if remote_branches.contains(&"origin/master".to_string()) {
+                "origin/master"
+            } else {
+                bail!("no main or master branch locally in this git repository to initiate from",)
+            }
+        };
+
+        let tip = self
+            .get_tip_of_branch(main_branch_name)
+            .context(format!(
+                "branch {main_branch_name} was listed as a remote branch but cannot get its tip commit id",
+            ))?;
+
+        Ok((main_branch_name, tip))
+    }
+
+    fn get_local_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)> {
         let main_branch_name = {
             let local_branches = self
                 .get_local_branch_names()
@@ -106,12 +132,24 @@ impl RepoActions for Repo {
         };
 
         let tip = self
-            .get_tip_of_local_branch(main_branch_name)
+            .get_tip_of_branch(main_branch_name)
             .context(format!(
                 "branch {main_branch_name} was listed as a local branch but cannot get its tip commit id",
             ))?;
 
         Ok((main_branch_name, tip))
+    }
+
+    fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)> {
+        if let Ok(main_tuple) = self
+            .get_origin_main_or_master_branch()
+            .context("the default branches (main or master) do not exist")
+        {
+            Ok(main_tuple)
+        } else {
+            self.get_main_or_master_branch()
+                .context("the default branches (main or master) do not exist")
+        }
     }
 
     fn get_local_branch_names(&self) -> Result<Vec<String>> {
@@ -131,6 +169,23 @@ impl RepoActions for Repo {
         Ok(branch_names)
     }
 
+    fn get_remote_branch_names(&self) -> Result<Vec<String>> {
+        let remote_branches = self
+            .git_repo
+            .branches(Some(git2::BranchType::Remote))
+            .context("getting GitRepo branches should not error even for a blank repository")?;
+
+        let mut branch_names = vec![];
+
+        for iter in remote_branches {
+            let branch = iter?.0;
+            if let Some(name) = branch.name()? {
+                branch_names.push(name.to_string());
+            }
+        }
+        Ok(branch_names)
+    }
+
     fn get_checked_out_branch_name(&self) -> Result<String> {
         Ok(self
             .git_repo
@@ -140,11 +195,18 @@ impl RepoActions for Repo {
             .to_string())
     }
 
-    fn get_tip_of_local_branch(&self, branch_name: &str) -> Result<Sha1Hash> {
-        let branch = self
+    fn get_tip_of_branch(&self, branch_name: &str) -> Result<Sha1Hash> {
+        let branch = if let Ok(branch) = self
             .git_repo
             .find_branch(branch_name, git2::BranchType::Local)
-            .context(format!("cannot find branch {branch_name}"))?;
+            .context(format!("cannot find local branch {branch_name}"))
+        {
+            branch
+        } else {
+            self.git_repo
+                .find_branch(branch_name, git2::BranchType::Remote)
+                .context(format!("cannot find local or remote branch {branch_name}"))?
+        };
         Ok(oid_to_sha1(&branch.into_reference().peel_to_commit()?.id()))
     }
 
@@ -407,7 +469,7 @@ impl RepoActions for Repo {
         branch_name: &str,
         patch_and_ancestors: Vec<nostr::Event>,
     ) -> Result<Vec<nostr::Event>> {
-        let branch_tip_result = self.get_tip_of_local_branch(branch_name);
+        let branch_tip_result = self.get_tip_of_branch(branch_name);
 
         // filter out existing ancestors in branch
         let mut patches_to_apply: Vec<nostr::Event> = patch_and_ancestors
@@ -1663,7 +1725,7 @@ mod tests {
                     let git_repo = Repo::from_path(&test_repo.dir)?;
                     git_repo.apply_patch_chain(BRANCH_NAME, patch_events)?;
                     assert_eq!(
-                        git_repo.get_tip_of_local_branch(BRANCH_NAME)?,
+                        git_repo.get_tip_of_branch(BRANCH_NAME)?,
                         oid_to_sha1(&original_repo.git_repo.head()?.peel_to_commit()?.id(),),
                     );
                     Ok(())
@@ -1677,11 +1739,11 @@ mod tests {
                     let existing_branch = test_repo.get_checked_out_branch_name()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
                     let previous_tip_of_existing_branch =
-                        git_repo.get_tip_of_local_branch(existing_branch.as_str())?;
+                        git_repo.get_tip_of_branch(existing_branch.as_str())?;
                     git_repo.apply_patch_chain(BRANCH_NAME, patch_events)?;
                     assert_eq!(
                         previous_tip_of_existing_branch,
-                        git_repo.get_tip_of_local_branch(existing_branch.as_str())?,
+                        git_repo.get_tip_of_branch(existing_branch.as_str())?,
                     );
                     Ok(())
                 }
@@ -1744,7 +1806,7 @@ mod tests {
                     let git_repo = Repo::from_path(&test_repo.dir)?;
                     git_repo.apply_patch_chain(BRANCH_NAME, patch_events)?;
                     assert_eq!(
-                        git_repo.get_tip_of_local_branch(BRANCH_NAME)?,
+                        git_repo.get_tip_of_branch(BRANCH_NAME)?,
                         oid_to_sha1(&original_repo.git_repo.head()?.peel_to_commit()?.id(),),
                     );
                     Ok(())
@@ -1760,11 +1822,11 @@ mod tests {
                     let existing_branch = test_repo.get_checked_out_branch_name()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
                     let previous_tip_of_existing_branch =
-                        git_repo.get_tip_of_local_branch(existing_branch.as_str())?;
+                        git_repo.get_tip_of_branch(existing_branch.as_str())?;
                     git_repo.apply_patch_chain(BRANCH_NAME, patch_events)?;
                     assert_eq!(
                         previous_tip_of_existing_branch,
-                        git_repo.get_tip_of_local_branch(existing_branch.as_str())?,
+                        git_repo.get_tip_of_branch(existing_branch.as_str())?,
                     );
                     Ok(())
                 }
@@ -1800,7 +1862,7 @@ mod tests {
                     git_repo.apply_patch_chain(BRANCH_NAME, patch_events)?;
 
                     assert_eq!(
-                        git_repo.get_tip_of_local_branch(BRANCH_NAME)?,
+                        git_repo.get_tip_of_branch(BRANCH_NAME)?,
                         oid_to_sha1(&original_repo.git_repo.head()?.peel_to_commit()?.id(),),
                     );
                     Ok(())
@@ -1832,7 +1894,7 @@ mod tests {
                     git_repo.apply_patch_chain(BRANCH_NAME, patch_events)?;
 
                     assert_eq!(
-                        git_repo.get_tip_of_local_branch(BRANCH_NAME)?,
+                        git_repo.get_tip_of_branch(BRANCH_NAME)?,
                         oid_to_sha1(&original_repo.git_repo.head()?.peel_to_commit()?.id(),),
                     );
                     Ok(())

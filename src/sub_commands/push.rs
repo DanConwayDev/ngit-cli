@@ -75,7 +75,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let most_recent_proposal_patch_chain = get_most_recent_patch_with_ancestors(commit_events)
         .context("cannot get most recent patch for proposal")?;
 
-    let branch_tip = git_repo.get_tip_of_local_branch(&branch_name)?;
+    let branch_tip = git_repo.get_tip_of_branch(&branch_name)?;
 
     let most_recent_patch_commit_id = str_to_sha1(
         &get_commit_id_from_patch(
