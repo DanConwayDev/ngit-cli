@@ -147,7 +147,7 @@ impl RepoActions for Repo {
         {
             Ok(main_tuple)
         } else {
-            self.get_main_or_master_branch()
+            self.get_local_main_or_master_branch()
                 .context("the default branches (main or master) do not exist")
         }
     }
@@ -1124,6 +1124,30 @@ mod tests {
     mod get_main_or_master_branch {
 
         use super::*;
+
+        #[test]
+        fn return_origin_main_if_exists() -> Result<()> {
+            let test_origin_repo = GitTestRepo::new("main")?;
+            let main_origin_oid = test_origin_repo.populate()?;
+
+            let test_repo = GitTestRepo::new("main")?;
+            test_repo.populate()?;
+            test_repo.add_remote("origin", test_origin_repo.dir.to_str().unwrap())?;
+            test_repo
+                .git_repo
+                .find_remote("origin")?
+                .fetch(&["main"], None, None)?;
+
+            std::fs::write(test_repo.dir.join("t3.md"), "some content")?;
+            test_repo.stage_and_commit("add t3.md")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            let (name, commit_hash) = git_repo.get_main_or_master_branch()?;
+            assert_eq!(name, "origin/main");
+            assert_eq!(commit_hash, oid_to_sha1(&main_origin_oid));
+            Ok(())
+        }
+
         mod returns_main {
             use super::*;
             #[test]
