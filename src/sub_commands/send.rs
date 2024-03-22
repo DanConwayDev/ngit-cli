@@ -4,10 +4,8 @@ use anyhow::{bail, Context, Result};
 use console::Style;
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use nostr::{
-    nips::nip19::Nip19, prelude::sha1::Hash as Sha1Hash, EventBuilder, FromBech32, Marker, Tag,
-    TagKind, UncheckedUrl,
-};
+use nostr::{nips::nip19::Nip19, EventBuilder, FromBech32, Marker, Tag, TagKind, UncheckedUrl};
+use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 use super::list::tag_value;
 #[cfg(not(test))]
