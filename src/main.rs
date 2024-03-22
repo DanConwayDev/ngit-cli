@@ -37,7 +37,7 @@ enum Commands {
     /// issue commits as a proposal
     Send(sub_commands::send::SubCommandArgs),
     /// list proposals; checkout, apply or download selected
-    List(sub_commands::list::SubCommandArgs),
+    List,
     /// send proposal revision
     Push(sub_commands::push::SubCommandArgs),
     /// fetch and apply new proposal commits / revisions linked to branch
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
         Commands::Login(args) => sub_commands::login::launch(&cli, args).await,
         Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
         Commands::Send(args) => sub_commands::send::launch(&cli, args).await,
-        Commands::List(args) => sub_commands::list::launch(&cli, args).await,
+        Commands::List => sub_commands::list::launch().await,
         Commands::Pull => sub_commands::pull::launch().await,
         Commands::Push(args) => sub_commands::push::launch(&cli, args).await,
     }

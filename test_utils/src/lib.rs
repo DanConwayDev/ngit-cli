@@ -574,7 +574,7 @@ impl CliTesterChoicePrompt<'_> {
 
         fn show_options(
             tester: &mut CliTester,
-            choices: &Vec<String>,
+            choices: &[String],
             selected_index: Option<usize>,
         ) -> Result<()> {
             if selected_index.is_some() {

@@ -16,18 +16,10 @@ use crate::{
         commit_msg_from_patch_oneliner, event_is_cover_letter, event_is_revision_root,
         event_to_cover_letter, patch_supports_commit_ids, PATCH_KIND,
     },
-    Cli,
 };
 
-#[derive(Debug, clap::Args)]
-pub struct SubCommandArgs {
-    /// TODO ignore merged, and closed
-    #[arg(long, action)]
-    open_only: bool,
-}
-
 #[allow(clippy::too_many_lines)]
-pub async fn launch(_cli_args: &Cli, _args: &SubCommandArgs) -> Result<()> {
+pub async fn launch() -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
 
     let root_commit = git_repo

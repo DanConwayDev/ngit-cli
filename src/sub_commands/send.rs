@@ -518,7 +518,7 @@ pub static PATCH_KIND: u64 = 1617;
 pub fn generate_cover_letter_and_patch_events(
     cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
-    commits: &Vec<Sha1Hash>,
+    commits: &[Sha1Hash],
     keys: &nostr::Keys,
     repo_ref: &RepoRef,
     in_reply_to: &Option<String>,

@@ -45,9 +45,11 @@ pub trait RepoActions {
     fn get_commit_parent(&self, commit: &Sha1Hash) -> Result<Sha1Hash>;
     fn get_commit_message(&self, commit: &Sha1Hash) -> Result<String>;
     fn get_commit_message_summary(&self, commit: &Sha1Hash) -> Result<String>;
+    #[allow(clippy::doc_link_with_quotes)]
     /// returns vector ["name", "email", "unixtime", "offset"]
     /// eg ["joe bloggs", "joe@pm.me", "12176","-300"]
     fn get_commit_author(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
+    #[allow(clippy::doc_link_with_quotes)]
     /// returns vector ["name", "email", "unixtime", "offset"]
     /// eg ["joe bloggs", "joe@pm.me", "12176","-300"]
     fn get_commit_comitter(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
@@ -1681,7 +1683,7 @@ mod tests {
             let mut events = generate_cover_letter_and_patch_events(
                 Some(("test".to_string(), "test".to_string())),
                 &git_repo,
-                &vec![oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
+                &[oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
                 &TEST_KEY_1_KEYS,
                 &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
                 &None,
