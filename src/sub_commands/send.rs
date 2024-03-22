@@ -545,8 +545,7 @@ pub fn generate_cover_letter_and_patch_events(
                     coordinate: Coordinate {
                         kind: nostr::Kind::Custom(REPO_REF_KIND),
                         public_key: *repo_ref.maintainers.first()
-                            .context("repo reference should always have at least one maintainer - the issuer of the repo event")
-                            ?,
+                            .context("repo reference should always have at least one maintainer")?,
                         identifier: repo_ref.identifier.to_string(),
                         relays: repo_ref.relays.clone(),
                     },
