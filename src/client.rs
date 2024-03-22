@@ -19,7 +19,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
-use nostr_sdk::ClientSigner;
+use nostr_sdk::NostrSigner;
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
@@ -101,7 +101,7 @@ impl Connect for Client {
 
     async fn set_keys(&mut self, keys: &nostr::Keys) {
         self.client
-            .set_signer(Some(ClientSigner::Keys(keys.clone())))
+            .set_signer(Some(NostrSigner::Keys(keys.clone())))
             .await;
     }
 
@@ -125,7 +125,7 @@ impl Connect for Client {
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
         self.client.add_relay(url).await?;
         self.client.connect_relay(url).await?;
-        Ok(self.client.send_event_to(url, event).await?)
+        Ok(self.client.send_event_to(vec![url], event).await?)
     }
 
     async fn get_events(
