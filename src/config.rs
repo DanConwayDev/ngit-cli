@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 #[cfg(test)]
 use mockall::*;
-use nostr::{secp256k1::XOnlyPublicKey, ToBech32};
+use nostr::{PublicKey, ToBech32};
 use serde::{self, Deserialize, Serialize};
 
 #[derive(Default)]
@@ -69,7 +69,7 @@ pub struct MyConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRef {
-    pub public_key: XOnlyPublicKey,
+    pub public_key: PublicKey,
     pub encrypted_key: String,
     pub metadata: UserMetadata,
     pub relays: UserRelays,
@@ -77,7 +77,7 @@ pub struct UserRef {
 }
 
 impl UserRef {
-    pub fn new(public_key: XOnlyPublicKey, encrypted_key: String) -> Self {
+    pub fn new(public_key: PublicKey, encrypted_key: String) -> Self {
         Self {
             public_key,
             encrypted_key,

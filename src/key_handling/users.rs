@@ -32,13 +32,13 @@ pub trait UserManagement {
         &self,
         #[cfg(test)] client: &MockConnect,
         #[cfg(not(test))] client: &Client,
-        public_key: &XOnlyPublicKey,
+        public_key: &PublicKey,
         after: u64,
     ) -> Result<UserRef>;
-    fn get_user_from_cache(&self, public_key: &XOnlyPublicKey) -> Result<UserRef>;
+    fn get_user_from_cache(&self, public_key: &PublicKey) -> Result<UserRef>;
     fn add_user_to_config(
         &self,
-        public_key: XOnlyPublicKey,
+        public_key: PublicKey,
         encrypted_secret_key: Option<String>,
         overwrite: bool,
     ) -> Result<()>;
@@ -99,7 +99,7 @@ impl UserManagement for UserManager {
 
     fn add_user_to_config(
         &self,
-        public_key: XOnlyPublicKey,
+        public_key: PublicKey,
         encrypted_secret_key: Option<String>,
         overwrite: bool,
     ) -> Result<()> {
@@ -129,7 +129,7 @@ impl UserManagement for UserManager {
             .context("failed to save application configuration with new user details in")
     }
 
-    fn get_user_from_cache(&self, public_key: &XOnlyPublicKey) -> Result<UserRef> {
+    fn get_user_from_cache(&self, public_key: &PublicKey) -> Result<UserRef> {
         let cfg = self
             .config_manager
             .load()
@@ -148,7 +148,7 @@ impl UserManagement for UserManager {
         &self,
         #[cfg(test)] client: &MockConnect,
         #[cfg(not(test))] client: &Client,
-        public_key: &XOnlyPublicKey,
+        public_key: &PublicKey,
         use_cache_unless_checked_more_than_x_secs_ago: u64,
     ) -> Result<UserRef> {
         let cfg = self

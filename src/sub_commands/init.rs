@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use nostr::{secp256k1::XOnlyPublicKey, FromBech32, ToBech32};
+use nostr::{FromBech32, PublicKey, ToBech32};
 
 use super::send::send_events;
 #[cfg(not(test))]
@@ -163,7 +163,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.web.clone()
     };
 
-    let maintainers: Vec<XOnlyPublicKey> = {
+    let maintainers: Vec<PublicKey> = {
         let mut dont_ask = !args.other_maintainers.is_empty();
         let mut maintainers_string = if !args.other_maintainers.is_empty() {
             [args.other_maintainers.clone()].concat().join(" ")
@@ -185,7 +185,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             };
             // add current user if not present
             if maintainers.iter().any(|m| {
-                if let Ok(m_pubkey) = XOnlyPublicKey::from_bech32(m) {
+                if let Ok(m_pubkey) = PublicKey::from_bech32(m) {
                     user_ref.public_key.eq(&m_pubkey)
                 } else {
                     false
@@ -210,9 +210,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     .map(std::string::ToString::to_string)
                     .collect();
             }
-            let mut maintainers: Vec<XOnlyPublicKey> = vec![];
+            let mut maintainers: Vec<PublicKey> = vec![];
             for m in maintainers_string.split(' ') {
-                if let Ok(m_pubkey) = XOnlyPublicKey::from_bech32(m) {
+                if let Ok(m_pubkey) = PublicKey::from_bech32(m) {
                     maintainers.push(m_pubkey);
                 } else {
                     println!("not a valid set of npubs seperated by a space");
