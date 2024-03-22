@@ -1837,7 +1837,6 @@ dependencies = [
  "nostr-signer",
  "nostr-zapper",
  "nwc",
- "once_cell",
  "thiserror",
  "tokio",
  "tracing",

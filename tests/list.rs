@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures::join;
-use nostr_sdk::client::blocking::Client;
+use nostr_sdk::client::Client;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, relay::Relay, *};
 
@@ -1589,6 +1589,8 @@ mod when_main_branch_is_uptodate {
             mod when_latest_revision_rebases_branch {
                 use std::time::Duration;
 
+                use tokio::{runtime::Handle, task::JoinHandle};
+
                 use super::*;
 
                 async fn prep_and_run() -> Result<(GitTestRepo, GitTestRepo)> {
@@ -1609,26 +1611,28 @@ mod when_main_branch_is_uptodate {
                     r55.events.push(generate_test_key_1_metadata_event("fred"));
                     r55.events.push(generate_test_key_1_relay_list_event());
 
-                    let cli_tester_handle = std::thread::spawn(
-                        move || -> Result<(GitTestRepo, GitTestRepo)> {
+                    let cli_tester_handle: JoinHandle<Result<(GitTestRepo, GitTestRepo)>> =
+                        tokio::task::spawn_blocking(move || {
                             // create 3 proposals
                             let _ = cli_tester_create_proposals()?;
                             // get proposal id of first
-                            let client = Client::new(&nostr::Keys::generate());
-                            client.add_relay("ws://localhost:8055")?;
-                            client.connect_relay("ws://localhost:8055")?;
-                            let proposals = client.get_events_of(
+                            // get proposal id of first
+                            let client = Client::default();
+                            Handle::current().block_on(client.add_relay("ws://localhost:8055"))?;
+                            Handle::current()
+                                .block_on(client.connect_relay("ws://localhost:8055"))?;
+                            let proposals = Handle::current().block_on(client.get_events_of(
                                 vec![
-                                    nostr::Filter::default()
-                                        .kind(nostr::Kind::Custom(PATCH_KIND))
-                                        .custom_tag(
-                                            nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                                            vec!["root"],
-                                        ),
-                                ],
+                                nostr::Filter::default()
+                                    .kind(nostr::Kind::Custom(PATCH_KIND))
+                                    .custom_tag(
+                                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                                        vec!["root"],
+                                    ),
+                            ],
                                 Some(Duration::from_millis(500)),
-                            )?;
-                            client.disconnect()?;
+                            ))?;
+                            Handle::current().block_on(client.disconnect())?;
 
                             let proposal_1_id = proposals
                                 .iter()
@@ -1702,8 +1706,7 @@ mod when_main_branch_is_uptodate {
                                 relay::shutdown_relay(8000 + p)?;
                             }
                             Ok((second_originating_repo, test_repo))
-                        },
-                    );
+                        });
 
                     // launch relay
                     let _ = join!(
@@ -1713,7 +1716,7 @@ mod when_main_branch_is_uptodate {
                         r55.listen_until_close(),
                         r56.listen_until_close(),
                     );
-                    let res = cli_tester_handle.join().unwrap()?;
+                    let res = cli_tester_handle.await??;
 
                     Ok(res)
                 }
@@ -1740,99 +1743,105 @@ mod when_main_branch_is_uptodate {
                         r55.events.push(generate_test_key_1_metadata_event("fred"));
                         r55.events.push(generate_test_key_1_relay_list_event());
 
-                        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            // create 3 proposals
-                            let _ = cli_tester_create_proposals()?;
-                            // get proposal id of first
-                            let client = Client::new(&nostr::Keys::generate());
-                            client.add_relay("ws://localhost:8055")?;
-                            client.connect_relay("ws://localhost:8055")?;
-                            let proposals = client.get_events_of(
-                                vec![
-                                    nostr::Filter::default()
-                                        .kind(nostr::Kind::Custom(PATCH_KIND))
-                                        .custom_tag(
-                                            nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                                            vec!["root"],
-                                        ),
-                                ],
-                                Some(Duration::from_millis(500)),
-                            )?;
-                            client.disconnect()?;
+                        let cli_tester_handle: JoinHandle<Result<()>> = tokio::task::spawn_blocking(
+                            move || {
+                                // create 3 proposals
+                                let _ = cli_tester_create_proposals()?;
+                                // get proposal id of first
+                                let client = Client::default();
+                                Handle::current()
+                                    .block_on(client.add_relay("ws://localhost:8055"))?;
+                                Handle::current()
+                                    .block_on(client.connect_relay("ws://localhost:8055"))?;
+                                let proposals =
+                                    Handle::current().block_on(client.get_events_of(
+                                        vec![
+                                nostr::Filter::default()
+                                    .kind(nostr::Kind::Custom(PATCH_KIND))
+                                    .custom_tag(
+                                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                                        vec!["root"],
+                                    ),
+                            ],
+                                        Some(Duration::from_millis(500)),
+                                    ))?;
+                                Handle::current().block_on(client.disconnect())?;
 
-                            let proposal_1_id = proposals
-                                .iter()
-                                .find(|e| {
-                                    e.tags
-                                        .iter()
-                                        .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
-                                })
-                                .unwrap()
-                                .id;
-                            // recreate proposal 1 on top of a another commit (like a rebase on top
-                            // of one extra commit)
-                            let second_originating_repo = GitTestRepo::default();
-                            second_originating_repo.populate()?;
-                            std::fs::write(
-                                second_originating_repo.dir.join("amazing.md"),
-                                "some content",
-                            )?;
-                            second_originating_repo
-                                .stage_and_commit("commit for rebasing on top of")?;
-                            cli_tester_create_proposal(
-                                &second_originating_repo,
-                                FEATURE_BRANCH_NAME_1,
-                                "a",
-                                Some((PROPOSAL_TITLE_1, "proposal a description")),
-                                Some(proposal_1_id.to_string()),
-                            )?;
+                                let proposal_1_id = proposals
+                                    .iter()
+                                    .find(|e| {
+                                        e.tags
+                                            .iter()
+                                            .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
+                                    })
+                                    .unwrap()
+                                    .id;
+                                // recreate proposal 1 on top of a another commit (like a rebase on
+                                // top of one extra commit)
+                                let second_originating_repo = GitTestRepo::default();
+                                second_originating_repo.populate()?;
+                                std::fs::write(
+                                    second_originating_repo.dir.join("amazing.md"),
+                                    "some content",
+                                )?;
+                                second_originating_repo
+                                    .stage_and_commit("commit for rebasing on top of")?;
+                                cli_tester_create_proposal(
+                                    &second_originating_repo,
+                                    FEATURE_BRANCH_NAME_1,
+                                    "a",
+                                    Some((PROPOSAL_TITLE_1, "proposal a description")),
+                                    Some(proposal_1_id.to_string()),
+                                )?;
 
-                            // pretend we have downloaded the origianl version of the first proposal
-                            let test_repo = GitTestRepo::default();
-                            test_repo.populate()?;
-                            create_and_populate_branch(
-                                &test_repo,
-                                FEATURE_BRANCH_NAME_1,
-                                "a",
-                                false,
-                            )?;
-                            // pretend we have pulled the updated main branch
-                            test_repo.checkout("main")?;
-                            std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
-                            test_repo.stage_and_commit("commit for rebasing on top of")?;
+                                // pretend we have downloaded the origianl version of the first
+                                // proposal
+                                let test_repo = GitTestRepo::default();
+                                test_repo.populate()?;
+                                create_and_populate_branch(
+                                    &test_repo,
+                                    FEATURE_BRANCH_NAME_1,
+                                    "a",
+                                    false,
+                                )?;
+                                // pretend we have pulled the updated main branch
+                                test_repo.checkout("main")?;
+                                std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
+                                test_repo.stage_and_commit("commit for rebasing on top of")?;
 
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                            p.expect("finding proposals...\r\n")?;
-                            let mut c = p.expect_choice(
-                                "all proposals",
-                                vec![
-                                    format!("\"{PROPOSAL_TITLE_3}\""),
-                                    format!("\"{PROPOSAL_TITLE_2}\""),
-                                    format!("\"{PROPOSAL_TITLE_1}\""),
-                                ],
-                            )?;
-                            c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
-                            p.expect("updated proposal available (2 ahead 0 behind 'main'). existing version is 2 ahead 1 behind 'main'\r\n")?;
-                            let mut c = p.expect_choice(
-                                "",
-                                vec![
-                                    format!("checkout and overwrite existing proposal branch"),
-                                    format!("checkout existing outdated proposal branch"),
-                                    format!("apply to current branch with `git am`"),
-                                    format!("download to ./patches"),
-                                    format!("back"),
-                                ],
-                            )?;
-                            c.succeeds_with(0, false, Some(0))?;
-                            p.expect("checked out new version of proposal (2 ahead 0 behind 'main'), replacing old version (2 ahead 1 behind 'main')\r\n")?;
-                            p.expect_end()?;
+                                let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                                p.expect("finding proposals...\r\n")?;
+                                let mut c = p.expect_choice(
+                                    "all proposals",
+                                    vec![
+                                        format!("\"{PROPOSAL_TITLE_3}\""),
+                                        format!("\"{PROPOSAL_TITLE_2}\""),
+                                        format!("\"{PROPOSAL_TITLE_1}\""),
+                                    ],
+                                )?;
+                                c.succeeds_with(2, true, None)?;
+                                p.expect("finding commits...\r\n")?;
+                                p.expect("updated proposal available (2 ahead 0 behind 'main'). existing version is 2 ahead 1 behind 'main'\r\n")?;
+                                let mut c = p.expect_choice(
+                                    "",
+                                    vec![
+                                        format!("checkout and overwrite existing proposal branch"),
+                                        format!("checkout existing outdated proposal branch"),
+                                        format!("apply to current branch with `git am`"),
+                                        format!("download to ./patches"),
+                                        format!("back"),
+                                    ],
+                                )?;
+                                c.succeeds_with(0, false, Some(0))?;
+                                p.expect("checked out new version of proposal (2 ahead 0 behind 'main'), replacing old version (2 ahead 1 behind 'main')\r\n")?;
+                                p.expect_end()?;
 
-                            for p in [51, 52, 53, 55, 56] {
-                                relay::shutdown_relay(8000 + p)?;
-                            }
-                            Ok(())
-                        });
+                                for p in [51, 52, 53, 55, 56] {
+                                    relay::shutdown_relay(8000 + p)?;
+                                }
+                                Ok(())
+                            },
+                        );
 
                         // launch relay
                         let _ = join!(
@@ -1842,7 +1851,7 @@ mod when_main_branch_is_uptodate {
                             r55.listen_until_close(),
                             r56.listen_until_close(),
                         );
-                        cli_tester_handle.join().unwrap()?;
+                        cli_tester_handle.await??;
                         println!("{:?}", r55.events);
                         Ok(())
                     }
