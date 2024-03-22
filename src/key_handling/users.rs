@@ -249,7 +249,11 @@ impl UserManagement for UserManager {
                         relays: new_relays_event
                             .tags
                             .iter()
-                            .filter(|t| t.kind().eq(&nostr::TagKind::R))
+                            .filter(|t| {
+                                t.kind().eq(&nostr::TagKind::SingleLetter(
+                                    SingleLetterTag::lowercase(Alphabet::R),
+                                ))
+                            })
                             .map(|t| UserRelayRef {
                                 url: t.as_vec()[1].clone(),
                                 read: t.as_vec().len() == 2 || t.as_vec()[2].eq("read"),

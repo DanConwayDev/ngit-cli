@@ -200,8 +200,9 @@ pub async fn fetch(
                     nostr::Filter::default().kind(nostr::Kind::Custom(REPO_REF_KIND));
                 match nip19 {
                     Nip19::Coordinate(c) => {
-                        repo_event_filter =
-                            repo_event_filter.identifier(c.identifier).author(c.pubkey);
+                        repo_event_filter = repo_event_filter
+                            .identifier(c.identifier)
+                            .author(c.public_key);
                         for r in c.relays {
                             relays.push(r);
                         }

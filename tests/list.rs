@@ -190,7 +190,7 @@ mod cannot_find_repo_event {
                     input.succeeds_with(
                         &Coordinate {
                             kind: nostr::Kind::Custom(REPOSITORY_KIND),
-                            pubkey: TEST_KEY_1_KEYS.public_key(),
+                            public_key: TEST_KEY_1_KEYS.public_key(),
                             identifier: repo_event.identifier().unwrap().to_string(),
                             relays: vec!["ws://localhost:8056".to_string()],
                         }
@@ -1621,7 +1621,10 @@ mod when_main_branch_is_uptodate {
                                 vec![
                                     nostr::Filter::default()
                                         .kind(nostr::Kind::Custom(PATCH_KIND))
-                                        .custom_tag(nostr::Alphabet::T, vec!["root"]),
+                                        .custom_tag(
+                                            nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                                            vec!["root"],
+                                        ),
                                 ],
                                 Some(Duration::from_millis(500)),
                             )?;
@@ -1748,7 +1751,10 @@ mod when_main_branch_is_uptodate {
                                 vec![
                                     nostr::Filter::default()
                                         .kind(nostr::Kind::Custom(PATCH_KIND))
-                                        .custom_tag(nostr::Alphabet::T, vec!["root"]),
+                                        .custom_tag(
+                                            nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                                            vec!["root"],
+                                        ),
                                 ],
                                 Some(Duration::from_millis(500)),
                             )?;

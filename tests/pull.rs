@@ -746,7 +746,10 @@ mod when_branch_is_checked_out {
                         vec![
                             nostr::Filter::default()
                                 .kind(nostr::Kind::Custom(PATCH_KIND))
-                                .custom_tag(nostr::Alphabet::T, vec!["root"]),
+                                .custom_tag(
+                                    nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                                    vec!["root"],
+                                ),
                         ],
                         Some(Duration::from_millis(500)),
                     )?;
@@ -843,7 +846,10 @@ mod when_branch_is_checked_out {
                         vec![
                             nostr::Filter::default()
                                 .kind(nostr::Kind::Custom(PATCH_KIND))
-                                .custom_tag(nostr::Alphabet::T, vec!["root"]),
+                                .custom_tag(
+                                    nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                                    vec!["root"],
+                                ),
                         ],
                         Some(Duration::from_millis(500)),
                     )?;

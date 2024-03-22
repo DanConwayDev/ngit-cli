@@ -730,9 +730,12 @@ pub async fn find_proposal_events(
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .custom_tag(nostr::Alphabet::T, vec!["root"])
                     .custom_tag(
-                        nostr::Alphabet::A,
+                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                        vec!["root"],
+                    )
+                    .custom_tag(
+                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::A),
                         repo_ref
                             .maintainers
                             .iter()
@@ -742,7 +745,10 @@ pub async fn find_proposal_events(
                 // events
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .custom_tag(nostr::Alphabet::T, vec!["root"])
+                    .custom_tag(
+                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                        vec!["root"],
+                    )
                     .reference(root_commit),
             ],
         )

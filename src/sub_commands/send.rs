@@ -4,7 +4,10 @@ use anyhow::{bail, Context, Result};
 use console::Style;
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use nostr::{nips::nip19::Nip19, EventBuilder, FromBech32, Marker, Tag, TagKind, UncheckedUrl};
+use nostr::{
+    nips::{nip01::Coordinate, nip19::Nip19},
+    EventBuilder, FromBech32, Marker, Tag, TagKind, UncheckedUrl,
+};
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 use super::list::tag_value;
@@ -539,11 +542,14 @@ pub fn generate_cover_letter_and_patch_events(
             vec![
                 // TODO: why not tag all maintainer identifiers?
                 Tag::A {
-                    kind: nostr::Kind::Custom(REPO_REF_KIND),
-                    public_key: *repo_ref.maintainers.first()
-                        .context("repo reference should always have at least one maintainer - the issuer of the repo event")
-                        ?,
-                    identifier: repo_ref.identifier.to_string(),
+                    coordinate: Coordinate {
+                        kind: nostr::Kind::Custom(REPO_REF_KIND),
+                        public_key: *repo_ref.maintainers.first()
+                            .context("repo reference should always have at least one maintainer - the issuer of the repo event")
+                            ?,
+                        identifier: repo_ref.identifier.to_string(),
+                        relays: repo_ref.relays.clone(),
+                    },
                     relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::from).clone(),
                 },
                 Tag::Reference(format!("{root_commit}")),
@@ -795,11 +801,14 @@ pub fn generate_patch_event(
         [
             vec![
                 Tag::A {
-                    kind: nostr::Kind::Custom(REPO_REF_KIND),
-                    public_key: *repo_ref.maintainers.first()
-                        .context("repo reference should always have at least one maintainer - the issuer of the repo event")
-                        ?,
-                    identifier: repo_ref.identifier.to_string(),
+                    coordinate: Coordinate {
+                        kind: nostr::Kind::Custom(REPO_REF_KIND),
+                        public_key: *repo_ref.maintainers.first()
+                            .context("repo reference should always have at least one maintainer - the issuer of the repo event")
+                            ?,
+                        identifier: repo_ref.identifier.to_string(),
+                        relays: repo_ref.relays.clone(),
+                    },
                     relay_url: relay_hint.clone(),
                 },
                 Tag::Reference(format!("{root_commit}")),
