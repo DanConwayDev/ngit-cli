@@ -1,9 +1,9 @@
-use std::{ffi::OsStr, path::PathBuf};
+use std::{ffi::OsStr, path::PathBuf, str::FromStr};
 
 use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
-use nostr::{self, prelude::FromSkStr, Kind, Tag};
+use nostr::{self, Kind, Tag};
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -26,7 +26,7 @@ pub static TEST_KEY_1_DISPLAY_NAME: &str = "bob";
 pub static TEST_KEY_1_ENCRYPTED: &str = "ncryptsec1qyq607h3cykxc3f2a44u89cdk336fptccn3fm5pf3nmf93d3c86qpunc7r6klwcn6lyszjy72wxwqq9aljg4pm6atvjrds9e248yhv76xfnt464265kgnjsvg8rlg06wg4sp9uljzfpu8zuaztcvfn2j8ggdrg8mldh850cy75efsyqqansert9wqmn4e6khpgvfz7h5le9";
 pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qy8ke0tjqnn8wt3w6lnc86c27ry3qrptxctjfcgruryxy0at238kwyjwsswd7z88thysruzw3awlrsxjvw5uptcd7vt70ft9rtkx00m8cgy3khm4hxa5d2gfnc6athnfruy2eyl6pkas8k34jg85z7xjqqadzfzh9rp0fzxqtw0tvxksac3n8yc98uksvuf93e0lcvqy8j6";
 pub static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
-    Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_1_NSEC).unwrap());
+    Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
 
 pub fn generate_test_key_1_metadata_event(name: &str) -> nostr::Event {
     nostr::event::EventBuilder::metadata(&nostr::Metadata::new().name(name))
@@ -95,7 +95,7 @@ pub static TEST_KEY_2_NPUB: &str =
 pub static TEST_KEY_2_DISPLAY_NAME: &str = "carole";
 pub static TEST_KEY_2_ENCRYPTED: &str = "...2";
 pub static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
-    Lazy::new(|| nostr::Keys::from_sk_str(TEST_KEY_2_NSEC).unwrap());
+    Lazy::new(|| nostr::Keys::from_str(TEST_KEY_2_NSEC).unwrap());
 
 pub fn generate_test_key_2_metadata_event(name: &str) -> nostr::Event {
     nostr::event::EventBuilder::metadata(&nostr::Metadata::new().name(name))

@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{str::FromStr, time::SystemTime};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -59,7 +59,7 @@ impl UserManagement for UserManager {
                     .input(PromptInputParms::default().with_prompt(prompt))
                     .context("failed to get nsec input from interactor")?,
             };
-            match Keys::from_sk_str(&pk) {
+            match Keys::from_str(&pk) {
                 Ok(key) => {
                     break key;
                 }
@@ -471,7 +471,7 @@ mod tests {
                     .expect_encrypt_key()
                     .once()
                     .withf(|k, p| {
-                        k.eq(&Keys::from_sk_str(TEST_KEY_1_NSEC).unwrap()) && p.eq(TEST_PASSWORD)
+                        k.eq(&Keys::from_str(TEST_KEY_1_NSEC).unwrap()) && p.eq(TEST_PASSWORD)
                     })
                     .returning(|_, _| Ok(TEST_KEY_1_ENCRYPTED.into()));
 

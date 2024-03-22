@@ -1,5 +1,7 @@
+use std::str::FromStr;
+
 use anyhow::{bail, Context, Result};
-use nostr::{prelude::FromSkStr, secp256k1::XOnlyPublicKey};
+use nostr::PublicKey;
 use zeroize::Zeroize;
 
 #[cfg(not(test))]
@@ -25,7 +27,7 @@ pub async fn launch(
     // if nsec parameter
     let key = if let Some(nsec_unwrapped) = nsec {
         // get key or fail without prompts
-        let key = nostr::Keys::from_sk_str(nsec_unwrapped).context("invalid nsec parameter")?;
+        let key = nostr::Keys::from_str(nsec_unwrapped).context("invalid nsec parameter")?;
 
         // if password, add user to enable password login in future
         if password.is_some() {
@@ -91,7 +93,7 @@ pub async fn launch(
 }
 
 async fn get_user_details(
-    public_key: &XOnlyPublicKey,
+    public_key: &PublicKey,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Result<UserRef> {
