@@ -144,7 +144,7 @@ impl Connect for Client {
         let m = MultiProgress::new();
         let pb_style = ProgressStyle::with_template(" {spinner} {prefix} {msg} {timeout_in}")?
             .with_key("timeout_in", |state: &ProgressState, w: &mut dyn Write| {
-                if state.elapsed().as_secs() > 3 {
+                if state.elapsed().as_secs() > 3 && state.elapsed().as_secs() < GET_EVENTS_TIMEOUT {
                     write!(
                         w,
                         "timeout in {:.1}s",
