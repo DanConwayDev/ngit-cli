@@ -23,8 +23,8 @@ futures = "0.3.28"
 git2 = "0.18.1"
 indicatif = "0.17.7"
 keyring = "2.0.5"
-nostr = "0.29.0"
-nostr-sdk = "0.29.0"
+nostr = { git = "https://github.com/DanConwayDev/nostr", branch="v0-29-with-send-events-fix" }
+nostr-sdk = { git = "https://github.com/DanConwayDev/nostr", branch="v0-29-with-send-events-fix" }
 passwords = "3.1.13"
 scrypt = "0.11.0"
 serde = { version = "1.0.181", features = ["derive"] }
