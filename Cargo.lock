@@ -1324,7 +1324,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.6",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1766,7 +1766,8 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 [[package]]
 name = "nostr"
 version = "0.29.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0-29-with-send-events-fix#20901408c61ba3977e4927bc069f3870a9174b1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "255485c2f41cf8f39d4e4a1901199549f54e32def81a71a8afe05f75809f441d"
 dependencies = [
  "aes 0.8.4",
  "base64",
@@ -1795,7 +1796,8 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.29.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0-29-with-send-events-fix#20901408c61ba3977e4927bc069f3870a9174b1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e15ab55f96ea5e560af0c75f1d942b1064266d443d11b2afbe51ca9ad78a018"
 dependencies = [
  "async-trait",
  "lru",
@@ -1807,8 +1809,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-relay-pool"
-version = "0.29.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0-29-with-send-events-fix#20901408c61ba3977e4927bc069f3870a9174b1b"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4c3431820082c850315218193c7e33a328b4b2cd0129d4fd5446a4dab87ddc4"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -1823,7 +1826,8 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.29.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0-29-with-send-events-fix#20901408c61ba3977e4927bc069f3870a9174b1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81ed0ab9cbc3b20d3dba99337f2e0739f052ebe32133d690e212022a06a22044"
 dependencies = [
  "async-utility",
  "lnurl-pay",
@@ -1841,7 +1845,8 @@ dependencies = [
 [[package]]
 name = "nostr-signer"
 version = "0.29.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0-29-with-send-events-fix#20901408c61ba3977e4927bc069f3870a9174b1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "307bdc7c26887d7e65632e66872989a19892dfe9f2c6dbd9a1d3f959c5c524d5"
 dependencies = [
  "async-utility",
  "nostr",
@@ -1853,7 +1858,8 @@ dependencies = [
 [[package]]
 name = "nostr-zapper"
 version = "0.29.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0-29-with-send-events-fix#20901408c61ba3977e4927bc069f3870a9174b1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "061d5eb00b430747a984ea9e41cd82c849832151b4263d8230c9c220dc2c62f8"
 dependencies = [
  "async-trait",
  "nostr",
@@ -1954,7 +1960,8 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "nwc"
 version = "0.29.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0-29-with-send-events-fix#20901408c61ba3977e4927bc069f3870a9174b1b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1894ffe54a1e5adf8dbb22b5a290c0748ec4a88aa07fa69c4359010edea49ed"
 dependencies = [
  "async-utility",
  "nostr",
