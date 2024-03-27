@@ -1324,7 +1324,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2 0.5.6",
  "tokio",
  "tower-service",
  "tracing",
@@ -1809,9 +1809,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-relay-pool"
-version = "0.29.1"
+version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4c3431820082c850315218193c7e33a328b4b2cd0129d4fd5446a4dab87ddc4"
+checksum = "a1b306bc99d49064950a16a06d35c7c19af94d8b4052fad0dfe02e41e529d5d3"
 dependencies = [
  "async-utility",
  "async-wsocket",
