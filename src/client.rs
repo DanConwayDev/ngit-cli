@@ -124,6 +124,7 @@ impl Connect for Client {
 
     async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
         self.client.add_relay(url).await?;
+        #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
         Ok(self.client.send_event_to(vec![url], event).await?)
     }
@@ -200,6 +201,7 @@ impl Connect for Client {
                 } else {
                     None
                 };
+                #[allow(clippy::large_futures)]
                 match get_events_of(relay, filters, &pb).await {
                     Err(error) => {
                         if let Some(pb) = pb {
@@ -246,6 +248,7 @@ async fn get_events_of(
     pb: &Option<ProgressBar>,
 ) -> Result<Vec<Event>> {
     if !relay.is_connected().await {
+        #[allow(clippy::large_futures)]
         relay.connect(None).await;
     }
 
