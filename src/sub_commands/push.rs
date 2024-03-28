@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use nostr::prelude::sha1::Hash as Sha1Hash;
+use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 #[cfg(not(test))]
 use crate::client::Client;

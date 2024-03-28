@@ -4,7 +4,7 @@ use std::{env::current_dir, path::Path};
 
 use anyhow::{bail, Context, Result};
 use git2::{DiffOptions, Oid, Revwalk};
-use nostr::prelude::{sha1::Hash as Sha1Hash, Hash};
+use nostr_sdk::hashes::{sha1::Hash as Sha1Hash, Hash};
 
 use crate::sub_commands::list::{get_commit_id_from_patch, tag_value};
 

@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{str::FromStr, time::SystemTime};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -32,13 +32,13 @@ pub trait UserManagement {
         &self,
         #[cfg(test)] client: &MockConnect,
         #[cfg(not(test))] client: &Client,
-        public_key: &XOnlyPublicKey,
+        public_key: &PublicKey,
         after: u64,
     ) -> Result<UserRef>;
-    fn get_user_from_cache(&self, public_key: &XOnlyPublicKey) -> Result<UserRef>;
+    fn get_user_from_cache(&self, public_key: &PublicKey) -> Result<UserRef>;
     fn add_user_to_config(
         &self,
-        public_key: XOnlyPublicKey,
+        public_key: PublicKey,
         encrypted_secret_key: Option<String>,
         overwrite: bool,
     ) -> Result<()>;
@@ -59,7 +59,7 @@ impl UserManagement for UserManager {
                     .input(PromptInputParms::default().with_prompt(prompt))
                     .context("failed to get nsec input from interactor")?,
             };
-            match Keys::from_sk_str(&pk) {
+            match Keys::from_str(&pk) {
                 Ok(key) => {
                     break key;
                 }
@@ -99,7 +99,7 @@ impl UserManagement for UserManager {
 
     fn add_user_to_config(
         &self,
-        public_key: XOnlyPublicKey,
+        public_key: PublicKey,
         encrypted_secret_key: Option<String>,
         overwrite: bool,
     ) -> Result<()> {
@@ -129,7 +129,7 @@ impl UserManagement for UserManager {
             .context("failed to save application configuration with new user details in")
     }
 
-    fn get_user_from_cache(&self, public_key: &XOnlyPublicKey) -> Result<UserRef> {
+    fn get_user_from_cache(&self, public_key: &PublicKey) -> Result<UserRef> {
         let cfg = self
             .config_manager
             .load()
@@ -148,7 +148,7 @@ impl UserManagement for UserManager {
         &self,
         #[cfg(test)] client: &MockConnect,
         #[cfg(not(test))] client: &Client,
-        public_key: &XOnlyPublicKey,
+        public_key: &PublicKey,
         use_cache_unless_checked_more_than_x_secs_ago: u64,
     ) -> Result<UserRef> {
         let cfg = self
@@ -249,7 +249,11 @@ impl UserManagement for UserManager {
                         relays: new_relays_event
                             .tags
                             .iter()
-                            .filter(|t| t.kind().eq(&nostr::TagKind::R))
+                            .filter(|t| {
+                                t.kind().eq(&nostr::TagKind::SingleLetter(
+                                    SingleLetterTag::lowercase(Alphabet::R),
+                                ))
+                            })
                             .map(|t| UserRelayRef {
                                 url: t.as_vec()[1].clone(),
                                 read: t.as_vec().len() == 2 || t.as_vec()[2].eq("read"),
@@ -471,7 +475,7 @@ mod tests {
                     .expect_encrypt_key()
                     .once()
                     .withf(|k, p| {
-                        k.eq(&Keys::from_sk_str(TEST_KEY_1_NSEC).unwrap()) && p.eq(TEST_PASSWORD)
+                        k.eq(&Keys::from_str(TEST_KEY_1_NSEC).unwrap()) && p.eq(TEST_PASSWORD)
                     })
                     .returning(|_, _| Ok(TEST_KEY_1_ENCRYPTED.into()));
 

@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use chacha20poly1305::{
     aead::{rand_core::RngCore, Aead, AeadCore, KeyInit, OsRng, Payload},
@@ -6,6 +8,7 @@ use chacha20poly1305::{
 #[cfg(test)]
 use mockall::*;
 use nostr::{prelude::*, Keys};
+use nostr_sdk::bech32::{self, FromBase32, ToBase32};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use zeroize::Zeroize;
 
@@ -120,10 +123,11 @@ impl EncryptDecrypt for Encryptor {
             bail!("invalid encrypted key");
         }
 
-        let key = Keys::from_sk_str(
-            std::str::from_utf8(&inner_secret).context("inner secret is not [u8]")?,
-        )
-        .context("incorrect password. Key decrypted with password did not produce a valid nsec.")?;
+        let key =
+            Keys::from_str(std::str::from_utf8(&inner_secret).context("inner secret is not [u8]")?)
+                .context(
+                    "incorrect password. Key decrypted with password did not produce a valid nsec.",
+                )?;
 
         inner_secret.zeroize();
 
