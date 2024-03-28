@@ -23,6 +23,7 @@ fn cli_tester_create_proposals() -> Result<GitTestRepo> {
         Some((PROPOSAL_TITLE_1, "proposal a description")),
         None,
     )?;
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_2,
@@ -30,6 +31,7 @@ fn cli_tester_create_proposals() -> Result<GitTestRepo> {
         Some((PROPOSAL_TITLE_2, "proposal b description")),
         None,
     )?;
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_3,
@@ -72,7 +74,7 @@ fn cli_tester_create_proposal(
     in_reply_to: Option<String>,
 ) -> Result<()> {
     create_and_populate_branch(test_repo, branch_name, prefix, false)?;
-
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     if let Some(in_reply_to) = in_reply_to {
         let mut p = CliTester::new_from_dir(
             &test_repo.dir,
@@ -489,7 +491,7 @@ mod when_main_branch_is_uptodate {
                                 "checked out proposal as '{FEATURE_BRANCH_NAME_3}' branch\r\n"
                             ))?;
                             p.expect_end()?;
-
+                            println!("blablagothere");
                             for p in [51, 52, 53, 55, 56] {
                                 relay::shutdown_relay(8000 + p)?;
                             }
@@ -726,6 +728,7 @@ mod when_main_branch_is_uptodate {
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                             let originating_repo = cli_tester_create_proposals()?;
+                            std::thread::sleep(std::time::Duration::from_millis(1000));
                             cli_tester_create_proposal(
                                 &originating_repo,
                                 FEATURE_BRANCH_NAME_4,
