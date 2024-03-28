@@ -1,0 +1,16 @@
+on: push
+
+name: build test
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+    - uses: actions/checkout@v3
+    - uses: cachix/install-nix-action@v22
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - run: nix develop --command cargo clippy
+    - run: nix develop --command cargo fmt --all -- --check
+    - run: nix develop --command cargo test
