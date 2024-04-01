@@ -25,7 +25,7 @@ pub struct SubCommandArgs {
     description: Option<String>,
     #[clap(long)]
     /// git server url users can clone from
-    clone_url: Option<String>,
+    clone_url: Vec<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
     /// homepage
     web: Vec<String>,
@@ -129,19 +129,24 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         )?,
     };
 
-    let git_server = match &args.clone_url {
-        Some(t) => t.clone(),
-        None => Interactor::default().input(
-            PromptInputParms::default()
-                .with_prompt("clone url")
-                .with_default(if let Some(repo_ref) = &repo_ref {
-                    repo_ref.git_server.clone()
-                } else if let Ok(git_repo) = git_repo.get_origin_url() {
-                    git_repo
-                } else {
-                    String::new()
-                }),
-        )?,
+    let git_server = if args.clone_url.is_empty() {
+        Interactor::default()
+            .input(
+                PromptInputParms::default()
+                    .with_prompt("clone url")
+                    .with_default(if let Some(repo_ref) = &repo_ref {
+                        repo_ref.git_server.clone().join(" ")
+                    } else if let Ok(git_repo) = git_repo.get_origin_url() {
+                        git_repo
+                    } else {
+                        String::new()
+                    }),
+            )?
+            .split(' ')
+            .map(std::string::ToString::to_string)
+            .collect()
+    } else {
+        args.clone_url.clone()
     };
 
     let web: Vec<String> = if args.web.is_empty() {

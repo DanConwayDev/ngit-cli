@@ -20,7 +20,7 @@ pub struct RepoRef {
     pub description: String,
     pub identifier: String,
     pub root_commit: String,
-    pub git_server: String,
+    pub git_server: Vec<String>,
     pub web: Vec<String>,
     pub relays: Vec<String>,
     pub maintainers: Vec<PublicKey>,
@@ -49,7 +49,8 @@ impl TryFrom<nostr::Event> for RepoRef {
         }
 
         if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("clone")) {
-            r.git_server = t.as_vec()[1].clone();
+            r.git_server = t.as_vec().clone();
+            r.git_server.remove(0);
         }
 
         if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("web")) {
@@ -121,7 +122,7 @@ impl RepoRef {
                     Tag::Description(self.description.clone()),
                     Tag::Generic(
                         nostr::TagKind::Custom("clone".to_string()),
-                        vec![self.git_server.clone()],
+                        self.git_server.clone(),
                     ),
                     Tag::Generic(nostr::TagKind::Custom("web".to_string()), self.web.clone()),
                     Tag::Generic(
@@ -303,7 +304,7 @@ mod tests {
             name: "test name".to_string(),
             description: "test description".to_string(),
             root_commit: "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2".to_string(),
-            git_server: "https://localhost:1000".to_string(),
+            git_server: vec!["https://localhost:1000".to_string()],
             web: vec![
                 "https://exampleproject.xyz".to_string(),
                 "https://gitworkshop.dev/123".to_string(),
@@ -394,7 +395,7 @@ mod tests {
         fn git_server() {
             assert_eq!(
                 RepoRef::try_from(create()).unwrap().git_server,
-                "https://localhost:1000",
+                vec!["https://localhost:1000"],
             )
         }
 
