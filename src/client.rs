@@ -12,7 +12,7 @@
 // want to inadvertlty use other features of nightly that might be removed.
 use std::{fmt::Write, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
@@ -240,7 +240,7 @@ impl Connect for Client {
     }
 }
 
-static GET_EVENTS_TIMEOUT: u64 = 10;
+static GET_EVENTS_TIMEOUT: u64 = 6;
 
 async fn get_events_of(
     relay: &nostr_sdk::Relay,
@@ -249,10 +249,14 @@ async fn get_events_of(
 ) -> Result<Vec<Event>> {
     if !relay.is_connected().await {
         #[allow(clippy::large_futures)]
-        relay.connect(None).await;
+        relay
+            .connect(Some(std::time::Duration::from_secs(GET_EVENTS_TIMEOUT)))
+            .await;
     }
 
-    if let Some(pb) = pb {
+    if !relay.is_connected().await {
+        bail!("connection timeout");
+    } else if let Some(pb) = pb {
         pb.set_prefix(format!("connected  {}", relay.url()));
     }
     let events = relay
