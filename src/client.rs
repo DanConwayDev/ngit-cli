@@ -240,7 +240,8 @@ impl Connect for Client {
     }
 }
 
-static GET_EVENTS_TIMEOUT: u64 = 6;
+static CONNECTION_TIMEOUT: u64 = 3;
+static GET_EVENTS_TIMEOUT: u64 = 7;
 
 async fn get_events_of(
     relay: &nostr_sdk::Relay,
@@ -250,7 +251,7 @@ async fn get_events_of(
     if !relay.is_connected().await {
         #[allow(clippy::large_futures)]
         relay
-            .connect(Some(std::time::Duration::from_secs(GET_EVENTS_TIMEOUT)))
+            .connect(Some(std::time::Duration::from_secs(CONNECTION_TIMEOUT)))
             .await;
     }
 
