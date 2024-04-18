@@ -956,7 +956,7 @@ mod with_offline_flag {
                 p.expect(format!("login as {}\r\n", TEST_KEY_1_NPUB).as_str())?
                     .expect_password(EXPECTED_PASSWORD_PROMPT)?
                     .succeeds_with(TEST_INVALID_PASSWORD)?;
-                p.expect_end_with(format!("Error: failed to log in as {}\r\n\r\nCaused by:\r\n    0: failed to decrypt key with provided password\r\n    1: failed to decrypt\r\n", TEST_KEY_1_NPUB).as_str())
+                p.expect_end_with(format!("Error: failed to log in as {}\r\n\r\nCaused by:\r\n    0: failed to decrypt key with provided password\r\n    1: ChaCha20Poly1305: aead::Error\r\n", TEST_KEY_1_NPUB).as_str())
             })
         }
     }

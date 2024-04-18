@@ -24,8 +24,8 @@ pub static TEST_KEY_1_NPUB: &str =
 pub static TEST_KEY_1_PUBKEY_HEX: &str =
     "f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768";
 pub static TEST_KEY_1_DISPLAY_NAME: &str = "bob";
-pub static TEST_KEY_1_ENCRYPTED: &str = "ncryptsec1qyq607h3cykxc3f2a44u89cdk336fptccn3fm5pf3nmf93d3c86qpunc7r6klwcn6lyszjy72wxwqq9aljg4pm6atvjrds9e248yhv76xfnt464265kgnjsvg8rlg06wg4sp9uljzfpu8zuaztcvfn2j8ggdrg8mldh850cy75efsyqqansert9wqmn4e6khpgvfz7h5le9";
-pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qy8ke0tjqnn8wt3w6lnc86c27ry3qrptxctjfcgruryxy0at238kwyjwsswd7z88thysruzw3awlrsxjvw5uptcd7vt70ft9rtkx00m8cgy3khm4hxa5d2gfnc6athnfruy2eyl6pkas8k34jg85z7xjqqadzfzh9rp0fzxqtw0tvxksac3n8yc98uksvuf93e0lcvqy8j6";
+pub static TEST_KEY_1_ENCRYPTED: &str = "ncryptsec1qgq77e3uftz8dh3jkjxwdms3v6gwqaqduxyzld82kskas8jcs5xup3sf2pc5tr0erqkqrtu0ptnjgjlgvx8lt7c0d7laryq2u7psfa6zm7mk7ln3ln58468shwatm7cx5wy5wvm7yk74ksrngygwxg74";
+pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qg835almhlrmyxqtqeva44d5ugm9wk2ccmwspxrqv4wjsdpdlud9es5hsrvs0pas7dvsretm0mc26qwfc7v8986mqngnjshcplnqzj62lxf44a0kkdv788f6dh20x2eum96l2j8v37s5grrheu2hgrkf";
 pub static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
 
@@ -121,13 +121,13 @@ pub fn make_event_old_or_change_user(
 
     unsigned.created_at =
         nostr::types::Timestamp::from(nostr::types::Timestamp::now().as_u64() - how_old_in_secs);
-    unsigned.id = nostr::EventId::new(
+    unsigned.id = Some(nostr::EventId::new(
         &keys.public_key(),
-        unsigned.created_at,
+        &unsigned.created_at,
         &unsigned.kind,
         &unsigned.tags,
         &unsigned.content,
-    );
+    ));
 
     unsigned.sign(keys).unwrap()
 }
