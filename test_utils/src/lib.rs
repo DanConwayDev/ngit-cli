@@ -4,6 +4,7 @@ use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
 use nostr::{self, Kind, Tag};
+use nostr_sdk::serde_json;
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -176,6 +177,11 @@ pub fn generate_repo_ref_event() -> nostr::Event {
     )
     .to_event(&TEST_KEY_1_KEYS)
     .unwrap()
+}
+
+/// enough to fool event_is_patch_set_root
+pub fn get_pretend_proposal_root_event() -> nostr::Event {
+    serde_json::from_str(r#"{"id":"8cb75aa4cda10a3a0f3242dc49d36159d30b3185bf63414cf6ce17f5c14a73b1","pubkey":"f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768","created_at":1714984571,"kind":1617,"tags":[["t","root"]],"content":"","sig":"6c197314b8c4c61da696dff888198333004d1ecc5d7bae2c554857f2f2b0d3ecc09369a5d8ba089c1bf89e3c6f5be40ade873fd698438ef8b303ffc6df35eb3f"}"#).unwrap()
 }
 
 /// wrapper for a cli testing tool - currently wraps rexpect and dialoguer

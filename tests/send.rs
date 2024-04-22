@@ -1284,9 +1284,14 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
     }
 }
 
-mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specified {
+mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_letter_details_specified {
+
+    use nostr::ToBech32;
+
     use super::*;
+
     fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
+        let proposal_root_bech32 = get_pretend_proposal_root_event().id.to_bech32().unwrap();
         let args = vec![
             "--nsec",
             TEST_KEY_1_NSEC,
@@ -1296,7 +1301,8 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
             "send",
             "HEAD~2",
             "--in-reply-to",
-            "nevent1qqsypm62fzw7qynvlc4gjl3tr0jw4vmh659nvr2cc5qyhdg92a5yy0qzypumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtesxygzam",
+            &proposal_root_bech32,
+            // "nevent1qqsged665nx6zz36puey9hzf6ds4n5ctxxzm7c6pfnmvu9l4c9988vgzyr6nuj7d02wdauzfeajx043c5yepjk9v6wm3avycy07kltdsy0tksh0zxyx",
             "--title",
             "exampletitle",
             "--description",
@@ -1305,7 +1311,12 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
         CliTester::new_from_dir(&git_repo.dir, args)
     }
     fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
-        p.expect("creating proposal revision for: nevent1qqsypm62fzw7qynvlc4gjl3tr0jw4vmh659nvr2cc5qyhdg92a5yy0qzypumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtesxygzam\r\n")?;
+        let proposal_root_bech32 = get_pretend_proposal_root_event().id.to_bech32().unwrap();
+        p.expect(format!(
+            "creating proposal revision for: {}\r\n",
+            proposal_root_bech32,
+        ))?;
+        // p.expect("creating proposal revision for: nevent1qqsged665nx6zz36puey9hzf6ds4n5ctxxzm7c6pfnmvu9l4c9988vgzyr6nuj7d02wdauzfeajx043c5yepjk9v6wm3avycy07kltdsy0tksh0zxyx\r\n")?;
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;
         p.expect("232efb3 add t3.md\r\n")?;
@@ -1343,6 +1354,7 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
                         &vec![
                             generate_test_key_1_metadata_event("fred"),
                             generate_test_key_1_relay_list_event(),
+                            get_pretend_proposal_root_event(),
                         ],
                     )?;
                     Ok(())
@@ -1357,7 +1369,7 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
                     relay.respond_events(
                         client_id,
                         &subscription_id,
-                        &vec![generate_repo_ref_event()],
+                        &vec![generate_repo_ref_event(), get_pretend_proposal_root_event()],
                     )?;
                     Ok(())
                 }),
@@ -1405,6 +1417,7 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
                             &vec![
                                 generate_test_key_1_metadata_event("fred"),
                                 generate_test_key_1_relay_list_event(),
+                                get_pretend_proposal_root_event(),
                             ],
                         )?;
                         Ok(())
@@ -1419,7 +1432,7 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
                         relay.respond_events(
                             client_id,
                             &subscription_id,
-                            &vec![generate_repo_ref_event()],
+                            &vec![generate_repo_ref_event(), get_pretend_proposal_root_event()],
                         )?;
                         Ok(())
                     }),
@@ -1430,7 +1443,6 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
             // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_create_proposal(&git_repo);
-
                 expect_msgs_first(&mut p, true)?;
                 relay::expect_send_with_progress(
                     &mut p,
@@ -1516,7 +1528,7 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
                         .unwrap()
                         .as_vec()[1],
                     // id of state nevent
-                    "40ef4a489de0126cfe2a897e2b1be4eab377d50b360d58c5004bb5055768423c",
+                    "8cb75aa4cda10a3a0f3242dc49d36159d30b3185bf63414cf6ce17f5c14a73b1",
                 );
             }
             Ok(())
@@ -1548,6 +1560,254 @@ mod in_reply_to_specified_with_range_of_head_2_and_cover_letter_details_specifie
                     cover_letter_event.id.to_string()
                 );
             }
+        }
+        Ok(())
+    }
+}
+
+mod in_reply_to_mentions_issue {
+    use nostr::ToBech32;
+
+    use super::*;
+    pub fn get_pretend_issue_event() -> nostr::Event {
+        serde_json::from_str(r#"{"created_at":1709286372,"content":"please provide feedback\nthis is an example ngit issue to demonstrate gitworkshop.dev.\n\nplease provide feedback with in reply to this issue or by creating a new issue.","tags":[["r","26689f97810fc656c7134c76e2a37d33b2e40ce7"],["a","30617:a008def15796fba9a0d6fab04e8fd57089285d9fd505da5a83fe8aad57a3564d:ngit","wss://relay.damus.io","root"],["p","a008def15796fba9a0d6fab04e8fd57089285d9fd505da5a83fe8aad57a3564d"]],"kind":1621,"pubkey":"a008def15796fba9a0d6fab04e8fd57089285d9fd505da5a83fe8aad57a3564d","id":"e944765d625ae7323d080da0df069c726a0e5490a17b452f854d85e18f781588","sig":"a1af9e89a35f1f7ef93e3de33986bd86cb7c4d7d9abb233c0c6405f32b5788171e47f84551afe8515b3107d12f03472721ea784b8791ff3f25e66a3169a54c20"}"#).unwrap()
+    }
+
+    fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
+        let proposal_root_bech32 = get_pretend_issue_event().id.to_bech32().unwrap();
+        let args = vec![
+            "--nsec",
+            TEST_KEY_1_NSEC,
+            "--password",
+            TEST_PASSWORD,
+            "--disable-cli-spinners",
+            "send",
+            "HEAD~2",
+            "--in-reply-to",
+            &proposal_root_bech32,
+            // "note1a9z8vhtzttnny0ggpksd7p5uwf4qu4ys59a52tu9fkz7rrmczkyqc46ngg",
+            "--title",
+            "exampletitle",
+            "--description",
+            "exampledescription",
+        ];
+        CliTester::new_from_dir(&git_repo.dir, args)
+    }
+
+    async fn prep_run_create_proposal() -> Result<(
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+    )> {
+        let git_repo = prep_git_repo()?;
+        // fallback (51,52) user write (53, 55) repo (55, 56)
+        let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+            Relay::new(
+                8051,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                            get_pretend_issue_event(),
+                        ],
+                    )?;
+                    Ok(())
+                }),
+            ),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
+            Relay::new(
+                8055,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event(), get_pretend_issue_event()],
+                    )?;
+                    Ok(())
+                }),
+            ),
+            Relay::new(8056, None, None),
+        );
+
+        // // check relay had the right number of events
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = cli_tester_create_proposal(&git_repo);
+            p.expect_end_eventually()?;
+            for p in [51, 52, 53, 55, 56] {
+                relay::shutdown_relay(8000 + p)?;
+            }
+            Ok(())
+        });
+
+        // launch relay
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+        );
+        cli_tester_handle.join().unwrap()?;
+        Ok((r51, r52, r53, r55, r56))
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn issue_event_mentioned_in_tagged_cover_letter() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
+        for relay in [&r53, &r55, &r56] {
+            let cover_letter_event: &nostr::Event =
+                relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
+            assert!(cover_letter_event.iter_tags().any(|t| {
+                t.as_vec()[0].eq("e")
+                    && t.as_vec()[1].eq(&get_pretend_issue_event().id.to_hex())
+                    && t.as_vec()[3].eq(&"mention")
+            }));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn isnt_tagged_as_revision() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
+        for relay in [&r53, &r55, &r56] {
+            let cover_letter_event: &nostr::Event =
+                relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
+            assert!(
+                !cover_letter_event
+                    .iter_tags()
+                    .any(|t| { t.as_vec()[0].eq("t") && t.as_vec()[1].eq(&"revision-root") })
+            );
+        }
+        Ok(())
+    }
+}
+mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root {
+    use nostr::JsonUtil;
+
+    use super::*;
+
+    fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
+        let args = vec![
+            "--nsec",
+            TEST_KEY_1_NSEC,
+            "--password",
+            TEST_PASSWORD,
+            "--disable-cli-spinners",
+            "send",
+            "HEAD~2",
+            "--in-reply-to",
+            // nsec1q3c5xnsm5m4wgsrhwnz04p0d5mevkryyggqgdpa9jwulpq9gldhswgtxvq
+            "npub1knxeegzqg0xqflsryvg7l7x7nmpe7kd7pl7zazug0a7t99tdsphszuyapx",
+            // nsec1nx5ulvcndhcuu8k6q8fenw50l6y75sec7pj8vr0r68l6a44w3lqspvj02k
+            "nprofile1qqsvru3yqrec6dxjn06f8cjh79jcu9wyaxu4y6v47yzpsx7vjm4xcuc33z2n3",
+            "--title",
+            "exampletitle",
+            "--description",
+            "exampledescription",
+        ];
+        CliTester::new_from_dir(&git_repo.dir, args)
+    }
+
+    async fn prep_run_create_proposal() -> Result<(
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+        Relay<'static>,
+    )> {
+        let git_repo = prep_git_repo()?;
+        // fallback (51,52) user write (53, 55) repo (55, 56)
+        let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+            Relay::new(
+                8051,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
+                    )?;
+                    Ok(())
+                }),
+            ),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
+            Relay::new(
+                8055,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event()],
+                    )?;
+                    Ok(())
+                }),
+            ),
+            Relay::new(8056, None, None),
+        );
+
+        // // check relay had the right number of events
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = cli_tester_create_proposal(&git_repo);
+            p.expect_end_eventually()?;
+            for p in [51, 52, 53, 55, 56] {
+                relay::shutdown_relay(8000 + p)?;
+            }
+            Ok(())
+        });
+
+        // launch relay
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+        );
+        cli_tester_handle.join().unwrap()?;
+        Ok((r51, r52, r53, r55, r56))
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn npub_and_nprofile_mentioned_in_tagged_cover_letter() -> Result<()> {
+        let (_, _, r53, r55, r56) = prep_run_create_proposal().await?;
+        for relay in [&r53, &r55, &r56] {
+            let cover_letter_event: &nostr::Event =
+                relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
+            println!("{:?}", &cover_letter_event.as_json());
+            assert!(cover_letter_event.iter_tags().any(|t| {
+                t.as_vec()[0].eq("p")
+                    && t.as_vec()[1].eq(&nostr::Keys::parse(
+                        "nsec1q3c5xnsm5m4wgsrhwnz04p0d5mevkryyggqgdpa9jwulpq9gldhswgtxvq",
+                    )
+                    .unwrap()
+                    .public_key()
+                    .to_hex())
+            }));
+            assert!(cover_letter_event.iter_tags().any(|t| {
+                t.as_vec()[0].eq("p")
+                    && t.as_vec()[1].eq(&nostr::Keys::parse(
+                        "nsec1nx5ulvcndhcuu8k6q8fenw50l6y75sec7pj8vr0r68l6a44w3lqspvj02k",
+                    )
+                    .unwrap()
+                    .public_key()
+                    .to_hex())
+            }));
         }
         Ok(())
     }

@@ -108,7 +108,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             cli_args,
             &sub_commands::send::SubCommandArgs {
                 since_or_range: String::new(),
-                in_reply_to: Some(proposal_root_event.id.to_string()),
+                in_reply_to: vec![proposal_root_event.id.to_string()],
                 title: None,
                 description: None,
                 no_cover_letter: args.no_cover_letter,
@@ -166,6 +166,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 None,
                 None,
                 &None,
+                &[],
             )
             .context("cannot make patch event from commit")?,
         );

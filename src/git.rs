@@ -1526,6 +1526,7 @@ mod tests {
                 None,
                 None,
                 &None,
+                &[],
             )
         }
         fn test_patch_applies_to_repository(patch_event: nostr::Event) -> Result<()> {
@@ -1687,6 +1688,7 @@ mod tests {
                 &TEST_KEY_1_KEYS,
                 &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
                 &None,
+                &[],
             )?;
 
             events.reverse();
