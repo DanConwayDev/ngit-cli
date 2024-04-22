@@ -6,7 +6,7 @@ use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nostr::{
     nips::{nip01::Coordinate, nip19::Nip19},
-    EventBuilder, FromBech32, Marker, Tag, TagKind, UncheckedUrl,
+    EventBuilder, FromBech32, Marker, Tag, TagKind, ToBech32, UncheckedUrl,
 };
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
@@ -220,12 +220,36 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     send_events(
         &client,
-        events,
+        events.clone(),
         user_ref.relays.write(),
         repo_ref.relays.clone(),
         !cli_args.disable_cli_spinners,
     )
     .await?;
+
+    if args.in_reply_to.is_none() {
+        if let Some(event) = events.first() {
+            // TODO: add gitworkshop.dev to njump and remove direct gitworkshop link
+            println!(
+                "{}",
+                dim.apply_to(format!(
+                    "view in gitworkshop.dev: https://gitworkshop.dev/repo/{}/proposal/{}",
+                    repo_ref.identifier,
+                    event.id(),
+                ))
+            );
+            println!(
+                "{}",
+                dim.apply_to(format!(
+                    "view in another client:  https://njump.me/{}",
+                    event
+                        .id()
+                        .to_bech32()
+                        .context("cannot produce nevent from event id")?
+                ))
+            );
+        }
+    }
     // TODO check if there is already a similarly named
     Ok(())
 }

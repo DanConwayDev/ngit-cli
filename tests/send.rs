@@ -147,6 +147,14 @@ fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()
     Ok(())
 }
 
+fn expect_msgs_after(p: &mut CliTester) -> Result<()> {
+    p.expect_after_whitespace("view in gitworkshop.dev: https://gitworkshop.dev/repo")?;
+    p.expect_eventually("\r\n")?;
+    p.expect("view in another client:  https://njump.me/")?;
+    p.expect_eventually("\r\n")?;
+    Ok(())
+}
+
 async fn prep_run_create_proposal(
     include_cover_letter: bool,
 ) -> Result<(
@@ -715,6 +723,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     ],
                     3,
                 )?;
+                expect_msgs_after(&mut p)?;
                 p.expect_end_with_whitespace()?;
                 for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;
@@ -880,6 +889,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         ],
                         3,
                     )?;
+                    expect_msgs_after(&mut p)?;
                     p.expect_end_with_whitespace()?;
                     for p in [51, 52, 53, 55, 56] {
                         relay::shutdown_relay(8000 + p)?;
@@ -963,6 +973,7 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
                     ],
                     2,
                 )?;
+                expect_msgs_after(&mut p)?;
                 p.expect_end_with_whitespace()?;
                 for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;
@@ -1241,6 +1252,7 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                     ],
                     2,
                 )?;
+                expect_msgs_after(&mut p)?;
                 p.expect_end_with_whitespace()?;
                 for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;
