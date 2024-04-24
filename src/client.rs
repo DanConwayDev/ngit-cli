@@ -61,7 +61,6 @@ impl Connect for Client {
                                                      * to delete all messages */
                 "wss://nos.lol".to_string(),
                 "wss://relay.nostr.band".to_string(),
-                "wss://relay.f7z.io".to_string(),
             ]
         };
 
