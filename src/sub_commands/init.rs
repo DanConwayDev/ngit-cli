@@ -205,15 +205,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         };
         'outer: loop {
             if !dont_ask {
-                maintainers_string = Interactor::default()
-                    .input(
-                        PromptInputParms::default()
-                            .with_prompt("maintainers")
-                            .with_default(maintainers_string),
-                    )?
-                    .split(' ')
-                    .map(std::string::ToString::to_string)
-                    .collect();
+                println!("{}", &maintainers_string);
+                maintainers_string = Interactor::default().input(
+                    PromptInputParms::default()
+                        .with_prompt("maintainers")
+                        .with_default(maintainers_string),
+                )?;
             }
             let mut maintainers: Vec<PublicKey> = vec![];
             for m in maintainers_string.split(' ') {
