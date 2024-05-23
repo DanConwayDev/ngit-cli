@@ -448,7 +448,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
 
         #[tokio::test]
         #[serial]
-        async fn pr_tags_branch_name() -> Result<()> {
+        async fn cover_letter_tags_branch_name() -> Result<()> {
             let (_, _, r53, r55, r56) = prep_run_create_proposal(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let cover_letter_event: &nostr::Event =
@@ -462,6 +462,27 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         .unwrap()
                         .as_vec()[1],
                     "feature"
+                );
+            }
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn cover_letter_tags_alt() -> Result<()> {
+            let (_, _, r53, r55, r56) = prep_run_create_proposal(true).await?;
+            for relay in [&r53, &r55, &r56] {
+                let cover_letter_event: &nostr::Event =
+                    relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
+
+                // branch-name tag
+                assert_eq!(
+                    cover_letter_event
+                        .iter_tags()
+                        .find(|t| t.as_vec()[0].eq("alt"))
+                        .unwrap()
+                        .as_vec()[1],
+                    "git patch cover letter: exampletitle"
                 );
             }
             Ok(())
@@ -599,6 +620,22 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     .unwrap()
                     .as_vec(),
                 vec!["committer", "Joe Bloggs", "joe.bloggs@pm.me", "0", "0"],
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn alt() -> Result<()> {
+            assert_eq!(
+                prep()
+                    .await?
+                    .tags
+                    .iter()
+                    .find(|t| t.as_vec()[0].eq("alt"))
+                    .unwrap()
+                    .as_vec(),
+                vec!["alt", "git patch: add t3.md"],
             );
             Ok(())
         }

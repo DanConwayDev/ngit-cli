@@ -136,6 +136,10 @@ impl RepoRef {
                             .map(std::string::ToString::to_string)
                             .collect(),
                     ),
+                    Tag::Generic(
+                        nostr::TagKind::Custom("alt".to_string()),
+                        vec![format!("git repository: {}", self.name.clone())],
+                    ),
                 ],
                 // code languages and hashtags
             ]
@@ -451,6 +455,15 @@ mod tests {
                         .any(|t| t.as_vec()[0].eq("name") && t.as_vec()[1].eq("test name"))
                 )
             }
+
+            #[test]
+            fn alt() {
+                assert!(
+                    create().tags.iter().any(|t| t.as_vec()[0].eq("alt")
+                        && t.as_vec()[1].eq("git repository: test name"))
+                )
+            }
+
             #[test]
             fn description() {
                 assert!(create().tags.iter().any(
@@ -515,7 +528,7 @@ mod tests {
 
             #[test]
             fn no_other_tags() {
-                assert_eq!(create().tags.len(), 8)
+                assert_eq!(create().tags.len(), 9)
             }
         }
     }

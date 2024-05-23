@@ -338,6 +338,23 @@ mod when_repo_not_previously_claimed {
 
             #[tokio::test]
             #[serial]
+            async fn alt() -> Result<()> {
+                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
+                for relay in [&r53, &r55, &r56, &r57] {
+                    let event: &nostr::Event = relay
+                        .events
+                        .iter()
+                        .find(|e| e.kind.as_u64().eq(&REPOSITORY_KIND))
+                        .unwrap();
+
+                    assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("alt")
+                        && t.as_vec()[1].eq("git repository: example-name")));
+                }
+                Ok(())
+            }
+
+            #[tokio::test]
+            #[serial]
             async fn description() -> Result<()> {
                 let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
                 for relay in [&r53, &r55, &r56, &r57] {

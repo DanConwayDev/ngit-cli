@@ -649,6 +649,10 @@ pub fn generate_cover_letter_and_patch_events(
                 },
                 Tag::Reference(format!("{root_commit}")),
                 Tag::Hashtag("cover-letter".to_string()),
+                Tag::Generic(
+                    nostr::TagKind::Custom("alt".to_string()),
+                    vec![format!("git patch cover letter: {}", title.clone())],
+                ),
             ],
             if let Some(event_ref) = root_proposal_id.clone() {
                 vec![
@@ -895,6 +899,7 @@ pub fn patch_supports_commit_ids(event: &nostr::Event) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub fn generate_patch_event(
     git_repo: &Repo,
     root_commit: &Sha1Hash,
@@ -912,6 +917,7 @@ pub fn generate_patch_event(
         .get_commit_parent(commit)
         .context("failed to get parent commit")?;
     let relay_hint = repo_ref.relays.first().map(nostr::UncheckedUrl::from);
+
     EventBuilder::new(
         nostr::event::Kind::Custom(PATCH_KIND),
         git_repo
@@ -937,6 +943,10 @@ pub fn generate_patch_event(
                 // code that makes it into the main branch, assuming
                 // the commit id is correct
                 Tag::Reference(commit.to_string()),
+                Tag::Generic(
+                    nostr::TagKind::Custom("alt".to_string()),
+                    vec![format!("git patch: {}", git_repo.get_commit_message_summary(commit).unwrap_or_default())],
+                ),
             ],
 
             if let Some(thread_event_id) = thread_event_id {
