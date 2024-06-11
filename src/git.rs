@@ -948,8 +948,8 @@ mod tests {
             fn test(time: git2::Time) -> Result<()> {
                 assert_eq!(
                     extract_sig_from_patch_tags(
-                        &[nostr::Tag::Generic(
-                            nostr::TagKind::Custom("author".to_string()),
+                        &[nostr::Tag::custom(
+                            nostr::TagKind::Custom("author".to_string().into()),
                             prep(&time)?,
                         )],
                         "author",

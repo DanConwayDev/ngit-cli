@@ -9,8 +9,8 @@ assert_cmd = "2.0.12"
 dialoguer = "0.10.4"
 directories = "5.0.1"
 git2 = "0.18.1"
-nostr = { git = "https://github.com/DanConwayDev/nostr", branch="expose-nip49-log-n" }
-nostr-sdk = { git = "https://github.com/DanConwayDev/nostr", branch="expose-nip49-log-n" }
+nostr = "0.32.0"
+nostr-sdk = "0.32.0"
 once_cell = "1.18.0"
 rand = "0.8"
 rexpect = { git = "https://github.com/rust-cli/rexpect.git", rev = "9eb61dd" }

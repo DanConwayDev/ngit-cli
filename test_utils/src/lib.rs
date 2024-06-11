@@ -3,8 +3,8 @@ use std::{ffi::OsStr, path::PathBuf, str::FromStr};
 use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
-use nostr::{self, Kind, Tag};
-use nostr_sdk::serde_json;
+use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
+use nostr_sdk::{serde_json, TagStandard};
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -12,8 +12,8 @@ use strip_ansi_escapes::strip_str;
 pub mod git;
 pub mod relay;
 
-pub static PATCH_KIND: u64 = 1617;
-pub static REPOSITORY_KIND: u64 = 30617;
+pub static PATCH_KIND: u16 = 1617;
+pub static REPOSITORY_KIND: u16 = 30617;
 
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
@@ -54,15 +54,18 @@ pub fn generate_test_key_1_relay_list_event() -> nostr::Event {
         nostr::Kind::RelayList,
         "",
         [
-            nostr::Tag::RelayMetadata(
-                "ws://localhost:8053".into(),
-                Some(nostr::RelayMetadata::Write),
-            ),
-            nostr::Tag::RelayMetadata(
-                "ws://localhost:8054".into(),
-                Some(nostr::RelayMetadata::Read),
-            ),
-            nostr::Tag::RelayMetadata("ws://localhost:8055".into(), None),
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::Url::from_str("ws://localhost:8053").unwrap(),
+                metadata: Some(RelayMetadata::Write),
+            }),
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::Url::from_str("ws://localhost:8054").unwrap(),
+                metadata: Some(RelayMetadata::Read),
+            }),
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::Url::from_str("ws://localhost:8055").unwrap(),
+                metadata: None,
+            }),
         ],
     )
     .to_event(&TEST_KEY_1_KEYS)
@@ -74,14 +77,14 @@ pub fn generate_test_key_1_relay_list_event_same_as_fallback() -> nostr::Event {
         nostr::Kind::RelayList,
         "",
         [
-            nostr::Tag::RelayMetadata(
-                "ws://localhost:8051".into(),
-                Some(nostr::RelayMetadata::Write),
-            ),
-            nostr::Tag::RelayMetadata(
-                "ws://localhost:8052".into(),
-                Some(nostr::RelayMetadata::Write),
-            ),
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::Url::from_str("ws://localhost:8051").unwrap(),
+                metadata: Some(RelayMetadata::Write),
+            }),
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::Url::from_str("ws://localhost:8052").unwrap(),
+                metadata: Some(RelayMetadata::Write),
+            }),
         ],
     )
     .to_event(&TEST_KEY_1_KEYS)
@@ -141,33 +144,33 @@ pub fn generate_repo_ref_event() -> nostr::Event {
         nostr::Kind::Custom(REPOSITORY_KIND),
         "",
         [
-            Tag::Identifier(
+            Tag::identifier(
                 // root_commit.to_string()
                 format!("{}-consider-it-random", root_commit),
             ),
-            Tag::Reference(root_commit.into()),
-            Tag::Name("example name".into()),
-            Tag::Description("example description".into()),
-            Tag::Generic(
-                nostr::TagKind::Custom("clone".to_string()),
+            Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
+            Tag::from_standardized(TagStandard::Name("example name".into())),
+            Tag::from_standardized(TagStandard::Description("example description".into())),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
                 vec!["git:://123.gitexample.com/test".to_string()],
             ),
-            Tag::Generic(
-                nostr::TagKind::Custom("web".to_string()),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
                 vec![
                     "https://exampleproject.xyz".to_string(),
                     "https://gitworkshop.dev/123".to_string(),
                 ],
             ),
-            Tag::Generic(
-                nostr::TagKind::Custom("relays".to_string()),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
                 vec![
                     "ws://localhost:8055".to_string(),
                     "ws://localhost:8056".to_string(),
                 ],
             ),
-            Tag::Generic(
-                nostr::TagKind::Custom("maintainers".to_string()),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
                 vec![
                     TEST_KEY_1_KEYS.public_key().to_string(),
                     TEST_KEY_2_KEYS.public_key().to_string(),

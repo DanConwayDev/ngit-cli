@@ -181,6 +181,7 @@ mod cannot_find_repo_event {
                             event_id: repo_event.id,
                             author: Some(TEST_KEY_1_KEYS.public_key()),
                             relays: vec!["ws://localhost:8056".to_string()],
+                            kind: None,
                         }
                         .to_bech32()?,
                     )?;

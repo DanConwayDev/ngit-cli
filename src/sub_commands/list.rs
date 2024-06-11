@@ -801,7 +801,7 @@ pub async fn find_commits_for_proposal_root_events(
         .context("cannot fetch patch events")?
         .iter()
         .filter(|e| {
-            e.kind.as_u64() == PATCH_KIND
+            e.kind.as_u16() == PATCH_KIND
                 && e.tags.iter().any(|t| {
                     t.as_vec().len() > 2
                         && proposal_root_events

@@ -1,7 +1,7 @@
 use std::{fs::File, io::BufReader, str::FromStr};
 
 use anyhow::{bail, Context, Result};
-use nostr::{nips::nip19::Nip19, FromBech32, PublicKey, Tag, ToBech32};
+use nostr::{nips::nip19::Nip19, FromBech32, PublicKey, Tag, TagStandard, ToBech32};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -31,7 +31,7 @@ impl TryFrom<nostr::Event> for RepoRef {
     type Error = anyhow::Error;
 
     fn try_from(event: nostr::Event) -> Result<Self> {
-        if !event.kind.as_u64().eq(&REPO_REF_KIND) {
+        if !event.kind.as_u16().eq(&REPO_REF_KIND) {
             bail!("incorrect kind");
         }
         let mut r = Self::default();
@@ -49,12 +49,12 @@ impl TryFrom<nostr::Event> for RepoRef {
         }
 
         if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("clone")) {
-            r.git_server = t.as_vec().clone();
+            r.git_server = t.clone().to_vec();
             r.git_server.remove(0);
         }
 
         if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("web")) {
-            r.web = t.as_vec().clone();
+            r.web = t.clone().to_vec();
             r.web.remove(0);
         }
 
@@ -67,12 +67,12 @@ impl TryFrom<nostr::Event> for RepoRef {
         }
 
         if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("relays")) {
-            r.relays = t.as_vec().clone();
+            r.relays = t.clone().to_vec();
             r.relays.remove(0);
         }
 
         if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("maintainers")) {
-            let mut maintainers = t.as_vec().clone();
+            let mut maintainers = t.clone().to_vec();
             maintainers.remove(0);
             if !maintainers.contains(&event.pubkey.to_string()) {
                 r.maintainers.push(event.pubkey);
@@ -90,7 +90,7 @@ impl TryFrom<nostr::Event> for RepoRef {
     }
 }
 
-pub static REPO_REF_KIND: u64 = 30_617;
+pub static REPO_REF_KIND: u16 = 30_617;
 
 impl RepoRef {
     pub fn to_event(&self, keys: &nostr::Keys) -> Result<nostr::Event> {
@@ -99,7 +99,7 @@ impl RepoRef {
             "",
             [
                 vec![
-                    Tag::Identifier(if self.identifier.to_string().is_empty() {
+                    Tag::identifier(if self.identifier.to_string().is_empty() {
                         // fiatjaf thought a random string. its not in the draft nip.
                         // thread_rng()
                         //     .sample_iter(&Alphanumeric)
@@ -117,27 +117,30 @@ impl RepoRef {
                     } else {
                         self.identifier.to_string()
                     }),
-                    Tag::Reference(self.root_commit.to_string()),
-                    Tag::Name(self.name.clone()),
-                    Tag::Description(self.description.clone()),
-                    Tag::Generic(
-                        nostr::TagKind::Custom("clone".to_string()),
+                    Tag::from_standardized(TagStandard::Reference(self.root_commit.to_string())),
+                    Tag::from_standardized(TagStandard::Name(self.name.clone())),
+                    Tag::from_standardized(TagStandard::Description(self.description.clone())),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
                         self.git_server.clone(),
                     ),
-                    Tag::Generic(nostr::TagKind::Custom("web".to_string()), self.web.clone()),
-                    Tag::Generic(
-                        nostr::TagKind::Custom("relays".to_string()),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
+                        self.web.clone(),
+                    ),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
                         self.relays.clone(),
                     ),
-                    Tag::Generic(
-                        nostr::TagKind::Custom("maintainers".to_string()),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
                         self.maintainers
                             .iter()
                             .map(std::string::ToString::to_string)
-                            .collect(),
+                            .collect::<Vec<String>>(),
                     ),
-                    Tag::Generic(
-                        nostr::TagKind::Custom("alt".to_string()),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
                         vec![format!("git repository: {}", self.name.clone())],
                     ),
                 ],
@@ -188,7 +191,7 @@ pub async fn fetch(
         // somewhere within .git folder for future use and seek to get that next time
         if let Some(event) = events
             .iter()
-            .filter(|e| e.kind.as_u64() == REPO_REF_KIND)
+            .filter(|e| e.kind.as_u16() == REPO_REF_KIND)
             .max_by_key(|e| e.created_at)
         {
             break event.clone();

@@ -255,19 +255,25 @@ pub fn expect_send_with_progress(
         " - {} -------------------- 0/{event_count}",
         &relays[0].0
     ))?;
-    for relay in &relays {
-        // if successful
-        if relay.1 {
-            p.expect_eventually(format!(" y {}", relay.0))?;
-        } else {
-            p.expect_eventually(format!(" x {} {}", relay.0, relay.2))?;
+    let last_relay_outcome = outcome_message(relays.last().unwrap());
+    let mut s = String::new();
+    loop {
+        s.push_str(&p.expect_eventually(&last_relay_outcome)?);
+        s.push_str(&last_relay_outcome);
+        if relays.iter().all(|r| s.contains(&outcome_message(r))) {
+            // all responses have been received with correct outcome
+            break;
         }
-        // could check that before only contains titles:
-        // - # y x n/n and whitespace
-        // let before = p.expect_eventually(format!(" â {title}"))?;
-        // assert_eq!("", before.trim());
     }
     Ok(())
+}
+
+fn outcome_message(relay: &(&str, bool, &str)) -> String {
+    if relay.1 {
+        format!(" y {}", relay.0)
+    } else {
+        format!(" x {} {}", relay.0, relay.2)
+    }
 }
 
 pub fn expect_send_with_progress_exact_interaction(

@@ -5,10 +5,10 @@ use console::Style;
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nostr::{
-    nips::{nip01::Coordinate, nip19::Nip19},
-    EventBuilder, FromBech32, Marker, Tag, TagKind, ToBech32, UncheckedUrl,
+    nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19},
+    EventBuilder, FromBech32, Tag, TagKind, ToBech32, UncheckedUrl,
 };
-use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
+use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, TagStandard};
 
 use super::list::tag_value;
 #[cfg(not(test))]
@@ -265,6 +265,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 }
 
 #[allow(clippy::module_name_repetitions)]
+#[allow(clippy::too_many_lines)]
 pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
@@ -273,21 +274,41 @@ pub async fn send_events(
     repo_read_relays: Vec<String>,
     animate: bool,
 ) -> Result<()> {
-    let (_, _, _, mut all) = unique_and_duplicate_all(&my_write_relays, &repo_read_relays);
+    let fallback = [
+        client.get_fallback_relays().clone(),
+        if events.iter().any(|e| e.kind().as_u16().eq(&REPO_REF_KIND)) {
+            client.get_blaster_relays().clone()
+        } else {
+            vec![]
+        },
+    ]
+    .concat();
+    let mut relays: Vec<&String> = vec![];
 
-    let mut fallback = client.get_fallback_relays().clone();
-
-    // blast repo events
-    if events.iter().any(|e| e.kind().as_u64().eq(&REPO_REF_KIND)) {
-        for r in client.get_blaster_relays() {
-            fallback.push(r.to_string());
+    let all = &[
+        repo_read_relays.clone(),
+        my_write_relays.clone(),
+        fallback.clone(),
+    ]
+    .concat();
+    // add duplicates first
+    for r in &repo_read_relays {
+        let r_clean = remove_trailing_slash(r);
+        if !my_write_relays
+            .iter()
+            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
+            .count()
+            > 1
+            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
+        {
+            relays.push(r);
         }
     }
 
-    // then remaining fallback list
-    for r in &fallback {
-        if !all.iter().any(|r2| r2.eq(&r)) {
-            all.push(r);
+    for r in all {
+        let r_clean = remove_trailing_slash(r);
+        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
+            relays.push(r);
         }
     }
 
@@ -319,25 +340,36 @@ pub async fn send_events(
         "x".to_string()
     })?;
 
-    join_all(all.iter().map(|&relay| async {
+    #[allow(clippy::borrow_deref_ref)]
+    join_all(relays.iter().map(|&relay| async {
+        let relay_clean = remove_trailing_slash(&*relay);
         let details = format!(
             "{}{}{} {}",
-            if my_write_relays.iter().any(|r| relay.eq(r)) {
+            if my_write_relays
+                .iter()
+                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+            {
                 " [my-relay]"
             } else {
                 ""
             },
-            if repo_read_relays.iter().any(|r| relay.eq(r)) {
+            if repo_read_relays
+                .iter()
+                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+            {
                 " [repo-relay]"
             } else {
                 ""
             },
-            if fallback.iter().any(|r| relay.eq(r)) {
+            if fallback
+                .iter()
+                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+            {
                 " [default]"
             } else {
                 ""
             },
-            *relay,
+            relay_clean,
         );
         let pb = m.add(
             ProgressBar::new(events.len() as u64)
@@ -378,36 +410,12 @@ pub async fn send_events(
     Ok(())
 }
 
-/// returns `(unique_vec1, unique_vec2, duplicates, all)`
-fn unique_and_duplicate_all<'a, S>(
-    vec1: &'a Vec<S>,
-    vec2: &'a Vec<S>,
-) -> (Vec<&'a S>, Vec<&'a S>, Vec<&'a S>, Vec<&'a S>)
-where
-    S: PartialEq,
-{
-    let mut vec1_u = vec![];
-    let mut vec2_u = vec![];
-    let mut dup = vec![];
-    let mut all = vec![];
-    for s1 in vec1 {
-        if vec2.iter().any(|s2| s1.eq(s2)) {
-            dup.push(s1);
-        } else {
-            vec1_u.push(s1);
-        }
+fn remove_trailing_slash(s: &String) -> String {
+    match s.as_str().strip_suffix('/') {
+        Some(s) => s,
+        None => s,
     }
-    for s2 in vec2 {
-        if !vec1.iter().any(|s1| s2.eq(s1)) {
-            vec2_u.push(s2);
-        }
-    }
-    for a in [&dup, &vec1_u, &vec2_u] {
-        for e in a {
-            all.push(&**e);
-        }
-    }
-    (vec1_u, vec2_u, dup, all)
+    .to_string()
 }
 
 fn choose_commits(git_repo: &Repo, proposed_commits: Vec<Sha1Hash>) -> Result<Vec<Sha1Hash>> {
@@ -501,53 +509,6 @@ fn summarise_commit_for_selection(git_repo: &Repo, commit: &Sha1Hash) -> Result<
     ))
 }
 
-mod tests_unique_and_duplicate {
-
-    #[test]
-    fn correct_number_of_unique_and_duplicate_items() {
-        let v1 = vec![
-            "t1".to_string(),
-            "t2".to_string(),
-            "t3".to_string(),
-            "t4".to_string(),
-            "t5".to_string(),
-        ];
-        let v2 = vec![
-            "t3".to_string(),
-            "t4".to_string(),
-            "t5".to_string(),
-            "t6".to_string(),
-        ];
-
-        let (v1_u, v2_u, d, a) = super::unique_and_duplicate_all(&v1, &v2);
-
-        assert_eq!(v1_u.len(), 2);
-        assert_eq!(v2_u.len(), 1);
-        assert_eq!(d.len(), 3);
-        assert_eq!(a.len(), 6);
-    }
-    #[test]
-    fn all_begins_with_duplicates() {
-        let v1 = vec![
-            "t1".to_string(),
-            "t2".to_string(),
-            "t3".to_string(),
-            "t4".to_string(),
-            "t5".to_string(),
-        ];
-        let v2 = vec![
-            "t3".to_string(),
-            "t4".to_string(),
-            "t5".to_string(),
-            "t6".to_string(),
-        ];
-
-        let (_, _, d, a) = super::unique_and_duplicate_all(&v1, &v2);
-
-        assert_eq!(a[0], d[0]);
-    }
-}
-
 async fn get_root_proposal_id_and_mentions_from_in_reply_to(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
@@ -555,20 +516,23 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
     in_reply_to: &[String],
 ) -> Result<(Option<String>, Vec<nostr::Tag>)> {
     let root_proposal_id = if let Some(first) = in_reply_to.first() {
-        match event_tag_from_nip19_or_hex(first, "in-reply-to", nostr::Marker::Root, true, false)? {
-            Tag::Event {
+        match event_tag_from_nip19_or_hex(first, "in-reply-to", Marker::Root, true, false)?
+            .as_standardized()
+        {
+            Some(nostr_sdk::TagStandard::Event {
                 event_id,
                 relay_url: _,
                 marker: _,
-            } => {
+                public_key: _,
+            }) => {
                 let events = client
                     .get_events(
                         repo_relays.to_vec(),
-                        vec![nostr::Filter::new().id(event_id)],
+                        vec![nostr::Filter::new().id(*event_id)],
                     )
                     .await
                     .context("whilst getting events specified in --in-reply-to")?;
-                if let Some(first) = events.iter().find(|e| e.id.eq(&event_id)) {
+                if let Some(first) = events.iter().find(|e| e.id.eq(event_id)) {
                     if event_is_patch_set_root(first) {
                         Some(event_id.to_string())
                     } else {
@@ -591,16 +555,10 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
     for (i, reply_to) in in_reply_to.iter().enumerate() {
         if i.ne(&0) || root_proposal_id.is_none() {
             mention_tags.push(
-                event_tag_from_nip19_or_hex(
-                    reply_to,
-                    "in-reply-to",
-                    nostr::Marker::Mention,
-                    true,
-                    false,
-                )
-                .context(format!(
-                    "{reply_to} in 'in-reply-to' not a valid nostr reference"
-                ))?,
+                event_tag_from_nip19_or_hex(reply_to, "in-reply-to", Marker::Mention, true, false)
+                    .context(format!(
+                        "{reply_to} in 'in-reply-to' not a valid nostr reference"
+                    ))?,
             );
         }
     }
@@ -608,7 +566,7 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
     Ok((root_proposal_id, mention_tags))
 }
 
-pub static PATCH_KIND: u64 = 1617;
+pub static PATCH_KIND: u16 = 1617;
 
 #[allow(clippy::too_many_lines)]
 pub fn generate_cover_letter_and_patch_events(
@@ -637,33 +595,30 @@ pub fn generate_cover_letter_and_patch_events(
         [
             vec![
                 // TODO: why not tag all maintainer identifiers?
-                Tag::A {
-                    coordinate: Coordinate {
-                        kind: nostr::Kind::Custom(REPO_REF_KIND),
-                        public_key: *repo_ref.maintainers.first()
-                            .context("repo reference should always have at least one maintainer")?,
-                        identifier: repo_ref.identifier.to_string(),
-                        relays: repo_ref.relays.clone(),
-                    },
-                    relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::from).clone(),
-                },
-                Tag::Reference(format!("{root_commit}")),
-                Tag::Hashtag("cover-letter".to_string()),
-                Tag::Generic(
-                    nostr::TagKind::Custom("alt".to_string()),
+                Tag::coordinate(Coordinate {
+                    kind: nostr::Kind::Custom(REPO_REF_KIND),
+                    public_key: *repo_ref.maintainers.first()
+                        .context("repo reference should always have at least one maintainer")?,
+                    identifier: repo_ref.identifier.to_string(),
+                    relays: repo_ref.relays.clone(),
+                }),
+                Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
+                Tag::hashtag("cover-letter"),
+                Tag::custom(
+                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
                     vec![format!("git patch cover letter: {}", title.clone())],
                 ),
             ],
             if let Some(event_ref) = root_proposal_id.clone() {
                 vec![
-                    Tag::Hashtag("root".to_string()),
-                    Tag::Hashtag("revision-root".to_string()),
+                    Tag::hashtag("root"),
+                    Tag::hashtag("revision-root"),
                     // TODO check if id is for a root proposal (perhaps its for an issue?)
-                    event_tag_from_nip19_or_hex(&event_ref,"proposal",nostr::Marker::Reply, false, false)?,
+                    event_tag_from_nip19_or_hex(&event_ref,"proposal",Marker::Reply, false, false)?,
                 ]
             } else {
                 vec![
-                    Tag::Hashtag("root".to_string()),
+                    Tag::hashtag("root"),
                 ]
             },
             mentions.to_vec(),
@@ -677,10 +632,12 @@ pub fn generate_cover_letter_and_patch_events(
                     && !branch_name.eq("origin/main")
                     && !branch_name.eq("origin/master")
                 {
-                    vec![Tag::Generic(
-                        TagKind::Custom("branch-name".to_string()),
-                        vec![branch_name],
-                    )]
+                    vec![
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
+                            vec![branch_name],
+                        ),
+                    ]
                 }
                 else { vec![] }
             } else {
@@ -740,7 +697,7 @@ pub fn generate_cover_letter_and_patch_events(
 fn event_tag_from_nip19_or_hex(
     reference: &str,
     reference_name: &str,
-    marker: nostr::Marker,
+    marker: Marker,
     allow_npub_reference: bool,
     prompt_for_correction: bool,
 ) -> Result<nostr::Tag> {
@@ -754,44 +711,44 @@ fn event_tag_from_nip19_or_hex(
         if let Ok(nip19) = Nip19::from_bech32(bech32.clone()) {
             match nip19 {
                 Nip19::Event(n) => {
-                    break Ok(nostr::Tag::Event {
+                    break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                         event_id: n.event_id,
                         relay_url: n.relays.first().map(UncheckedUrl::new),
                         marker: Some(marker),
-                    });
+                        public_key: None,
+                    }));
                 }
                 Nip19::EventId(id) => {
-                    break Ok(nostr::Tag::Event {
+                    break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                         event_id: id,
                         relay_url: None,
                         marker: Some(marker),
-                    });
+                        public_key: None,
+                    }));
                 }
                 Nip19::Coordinate(coordinate) => {
-                    break Ok(nostr::Tag::A {
-                        coordinate,
-                        relay_url: None,
-                    });
+                    break Ok(Tag::coordinate(coordinate));
                 }
                 Nip19::Profile(profile) => {
                     if allow_npub_reference {
-                        break Ok(nostr::Tag::public_key(profile.public_key));
+                        break Ok(Tag::public_key(profile.public_key));
                     }
                 }
                 Nip19::Pubkey(public_key) => {
                     if allow_npub_reference {
-                        break Ok(nostr::Tag::public_key(public_key));
+                        break Ok(Tag::public_key(public_key));
                     }
                 }
                 _ => {}
             }
         }
         if let Ok(id) = nostr::EventId::from_str(&bech32) {
-            break Ok(nostr::Tag::Event {
+            break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                 event_id: id,
                 relay_url: None,
                 marker: Some(marker),
-            });
+                public_key: None,
+            }));
         }
         if prompt_for_correction {
             println!("not a valid {reference_name} event reference");
@@ -813,7 +770,7 @@ pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
     // TODO: look for Subject:[ PATCH 0/n ] but watch out for:
     //   [PATCH v1 0/n ] or
     //   [PATCH subsystem v2 0/n ]
-    event.kind.as_u64().eq(&PATCH_KIND)
+    event.kind.as_u16().eq(&PATCH_KIND)
         && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
         && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
@@ -883,16 +840,16 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
 }
 
 pub fn event_is_patch_set_root(event: &nostr::Event) -> bool {
-    event.kind.as_u64().eq(&PATCH_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
+    event.kind.as_u16().eq(&PATCH_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
 }
 
 pub fn event_is_revision_root(event: &nostr::Event) -> bool {
-    event.kind.as_u64().eq(&PATCH_KIND)
+    event.kind.as_u16().eq(&PATCH_KIND)
         && event.iter_tags().any(|t| t.as_vec()[1].eq("revision-root"))
 }
 
 pub fn patch_supports_commit_ids(event: &nostr::Event) -> bool {
-    event.kind.as_u64().eq(&PATCH_KIND)
+    event.kind.as_u16().eq(&PATCH_KIND)
         && event
             .iter_tags()
             .any(|t| t.as_vec()[0].eq("commit-pgp-sig"))
@@ -925,55 +882,54 @@ pub fn generate_patch_event(
             .context(format!("cannot make patch for commit {commit}"))?,
         [
             vec![
-                Tag::A {
-                    coordinate: Coordinate {
-                        kind: nostr::Kind::Custom(REPO_REF_KIND),
-                        public_key: *repo_ref.maintainers.first()
-                            .context("repo reference should always have at least one maintainer - the issuer of the repo event")
-                            ?,
-                        identifier: repo_ref.identifier.to_string(),
-                        relays: repo_ref.relays.clone(),
-                    },
-                    relay_url: relay_hint.clone(),
-                },
-                Tag::Reference(format!("{root_commit}")),
+                Tag::coordinate(Coordinate {
+                    kind: nostr::Kind::Custom(REPO_REF_KIND),
+                    public_key: *repo_ref.maintainers.first()
+                        .context("repo reference should always have at least one maintainer - the issuer of the repo event")
+                        ?,
+                    identifier: repo_ref.identifier.to_string(),
+                    relays: repo_ref.relays.clone(),
+                }),
+                Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
                 // commit id reference is a trade-off. its now
                 // unclear which one is the root commit id but it
                 // enables easier location of code comments againt
                 // code that makes it into the main branch, assuming
                 // the commit id is correct
-                Tag::Reference(commit.to_string()),
-                Tag::Generic(
-                    nostr::TagKind::Custom("alt".to_string()),
+                Tag::from_standardized(TagStandard::Reference(commit.to_string())),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
                     vec![format!("git patch: {}", git_repo.get_commit_message_summary(commit).unwrap_or_default())],
                 ),
             ],
 
             if let Some(thread_event_id) = thread_event_id {
-                vec![Tag::Event {
+                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
                     event_id: thread_event_id,
                     relay_url: relay_hint.clone(),
                     marker: Some(Marker::Root),
-                }]
+                    public_key: None,
+                })]
             } else if let Some(event_ref) = root_proposal_id.clone() {
                 vec![
-                    Tag::Hashtag("root".to_string()),
-                    Tag::Hashtag("revision-root".to_string()),
+                    Tag::hashtag("root"),
+                    Tag::hashtag("revision-root"),
                     // TODO check if id is for a root proposal (perhaps its for an issue?)
-                    event_tag_from_nip19_or_hex(&event_ref,"proposal",nostr::Marker::Reply, false, false)?,
+                    event_tag_from_nip19_or_hex(&event_ref,"proposal", Marker::Reply, false, false)?,
                 ]
             } else {
                 vec![
-                    Tag::Hashtag("root".to_string()),
+                    Tag::hashtag("root"),
                 ]
             },
             mentions.to_vec(),
             if let Some(id) = parent_patch_event_id {
-                vec![Tag::Event {
+                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
                     event_id: id,
                     relay_url: relay_hint.clone(),
                     marker: Some(Marker::Reply),
-                }]
+                    public_key: None,
+                })]
             } else {
                 vec![]
             },
@@ -981,8 +937,8 @@ pub fn generate_patch_event(
             if let Some(branch_name) = branch_name {
                 if thread_event_id.is_none() {
                     vec![
-                        Tag::Generic(
-                            TagKind::Custom("branch-name".to_string()),
+                        Tag::custom(
+                            TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
                             vec![branch_name.to_string()],
                         )
                     ]
@@ -1002,33 +958,35 @@ pub fn generate_patch_event(
                     .collect(),
             vec![
                 // a fallback is now in place to extract this from the patch
-                Tag::Generic(
-                    TagKind::Custom("commit".to_string()),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
                     vec![commit.to_string()],
                 ),
                 // this is required as patches cannot be relied upon to include the 'base commit'
-                Tag::Generic(
-                    TagKind::Custom("parent-commit".to_string()),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("parent-commit")),
                     vec![commit_parent.to_string()],
                 ),
                 // this is required to ensure the commit id matches
-                Tag::Generic(
-                    TagKind::Custom("commit-pgp-sig".to_string()),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("commit-pgp-sig")),
                     vec![
                         git_repo
                             .extract_commit_pgp_signature(commit)
                             .unwrap_or_default(),
-                    ],
+                        ],
                 ),
                 // removing description tag will not cause anything to break
-                Tag::Description(git_repo.get_commit_message(commit)?.to_string()),
-                Tag::Generic(
-                    TagKind::Custom("author".to_string()),
+                Tag::from_standardized(nostr_sdk::TagStandard::Description(
+                    git_repo.get_commit_message(commit)?.to_string()
+                )),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("author")),
                     git_repo.get_commit_author(commit)?,
                 ),
                 // this is required to ensure the commit id matches
-                Tag::Generic(
-                    TagKind::Custom("committer".to_string()),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("committer")),
                     git_repo.get_commit_comitter(commit)?,
                 ),
             ],
@@ -1246,8 +1204,8 @@ mod tests {
                 nostr::event::Kind::Custom(PATCH_KIND),
                 format!("From ea897e987ea9a7a98e7a987e97987ea98e7a3334 Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/2] {title}\n\n{description}"),
                 [
-                    Tag::Hashtag("cover-letter".to_string()),
-                    Tag::Hashtag("root".to_string()),
+                    Tag::hashtag("cover-letter"),
+                    Tag::hashtag("root"),
                 ],
             )
             .to_event(&nostr::Keys::generate())?)

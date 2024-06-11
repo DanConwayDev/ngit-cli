@@ -567,15 +567,18 @@ mod tests {
                 nostr::Kind::RelayList,
                 "",
                 [
-                    nostr::Tag::RelayMetadata(
-                        "wss://fredswrite1.relay".into(),
-                        Some(nostr::RelayMetadata::Write),
-                    ),
-                    nostr::Tag::RelayMetadata(
-                        "wss://fredsread1.relay".into(),
-                        Some(nostr::RelayMetadata::Read),
-                    ),
-                    nostr::Tag::RelayMetadata("wss://fredsreadwrite.relay".into(), None),
+                    nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                        relay_url: nostr::Url::from_str("wss://fredswrite1.relay/").unwrap(),
+                        metadata: Some(RelayMetadata::Write),
+                    }),
+                    nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                        relay_url: nostr::Url::from_str("wss://fredsread1.relay/").unwrap(),
+                        metadata: Some(RelayMetadata::Read),
+                    }),
+                    nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                        relay_url: nostr::Url::from_str("wss://fredsreadwrite.relay/").unwrap(),
+                        metadata: None,
+                    }),
                 ],
             )
             .to_event(&TEST_KEY_1_KEYS)
@@ -587,15 +590,18 @@ mod tests {
                 nostr::Kind::RelayList,
                 "",
                 [
-                    nostr::Tag::RelayMetadata(
-                        "wss://carolswrite1.relay".into(),
-                        Some(nostr::RelayMetadata::Write),
-                    ),
-                    nostr::Tag::RelayMetadata(
-                        "wss://carolsread1.relay".into(),
-                        Some(nostr::RelayMetadata::Read),
-                    ),
-                    nostr::Tag::RelayMetadata("wss://carolsreadwrite.relay".into(), None),
+                    nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                        relay_url: nostr::Url::from_str("wss://carolswrite1.relay/").unwrap(),
+                        metadata: Some(RelayMetadata::Write),
+                    }),
+                    nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                        relay_url: nostr::Url::from_str("wss://carolsread1.relay/").unwrap(),
+                        metadata: Some(RelayMetadata::Read),
+                    }),
+                    nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                        relay_url: nostr::Url::from_str("wss://carolsreadwrite.relay/").unwrap(),
+                        metadata: None,
+                    }),
                 ],
             )
             .to_event(&TEST_KEY_2_KEYS)
@@ -652,7 +658,7 @@ mod tests {
 
         fn expected_userrelayrefs_write1() -> UserRelayRef {
             UserRelayRef {
-                url: "wss://fredswrite1.relay".into(),
+                url: "wss://fredswrite1.relay/".into(),
                 read: false,
                 write: true,
             }
@@ -661,7 +667,7 @@ mod tests {
 
         fn expected_userrelayrefs_read_write1() -> UserRelayRef {
             UserRelayRef {
-                url: "wss://fredsreadwrite.relay".into(),
+                url: "wss://fredsreadwrite.relay/".into(),
                 read: true,
                 write: true,
             }
@@ -672,7 +678,7 @@ mod tests {
             vec![
                 expected_userrelayrefs_write1(),
                 UserRelayRef {
-                    url: "wss://fredsread1.relay".into(),
+                    url: "wss://fredsread1.relay/".into(),
                     read: true,
                     write: false,
                 },

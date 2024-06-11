@@ -82,12 +82,12 @@ mod when_commits_behind_ask_to_proceed {
 }
 
 fn is_cover_letter(event: &nostr::Event) -> bool {
-    event.kind.as_u64().eq(&PATCH_KIND)
+    event.kind.as_u16().eq(&PATCH_KIND)
         && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
 fn is_patch(event: &nostr::Event) -> bool {
-    event.kind.as_u64().eq(&PATCH_KIND)
+    event.kind.as_u16().eq(&PATCH_KIND)
         && !event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
@@ -393,12 +393,12 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
         #[tokio::test]
         #[serial]
         async fn p_tags_for_maintainers() -> Result<()> {
-            let maintainers = &generate_repo_ref_event()
+            let event = generate_repo_ref_event();
+            let maintainers = &event
                 .iter_tags()
                 .find(|t| t.as_vec()[0].eq(&"maintainers"))
                 .unwrap()
-                .as_vec()
-                .clone()[1..];
+                .as_vec()[1..];
             let (_, _, r53, r55, r56) = prep_run_create_proposal(true).await?;
             for relay in [&r53, &r55, &r56] {
                 for m in maintainers {
@@ -546,12 +546,12 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
         #[tokio::test]
         #[serial]
         async fn p_tags_for_maintainers() -> Result<()> {
-            let maintainers = &generate_repo_ref_event()
+            let event = generate_repo_ref_event();
+            let maintainers = &event
                 .iter_tags()
                 .find(|t| t.as_vec()[0].eq(&"maintainers"))
                 .unwrap()
-                .as_vec()
-                .clone()[1..];
+                .as_vec()[1..];
             for m in maintainers {
                 assert!(
                     prep()
