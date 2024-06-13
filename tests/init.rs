@@ -300,7 +300,7 @@ mod when_repo_not_previously_claimed {
 
             #[tokio::test]
             #[serial]
-            async fn earliest_unique_commit_as_reference() -> Result<()> {
+            async fn earliest_unique_commit_as_reference_with_euc_marker() -> Result<()> {
                 let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
                 for relay in [&r53, &r55, &r56, &r57] {
                     let event: &nostr::Event = relay
@@ -310,7 +310,8 @@ mod when_repo_not_previously_claimed {
                         .unwrap();
 
                     assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("r")
-                        && t.as_vec()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")));
+                        && t.as_vec()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")
+                        && t.as_vec()[2].eq("euc")));
                 }
                 Ok(())
             }

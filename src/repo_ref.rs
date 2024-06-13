@@ -117,7 +117,10 @@ impl RepoRef {
                     } else {
                         self.identifier.to_string()
                     }),
-                    Tag::from_standardized(TagStandard::Reference(self.root_commit.to_string())),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("r")),
+                        vec![self.root_commit.to_string(), "euc".to_string()],
+                    ),
                     Tag::from_standardized(TagStandard::Name(self.name.clone())),
                     Tag::from_standardized(TagStandard::Description(self.description.clone())),
                     Tag::custom(
