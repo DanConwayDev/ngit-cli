@@ -76,6 +76,8 @@ pub trait RepoActions {
     ) -> Result<Vec<nostr::Event>>;
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
     fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool>;
+    fn get_git_config_item(&self, item: &str, global: bool) -> Result<Option<String>>;
+    fn save_git_config_item(&self, item: &str, value: &str, global: bool) -> Result<()>;
 }
 
 impl RepoActions for Repo {
@@ -578,6 +580,42 @@ impl RepoActions for Repo {
             Ok(false)
         }
     }
+
+    fn get_git_config_item(&self, item: &str, global: bool) -> Result<Option<String>> {
+        match if global {
+            self.git_repo
+                .config()
+                .context("cannot open git config")?
+                .open_global()
+                .context("cannot open global git config")?
+        } else {
+            self.git_repo.config().context("cannot open git config")?
+        }
+        .get_entry(item)
+        {
+            Ok(item) => Ok(Some(
+                item.value()
+                    .context("cannot find git config item")?
+                    .to_string(),
+            )),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn save_git_config_item(&self, item: &str, value: &str, global: bool) -> Result<()> {
+        if global {
+            self.git_repo
+                .config()
+                .context("cannot open git config")?
+                .open_global()
+                .context("cannot open global git config")?
+        } else {
+            self.git_repo.config().context("cannot open git config")?
+        }
+        .set_str(item, value)
+        .context("cannot set git config value")?;
+        Ok(())
+    }
 }
 
 fn oid_to_u8_20_bytes(oid: &Oid) -> [u8; 20] {
@@ -793,6 +831,50 @@ mod tests {
     use test_utils::{generate_repo_ref_event, git::GitTestRepo, TEST_KEY_1_KEYS};
 
     use super::*;
+
+    mod git_config_item_local {
+        use super::*;
+
+        #[test]
+        fn save_git_config_item_returns_ok() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            git_repo.save_git_config_item("test.item", "testvalue", false)?;
+            Ok(())
+        }
+
+        #[test]
+        fn get_git_config_item_returns_item_just_saved() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            git_repo.save_git_config_item("test.item", "testvalue", false)?;
+            assert_eq!(
+                git_repo.get_git_config_item("test.item", false)?.unwrap(),
+                "testvalue",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn get_git_config_item_returns_none_if_not_present() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            assert_eq!(git_repo.get_git_config_item("test.item", false)?, None);
+            Ok(())
+        }
+
+        #[test]
+        fn get_git_config_item_empty_string_returns_empty_string_instead_of_none() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            git_repo.save_git_config_item("test.item", "", false)?;
+            assert_eq!(
+                git_repo.get_git_config_item("test.item", false)?,
+                Some("".to_string()),
+            );
+            Ok(())
+        }
+    }
 
     #[test]
     fn get_commit_parent() -> Result<()> {
