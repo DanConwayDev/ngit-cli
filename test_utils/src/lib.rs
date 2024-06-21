@@ -438,11 +438,11 @@ impl CliTesterConfirmPrompt<'_> {
     }
 
     pub fn succeeds_with(&mut self, input: Option<bool>) -> Result<&mut Self> {
-        self.tester.send_line(match input {
-            None => "",
-            Some(true) => "y",
-            Some(false) => "n",
-        })?;
+        match input {
+            None => self.tester.send_line(""),
+            Some(true) => self.tester.send("y"),
+            Some(false) => self.tester.send("n"),
+        }?;
         self.tester
             .expect("\r")
             .context("expect new line after confirm input to be printed")?;
