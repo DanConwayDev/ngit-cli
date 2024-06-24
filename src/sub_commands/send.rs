@@ -178,7 +178,14 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     } else {
         None
     };
-    let (keys, user_ref) = login::launch(&cli_args.nsec, &cli_args.password, Some(&client)).await?;
+    let (keys, user_ref) = login::launch(
+        &git_repo,
+        &cli_args.nsec,
+        &cli_args.password,
+        Some(&client),
+        false,
+    )
+    .await?;
 
     client.set_keys(&keys).await;
 

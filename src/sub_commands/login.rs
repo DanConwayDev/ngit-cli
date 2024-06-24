@@ -1,11 +1,11 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap;
 
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
-use crate::{client::Connect, login, Cli};
+use crate::{client::Connect, git::Repo, login, Cli};
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
@@ -15,8 +15,9 @@ pub struct SubCommandArgs {
 }
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
+    let git_repo = Repo::discover().context("cannot find a git repository")?;
     if command_args.offline {
-        login::launch(&args.nsec, &args.password, None).await?;
+        login::launch(&git_repo, &args.nsec, &args.password, None, true).await?;
         Ok(())
     } else {
         #[cfg(not(test))]
@@ -24,7 +25,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         #[cfg(test)]
         let client = <MockConnect as std::default::Default>::default();
 
-        login::launch(&args.nsec, &args.password, Some(&client)).await?;
+        login::launch(&git_repo, &args.nsec, &args.password, Some(&client), true).await?;
         client.disconnect().await?;
         Ok(())
     }

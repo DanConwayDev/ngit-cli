@@ -952,17 +952,20 @@ where
 }
 
 fn backup_existing_config() -> Result<()> {
-    let config_path = get_dirs().config_dir().join("config.json");
-    let backup_config_path = get_dirs().config_dir().join("config-backup.json");
+    let config_path = get_dirs().config_dir().join("cache.sqlite");
+    let backup_config_path = get_dirs().config_dir().join("cache-backup.sqlite");
+    if !backup_config_path.exists() {
+        std::fs::rename(&config_path, backup_config_path)?;
+    }
     if config_path.exists() {
-        std::fs::rename(config_path, backup_config_path)?;
+        std::fs::remove_file(&config_path)?;
     }
     Ok(())
 }
 
 fn restore_config_backup() -> Result<()> {
-    let config_path = get_dirs().config_dir().join("config.json");
-    let backup_config_path = get_dirs().config_dir().join("config-backup.json");
+    let config_path = get_dirs().config_dir().join("cache.sqlite");
+    let backup_config_path = get_dirs().config_dir().join("cache-backup.sqlite");
     if config_path.exists() {
         std::fs::remove_file(&config_path)?;
     }

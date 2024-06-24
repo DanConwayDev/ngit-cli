@@ -347,7 +347,6 @@ mod when_branch_is_checked_out {
                             "1 commits ahead. preparing to create creating patch events.\r\n",
                         )?;
                         p.expect("searching for profile and relay updates...\r\n")?;
-                        p.expect("\r")?;
                         p.expect("logged in as fred\r\n")?;
                         p.expect("pushing 1 commits\r\n")?;
 
@@ -593,7 +592,6 @@ mod when_branch_is_checked_out {
                         p.expect("355bdf1 add a4.md\r\n")?;
                         p.expect("dbd1115 add a3.md\r\n")?;
                         p.expect("searching for profile and relay updates...\r\n")?;
-                        p.expect("\r")?;
                         p.expect("logged in as fred\r\n")?;
                         p.expect("posting 2 patches without a covering letter...\r\n")?;
 
