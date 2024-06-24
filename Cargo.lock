@@ -1820,9 +1820,9 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
 name = "nostr"
-version = "0.32.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1534cec170e72b57b82323422ac243716d9817d13ed77f3b952eb5133ebef060"
+checksum = "f7948938314ee0392f378ab1a5d58b4707f2207550bc410b1629a80a4f28af7d"
 dependencies = [
  "aes 0.8.4",
  "base64 0.21.7",
