@@ -828,7 +828,7 @@ fn extract_sig_from_patch_tags<'a>(
 mod tests {
     use std::fs;
 
-    use test_utils::{generate_repo_ref_event, git::GitTestRepo, TEST_KEY_1_KEYS};
+    use test_utils::{generate_repo_ref_event, git::GitTestRepo};
 
     use super::*;
 
@@ -1591,10 +1591,12 @@ mod tests {
 
     mod apply_patch {
 
+        use test_utils::TEST_KEY_1_SIGNER;
+
         use super::*;
         use crate::{repo_ref::RepoRef, sub_commands::send::generate_patch_event};
 
-        fn generate_patch_from_head_commit(test_repo: &GitTestRepo) -> Result<nostr::Event> {
+        async fn generate_patch_from_head_commit(test_repo: &GitTestRepo) -> Result<nostr::Event> {
             let original_oid = test_repo.git_repo.head()?.peel_to_commit()?.id();
             let git_repo = Repo::from_path(&test_repo.dir)?;
             generate_patch_event(
@@ -1602,7 +1604,7 @@ mod tests {
                 &git_repo.get_root_commit()?,
                 &oid_to_sha1(&original_oid),
                 Some(nostr::EventId::all_zeros()),
-                &TEST_KEY_1_KEYS,
+                &TEST_KEY_1_SIGNER,
                 &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
                 None,
                 None,
@@ -1610,6 +1612,7 @@ mod tests {
                 &None,
                 &[],
             )
+            .await
         }
         fn test_patch_applies_to_repository(patch_event: nostr::Event) -> Result<()> {
             let test_repo = GitTestRepo::default();
@@ -1649,19 +1652,21 @@ mod tests {
 
             use super::*;
 
-            #[test]
-            fn simple_signature_author_committer_same_as_git_user_0_unixtime_no_pgp_signature()
+            #[tokio::test]
+            async fn simple_signature_author_committer_same_as_git_user_0_unixtime_no_pgp_signature()
             -> Result<()> {
                 let source_repo = GitTestRepo::default();
                 source_repo.populate()?;
                 fs::write(source_repo.dir.join("x1.md"), "some content")?;
                 source_repo.stage_and_commit("add x1.md")?;
 
-                test_patch_applies_to_repository(generate_patch_from_head_commit(&source_repo)?)
+                test_patch_applies_to_repository(
+                    generate_patch_from_head_commit(&source_repo).await?,
+                )
             }
 
-            #[test]
-            fn signature_with_specific_author_time() -> Result<()> {
+            #[tokio::test]
+            async fn signature_with_specific_author_time() -> Result<()> {
                 let source_repo = GitTestRepo::default();
                 source_repo.populate()?;
                 fs::write(source_repo.dir.join("x1.md"), "some content")?;
@@ -1675,11 +1680,13 @@ mod tests {
                     None,
                 )?;
 
-                test_patch_applies_to_repository(generate_patch_from_head_commit(&source_repo)?)
+                test_patch_applies_to_repository(
+                    generate_patch_from_head_commit(&source_repo).await?,
+                )
             }
 
-            #[test]
-            fn author_name_and_email_not_current_git_user() -> Result<()> {
+            #[tokio::test]
+            async fn author_name_and_email_not_current_git_user() -> Result<()> {
                 let source_repo = GitTestRepo::default();
                 source_repo.populate()?;
                 fs::write(source_repo.dir.join("x1.md"), "some content")?;
@@ -1693,11 +1700,13 @@ mod tests {
                     None,
                 )?;
 
-                test_patch_applies_to_repository(generate_patch_from_head_commit(&source_repo)?)
+                test_patch_applies_to_repository(
+                    generate_patch_from_head_commit(&source_repo).await?,
+                )
             }
 
-            #[test]
-            fn comiiter_name_and_email_not_current_git_user_or_author() -> Result<()> {
+            #[tokio::test]
+            async fn comiiter_name_and_email_not_current_git_user_or_author() -> Result<()> {
                 let source_repo = GitTestRepo::default();
                 source_repo.populate()?;
                 fs::write(source_repo.dir.join("x1.md"), "some content")?;
@@ -1715,13 +1724,15 @@ mod tests {
                     )?),
                 )?;
 
-                test_patch_applies_to_repository(generate_patch_from_head_commit(&source_repo)?)
+                test_patch_applies_to_repository(
+                    generate_patch_from_head_commit(&source_repo).await?,
+                )
             }
 
             // TODO: pgp signature
 
-            #[test]
-            fn unique_author_and_commiter_details() -> Result<()> {
+            #[tokio::test]
+            async fn unique_author_and_commiter_details() -> Result<()> {
                 let source_repo = GitTestRepo::default();
                 source_repo.populate()?;
                 fs::write(source_repo.dir.join("x1.md"), "some content")?;
@@ -1739,13 +1750,15 @@ mod tests {
                     )?),
                 )?;
 
-                test_patch_applies_to_repository(generate_patch_from_head_commit(&source_repo)?)
+                test_patch_applies_to_repository(
+                    generate_patch_from_head_commit(&source_repo).await?,
+                )
             }
         }
     }
 
     mod apply_patch_chain {
-        use test_utils::TEST_KEY_1_KEYS;
+        use test_utils::TEST_KEY_1_SIGNER;
 
         use super::*;
         use crate::{
@@ -1754,8 +1767,8 @@ mod tests {
 
         static BRANCH_NAME: &str = "add-example-feature";
         // returns original_repo, cover_letter_event, patch_events
-        fn generate_test_repo_and_events() -> Result<(GitTestRepo, nostr::Event, Vec<nostr::Event>)>
-        {
+        async fn generate_test_repo_and_events()
+        -> Result<(GitTestRepo, nostr::Event, Vec<nostr::Event>)> {
             let original_repo = GitTestRepo::default();
             let oid3 = original_repo.populate_with_test_branch()?;
             let oid2 = original_repo.git_repo.find_commit(oid3)?.parent_id(0)?;
@@ -1767,11 +1780,12 @@ mod tests {
                 Some(("test".to_string(), "test".to_string())),
                 &git_repo,
                 &[oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
-                &TEST_KEY_1_KEYS,
+                &TEST_KEY_1_SIGNER,
                 &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
                 &None,
                 &[],
-            )?;
+            )
+            .await?;
 
             events.reverse();
 
@@ -1784,9 +1798,9 @@ mod tests {
             mod when_branch_root_is_tip_of_main {
                 use super::*;
 
-                #[test]
-                fn branch_gets_created_with_name_specified_in_proposal() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_gets_created_with_name_specified_in_proposal() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1799,9 +1813,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn branch_checked_out() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_checked_out() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1813,9 +1827,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn patches_get_created_as_commits() -> Result<()> {
-                    let (original_repo, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn patches_get_created_as_commits() -> Result<()> {
+                    let (original_repo, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1827,9 +1841,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn branch_tip_is_most_recent_patch() -> Result<()> {
-                    let (original_repo, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_tip_is_most_recent_patch() -> Result<()> {
+                    let (original_repo, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1841,9 +1855,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn previously_checked_out_branch_tip_does_not_change() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn previously_checked_out_branch_tip_does_not_change() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let existing_branch = test_repo.get_checked_out_branch_name()?;
@@ -1858,9 +1872,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn returns_all_patches_applied() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn returns_all_patches_applied() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1873,9 +1887,9 @@ mod tests {
             mod when_branch_root_is_tip_behind_main {
                 use super::*;
 
-                #[test]
-                fn branch_gets_created_with_name_specified_in_proposal() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_gets_created_with_name_specified_in_proposal() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     std::fs::write(test_repo.dir.join("m3.md"), "some content")?;
@@ -1890,9 +1904,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn branch_checked_out() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_checked_out() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     std::fs::write(test_repo.dir.join("m3.md"), "some content")?;
@@ -1906,9 +1920,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn branch_tip_is_most_recent_patch() -> Result<()> {
-                    let (original_repo, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_tip_is_most_recent_patch() -> Result<()> {
+                    let (original_repo, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     std::fs::write(test_repo.dir.join("m3.md"), "some content")?;
@@ -1922,9 +1936,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn previously_checked_out_branch_tip_does_not_change() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn previously_checked_out_branch_tip_does_not_change() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     std::fs::write(test_repo.dir.join("m3.md"), "some content")?;
@@ -1941,9 +1955,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn returns_all_patches_applied() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn returns_all_patches_applied() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1962,9 +1976,10 @@ mod tests {
             mod when_branch_already_checked_out {
                 use super::*;
 
-                #[test]
-                fn branch_tip_is_most_recent_patch() -> Result<()> {
-                    let (original_repo, _, mut patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_tip_is_most_recent_patch() -> Result<()> {
+                    let (original_repo, _, mut patch_events) =
+                        generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1978,9 +1993,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn returns_all_patches_applied() -> Result<()> {
-                    let (_, _, mut patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn returns_all_patches_applied() -> Result<()> {
+                    let (_, _, mut patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -1993,9 +2008,10 @@ mod tests {
             mod when_branch_not_checked_out {
                 use super::*;
 
-                #[test]
-                fn branch_tip_is_most_recent_patch() -> Result<()> {
-                    let (original_repo, _, mut patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_tip_is_most_recent_patch() -> Result<()> {
+                    let (original_repo, _, mut patch_events) =
+                        generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -2010,9 +2026,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn branch_checked_out() -> Result<()> {
-                    let (_, _, mut patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_checked_out() -> Result<()> {
+                    let (_, _, mut patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -2027,9 +2043,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn returns_all_patches_applied() -> Result<()> {
-                    let (_, _, mut patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn returns_all_patches_applied() -> Result<()> {
+                    let (_, _, mut patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -2048,9 +2064,9 @@ mod tests {
             mod when_branch_already_checked_out {
                 use super::*;
 
-                #[test]
-                fn returns_all_patches_applied_0() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn returns_all_patches_applied_0() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -2063,9 +2079,9 @@ mod tests {
             mod when_branch_not_checked_out {
                 use super::*;
 
-                #[test]
-                fn branch_checked_out() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn branch_checked_out() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -2080,9 +2096,9 @@ mod tests {
                     Ok(())
                 }
 
-                #[test]
-                fn returns_all_patches_applied_0() -> Result<()> {
-                    let (_, _, patch_events) = generate_test_repo_and_events()?;
+                #[tokio::test]
+                async fn returns_all_patches_applied_0() -> Result<()> {
+                    let (_, _, patch_events) = generate_test_repo_and_events().await?;
                     let test_repo = GitTestRepo::default();
                     test_repo.populate()?;
                     let git_repo = Repo::from_path(&test_repo.dir)?;

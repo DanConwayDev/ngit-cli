@@ -4,7 +4,7 @@ use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use directories::ProjectDirs;
 use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
-use nostr_sdk::{serde_json, TagStandard};
+use nostr_sdk::{serde_json, NostrSigner, TagStandard};
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -28,6 +28,13 @@ pub static TEST_KEY_1_ENCRYPTED: &str = "ncryptsec1qgq77e3uftz8dh3jkjxwdms3v6gwq
 pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qg835almhlrmyxqtqeva44d5ugm9wk2ccmwspxrqv4wjsdpdlud9es5hsrvs0pas7dvsretm0mc26qwfc7v8986mqngnjshcplnqzj62lxf44a0kkdv788f6dh20x2eum96l2j8v37s5grrheu2hgrkf";
 pub static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
+
+pub static TEST_KEY_1_SIGNER: Lazy<NostrSigner> =
+    Lazy::new(|| NostrSigner::Keys(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap()));
+
+pub fn generate_test_key_1_signer() -> NostrSigner {
+    NostrSigner::Keys(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap())
+}
 
 pub fn generate_test_key_1_metadata_event(name: &str) -> nostr::Event {
     nostr::event::EventBuilder::metadata(&nostr::Metadata::new().name(name))

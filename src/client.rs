@@ -34,7 +34,7 @@ pub struct Client {
 pub trait Connect {
     fn default() -> Self;
     fn new(opts: Params) -> Self;
-    async fn set_keys(&mut self, keys: &nostr::Keys);
+    async fn set_signer(&mut self, signer: NostrSigner);
     async fn disconnect(&self) -> Result<()>;
     fn get_fallback_relays(&self) -> &Vec<String>;
     fn get_more_fallback_relays(&self) -> &Vec<String>;
@@ -91,17 +91,20 @@ impl Connect for Client {
     }
     fn new(opts: Params) -> Self {
         Client {
-            client: nostr_sdk::Client::new(&opts.keys.unwrap_or(nostr::Keys::generate())),
+            client: nostr_sdk::ClientBuilder::new()
+                .signer(&opts.keys.unwrap_or(nostr::Keys::generate()))
+                // .database(
+                //     SQLiteDatabase::open(get_dirs()?.config_dir().join("cache.sqlite")).await?,
+                // )
+                .build(),
             fallback_relays: opts.fallback_relays,
             more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
         }
     }
 
-    async fn set_keys(&mut self, keys: &nostr::Keys) {
-        self.client
-            .set_signer(Some(NostrSigner::Keys(keys.clone())))
-            .await;
+    async fn set_signer(&mut self, signer: NostrSigner) {
+        self.client.set_signer(Some(signer)).await;
     }
 
     async fn disconnect(&self) -> Result<()> {

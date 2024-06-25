@@ -2,6 +2,7 @@ use std::{fs::File, io::BufReader, str::FromStr};
 
 use anyhow::{bail, Context, Result};
 use nostr::{nips::nip19::Nip19, FromBech32, PublicKey, Tag, TagStandard, ToBech32};
+use nostr_sdk::NostrSigner;
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -93,66 +94,67 @@ impl TryFrom<nostr::Event> for RepoRef {
 pub static REPO_REF_KIND: u16 = 30_617;
 
 impl RepoRef {
-    pub fn to_event(&self, keys: &nostr::Keys) -> Result<nostr::Event> {
-        nostr_sdk::EventBuilder::new(
-            nostr::event::Kind::Custom(REPO_REF_KIND),
-            "",
-            [
-                vec![
-                    Tag::identifier(if self.identifier.to_string().is_empty() {
-                        // fiatjaf thought a random string. its not in the draft nip.
-                        // thread_rng()
-                        //     .sample_iter(&Alphanumeric)
-                        //     .take(15)
-                        //     .map(char::from)
-                        //     .collect()
+    pub async fn to_event(&self, signer: &NostrSigner) -> Result<nostr::Event> {
+        signer
+            .sign_event_builder(nostr_sdk::EventBuilder::new(
+                nostr::event::Kind::Custom(REPO_REF_KIND),
+                "",
+                [
+                    vec![
+                        Tag::identifier(if self.identifier.to_string().is_empty() {
+                            // fiatjaf thought a random string. its not in the draft nip.
+                            // thread_rng()
+                            //     .sample_iter(&Alphanumeric)
+                            //     .take(15)
+                            //     .map(char::from)
+                            //     .collect()
 
-                        // an identifier based on first commit is better so that users dont
-                        // accidentally create two seperate identifiers for the same repo
-                        // there is a hesitancy to use the commit id
-                        // in another conversaion with fiatjaf he suggested the first 6 character of
-                        // the commit id
-                        // here we are using 7 which is the standard for shorthand commit id
-                        self.root_commit.to_string()[..7].to_string()
-                    } else {
-                        self.identifier.to_string()
-                    }),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("r")),
-                        vec![self.root_commit.to_string(), "euc".to_string()],
-                    ),
-                    Tag::from_standardized(TagStandard::Name(self.name.clone())),
-                    Tag::from_standardized(TagStandard::Description(self.description.clone())),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                        self.git_server.clone(),
-                    ),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
-                        self.web.clone(),
-                    ),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
-                        self.relays.clone(),
-                    ),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
-                        self.maintainers
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect::<Vec<String>>(),
-                    ),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec![format!("git repository: {}", self.name.clone())],
-                    ),
-                ],
-                // code languages and hashtags
-            ]
-            .concat(),
-        )
-        .to_event(keys)
-        .context("failed to create repository reference event")
+                            // an identifier based on first commit is better so that users dont
+                            // accidentally create two seperate identifiers for the same repo
+                            // there is a hesitancy to use the commit id
+                            // in another conversaion with fiatjaf he suggested the first 6
+                            // character of the commit id
+                            // here we are using 7 which is the standard for shorthand commit id
+                            self.root_commit.to_string()[..7].to_string()
+                        } else {
+                            self.identifier.to_string()
+                        }),
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("r")),
+                            vec![self.root_commit.to_string(), "euc".to_string()],
+                        ),
+                        Tag::from_standardized(TagStandard::Name(self.name.clone())),
+                        Tag::from_standardized(TagStandard::Description(self.description.clone())),
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
+                            self.git_server.clone(),
+                        ),
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
+                            self.web.clone(),
+                        ),
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
+                            self.relays.clone(),
+                        ),
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
+                            self.maintainers
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<String>>(),
+                        ),
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                            vec![format!("git repository: {}", self.name.clone())],
+                        ),
+                    ],
+                    // code languages and hashtags
+                ]
+                .concat(),
+            ))
+            .await
+            .context("failed to create repository reference event")
     }
 }
 
@@ -308,7 +310,7 @@ mod tests {
 
     use super::*;
 
-    fn create() -> nostr::Event {
+    async fn create() -> nostr::Event {
         RepoRef {
             identifier: "123412341".to_string(),
             name: "test name".to_string(),
@@ -322,34 +324,38 @@ mod tests {
             relays: vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
         }
-        .to_event(&TEST_KEY_1_KEYS)
+        .to_event(&TEST_KEY_1_SIGNER)
+        .await
         .unwrap()
     }
     mod try_from {
         use super::*;
 
-        #[test]
-        fn identifier() {
-            assert_eq!(RepoRef::try_from(create()).unwrap().identifier, "123412341",)
-        }
-
-        #[test]
-        fn name() {
-            assert_eq!(RepoRef::try_from(create()).unwrap().name, "test name",)
-        }
-
-        #[test]
-        fn description() {
+        #[tokio::test]
+        async fn identifier() {
             assert_eq!(
-                RepoRef::try_from(create()).unwrap().description,
+                RepoRef::try_from(create().await).unwrap().identifier,
+                "123412341",
+            )
+        }
+
+        #[tokio::test]
+        async fn name() {
+            assert_eq!(RepoRef::try_from(create().await).unwrap().name, "test name",)
+        }
+
+        #[tokio::test]
+        async fn description() {
+            assert_eq!(
+                RepoRef::try_from(create().await).unwrap().description,
                 "test description",
             )
         }
 
-        #[test]
-        fn root_commit_is_r_tag() {
+        #[tokio::test]
+        async fn root_commit_is_r_tag() {
             assert_eq!(
-                RepoRef::try_from(create()).unwrap().root_commit,
+                RepoRef::try_from(create().await).unwrap().root_commit,
                 "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2",
             )
         }
@@ -358,42 +364,43 @@ mod tests {
             use nostr::JsonUtil;
 
             use super::*;
-            fn create_with_incorrect_first_commit_ref(s: &str) -> nostr::Event {
+            async fn create_with_incorrect_first_commit_ref(s: &str) -> nostr::Event {
                 nostr::Event::from_json(
                     create()
+                        .await
                         .as_json()
                         .replace("5e664e5a7845cd1373c79f580ca4fe29ab5b34d2", s),
                 )
                 .unwrap()
             }
 
-            #[test]
-            fn less_than_40_characters() {
+            #[tokio::test]
+            async fn less_than_40_characters() {
                 let s = "5e664e5a7845cd1373";
                 assert_eq!(
-                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s))
+                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s).await)
                         .unwrap()
                         .root_commit,
                     "",
                 )
             }
 
-            #[test]
-            fn more_than_40_characters() {
+            #[tokio::test]
+            async fn more_than_40_characters() {
                 let s = "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2111111111";
                 assert_eq!(
-                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s))
+                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s).await)
                         .unwrap()
                         .root_commit,
                     "",
                 )
             }
 
-            #[test]
-            fn not_hex_characters() {
+            #[tokio::test]
+            async fn not_hex_characters() {
                 let s = "xxx64e5a7845cd1373c79f580ca4fe29ab5b34d2";
                 assert_eq!(
-                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s))
+                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s).await)
                         .unwrap()
                         .root_commit,
                     "",
@@ -401,18 +408,18 @@ mod tests {
             }
         }
 
-        #[test]
-        fn git_server() {
+        #[tokio::test]
+        async fn git_server() {
             assert_eq!(
-                RepoRef::try_from(create()).unwrap().git_server,
+                RepoRef::try_from(create().await).unwrap().git_server,
                 vec!["https://localhost:1000"],
             )
         }
 
-        #[test]
-        fn web() {
+        #[tokio::test]
+        async fn web() {
             assert_eq!(
-                RepoRef::try_from(create()).unwrap().web,
+                RepoRef::try_from(create().await).unwrap().web,
                 vec![
                     "https://exampleproject.xyz".to_string(),
                     "https://gitworkshop.dev/123".to_string()
@@ -420,18 +427,18 @@ mod tests {
             )
         }
 
-        #[test]
-        fn relays() {
+        #[tokio::test]
+        async fn relays() {
             assert_eq!(
-                RepoRef::try_from(create()).unwrap().relays,
+                RepoRef::try_from(create().await).unwrap().relays,
                 vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
             )
         }
 
-        #[test]
-        fn maintainers() {
+        #[tokio::test]
+        async fn maintainers() {
             assert_eq!(
-                RepoRef::try_from(create()).unwrap().maintainers,
+                RepoRef::try_from(create().await).unwrap().maintainers,
                 vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             )
         }
@@ -442,57 +449,59 @@ mod tests {
         mod tags {
             use super::*;
 
-            #[test]
-            fn identifier() {
+            #[tokio::test]
+            async fn identifier() {
                 assert!(
                     create()
+                        .await
                         .tags
                         .iter()
                         .any(|t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq("123412341"))
                 )
             }
 
-            #[test]
-            fn name() {
+            #[tokio::test]
+            async fn name() {
                 assert!(
                     create()
+                        .await
                         .tags
                         .iter()
                         .any(|t| t.as_vec()[0].eq("name") && t.as_vec()[1].eq("test name"))
                 )
             }
 
-            #[test]
-            fn alt() {
+            #[tokio::test]
+            async fn alt() {
                 assert!(
-                    create().tags.iter().any(|t| t.as_vec()[0].eq("alt")
+                    create().await.tags.iter().any(|t| t.as_vec()[0].eq("alt")
                         && t.as_vec()[1].eq("git repository: test name"))
                 )
             }
 
-            #[test]
-            fn description() {
-                assert!(create().tags.iter().any(
+            #[tokio::test]
+            async fn description() {
+                assert!(create().await.tags.iter().any(
                     |t| t.as_vec()[0].eq("description") && t.as_vec()[1].eq("test description")
                 ))
             }
 
-            #[test]
-            fn root_commit_as_reference() {
-                assert!(create().tags.iter().any(|t| t.as_vec()[0].eq("r")
+            #[tokio::test]
+            async fn root_commit_as_reference() {
+                assert!(create().await.tags.iter().any(|t| t.as_vec()[0].eq("r")
                     && t.as_vec()[1].eq("5e664e5a7845cd1373c79f580ca4fe29ab5b34d2")))
             }
 
-            #[test]
-            fn git_server() {
-                assert!(create().tags.iter().any(
+            #[tokio::test]
+            async fn git_server() {
+                assert!(create().await.tags.iter().any(
                     |t| t.as_vec()[0].eq("clone") && t.as_vec()[1].eq("https://localhost:1000")
                 ))
             }
 
-            #[test]
-            fn relays() {
-                let event = create();
+            #[tokio::test]
+            async fn relays() {
+                let event = create().await;
                 let relays_tag: &nostr::Tag = event
                     .tags
                     .iter()
@@ -503,9 +512,9 @@ mod tests {
                 assert_eq!(relays_tag.as_vec()[2], "ws://relay2.io");
             }
 
-            #[test]
-            fn web() {
-                let event = create();
+            #[tokio::test]
+            async fn web() {
+                let event = create().await;
                 let web_tag: &nostr::Tag =
                     event.tags.iter().find(|t| t.as_vec()[0].eq("web")).unwrap();
                 assert_eq!(web_tag.as_vec().len(), 3);
@@ -513,9 +522,9 @@ mod tests {
                 assert_eq!(web_tag.as_vec()[2], "https://gitworkshop.dev/123");
             }
 
-            #[test]
-            fn maintainers() {
-                let event = create();
+            #[tokio::test]
+            async fn maintainers() {
+                let event = create().await;
                 let maintainers_tag: &nostr::Tag = event
                     .tags
                     .iter()
@@ -532,9 +541,9 @@ mod tests {
                 );
             }
 
-            #[test]
-            fn no_other_tags() {
-                assert_eq!(create().tags.len(), 9)
+            #[tokio::test]
+            async fn no_other_tags() {
+                assert_eq!(create().await.tags.len(), 9)
             }
         }
     }

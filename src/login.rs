@@ -3,7 +3,9 @@ use std::str::FromStr;
 use anyhow::{bail, Context, Result};
 use nostr::PublicKey;
 use nostr_database::Order;
-use nostr_sdk::{Alphabet, FromBech32, JsonUtil, Kind, NostrDatabase, SingleLetterTag, ToBech32};
+use nostr_sdk::{
+    Alphabet, FromBech32, JsonUtil, Kind, NostrDatabase, NostrSigner, SingleLetterTag, ToBech32,
+};
 use nostr_sqlite::SQLiteDatabase;
 
 #[cfg(not(test))]
@@ -28,7 +30,7 @@ pub async fn launch(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     change_user: bool,
-) -> Result<(nostr::Keys, UserRef)> {
+) -> Result<(NostrSigner, UserRef)> {
     if let Ok(keys) = match get_keys_without_prompts(git_repo, nsec, password, change_user) {
         Ok(keys) => Ok(keys),
         Err(error) => {
@@ -73,7 +75,7 @@ pub async fn launch(
         // get user ref
         let user_ref = get_user_details(&keys.public_key(), client, git_repo).await?;
         print_logged_in_as(&user_ref, client.is_none())?;
-        Ok((keys, user_ref))
+        Ok((NostrSigner::Keys(keys), user_ref))
     } else {
         fresh_login(git_repo, client, change_user).await
     }
@@ -172,7 +174,7 @@ async fn fresh_login(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     always_save: bool,
-) -> Result<(nostr::Keys, UserRef)> {
+) -> Result<(NostrSigner, UserRef)> {
     // prompt for nsec
     let mut prompt = "login with nsec";
     let keys = loop {
@@ -196,7 +198,7 @@ async fn fresh_login(
     }
     let user_ref = get_user_details(&keys.public_key(), client, git_repo).await?;
     print_logged_in_as(&user_ref, client.is_none())?;
-    Ok((keys, user_ref))
+    Ok((NostrSigner::Keys(keys), user_ref))
 }
 
 fn save_keys(git_repo: &Repo, keys: &nostr::Keys, always_save: bool) -> Result<()> {

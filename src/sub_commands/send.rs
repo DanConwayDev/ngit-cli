@@ -8,7 +8,7 @@ use nostr::{
     nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19},
     EventBuilder, FromBech32, Tag, TagKind, ToBech32, UncheckedUrl,
 };
-use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, TagStandard};
+use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, NostrSigner, TagStandard};
 
 use super::list::tag_value;
 #[cfg(not(test))]
@@ -178,7 +178,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     } else {
         None
     };
-    let (keys, user_ref) = login::launch(
+    let (signer, user_ref) = login::launch(
         &git_repo,
         &cli_args.nsec,
         &cli_args.password,
@@ -187,7 +187,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     )
     .await?;
 
-    client.set_keys(&keys).await;
+    client.set_signer(signer.clone()).await;
 
     let repo_ref = repo_ref::fetch(
         &git_repo,
@@ -208,11 +208,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         cover_letter_title_description.clone(),
         &git_repo,
         &commits,
-        &keys,
+        &signer,
         &repo_ref,
         &root_proposal_id,
         &mention_tags,
-    )?;
+    )
+    .await?;
 
     println!(
         "posting {} patch{} {} a covering letter...",
@@ -576,11 +577,11 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
 pub static PATCH_KIND: u16 = 1617;
 
 #[allow(clippy::too_many_lines)]
-pub fn generate_cover_letter_and_patch_events(
+pub async fn generate_cover_letter_and_patch_events(
     cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
     commits: &[Sha1Hash],
-    keys: &nostr::Keys,
+    signer: &NostrSigner,
     repo_ref: &RepoRef,
     root_proposal_id: &Option<String>,
     mentions: &[nostr::Tag],
@@ -592,7 +593,7 @@ pub fn generate_cover_letter_and_patch_events(
     let mut events = vec![];
 
     if let Some((title, description)) = cover_letter_title_description {
-        events.push(EventBuilder::new(
+        events.push(signer.sign_event_builder(EventBuilder::new(
         nostr::event::Kind::Custom(PATCH_KIND),
         format!(
             "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
@@ -655,8 +656,7 @@ pub fn generate_cover_letter_and_patch_events(
                 .map(|pk| Tag::public_key(*pk))
                 .collect(),
         ].concat(),
-    )
-    .to_event(keys)
+    )).await
     .context("failed to create cover-letter event")?);
     }
 
@@ -667,7 +667,7 @@ pub fn generate_cover_letter_and_patch_events(
                 &root_commit,
                 commit,
                 events.first().map(|event| event.id),
-                keys,
+                signer,
                 repo_ref,
                 events.last().map(nostr::Event::id),
                 if events.is_empty() {
@@ -695,6 +695,7 @@ pub fn generate_cover_letter_and_patch_events(
                 root_proposal_id,
                 if events.is_empty() { mentions } else { &[] },
             )
+            .await
             .context("failed to generate patch event")?,
         );
     }
@@ -864,12 +865,12 @@ pub fn patch_supports_commit_ids(event: &nostr::Event) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-pub fn generate_patch_event(
+pub async fn generate_patch_event(
     git_repo: &Repo,
     root_commit: &Sha1Hash,
     commit: &Sha1Hash,
     thread_event_id: Option<nostr::EventId>,
-    keys: &nostr::Keys,
+    signer: &nostr_sdk::NostrSigner,
     repo_ref: &RepoRef,
     parent_patch_event_id: Option<nostr::EventId>,
     series_count: Option<(u64, u64)>,
@@ -882,7 +883,7 @@ pub fn generate_patch_event(
         .context("failed to get parent commit")?;
     let relay_hint = repo_ref.relays.first().map(nostr::UncheckedUrl::from);
 
-    EventBuilder::new(
+    signer.sign_event_builder(EventBuilder::new(
         nostr::event::Kind::Custom(PATCH_KIND),
         git_repo
             .make_patch_from_commit(commit,&series_count)
@@ -999,8 +1000,7 @@ pub fn generate_patch_event(
             ],
         ]
         .concat(),
-    )
-    .to_event(keys)
+    )).await
     .context("failed to sign event")
 }
 // TODO

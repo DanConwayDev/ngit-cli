@@ -59,7 +59,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     #[cfg(test)]
     let mut client = <MockConnect as std::default::Default>::default();
 
-    let (keys, user_ref) = login::launch(
+    let (signer, user_ref) = login::launch(
         &git_repo,
         &cli_args.nsec,
         &cli_args.password,
@@ -67,8 +67,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         false,
     )
     .await?;
-
-    client.set_keys(&keys).await;
 
     let repo_ref = if let Ok(rep_ref) = repo_ref::fetch(
         &git_repo,
@@ -180,7 +178,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         let mut maintainers_string = if !args.other_maintainers.is_empty() {
             [args.other_maintainers.clone()].concat().join(" ")
         } else if repo_ref.is_none() && repo_config_result.is_err() {
-            keys.public_key().to_bech32()?
+            signer.public_key().await?.to_bech32()?
         } else {
             let maintainers = if let Ok(config) = &repo_config_result {
                 config.maintainers.clone()
@@ -193,7 +191,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     .collect()
             } else {
                 //unreachable
-                vec![keys.public_key().to_bech32()?]
+                vec![signer.public_key().await?.to_bech32()?]
             };
             // add current user if not present
             if maintainers.iter().any(|m| {
@@ -205,7 +203,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }) {
                 maintainers.join(" ")
             } else {
-                [maintainers, vec![keys.public_key().to_bech32()?]]
+                [maintainers, vec![signer.public_key().await?.to_bech32()?]]
                     .concat()
                     .join(" ")
             }
@@ -231,7 +229,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
             // add current user incase removed
             if !maintainers.iter().any(|m| user_ref.public_key.eq(m)) {
-                maintainers.push(keys.public_key());
+                maintainers.push(signer.public_key().await?);
             }
             break maintainers;
         }
@@ -300,7 +298,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         relays: relays.clone(),
         maintainers: maintainers.clone(),
     }
-    .to_event(&keys)?;
+    .to_event(&signer)
+    .await?;
+
+    client.set_signer(signer).await;
 
     send_events(
         &client,

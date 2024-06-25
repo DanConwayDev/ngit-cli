@@ -148,7 +148,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         ahead.len()
     );
 
-    let (keys, user_ref) = login::launch(
+    let (signer, user_ref) = login::launch(
         &git_repo,
         &cli_args.nsec,
         &cli_args.password,
@@ -156,8 +156,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         false,
     )
     .await?;
-
-    client.set_keys(&keys).await;
 
     let mut patch_events: Vec<nostr::Event> = vec![];
     for commit in &ahead {
@@ -167,7 +165,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 &root_commit,
                 commit,
                 Some(proposal_root_event.id),
-                &keys,
+                &signer,
                 &repo_ref,
                 patch_events.last().map(nostr::Event::id),
                 None,
@@ -175,10 +173,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 &None,
                 &[],
             )
+            .await
             .context("cannot make patch event from commit")?,
         );
     }
     println!("pushing {} commits", ahead.len());
+
+    client.set_signer(signer).await;
 
     send_events(
         &client,
