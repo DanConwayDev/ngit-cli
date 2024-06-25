@@ -42,7 +42,8 @@ pub async fn launch(
                         get_config_item(git_repo, "nostr.npub")
                             .unwrap_or("unknown ncryptsec".to_string()),
                     ) {
-                        if let Ok(user_ref) = get_user_details(&public_key, client).await {
+                        if let Ok(user_ref) = get_user_details(&public_key, client, git_repo).await
+                        {
                             user_ref.metadata.name
                         } else {
                             "unknown ncryptsec".to_string()
@@ -70,7 +71,7 @@ pub async fn launch(
         }
     } {
         // get user ref
-        let user_ref = get_user_details(&keys.public_key(), client).await?;
+        let user_ref = get_user_details(&keys.public_key(), client, git_repo).await?;
         print_logged_in_as(&user_ref, client.is_none())?;
         Ok((keys, user_ref))
     } else {
@@ -193,7 +194,7 @@ async fn fresh_login(
     if let Err(error) = save_keys(git_repo, &keys, always_save) {
         println!("{error}");
     }
-    let user_ref = get_user_details(&keys.public_key(), client).await?;
+    let user_ref = get_user_details(&keys.public_key(), client, git_repo).await?;
     print_logged_in_as(&user_ref, client.is_none())?;
     Ok((keys, user_ref))
 }
@@ -341,11 +342,17 @@ async fn get_user_details(
     public_key: &PublicKey,
     #[cfg(test)] client: Option<&crate::client::MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
+    git_repo: &Repo,
 ) -> Result<UserRef> {
     if client.is_some() {
         println!("searching for profile and relay updates...");
     }
-    let database = SQLiteDatabase::open(get_dirs()?.config_dir().join("cache.sqlite")).await?;
+    let database = SQLiteDatabase::open(if std::env::var("NGITTEST").is_err() {
+        get_dirs()?.config_dir().join("cache.sqlite")
+    } else {
+        git_repo.get_path()?.join(".git/test-global-cache.sqlite")
+    })
+    .await?;
     let mut events: Vec<nostr::Event> = vec![];
     let filters = vec![
         nostr::Filter::default()
