@@ -2,7 +2,6 @@ use std::{ffi::OsStr, path::PathBuf, str::FromStr};
 
 use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
-use directories::ProjectDirs;
 use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
 use nostr_sdk::{serde_json, NostrSigner, TagStandard};
 use once_cell::sync::Lazy;
@@ -933,56 +932,4 @@ where
             strip_ansi_escape_codes: true,
         },
     )
-}
-
-/// backup and remove application config and data
-pub fn before() -> Result<()> {
-    backup_existing_config()
-}
-
-/// restore backuped application config and data
-pub fn after() -> Result<()> {
-    restore_config_backup()
-}
-
-/// run func between before and after scripts which backup, reset and restore
-/// application config
-///
-/// TODO: fix issue: if func panics, after() is not run.
-pub fn with_fresh_config<F>(func: F) -> Result<()>
-where
-    F: Fn() -> Result<()>,
-{
-    before()?;
-    func()?;
-    after()
-}
-
-fn backup_existing_config() -> Result<()> {
-    let config_path = get_dirs().config_dir().join("cache.sqlite");
-    let backup_config_path = get_dirs().config_dir().join("cache-backup.sqlite");
-    if !backup_config_path.exists() {
-        std::fs::rename(&config_path, backup_config_path)?;
-    }
-    if config_path.exists() {
-        std::fs::remove_file(&config_path)?;
-    }
-    Ok(())
-}
-
-fn restore_config_backup() -> Result<()> {
-    let config_path = get_dirs().config_dir().join("cache.sqlite");
-    let backup_config_path = get_dirs().config_dir().join("cache-backup.sqlite");
-    if config_path.exists() {
-        std::fs::remove_file(&config_path)?;
-    }
-    if backup_config_path.exists() {
-        std::fs::rename(backup_config_path, config_path)?;
-    }
-    Ok(())
-}
-
-fn get_dirs() -> ProjectDirs {
-    ProjectDirs::from("", "CodeCollaboration", "ngit")
-        .expect("rust directories crate should return ProjectDirs")
 }

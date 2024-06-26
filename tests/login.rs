@@ -57,26 +57,24 @@ mod with_relays {
                     );
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        with_fresh_config(|| {
-                            let mut p = CliTester::new(["login"]);
+                        let mut p = CliTester::new(["login"]);
 
-                            p.expect_input(EXPECTED_NSEC_PROMPT)?
-                                .succeeds_with(TEST_KEY_1_NSEC)?;
+                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                            .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                                .succeeds_with(Some(true))?;
+                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                            .succeeds_with(Some(true))?;
 
-                            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                                .succeeds_with(Some(false))?;
+                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                            .succeeds_with(Some(false))?;
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
 
-                            p.expect_end_with("logged in as fred\r\n")?;
-                            for p in [51, 52] {
-                                shutdown_relay(8000 + p)?;
-                            }
-                            Ok(())
-                        })
+                        p.expect_end_with("logged in as fred\r\n")?;
+                        for p in [51, 52] {
+                            shutdown_relay(8000 + p)?;
+                        }
+                        Ok(())
                     });
 
                     // launch relay
@@ -96,30 +94,28 @@ mod with_relays {
                     );
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        with_fresh_config(|| {
-                            let mut p = CliTester::new(["login"]);
+                        let mut p = CliTester::new(["login"]);
 
-                            p.expect_input(EXPECTED_NSEC_PROMPT)?
-                                .succeeds_with(TEST_KEY_1_NSEC)?;
+                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                            .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                                .succeeds_with(Some(true))?;
+                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                            .succeeds_with(Some(true))?;
 
-                            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                                .succeeds_with(Some(false))?;
+                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                            .succeeds_with(Some(false))?;
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
 
-                            p.expect("cannot extract account name from account metadata...\r\n")?;
+                        p.expect("cannot extract account name from account metadata...\r\n")?;
 
-                            p.expect_end_with(
-                                format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str(),
-                            )?;
-                            for p in [51, 52] {
-                                shutdown_relay(8000 + p)?;
-                            }
-                            Ok(())
-                        })
+                        p.expect_end_with(
+                            format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str(),
+                        )?;
+                        for p in [51, 52] {
+                            shutdown_relay(8000 + p)?;
+                        }
+                        Ok(())
                     });
 
                     // launch relay
@@ -410,17 +406,15 @@ mod with_relays {
                         );
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            with_fresh_config(|| {
-                                let mut p = CliTester::new(["login", "--nsec", TEST_KEY_1_NSEC]);
+                            let mut p = CliTester::new(["login", "--nsec", TEST_KEY_1_NSEC]);
 
-                                p.expect("searching for profile and relay updates...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
 
-                                p.expect_end_with("logged in as fred\r\n")?;
-                                for p in [51, 52] {
-                                    shutdown_relay(8000 + p)?;
-                                }
-                                Ok(())
-                            })
+                            p.expect_end_with("logged in as fred\r\n")?;
+                            for p in [51, 52] {
+                                shutdown_relay(8000 + p)?;
+                            }
+                            Ok(())
                         });
 
                         // launch relay
@@ -462,27 +456,25 @@ mod with_relays {
                         );
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            with_fresh_config(|| {
-                                CliTester::new([
-                                    "login",
-                                    "--offline",
-                                    "--nsec",
-                                    TEST_KEY_1_NSEC,
-                                    "--password",
-                                    TEST_PASSWORD,
-                                ])
-                                .expect_end_eventually()?;
+                            CliTester::new([
+                                "login",
+                                "--offline",
+                                "--nsec",
+                                TEST_KEY_1_NSEC,
+                                "--password",
+                                TEST_PASSWORD,
+                            ])
+                            .expect_end_eventually()?;
 
-                                let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
+                            let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
 
-                                p.expect("searching for profile and relay updates...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
 
-                                p.expect_end_with("logged in as fred\r\n")?;
-                                for p in [51, 52] {
-                                    shutdown_relay(8000 + p)?;
-                                }
-                                Ok(())
-                            })
+                            p.expect_end_with("logged in as fred\r\n")?;
+                            for p in [51, 52] {
+                                shutdown_relay(8000 + p)?;
+                            }
+                            Ok(())
                         });
 
                         // launch relay
@@ -524,23 +516,21 @@ mod with_relays {
                         );
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            with_fresh_config(|| {
-                                let mut p = CliTester::new([
-                                    "login",
-                                    "--nsec",
-                                    TEST_KEY_1_NSEC,
-                                    "--password",
-                                    TEST_PASSWORD,
-                                ]);
+                            let mut p = CliTester::new([
+                                "login",
+                                "--nsec",
+                                TEST_KEY_1_NSEC,
+                                "--password",
+                                TEST_PASSWORD,
+                            ]);
 
-                                p.expect("searching for profile and relay updates...\r\n")?;
+                            p.expect("searching for profile and relay updates...\r\n")?;
 
-                                p.expect_end_with("logged in as fred\r\n")?;
-                                for p in [51, 52] {
-                                    shutdown_relay(8000 + p)?;
-                                }
-                                Ok(())
-                            })
+                            p.expect_end_with("logged in as fred\r\n")?;
+                            for p in [51, 52] {
+                                shutdown_relay(8000 + p)?;
+                            }
+                            Ok(())
                         });
 
                         // launch relay
@@ -571,32 +561,26 @@ mod with_relays {
                     );
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        with_fresh_config(|| {
-                            let mut p = CliTester::new(["login"]);
+                        let mut p = CliTester::new(["login"]);
 
-                            p.expect_input(EXPECTED_NSEC_PROMPT)?
-                                .succeeds_with(TEST_KEY_1_NSEC)?;
+                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                            .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                                .succeeds_with(Some(true))?;
+                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                            .succeeds_with(Some(true))?;
 
-                            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                                .succeeds_with(Some(false))?;
+                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                            .succeeds_with(Some(false))?;
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
 
-                            p.expect(
-                                "cannot find your account metadata (name, etc) on relays\r\n",
-                            )?;
+                        p.expect("cannot find your account metadata (name, etc) on relays\r\n")?;
 
-                            p.expect_end_with(
-                                format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str(),
-                            )?;
-                            for p in [51, 52] {
-                                shutdown_relay(8000 + p)?;
-                            }
-                            Ok(())
-                        })
+                        p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())?;
+                        for p in [51, 52] {
+                            shutdown_relay(8000 + p)?;
+                        }
+                        Ok(())
                     });
 
                     // launch relay
@@ -637,28 +621,26 @@ mod with_relays {
                     );
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        with_fresh_config(|| {
-                            let mut p = CliTester::new(["login"]);
+                        let mut p = CliTester::new(["login"]);
 
-                            p.expect_input(EXPECTED_NSEC_PROMPT)?
-                                .succeeds_with(TEST_KEY_1_NSEC)?;
+                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                            .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                                .succeeds_with(Some(true))?;
+                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                            .succeeds_with(Some(true))?;
 
-                            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                                .succeeds_with(Some(false))?;
+                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                            .succeeds_with(Some(false))?;
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
 
-                            p.expect("cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
+                        p.expect("cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
 
-                            p.expect_end_with("logged in as fred\r\n")?;
-                            for p in [51, 52] {
-                                shutdown_relay(8000 + p)?;
-                            }
-                            Ok(())
-                        })
+                        p.expect_end_with("logged in as fred\r\n")?;
+                        for p in [51, 52] {
+                            shutdown_relay(8000 + p)?;
+                        }
+                        Ok(())
                     });
 
                     // launch relay
@@ -703,29 +685,27 @@ mod with_relays {
                     );
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        with_fresh_config(|| {
-                            let mut p = CliTester::new([
-                                "login",
-                                "--nsec",
-                                TEST_KEY_1_NSEC,
-                                "--password",
-                                TEST_PASSWORD,
-                            ]);
+                        let mut p = CliTester::new([
+                            "login",
+                            "--nsec",
+                            TEST_KEY_1_NSEC,
+                            "--password",
+                            TEST_PASSWORD,
+                        ]);
 
-                            p.expect_end_eventually_with("logged in as fred\r\n")?;
+                        p.expect_end_eventually_with("logged in as fred\r\n")?;
 
-                            for p in [51, 52] {
-                                shutdown_relay(8000 + p)?;
-                            }
+                        for p in [51, 52] {
+                            shutdown_relay(8000 + p)?;
+                        }
 
-                            let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
+                        let mut p = CliTester::new(["login", "--password", TEST_PASSWORD]);
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile and relay updates...\r\n")?;
 
-                            p.expect_end_eventually_with("logged in as fred\r\n")?;
+                        p.expect_end_eventually_with("logged in as fred\r\n")?;
 
-                            Ok(())
-                        })
+                        Ok(())
                     });
 
                     // launch relay
@@ -754,26 +734,24 @@ mod with_relays {
                 );
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    with_fresh_config(|| {
-                        let mut p = CliTester::new(["login"]);
+                    let mut p = CliTester::new(["login"]);
 
-                        p.expect_input(EXPECTED_NSEC_PROMPT)?
-                            .succeeds_with(TEST_KEY_1_NSEC)?;
+                    p.expect_input(EXPECTED_NSEC_PROMPT)?
+                        .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                            .succeeds_with(Some(true))?;
+                    p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                        .succeeds_with(Some(true))?;
 
-                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                            .succeeds_with(Some(false))?;
+                    p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                        .succeeds_with(Some(false))?;
 
-                        p.expect("searching for profile and relay updates...\r\n")?;
+                    p.expect("searching for profile and relay updates...\r\n")?;
 
-                        p.expect_end_with("logged in as fred\r\n")?;
-                        for p in [51, 52, 53, 55] {
-                            shutdown_relay(8000 + p)?;
-                        }
-                        Ok(())
-                    })
+                    p.expect_end_with("logged in as fred\r\n")?;
+                    for p in [51, 52, 53, 55] {
+                        shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
                 });
 
                 // launch relay
@@ -832,18 +810,73 @@ mod with_offline_flag {
         #[test]
         #[serial]
         fn prompts_for_nsec_and_password() -> Result<()> {
-            before()?;
             standard_first_time_login_encrypting_nsec()?;
-            after()
+            Ok(())
         }
 
         #[test]
         #[serial]
         fn succeeds_with_text_logged_in_as_npub() -> Result<()> {
-            with_fresh_config(|| {
+            let mut p = CliTester::new(["login", "--offline"]);
+
+            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                .succeeds_with(TEST_KEY_1_NSEC)?;
+
+            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                .succeeds_with(Some(true))?;
+
+            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                .succeeds_with(Some(true))?;
+
+            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
+                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
+                .succeeds_with(TEST_PASSWORD)?;
+
+            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+        }
+
+        #[test]
+        #[serial]
+        fn succeeds_with_hex_secret_key_in_place_of_nsec() -> Result<()> {
+            let mut p = CliTester::new(["login", "--offline"]);
+
+            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                .succeeds_with(TEST_KEY_1_SK_HEX)?;
+
+            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                .succeeds_with(Some(true))?;
+
+            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                .succeeds_with(Some(true))?;
+
+            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
+                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
+                .succeeds_with(TEST_PASSWORD)?;
+
+            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+        }
+
+        mod when_invalid_nsec {
+            use super::*;
+
+            #[test]
+            #[serial]
+            fn prompts_for_nsec_until_valid() -> Result<()> {
+                let invalid_nsec_response =
+                    "invalid nsec. try again with nsec (or hex private key)";
+
                 let mut p = CliTester::new(["login", "--offline"]);
 
                 p.expect_input(EXPECTED_NSEC_PROMPT)?
+                    // this behaviour is intentional. rejecting the response with dialoguer
+                    // hides the original input from the user so they
+                    // cannot see the mistake they made.
+                    .succeeds_with(TEST_INVALID_NSEC)?;
+
+                p.expect_input(invalid_nsec_response)?
+                    .succeeds_with(TEST_INVALID_NSEC)?;
+
+                p.expect_input(invalid_nsec_response)?
                     .succeeds_with(TEST_KEY_1_NSEC)?;
 
                 p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
@@ -857,68 +890,6 @@ mod with_offline_flag {
                     .succeeds_with(TEST_PASSWORD)?;
 
                 p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-            })
-        }
-
-        #[test]
-        #[serial]
-        fn succeeds_with_hex_secret_key_in_place_of_nsec() -> Result<()> {
-            with_fresh_config(|| {
-                let mut p = CliTester::new(["login", "--offline"]);
-
-                p.expect_input(EXPECTED_NSEC_PROMPT)?
-                    .succeeds_with(TEST_KEY_1_SK_HEX)?;
-
-                p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                    .succeeds_with(Some(true))?;
-
-                p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                    .succeeds_with(Some(true))?;
-
-                p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                    .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                    .succeeds_with(TEST_PASSWORD)?;
-
-                p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-            })
-        }
-
-        mod when_invalid_nsec {
-            use super::*;
-
-            #[test]
-            #[serial]
-            fn prompts_for_nsec_until_valid() -> Result<()> {
-                with_fresh_config(|| {
-                    let invalid_nsec_response =
-                        "invalid nsec. try again with nsec (or hex private key)";
-
-                    let mut p = CliTester::new(["login", "--offline"]);
-
-                    p.expect_input(EXPECTED_NSEC_PROMPT)?
-                        // this behaviour is intentional. rejecting the response with dialoguer
-                        // hides the original input from the user so they
-                        // cannot see the mistake they made.
-                        .succeeds_with(TEST_INVALID_NSEC)?;
-
-                    p.expect_input(invalid_nsec_response)?
-                        .succeeds_with(TEST_INVALID_NSEC)?;
-
-                    p.expect_input(invalid_nsec_response)?
-                        .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                    p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                        .succeeds_with(Some(true))?;
-
-                    p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                        .succeeds_with(Some(true))?;
-
-                    p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                        .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                        .succeeds_with(TEST_PASSWORD)?;
-
-                    p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-                })
             }
         }
     }
@@ -929,26 +900,22 @@ mod with_offline_flag {
         #[test]
         #[serial]
         fn valid_nsec_param_succeeds_without_prompts() -> Result<()> {
-            with_fresh_config(|| {
-                CliTester::new(["login", "--offline", "--nsec", TEST_KEY_1_NSEC])
-                    .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-            })
+            CliTester::new(["login", "--offline", "--nsec", TEST_KEY_1_NSEC])
+                .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
         }
 
         #[test]
         #[serial]
         fn forgets_identity() -> Result<()> {
-            with_fresh_config(|| {
-                CliTester::new(["login", "--offline", "--nsec", TEST_KEY_1_NSEC])
-                    .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())?;
+            CliTester::new(["login", "--offline", "--nsec", TEST_KEY_1_NSEC])
+                .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())?;
 
-                let mut p = CliTester::new(["login", "--offline"]);
+            let mut p = CliTester::new(["login", "--offline"]);
 
-                p.expect_input(EXPECTED_NSEC_PROMPT)?
-                    .succeeds_with(TEST_KEY_1_NSEC)?;
+            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                p.exit()
-            })
+            p.exit()
         }
 
         mod when_logging_in_as_different_nsec {
@@ -957,22 +924,18 @@ mod with_offline_flag {
             #[test]
             #[serial]
             fn valid_nsec_param_succeeds_without_prompts_and_logs_in() -> Result<()> {
-                with_fresh_config(|| {
-                    standard_first_time_login_encrypting_nsec()?.exit()?;
+                standard_first_time_login_encrypting_nsec()?.exit()?;
 
-                    CliTester::new(["login", "--offline", "--nsec", TEST_KEY_2_NSEC])
-                        .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_2_NPUB).as_str())
-                })
+                CliTester::new(["login", "--offline", "--nsec", TEST_KEY_2_NSEC])
+                    .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_2_NPUB).as_str())
             }
         }
         #[test]
         #[serial]
         fn invalid_nsec_param_fails_without_prompts() -> Result<()> {
-            with_fresh_config(|| {
-                CliTester::new(["login", "--offline", "--nsec", TEST_INVALID_NSEC]).expect_end_with(
-                    "Error: invalid nsec parameter\r\n\r\nCaused by:\r\n    Invalid secret key\r\n",
-                )
-            })
+            CliTester::new(["login", "--offline", "--nsec", TEST_INVALID_NSEC]).expect_end_with(
+                "Error: invalid nsec parameter\r\n\r\nCaused by:\r\n    Invalid secret key\r\n",
+            )
         }
     }
 
@@ -982,33 +945,29 @@ mod with_offline_flag {
         #[test]
         #[serial]
         fn valid_nsec_param_succeeds_without_prompts() -> Result<()> {
-            with_fresh_config(|| {
-                CliTester::new([
-                    "login",
-                    "--offline",
-                    "--nsec",
-                    TEST_KEY_1_NSEC,
-                    "--password",
-                    TEST_PASSWORD,
-                ])
-                .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-            })
+            CliTester::new([
+                "login",
+                "--offline",
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+            ])
+            .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
         }
 
         #[test]
         #[serial]
         fn parameters_can_be_called_globally() -> Result<()> {
-            with_fresh_config(|| {
-                CliTester::new([
-                    "--nsec",
-                    TEST_KEY_1_NSEC,
-                    "--password",
-                    TEST_PASSWORD,
-                    "login",
-                    "--offline",
-                ])
-                .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-            })
+            CliTester::new([
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "login",
+                "--offline",
+            ])
+            .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
         }
 
         mod when_logging_in_as_different_nsec {
@@ -1017,19 +976,17 @@ mod with_offline_flag {
             #[test]
             #[serial]
             fn valid_nsec_param_succeeds_without_prompts_and_logs_in() -> Result<()> {
-                with_fresh_config(|| {
-                    standard_first_time_login_encrypting_nsec()?.exit()?;
+                standard_first_time_login_encrypting_nsec()?.exit()?;
 
-                    CliTester::new([
-                        "login",
-                        "--offline",
-                        "--nsec",
-                        TEST_KEY_2_NSEC,
-                        "--password",
-                        TEST_PASSWORD,
-                    ])
-                    .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_2_NPUB).as_str())
-                })
+                CliTester::new([
+                    "login",
+                    "--offline",
+                    "--nsec",
+                    TEST_KEY_2_NSEC,
+                    "--password",
+                    TEST_PASSWORD,
+                ])
+                .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_2_NPUB).as_str())
             }
         }
 
@@ -1039,41 +996,37 @@ mod with_offline_flag {
             #[test]
             #[serial]
             fn password_changes() -> Result<()> {
-                with_fresh_config(|| {
-                    standard_first_time_login_encrypting_nsec()?.exit()?;
+                standard_first_time_login_encrypting_nsec()?.exit()?;
 
-                    CliTester::new([
-                        "login",
-                        "--offline",
-                        "--nsec",
-                        TEST_KEY_1_NSEC,
-                        "--password",
-                        TEST_INVALID_PASSWORD,
-                    ])
-                    .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())?;
+                CliTester::new([
+                    "login",
+                    "--offline",
+                    "--nsec",
+                    TEST_KEY_1_NSEC,
+                    "--password",
+                    TEST_INVALID_PASSWORD,
+                ])
+                .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())?;
 
-                    CliTester::new(["--password", TEST_INVALID_PASSWORD, "login", "--offline"])
-                        .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-                })
+                CliTester::new(["--password", TEST_INVALID_PASSWORD, "login", "--offline"])
+                    .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
             }
         }
 
         #[test]
         #[serial]
         fn invalid_nsec_param_fails_without_prompts() -> Result<()> {
-            with_fresh_config(|| {
-                CliTester::new([
-                    "login",
-                    "--offline",
-                    "--nsec",
-                    TEST_INVALID_NSEC,
-                    "--password",
-                    TEST_PASSWORD,
-                ])
-                .expect_end_with(
-                    "Error: invalid nsec parameter\r\n\r\nCaused by:\r\n    Invalid secret key\r\n",
-                )
-            })
+            CliTester::new([
+                "login",
+                "--offline",
+                "--nsec",
+                TEST_INVALID_NSEC,
+                "--password",
+                TEST_PASSWORD,
+            ])
+            .expect_end_with(
+                "Error: invalid nsec parameter\r\n\r\nCaused by:\r\n    Invalid secret key\r\n",
+            )
         }
     }
 
@@ -1085,40 +1038,38 @@ mod with_offline_flag {
         // combined into a single test as it is computationally expensive to run
         fn warns_it_might_take_a_few_seconds_then_succeeds_then_second_login_prompts_for_password_then_warns_again_then_succeeds()
         -> Result<()> {
-            with_fresh_config(|| {
-                let mut p = CliTester::new_with_timeout(10000, ["login", "--offline"]);
-                p.expect_input(EXPECTED_NSEC_PROMPT)?
-                    .succeeds_with(TEST_KEY_1_NSEC)?;
+            let mut p = CliTester::new_with_timeout(10000, ["login", "--offline"]);
+            p.expect_input(EXPECTED_NSEC_PROMPT)?
+                .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                    .succeeds_with(Some(true))?;
+            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
+                .succeeds_with(Some(true))?;
 
-                p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                    .succeeds_with(Some(true))?;
+            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
+                .succeeds_with(Some(true))?;
 
-                p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                    .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                    .succeeds_with(TEST_WEAK_PASSWORD)?;
+            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
+                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
+                .succeeds_with(TEST_WEAK_PASSWORD)?;
 
-                p.expect("this may take a few seconds...\r\n")?;
+            p.expect("this may take a few seconds...\r\n")?;
 
-                p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
 
-                // commented out as 'login' command now assumes you want to
-                // login as a new user
-                // p = CliTester::new_with_timeout(10000, ["login",
-                // "--offline"]);
+            // commented out as 'login' command now assumes you want to
+            // login as a new user
+            // p = CliTester::new_with_timeout(10000, ["login",
+            // "--offline"]);
 
-                // p.expect(format!("login as {}\r\n",
-                // TEST_KEY_1_NPUB).as_str())?
-                //     .expect_password(EXPECTED_PASSWORD_PROMPT)?
-                //     .succeeds_with(TEST_WEAK_PASSWORD)?;
+            // p.expect(format!("login as {}\r\n",
+            // TEST_KEY_1_NPUB).as_str())?
+            //     .expect_password(EXPECTED_PASSWORD_PROMPT)?
+            //     .succeeds_with(TEST_WEAK_PASSWORD)?;
 
-                // p.expect("this may take a few seconds...\r\n")?;
+            // p.expect("this may take a few seconds...\r\n")?;
 
-                // p.expect_end_with(format!("logged in as {}\r\n",
-                // TEST_KEY_1_NPUB).as_str())
-            })
+            // p.expect_end_with(format!("logged in as {}\r\n",
+            // TEST_KEY_1_NPUB).as_str())
         }
     }
 }
