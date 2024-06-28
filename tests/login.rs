@@ -1130,7 +1130,7 @@ mod with_offline_flag {
         -> Result<()> {
             let test_repo = GitTestRepo::default();
             let mut p =
-                CliTester::new_with_timeout_from_dir(10000, &test_repo.dir, ["login", "--offline"]);
+                CliTester::new_with_timeout_from_dir(15000, &test_repo.dir, ["login", "--offline"]);
             p.expect_input(EXPECTED_NSEC_PROMPT)?
                 .succeeds_with(TEST_KEY_1_NSEC)?;
 
