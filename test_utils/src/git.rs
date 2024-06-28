@@ -25,6 +25,9 @@ impl GitTestRepo {
                 .initial_head(main_branch_name)
                 .mkpath(true),
         )?;
+        // Make sure we have standard diffs for the tests so that user-level config does
+        // not make them fail.
+        git_repo.config()?.set_bool("diff.mnemonicPrefix", false)?;
         Ok(Self {
             dir: path,
             git_repo,
