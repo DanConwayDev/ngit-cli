@@ -76,8 +76,9 @@ pub trait RepoActions {
     ) -> Result<Vec<nostr::Event>>;
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
     fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool>;
-    fn get_git_config_item(&self, item: &str, global: bool) -> Result<Option<String>>;
+    fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>>;
     fn save_git_config_item(&self, item: &str, value: &str, global: bool) -> Result<()>;
+    fn remove_git_config_item(&self, item: &str, global: bool) -> Result<bool>;
 }
 
 impl RepoActions for Repo {
@@ -581,8 +582,15 @@ impl RepoActions for Repo {
         }
     }
 
-    fn get_git_config_item(&self, item: &str, global: bool) -> Result<Option<String>> {
-        match if global {
+    /// setting global to None will suppliment local config with global items
+    /// not in local
+    fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>> {
+        let just_global = if let Some(just_global) = global {
+            just_global
+        } else {
+            false
+        };
+        match if just_global {
             self.git_repo
                 .config()
                 .context("cannot open git config")?
@@ -593,11 +601,22 @@ impl RepoActions for Repo {
         }
         .get_entry(item)
         {
-            Ok(item) => Ok(Some(
-                item.value()
-                    .context("cannot find git config item")?
-                    .to_string(),
-            )),
+            Ok(item) => {
+                if let Some(global) = global {
+                    if item.level().eq(&git2::ConfigLevel::Local) {
+                        if global {
+                            bail!("only local repository login available")
+                        }
+                    } else if !global {
+                        bail!("only global repository login available")
+                    }
+                }
+                Ok(Some(
+                    item.value()
+                        .context("cannot find git config item")?
+                        .to_string(),
+                ))
+            }
             Err(_) => Ok(None),
         }
     }
@@ -613,8 +632,32 @@ impl RepoActions for Repo {
             self.git_repo.config().context("cannot open git config")?
         }
         .set_str(item, value)
-        .context("cannot set git config value")?;
+        .context(format!(
+            "cannot set {} git config item {}",
+            if global { "global" } else { "local" },
+            item
+        ))?;
         Ok(())
+    }
+
+    /// returns false if item doesn't exist
+    fn remove_git_config_item(&self, item: &str, global: bool) -> Result<bool> {
+        if self.get_git_config_item(item, Some(global))?.is_none() {
+            Ok(false)
+        } else {
+            if global {
+                self.git_repo
+                    .config()
+                    .context("cannot open git config")?
+                    .open_global()
+                    .context("cannot open global git config")?
+            } else {
+                self.git_repo.config().context("cannot open git config")?
+            }
+            .remove(item)
+            .context("cannot remove existing git config item")?;
+            Ok(true)
+        }
     }
 }
 
@@ -849,7 +892,9 @@ mod tests {
             let git_repo = Repo::from_path(&test_repo.dir)?;
             git_repo.save_git_config_item("test.item", "testvalue", false)?;
             assert_eq!(
-                git_repo.get_git_config_item("test.item", false)?.unwrap(),
+                git_repo
+                    .get_git_config_item("test.item", Some(false))?
+                    .unwrap(),
                 "testvalue",
             );
             Ok(())
@@ -859,7 +904,10 @@ mod tests {
         fn get_git_config_item_returns_none_if_not_present() -> Result<()> {
             let test_repo = GitTestRepo::default();
             let git_repo = Repo::from_path(&test_repo.dir)?;
-            assert_eq!(git_repo.get_git_config_item("test.item", false)?, None);
+            assert_eq!(
+                git_repo.get_git_config_item("test.item", Some(false))?,
+                None
+            );
             Ok(())
         }
 
@@ -869,9 +917,30 @@ mod tests {
             let git_repo = Repo::from_path(&test_repo.dir)?;
             git_repo.save_git_config_item("test.item", "", false)?;
             assert_eq!(
-                git_repo.get_git_config_item("test.item", false)?,
+                git_repo.get_git_config_item("test.item", Some(false))?,
                 Some("".to_string()),
             );
+            Ok(())
+        }
+
+        #[test]
+        fn remove_local_git_config_item() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            git_repo.save_git_config_item("test.item", "testvalue", false)?;
+            assert!(git_repo.remove_git_config_item("test.item", false)?);
+            assert_eq!(
+                git_repo.get_git_config_item("test.item", Some(false))?,
+                None,
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn remove_git_config_item_returns_false_if_item_wasnt_set() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            assert!(!(git_repo.remove_git_config_item("test.item", false)?));
             Ok(())
         }
     }

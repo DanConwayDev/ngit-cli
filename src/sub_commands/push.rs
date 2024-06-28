@@ -150,6 +150,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let (signer, user_ref) = login::launch(
         &git_repo,
+        &cli_args.bunker_uri,
+        &cli_args.bunker_app_key,
         &cli_args.nsec,
         &cli_args.password,
         Some(&client),

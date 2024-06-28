@@ -1,11 +1,13 @@
-use std::str::FromStr;
+use std::{fs::create_dir_all, str::FromStr, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use nostr::PublicKey;
+use nostr::{nips::nip46::NostrConnectURI, PublicKey};
 use nostr_database::Order;
 use nostr_sdk::{
-    Alphabet, FromBech32, JsonUtil, Kind, NostrDatabase, NostrSigner, SingleLetterTag, ToBech32,
+    Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrDatabase, NostrSigner, SingleLetterTag,
+    ToBech32,
 };
+use nostr_signer::Nip46Signer;
 use nostr_sqlite::SQLiteDatabase;
 
 #[cfg(not(test))]
@@ -16,7 +18,7 @@ use crate::{
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptPasswordParms,
     },
-    client::Connect,
+    client::{fetch_public_key, Connect},
     config::{get_dirs, UserMetadata, UserRef, UserRelayRef, UserRelays},
     git::{Repo, RepoActions},
     key_handling::encryption::{decrypt_key, encrypt_key},
@@ -25,14 +27,25 @@ use crate::{
 /// handles the encrpytion and storage of key material
 pub async fn launch(
     git_repo: &Repo,
+    bunker_uri: &Option<String>,
+    bunker_app_key: &Option<String>,
     nsec: &Option<String>,
     password: &Option<String>,
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     change_user: bool,
 ) -> Result<(NostrSigner, UserRef)> {
-    if let Ok(keys) = match get_keys_without_prompts(git_repo, nsec, password, change_user) {
-        Ok(keys) => Ok(keys),
+    if let Ok(signer) = match get_signer_without_prompts(
+        git_repo,
+        bunker_uri,
+        bunker_app_key,
+        nsec,
+        password,
+        change_user,
+    )
+    .await
+    {
+        Ok(signer) => Ok(signer),
         Err(error) => {
             if error
                 .to_string()
@@ -60,7 +73,7 @@ pub async fn launch(
                         .password(PromptPasswordParms::default().with_prompt("password"))
                         .context("failed to get password input from interactor.password")?;
                     if let Ok(keys) = get_keys_with_password(git_repo, &password) {
-                        break Ok(keys);
+                        break Ok(NostrSigner::Keys(keys));
                     }
                     println!("incorrect password");
                 }
@@ -73,9 +86,17 @@ pub async fn launch(
         }
     } {
         // get user ref
-        let user_ref = get_user_details(&keys.public_key(), client, git_repo).await?;
+        let user_ref = get_user_details(
+            &signer
+                .public_key()
+                .await
+                .context("cannot get public key from signer")?,
+            client,
+            git_repo,
+        )
+        .await?;
         print_logged_in_as(&user_ref, client.is_none())?;
-        Ok((NostrSigner::Keys(keys), user_ref))
+        Ok((signer, user_ref))
     } else {
         fresh_login(git_repo, client, change_user).await
     }
@@ -95,18 +116,45 @@ fn print_logged_in_as(user_ref: &UserRef, offline_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn get_keys_without_prompts(
+async fn get_signer_without_prompts(
     git_repo: &Repo,
+    bunker_uri: &Option<String>,
+    bunker_app_key: &Option<String>,
     nsec: &Option<String>,
     password: &Option<String>,
     save_local: bool,
-) -> Result<nostr::Keys> {
+) -> Result<NostrSigner> {
     if let Some(nsec) = nsec {
-        get_keys_from_nsec(git_repo, nsec, password, save_local)
+        Ok(NostrSigner::Keys(get_keys_from_nsec(
+            git_repo, nsec, password, save_local,
+        )?))
     } else if let Some(password) = password {
-        get_keys_with_password(git_repo, password)
+        Ok(NostrSigner::Keys(get_keys_with_password(
+            git_repo, password,
+        )?))
+    } else if let Some(bunker_uri) = bunker_uri {
+        if let Some(bunker_app_key) = bunker_app_key {
+            let signer = get_nip46_signer_from_uri_and_key(bunker_uri, bunker_app_key)
+                .await
+                .context("failed to connect with remote signer")?;
+            if save_local {
+                save_to_git_config(
+                    git_repo,
+                    &signer.public_key().await?.to_bech32()?,
+                    &None,
+                    &Some((bunker_uri.to_string(),bunker_app_key.to_string())),
+                    false,
+                )
+                    .context("failed to save bunker details local git config nostr.bunker-uri and nostr.bunker-app-key")?;
+            }
+            Ok(signer)
+        } else {
+            bail!(
+                "bunker-app-key parameter must be provided alongside bunker-uri. if unknown, login interactively."
+            )
+        }
     } else if !save_local {
-        get_keys_with_git_config_nsec_without_prompts(git_repo)
+        get_signer_with_git_config_nsec_or_bunker_without_prompts(git_repo).await
     } else {
         bail!("user wants prompts to specify new keys")
     }
@@ -139,18 +187,82 @@ fn get_keys_from_nsec(
         if let Some(password) = password {
             s = encrypt_key(&keys, password)?;
         }
-        git_repo
-            .save_git_config_item("nostr.nsec", &s, false)
-            .context("failed to save encrypted nsec in local git config nostr.nsec")?;
-        git_repo.save_git_config_item("nostr.npub", &keys.public_key().to_bech32()?, false)?;
+        save_to_git_config(
+            git_repo,
+            &keys.public_key().to_bech32()?,
+            &Some(s),
+            &None,
+            false,
+        )
+        .context("failed to save encrypted nsec in local git config nostr.nsec")?;
     }
     Ok(keys)
+}
+
+fn save_to_git_config(
+    git_repo: &Repo,
+    npub: &str,
+    nsec: &Option<String>,
+    bunker: &Option<(String, String)>,
+    global: bool,
+) -> Result<()> {
+    if let Err(error) = silently_save_to_git_config(git_repo, npub, nsec, bunker, global) {
+        println!(
+            "failed to save login details to {} git config",
+            if global { "global" } else { "local" }
+        );
+        if let Some(nsec) = nsec {
+            if nsec.contains("ncryptsec") {
+                println!("manually set git config nostr.nsec to: {nsec}");
+            } else {
+                println!("manually set git config nostr.nsec");
+            }
+        }
+        if let Some(bunker) = bunker {
+            println!("manually set git config as follows:");
+            println!("nostr.bunker-uri: {}", bunker.0);
+            println!("nostr.bunker-app-key: {}", bunker.1);
+        }
+        Err(error)
+    } else {
+        println!(
+            "saved login details to {} git config",
+            if global { "global" } else { "local" }
+        );
+        Ok(())
+    }
+}
+fn silently_save_to_git_config(
+    git_repo: &Repo,
+    npub: &str,
+    nsec: &Option<String>,
+    bunker: &Option<(String, String)>,
+    global: bool,
+) -> Result<()> {
+    // must do this first otherwise it might remove the global items just added
+    if global {
+        git_repo.remove_git_config_item("nostr.npub", false)?;
+        git_repo.remove_git_config_item("nostr.nsec", false)?;
+        git_repo.remove_git_config_item("nostr.bunker-uri", false)?;
+        git_repo.remove_git_config_item("nostr.bunker-app-key", false)?;
+    }
+    if let Some(bunker) = bunker {
+        git_repo.remove_git_config_item("nostr.nsec", global)?;
+        git_repo.save_git_config_item("nostr.bunker-uri", &bunker.0, global)?;
+        git_repo.save_git_config_item("nostr.bunker-app-key", &bunker.1, global)?;
+    }
+    if let Some(nsec) = nsec {
+        git_repo.save_git_config_item("nostr.nsec", nsec, global)?;
+        git_repo.remove_git_config_item("nostr.bunker-uri", global)?;
+        git_repo.remove_git_config_item("nostr.bunker-app-key", global)?;
+    }
+    git_repo.save_git_config_item("nostr.npub", npub, global)
 }
 
 fn get_keys_with_password(git_repo: &Repo, password: &str) -> Result<nostr::Keys> {
     decrypt_key(
         &git_repo
-            .get_git_config_item("nostr.nsec", false)
+            .get_git_config_item("nostr.nsec", None)
             .context("failed get git config")?
             .context("git config item nostr.nsec doesn't exist so cannot decrypt it")?,
         password,
@@ -158,15 +270,74 @@ fn get_keys_with_password(git_repo: &Repo, password: &str) -> Result<nostr::Keys
     .context("failed to decrypt stored nsec key with provided password")
 }
 
-fn get_keys_with_git_config_nsec_without_prompts(git_repo: &Repo) -> Result<nostr::Keys> {
-    let nsec = &git_repo
-        .get_git_config_item("nostr.nsec", false)
-        .context("failed get git config")?
-        .context("git config item nostr.nsec doesn't exist")?;
-    if nsec.contains("ncryptsec") {
-        bail!("git config item nostr.nsec is an ncryptsec")
+async fn get_nip46_signer_from_uri_and_key(uri: &str, app_key: &str) -> Result<NostrSigner> {
+    let term = console::Term::stderr();
+    term.write_line("connecting to remote signer...")?;
+    let uri = NostrConnectURI::parse(uri)?;
+    let signer = NostrSigner::nip46(
+        Nip46Signer::new(
+            uri,
+            nostr::Keys::from_str(app_key).context("invalid app key")?,
+            Duration::from_secs(30),
+            None,
+        )
+        .await?,
+    );
+    term.clear_last_lines(1)?;
+    Ok(signer)
+}
+
+async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
+    git_repo: &Repo,
+) -> Result<NostrSigner> {
+    if let Ok(local_nsec) = &git_repo
+        .get_git_config_item("nostr.nsec", Some(false))
+        .context("failed get local git config")?
+        .context("git local config item nostr.nsec doesn't exist")
+    {
+        if local_nsec.contains("ncryptsec") {
+            bail!("git global config item nostr.nsec is an ncryptsec")
+        }
+        Ok(NostrSigner::Keys(
+            nostr::Keys::from_str(local_nsec).context("invalid nsec parameter")?,
+        ))
+    } else if let Ok((uri, app_key)) = get_git_config_bunker_uri_and_app_key(git_repo, Some(false))
+    {
+        get_nip46_signer_from_uri_and_key(&uri, &app_key).await
+    } else if let Ok(global_nsec) = &git_repo
+        .get_git_config_item("nostr.nsec", Some(true))
+        .context("failed get global git config")?
+        .context("git global config item nostr.nsec doesn't exist")
+    {
+        if global_nsec.contains("ncryptsec") {
+            bail!("git global config item nostr.nsec is an ncryptsec")
+        }
+        Ok(NostrSigner::Keys(
+            nostr::Keys::from_str(global_nsec).context("invalid nsec parameter")?,
+        ))
+    } else if let Ok((uri, app_key)) = get_git_config_bunker_uri_and_app_key(git_repo, Some(true)) {
+        get_nip46_signer_from_uri_and_key(&uri, &app_key).await
+    } else {
+        bail!("cannot get nsec or bunker from git config")
     }
-    nostr::Keys::from_str(nsec).context("invalid nsec parameter")
+}
+
+fn get_git_config_bunker_uri_and_app_key(
+    git_repo: &Repo,
+    global: Option<bool>,
+) -> Result<(String, String)> {
+    Ok((
+        git_repo
+            .get_git_config_item("nostr.bunker_url", global)
+            .context("failed get local git config")?
+            .context("git local config item nostr.bunker_url doesn't exist")?
+            .to_string(),
+        git_repo
+            .get_git_config_item("nostr.bunker-app-key", global)
+            .context("failed get local git config")?
+            .context("git local config item nostr.bunker-app-key doesn't exist")?
+            .to_string(),
+    ))
 }
 
 async fn fresh_login(
@@ -175,50 +346,119 @@ async fn fresh_login(
     #[cfg(not(test))] client: Option<&Client>,
     always_save: bool,
 ) -> Result<(NostrSigner, UserRef)> {
+    let mut public_key: Option<PublicKey> = None;
     // prompt for nsec
-    let mut prompt = "login with nsec";
-    let keys = loop {
-        match nostr::Keys::from_str(
-            &Interactor::default()
-                .input(PromptInputParms::default().with_prompt(prompt))
-                .context("failed to get nsec input from interactor")?,
-        ) {
+    let mut prompt = "login with bunker uri / nsec";
+    let signer = loop {
+        let input = Interactor::default()
+            .input(PromptInputParms::default().with_prompt(prompt))
+            .context("failed to get nsec input from interactor")?;
+        match nostr::Keys::from_str(&input) {
             Ok(key) => {
-                break key;
+                if let Err(error) = save_keys(git_repo, &key, always_save) {
+                    println!("{error}");
+                }
+                break NostrSigner::Keys(key);
             }
-            Err(_) => {
-                prompt = "invalid nsec. try again with nsec (or hex private key)";
-            }
+            Err(_) => match NostrConnectURI::parse(&input) {
+                Ok(_) => {
+                    let app_key = Keys::generate().secret_key()?.to_secret_hex();
+                    match get_nip46_signer_from_uri_and_key(&input, &app_key).await {
+                        Ok(signer) => {
+                            let pub_key = fetch_public_key(&signer).await?;
+                            if let Err(error) =
+                                save_bunker(git_repo, &pub_key, &input, &app_key, always_save)
+                            {
+                                println!("{error}");
+                            }
+                            public_key = Some(pub_key);
+                            break signer;
+                        }
+                        Err(_) => {
+                            prompt = "invalid. try again with nostr address / nsec";
+                        }
+                    }
+                }
+                Err(_) => {
+                    prompt = "invalid. try again with nostr address / nsec";
+                }
+            },
         }
     };
+    let public_key = if let Some(public_key) = public_key {
+        public_key
+    } else {
+        signer.public_key().await?
+    };
     // lookup profile
-    // save keys
-    if let Err(error) = save_keys(git_repo, &keys, always_save) {
-        println!("{error}");
-    }
-    let user_ref = get_user_details(&keys.public_key(), client, git_repo).await?;
+    let user_ref = get_user_details(&public_key, client, git_repo).await?;
     print_logged_in_as(&user_ref, client.is_none())?;
-    Ok((NostrSigner::Keys(keys), user_ref))
+    Ok((signer, user_ref))
+}
+
+fn save_bunker(
+    git_repo: &Repo,
+    public_key: &PublicKey,
+    uri: &str,
+    app_key: &str,
+    always_save: bool,
+) -> Result<()> {
+    if always_save
+        || Interactor::default()
+            .confirm(PromptConfirmParms::default().with_prompt("save login details?"))?
+    {
+        let global = !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt("just for this repository?")
+                .with_default(false),
+        )?;
+        let npub = public_key.to_bech32()?;
+        if let Err(error) = save_to_git_config(
+            git_repo,
+            &npub,
+            &None,
+            &Some((uri.to_string(), app_key.to_string())),
+            global,
+        ) {
+            if global {
+                if Interactor::default().confirm(
+                    PromptConfirmParms::default()
+                        .with_prompt("save in repository git config?")
+                        .with_default(true),
+                )? {
+                    save_to_git_config(
+                        git_repo,
+                        &npub,
+                        &None,
+                        &Some((uri.to_string(), app_key.to_string())),
+                        false,
+                    )?;
+                }
+            } else {
+                Err(error)?;
+            }
+        };
+    }
+    Ok(())
 }
 
 fn save_keys(git_repo: &Repo, keys: &nostr::Keys, always_save: bool) -> Result<()> {
-    let store = always_save
+    if always_save
         || Interactor::default()
-            .confirm(PromptConfirmParms::default().with_prompt("save login details?"))?;
+            .confirm(PromptConfirmParms::default().with_prompt("save login details?"))?
+    {
+        let global = !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt("just for this repository?")
+                .with_default(false),
+        )?;
 
-    let global = !Interactor::default().confirm(
-        PromptConfirmParms::default()
-            .with_prompt("just for this repository?")
-            .with_default(false),
-    )?;
+        let encrypt = Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt("require password?")
+                .with_default(false),
+        )?;
 
-    let encrypt = Interactor::default().confirm(
-        PromptConfirmParms::default()
-            .with_prompt("require password?")
-            .with_default(false),
-    )?;
-
-    if store {
         let npub = keys.public_key().to_bech32()?;
         let nsec_string = if encrypt {
             let password = Interactor::default()
@@ -233,22 +473,20 @@ fn save_keys(git_repo: &Repo, keys: &nostr::Keys, always_save: bool) -> Result<(
             keys.secret_key()?.to_bech32()?
         };
 
-        if let Err(error) = git_repo.save_git_config_item("nostr.nsec", &nsec_string, global) {
+        if let Err(error) =
+            save_to_git_config(git_repo, &npub, &Some(nsec_string.clone()), &None, global)
+        {
             if global {
-                println!("failed to edit global git config instead");
                 if Interactor::default().confirm(
                     PromptConfirmParms::default()
                         .with_prompt("save in repository git config?")
                         .with_default(true),
                 )? {
-                    git_repo.save_git_config_item("nostr.nsec", &nsec_string, false)?;
-                    git_repo.save_git_config_item("nostr.npub", &npub, false)?;
+                    save_to_git_config(git_repo, &npub, &Some(nsec_string.clone()), &None, false)?;
                 }
             } else {
-                bail!(error)
+                Err(error)?;
             }
-        } else {
-            git_repo.save_git_config_item("nostr.npub", &npub, global)?;
         };
     };
     Ok(())
@@ -256,7 +494,7 @@ fn save_keys(git_repo: &Repo, keys: &nostr::Keys, always_save: bool) -> Result<(
 
 fn get_config_item(git_repo: &Repo, name: &str) -> Result<String> {
     git_repo
-        .get_git_config_item(name, false)
+        .get_git_config_item(name, None)
         .context("failed get git config")?
         .context(format!("git config item {name} doesn't exist"))
 }
@@ -350,6 +588,10 @@ async fn get_user_details(
         println!("searching for profile and relay updates...");
     }
     let database = SQLiteDatabase::open(if std::env::var("NGITTEST").is_err() {
+        create_dir_all(get_dirs()?.config_dir()).context(format!(
+            "cannot create cache directory in: {:?}",
+            get_dirs()?.config_dir()
+        ))?;
         get_dirs()?.config_dir().join("cache.sqlite")
     } else {
         git_repo.get_path()?.join(".git/test-global-cache.sqlite")

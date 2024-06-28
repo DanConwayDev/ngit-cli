@@ -1761,6 +1761,7 @@ dependencies = [
  "nostr",
  "nostr-database",
  "nostr-sdk",
+ "nostr-signer",
  "nostr-sqlite",
  "once_cell",
  "passwords",

@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), warn(clippy::pedantic))]
+#![allow(clippy::large_futures)]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use anyhow::Result;
@@ -19,6 +20,12 @@ mod sub_commands;
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// remote signer address
+    #[arg(long, global = true)]
+    bunker_uri: Option<String>,
+    /// remote signer app secret key
+    #[arg(long, global = true)]
+    bunker_app_key: Option<String>,
     /// nsec or hex private key
     #[arg(short, long, global = true)]
     nsec: Option<String>,

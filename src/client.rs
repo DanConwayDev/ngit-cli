@@ -19,7 +19,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
-use nostr_sdk::NostrSigner;
+use nostr_sdk::{EventBuilder, NostrSigner};
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
@@ -291,4 +291,33 @@ fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event>
         }
     }
     dedup_events
+}
+
+pub async fn sign_event(event_builder: EventBuilder, signer: &NostrSigner) -> Result<nostr::Event> {
+    if signer.r#type().eq(&nostr_signer::NostrSignerType::NIP46) {
+        let term = console::Term::stderr();
+        term.write_line("signing event with remote signer...")?;
+        let event = signer
+            .sign_event_builder(event_builder)
+            .await
+            .context("failed to sign event")?;
+        term.clear_last_lines(1)?;
+        Ok(event)
+    } else {
+        signer
+            .sign_event_builder(event_builder)
+            .await
+            .context("failed to sign event")
+    }
+}
+
+pub async fn fetch_public_key(signer: &NostrSigner) -> Result<nostr::PublicKey> {
+    let term = console::Term::stderr();
+    term.write_line("fetching npub from remote signer...")?;
+    let public_key = signer
+        .public_key()
+        .await
+        .context("failed to get npub from remote signer")?;
+    term.clear_last_lines(1)?;
+    Ok(public_key)
 }

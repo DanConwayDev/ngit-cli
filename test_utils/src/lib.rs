@@ -708,13 +708,14 @@ impl CliTester {
             formatter: ColorfulTheme::default(),
         }
     }
-    pub fn new_with_timeout<I, S>(timeout_ms: u64, args: I) -> Self
+    pub fn new_with_timeout_from_dir<I, S>(timeout_ms: u64, dir: &PathBuf, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         Self {
-            rexpect_session: rexpect_with(args, timeout_ms).expect("rexpect to spawn new process"),
+            rexpect_session: rexpect_with_from_dir(dir, args, timeout_ms)
+                .expect("rexpect to spawn new process"),
             formatter: ColorfulTheme::default(),
         }
     }

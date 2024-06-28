@@ -17,7 +17,16 @@ pub struct SubCommandArgs {
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
     if command_args.offline {
-        login::launch(&git_repo, &args.nsec, &args.password, None, true).await?;
+        login::launch(
+            &git_repo,
+            &args.bunker_uri,
+            &args.bunker_app_key,
+            &args.nsec,
+            &args.password,
+            None,
+            true,
+        )
+        .await?;
         Ok(())
     } else {
         #[cfg(not(test))]
@@ -25,7 +34,16 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         #[cfg(test)]
         let client = <MockConnect as std::default::Default>::default();
 
-        login::launch(&git_repo, &args.nsec, &args.password, Some(&client), true).await?;
+        login::launch(
+            &git_repo,
+            &args.bunker_uri,
+            &args.bunker_app_key,
+            &args.nsec,
+            &args.password,
+            Some(&client),
+            true,
+        )
+        .await?;
         client.disconnect().await?;
         Ok(())
     }

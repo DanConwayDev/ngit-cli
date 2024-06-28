@@ -11,7 +11,7 @@ use crate::client::Client;
 use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::Connect,
+    client::{sign_event, Connect},
     git::{Repo, RepoActions},
 };
 
@@ -95,8 +95,8 @@ pub static REPO_REF_KIND: u16 = 30_617;
 
 impl RepoRef {
     pub async fn to_event(&self, signer: &NostrSigner) -> Result<nostr::Event> {
-        signer
-            .sign_event_builder(nostr_sdk::EventBuilder::new(
+        sign_event(
+            nostr_sdk::EventBuilder::new(
                 nostr::event::Kind::Custom(REPO_REF_KIND),
                 "",
                 [
@@ -152,9 +152,11 @@ impl RepoRef {
                     // code languages and hashtags
                 ]
                 .concat(),
-            ))
-            .await
-            .context("failed to create repository reference event")
+            ),
+            signer,
+        )
+        .await
+        .context("failed to create repository reference event")
     }
 }
 

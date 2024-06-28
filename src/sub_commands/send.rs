@@ -19,7 +19,7 @@ use crate::{
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
     },
-    client::Connect,
+    client::{sign_event, Connect},
     git::{Repo, RepoActions},
     login,
     repo_ref::{self, RepoRef, REPO_REF_KIND},
@@ -180,6 +180,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     };
     let (signer, user_ref) = login::launch(
         &git_repo,
+        &cli_args.bunker_uri,
+        &cli_args.bunker_app_key,
         &cli_args.nsec,
         &cli_args.password,
         Some(&client),
@@ -593,7 +595,7 @@ pub async fn generate_cover_letter_and_patch_events(
     let mut events = vec![];
 
     if let Some((title, description)) = cover_letter_title_description {
-        events.push(signer.sign_event_builder(EventBuilder::new(
+        events.push(sign_event(EventBuilder::new(
         nostr::event::Kind::Custom(PATCH_KIND),
         format!(
             "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
@@ -656,7 +658,7 @@ pub async fn generate_cover_letter_and_patch_events(
                 .map(|pk| Tag::public_key(*pk))
                 .collect(),
         ].concat(),
-    )).await
+    ), signer).await
     .context("failed to create cover-letter event")?);
     }
 
@@ -883,7 +885,7 @@ pub async fn generate_patch_event(
         .context("failed to get parent commit")?;
     let relay_hint = repo_ref.relays.first().map(nostr::UncheckedUrl::from);
 
-    signer.sign_event_builder(EventBuilder::new(
+    sign_event(EventBuilder::new(
         nostr::event::Kind::Custom(PATCH_KIND),
         git_repo
             .make_patch_from_commit(commit,&series_count)
@@ -1000,7 +1002,7 @@ pub async fn generate_patch_event(
             ],
         ]
         .concat(),
-    )).await
+    ), signer).await
     .context("failed to sign event")
 }
 // TODO
