@@ -3,7 +3,7 @@ use git::GitTestRepo;
 use serial_test::serial;
 use test_utils::*;
 
-static EXPECTED_NSEC_PROMPT: &str = "login with bunker uri / nsec";
+static EXPECTED_NSEC_PROMPT: &str = "login with nostr address / nsec";
 static EXPECTED_LOCAL_REPOSITORY_PROMPT: &str = "just for this repository?";
 static EXPECTED_REQUIRE_PASSWORD_PROMPT: &str = "require password?";
 static EXPECTED_SET_PASSWORD_PROMPT: &str = "encrypt with password";
@@ -909,7 +909,8 @@ mod with_offline_flag {
 
             #[test]
             fn prompts_for_nsec_until_valid() -> Result<()> {
-                let invalid_nsec_response = "invalid. try again with nostr address / nsec";
+                let invalid_nsec_response =
+                    "invalid. try again with nostr address / bunker uri / nsec";
 
                 let test_repo = GitTestRepo::default();
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);

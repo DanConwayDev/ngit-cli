@@ -1,7 +1,10 @@
 use std::{fs::create_dir_all, str::FromStr, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use nostr::{nips::nip46::NostrConnectURI, PublicKey};
+use nostr::{
+    nips::{nip05::get_nip46, nip46::NostrConnectURI},
+    PublicKey,
+};
 use nostr_database::Order;
 use nostr_sdk::{
     Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrDatabase, NostrSigner, SingleLetterTag,
@@ -348,41 +351,45 @@ async fn fresh_login(
 ) -> Result<(NostrSigner, UserRef)> {
     let mut public_key: Option<PublicKey> = None;
     // prompt for nsec
-    let mut prompt = "login with bunker uri / nsec";
+    let mut prompt = "login with nostr address / nsec";
     let signer = loop {
         let input = Interactor::default()
             .input(PromptInputParms::default().with_prompt(prompt))
             .context("failed to get nsec input from interactor")?;
-        match nostr::Keys::from_str(&input) {
-            Ok(key) => {
-                if let Err(error) = save_keys(git_repo, &key, always_save) {
+        if let Ok(keys) = nostr::Keys::from_str(&input) {
+            if let Err(error) = save_keys(git_repo, &keys, always_save) {
+                println!("{error}");
+            }
+            break NostrSigner::Keys(keys);
+        }
+        let uri = if let Ok(uri) = NostrConnectURI::parse(&input) {
+            uri
+        } else if input.contains('@') {
+            if let Ok(uri) = fetch_nip46_uri_from_nip05(&input).await {
+                uri
+            } else {
+                prompt = "failed. try again with nostr address / bunker uri / nsec";
+                continue;
+            }
+        } else {
+            prompt = "invalid. try again with nostr address / bunker uri / nsec";
+            continue;
+        };
+        let app_key = Keys::generate().secret_key()?.to_secret_hex();
+        match get_nip46_signer_from_uri_and_key(&uri.to_string(), &app_key).await {
+            Ok(signer) => {
+                let pub_key = fetch_public_key(&signer).await?;
+                if let Err(error) =
+                    save_bunker(git_repo, &pub_key, &uri.to_string(), &app_key, always_save)
+                {
                     println!("{error}");
                 }
-                break NostrSigner::Keys(key);
+                public_key = Some(pub_key);
+                break signer;
             }
-            Err(_) => match NostrConnectURI::parse(&input) {
-                Ok(_) => {
-                    let app_key = Keys::generate().secret_key()?.to_secret_hex();
-                    match get_nip46_signer_from_uri_and_key(&input, &app_key).await {
-                        Ok(signer) => {
-                            let pub_key = fetch_public_key(&signer).await?;
-                            if let Err(error) =
-                                save_bunker(git_repo, &pub_key, &input, &app_key, always_save)
-                            {
-                                println!("{error}");
-                            }
-                            public_key = Some(pub_key);
-                            break signer;
-                        }
-                        Err(_) => {
-                            prompt = "invalid. try again with nostr address / nsec";
-                        }
-                    }
-                }
-                Err(_) => {
-                    prompt = "invalid. try again with nostr address / nsec";
-                }
-            },
+            Err(_) => {
+                prompt = "failed. try again with nostr address / bunker uri / nsec";
+            }
         }
     };
     let public_key = if let Some(public_key) = public_key {
@@ -394,6 +401,30 @@ async fn fresh_login(
     let user_ref = get_user_details(&public_key, client, git_repo).await?;
     print_logged_in_as(&user_ref, client.is_none())?;
     Ok((signer, user_ref))
+}
+
+pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
+    let term = console::Term::stderr();
+    term.write_line("contacting login service provider...")?;
+    let res = get_nip46(&nip05, None).await;
+    term.clear_last_lines(1)?;
+    match res {
+        Ok((signer_public_key, relays)) => {
+            if relays.is_empty() {
+                println!("nip05 provider isn't configured for remote login");
+                bail!("nip05 provider isn't configured for remote login")
+            }
+            Ok(NostrConnectURI::Bunker {
+                signer_public_key,
+                relays,
+                secret: None,
+            })
+        }
+        Err(error) => {
+            println!("error contacting login service provider: {error}");
+            Err(error).context("error contacting login service provider")
+        }
+    }
 }
 
 fn save_bunker(
