@@ -85,6 +85,8 @@ impl TryFrom<nostr::Event> for RepoRef {
                     .context("invalid repository event")?,
                 );
             }
+        } else {
+            r.maintainers = vec![event.pubkey];
         }
 
         Ok(r)
