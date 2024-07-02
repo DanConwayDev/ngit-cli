@@ -101,7 +101,8 @@ pub static TEST_KEY_2_NSEC: &str =
     "nsec1ypglg6nj6ep0g2qmyfqcv2al502gje3jvpwye6mthmkvj93tqkesknv6qm";
 pub static TEST_KEY_2_NPUB: &str =
     "npub1h2yz2eh0798nh25hvypenrz995nla9dktfuk565ljf3ghnkhdljsul834e";
-
+pub static TEST_KEY_2_PUBKEY_HEX: &str =
+    "ba882566eff14f3baa976103998c452d27fe95b65a796a6a9f92628bced76fe5";
 pub static TEST_KEY_2_DISPLAY_NAME: &str = "carole";
 pub static TEST_KEY_2_ENCRYPTED: &str = "...2";
 pub static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =

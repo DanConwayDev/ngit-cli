@@ -603,15 +603,13 @@ pub async fn generate_cover_letter_and_patch_events(
             commits.len()
         ),
         [
+            repo_ref.maintainers.iter().map(|m| Tag::coordinate(Coordinate {
+                kind: nostr::Kind::Custom(REPO_REF_KIND),
+                public_key: *m,
+                identifier: repo_ref.identifier.to_string(),
+                relays: repo_ref.relays.clone(),
+            })).collect::<Vec<Tag>>(),
             vec![
-                // TODO: why not tag all maintainer identifiers?
-                Tag::coordinate(Coordinate {
-                    kind: nostr::Kind::Custom(REPO_REF_KIND),
-                    public_key: *repo_ref.maintainers.first()
-                        .context("repo reference should always have at least one maintainer")?,
-                    identifier: repo_ref.identifier.to_string(),
-                    relays: repo_ref.relays.clone(),
-                }),
                 Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
                 Tag::hashtag("cover-letter"),
                 Tag::custom(
@@ -885,124 +883,142 @@ pub async fn generate_patch_event(
         .context("failed to get parent commit")?;
     let relay_hint = repo_ref.relays.first().map(nostr::UncheckedUrl::from);
 
-    sign_event(EventBuilder::new(
-        nostr::event::Kind::Custom(PATCH_KIND),
-        git_repo
-            .make_patch_from_commit(commit,&series_count)
-            .context(format!("cannot make patch for commit {commit}"))?,
-        [
-            vec![
-                Tag::coordinate(Coordinate {
-                    kind: nostr::Kind::Custom(REPO_REF_KIND),
-                    public_key: *repo_ref.maintainers.first()
-                        .context("repo reference should always have at least one maintainer - the issuer of the repo event")
-                        ?,
-                    identifier: repo_ref.identifier.to_string(),
-                    relays: repo_ref.relays.clone(),
-                }),
-                Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
-                // commit id reference is a trade-off. its now
-                // unclear which one is the root commit id but it
-                // enables easier location of code comments againt
-                // code that makes it into the main branch, assuming
-                // the commit id is correct
-                Tag::from_standardized(TagStandard::Reference(commit.to_string())),
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                    vec![format!("git patch: {}", git_repo.get_commit_message_summary(commit).unwrap_or_default())],
-                ),
-            ],
-
-            if let Some(thread_event_id) = thread_event_id {
-                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                    event_id: thread_event_id,
-                    relay_url: relay_hint.clone(),
-                    marker: Some(Marker::Root),
-                    public_key: None,
-                })]
-            } else if let Some(event_ref) = root_proposal_id.clone() {
+    sign_event(
+        EventBuilder::new(
+            nostr::event::Kind::Custom(PATCH_KIND),
+            git_repo
+                .make_patch_from_commit(commit, &series_count)
+                .context(format!("cannot make patch for commit {commit}"))?,
+            [
+                repo_ref
+                    .maintainers
+                    .iter()
+                    .map(|m| {
+                        Tag::coordinate(Coordinate {
+                            kind: nostr::Kind::Custom(REPO_REF_KIND),
+                            public_key: *m,
+                            identifier: repo_ref.identifier.to_string(),
+                            relays: repo_ref.relays.clone(),
+                        })
+                    })
+                    .collect::<Vec<Tag>>(),
                 vec![
-                    Tag::hashtag("root"),
-                    Tag::hashtag("revision-root"),
-                    // TODO check if id is for a root proposal (perhaps its for an issue?)
-                    event_tag_from_nip19_or_hex(&event_ref,"proposal", Marker::Reply, false, false)?,
-                ]
-            } else {
-                vec![
-                    Tag::hashtag("root"),
-                ]
-            },
-            mentions.to_vec(),
-            if let Some(id) = parent_patch_event_id {
-                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                    event_id: id,
-                    relay_url: relay_hint.clone(),
-                    marker: Some(Marker::Reply),
-                    public_key: None,
-                })]
-            } else {
-                vec![]
-            },
-            // see comment on branch names in cover letter event creation
-            if let Some(branch_name) = branch_name {
-                if thread_event_id.is_none() {
+                    Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
+                    // commit id reference is a trade-off. its now
+                    // unclear which one is the root commit id but it
+                    // enables easier location of code comments againt
+                    // code that makes it into the main branch, assuming
+                    // the commit id is correct
+                    Tag::from_standardized(TagStandard::Reference(commit.to_string())),
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                        vec![format!(
+                            "git patch: {}",
+                            git_repo
+                                .get_commit_message_summary(commit)
+                                .unwrap_or_default()
+                        )],
+                    ),
+                ],
+                if let Some(thread_event_id) = thread_event_id {
+                    vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
+                        event_id: thread_event_id,
+                        relay_url: relay_hint.clone(),
+                        marker: Some(Marker::Root),
+                        public_key: None,
+                    })]
+                } else if let Some(event_ref) = root_proposal_id.clone() {
                     vec![
-                        Tag::custom(
+                        Tag::hashtag("root"),
+                        Tag::hashtag("revision-root"),
+                        // TODO check if id is for a root proposal (perhaps its for an issue?)
+                        event_tag_from_nip19_or_hex(
+                            &event_ref,
+                            "proposal",
+                            Marker::Reply,
+                            false,
+                            false,
+                        )?,
+                    ]
+                } else {
+                    vec![Tag::hashtag("root")]
+                },
+                mentions.to_vec(),
+                if let Some(id) = parent_patch_event_id {
+                    vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
+                        event_id: id,
+                        relay_url: relay_hint.clone(),
+                        marker: Some(Marker::Reply),
+                        public_key: None,
+                    })]
+                } else {
+                    vec![]
+                },
+                // see comment on branch names in cover letter event creation
+                if let Some(branch_name) = branch_name {
+                    if thread_event_id.is_none() {
+                        vec![Tag::custom(
                             TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
                             vec![branch_name.to_string()],
-                        )
-                    ]
-                }
-                else { vec![]}
-            }
-            else { vec![]},
-            // whilst it is in nip34 draft to tag the maintainers
-            // I'm not sure it is a good idea because if they are
-            // interested in all patches then their specialised
-            // client should subscribe to patches tagged with the
-            // repo reference. maintainers of large repos will not
-            // be interested in every patch.
-            repo_ref.maintainers
+                        )]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                },
+                // whilst it is in nip34 draft to tag the maintainers
+                // I'm not sure it is a good idea because if they are
+                // interested in all patches then their specialised
+                // client should subscribe to patches tagged with the
+                // repo reference. maintainers of large repos will not
+                // be interested in every patch.
+                repo_ref
+                    .maintainers
                     .iter()
                     .map(|pk| Tag::public_key(*pk))
                     .collect(),
-            vec![
-                // a fallback is now in place to extract this from the patch
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
-                    vec![commit.to_string()],
-                ),
-                // this is required as patches cannot be relied upon to include the 'base commit'
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("parent-commit")),
-                    vec![commit_parent.to_string()],
-                ),
-                // this is required to ensure the commit id matches
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("commit-pgp-sig")),
-                    vec![
-                        git_repo
-                            .extract_commit_pgp_signature(commit)
-                            .unwrap_or_default(),
+                vec![
+                    // a fallback is now in place to extract this from the patch
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
+                        vec![commit.to_string()],
+                    ),
+                    // this is required as patches cannot be relied upon to include the 'base
+                    // commit'
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("parent-commit")),
+                        vec![commit_parent.to_string()],
+                    ),
+                    // this is required to ensure the commit id matches
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("commit-pgp-sig")),
+                        vec![
+                            git_repo
+                                .extract_commit_pgp_signature(commit)
+                                .unwrap_or_default(),
                         ],
-                ),
-                // removing description tag will not cause anything to break
-                Tag::from_standardized(nostr_sdk::TagStandard::Description(
-                    git_repo.get_commit_message(commit)?.to_string()
-                )),
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("author")),
-                    git_repo.get_commit_author(commit)?,
-                ),
-                // this is required to ensure the commit id matches
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("committer")),
-                    git_repo.get_commit_comitter(commit)?,
-                ),
-            ],
-        ]
-        .concat(),
-    ), signer).await
+                    ),
+                    // removing description tag will not cause anything to break
+                    Tag::from_standardized(nostr_sdk::TagStandard::Description(
+                        git_repo.get_commit_message(commit)?.to_string(),
+                    )),
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("author")),
+                        git_repo.get_commit_author(commit)?,
+                    ),
+                    // this is required to ensure the commit id matches
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("committer")),
+                        git_repo.get_commit_comitter(commit)?,
+                    ),
+                ],
+            ]
+            .concat(),
+        ),
+        signer,
+    )
+    .await
     .context("failed to sign event")
 }
 // TODO

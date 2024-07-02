@@ -375,7 +375,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
 
         #[tokio::test]
         #[serial]
-        async fn a_tag_for_repo_event() -> Result<()> {
+        async fn a_tag_for_repo_event_of_each_maintainer() -> Result<()> {
             let (_, _, r53, r55, r56) = prep_run_create_proposal(true).await?;
             for relay in [&r53, &r55, &r56] {
                 let cover_letter_event: &nostr::Event =
@@ -383,6 +383,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                 assert!(cover_letter_event.iter_tags().any(|t| t.as_vec()[0].eq("a")
                     && t.as_vec()[1].eq(&format!(
                         "{REPOSITORY_KIND}:{TEST_KEY_1_PUBKEY_HEX}:{}",
+                        generate_repo_ref_event().identifier().unwrap()
+                    ))));
+                assert!(cover_letter_event.iter_tags().any(|t| t.as_vec()[0].eq("a")
+                    && t.as_vec()[1].eq(&format!(
+                        "{REPOSITORY_KIND}:{TEST_KEY_2_PUBKEY_HEX}:{}",
                         generate_repo_ref_event().identifier().unwrap()
                     ))));
             }
@@ -564,11 +569,18 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
 
         #[tokio::test]
         #[serial]
-        async fn a_tag_for_repo_event() -> Result<()> {
+        async fn a_tag_for_repo_event_of_each_maintainer() -> Result<()> {
             assert!(prep().await?.tags.iter().any(|t| {
                 t.as_vec()[0].eq("a")
                     && t.as_vec()[1].eq(&format!(
                         "{REPOSITORY_KIND}:{TEST_KEY_1_PUBKEY_HEX}:{}",
+                        generate_repo_ref_event().identifier().unwrap()
+                    ))
+            }));
+            assert!(prep().await?.tags.iter().any(|t| {
+                t.as_vec()[0].eq("a")
+                    && t.as_vec()[1].eq(&format!(
+                        "{REPOSITORY_KIND}:{TEST_KEY_2_PUBKEY_HEX}:{}",
                         generate_repo_ref_event().identifier().unwrap()
                     ))
             }));
