@@ -331,9 +331,9 @@ fn get_git_config_bunker_uri_and_app_key(
 ) -> Result<(String, String)> {
     Ok((
         git_repo
-            .get_git_config_item("nostr.bunker_url", global)
+            .get_git_config_item("nostr.bunker-uri", global)
             .context("failed get local git config")?
-            .context("git local config item nostr.bunker_url doesn't exist")?
+            .context("git local config item nostr.bunker-uri doesn't exist")?
             .to_string(),
         git_repo
             .get_git_config_item("nostr.bunker-app-key", global)
