@@ -19,7 +19,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
 use nostr::Event;
-use nostr_sdk::{EventBuilder, NostrSigner};
+use nostr_sdk::{prelude::RelayLimits, EventBuilder, NostrSigner, Options};
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
@@ -83,7 +83,9 @@ impl Connect for Client {
             vec!["wss://nostr.mutinywallet.com".to_string()]
         };
         Client {
-            client: nostr_sdk::Client::new(&nostr::Keys::generate()),
+            client: nostr_sdk::ClientBuilder::new()
+                .opts(Options::new().relay_limits(RelayLimits::disable()))
+                .build(),
             fallback_relays,
             more_fallback_relays,
             blaster_relays,
@@ -92,6 +94,7 @@ impl Connect for Client {
     fn new(opts: Params) -> Self {
         Client {
             client: nostr_sdk::ClientBuilder::new()
+                .opts(Options::new().relay_limits(RelayLimits::disable()))
                 .signer(&opts.keys.unwrap_or(nostr::Keys::generate()))
                 // .database(
                 //     SQLiteDatabase::open(get_dirs()?.config_dir().join("cache.sqlite")).await?,
