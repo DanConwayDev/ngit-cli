@@ -46,39 +46,134 @@ pub async fn launch() -> Result<()> {
 
     println!("finding proposals...");
 
-    let proposal_events_and_revisions: Vec<nostr::Event> =
-        find_proposal_events(&client, &repo_ref, &root_commit.to_string()).await?;
+    let proposal_events_and_revisions_and_statuses: Vec<nostr::Event> =
+        find_proposal_and_status_events(&client, &repo_ref, &root_commit.to_string()).await?;
 
-    if proposal_events_and_revisions.is_empty() {
+    if proposal_events_and_revisions_and_statuses.is_empty() {
         println!("no proposals found... create one? try `ngit send`");
         return Ok(());
     }
-    let proposal_events: Vec<&nostr::Event> = proposal_events_and_revisions
+    let proposal_events: Vec<&nostr::Event> = proposal_events_and_revisions_and_statuses
         .iter()
-        .filter(|e| !event_is_revision_root(e))
+        .filter(|e| !event_is_revision_root(e) && e.kind().as_u16().eq(&PATCH_KIND))
         .collect::<Vec<&nostr::Event>>();
 
+    let mut open_proposals: Vec<&nostr::Event> = vec![];
+    let mut draft_proposals: Vec<&nostr::Event> = vec![];
+    let mut closed_proposals: Vec<&nostr::Event> = vec![];
+    let mut applied_proposals: Vec<&nostr::Event> = vec![];
+
+    for proposal in &proposal_events {
+        let status = if let Some(e) = proposal_events_and_revisions_and_statuses
+            .iter()
+            .filter(|e| {
+                status_kinds().contains(&e.kind())
+                    && e.iter_tags()
+                        .any(|t| t.as_vec()[1].eq(&proposal.id.to_string()))
+            })
+            .collect::<Vec<&nostr::Event>>()
+            .first()
+        {
+            e.kind().as_u16()
+        } else {
+            STATUS_KIND_OPEN
+        };
+        if status.eq(&STATUS_KIND_OPEN) {
+            open_proposals.push(proposal);
+        } else if status.eq(&STATUS_KIND_CLOSED) {
+            closed_proposals.push(proposal);
+        } else if status.eq(&STATUS_KIND_DRAFT) {
+            draft_proposals.push(proposal);
+        } else if status.eq(&STATUS_KIND_APPLIED) {
+            applied_proposals.push(proposal);
+        }
+    }
+
+    if proposal_events_and_revisions_and_statuses.is_empty() {
+        println!("no open proposals found... create one? try `ngit send`");
+        return Ok(());
+    }
+
+    let mut selected_status = STATUS_KIND_OPEN;
+
     loop {
+        let proposals_for_status = if selected_status == STATUS_KIND_OPEN {
+            &open_proposals
+        } else if selected_status == STATUS_KIND_DRAFT {
+            &draft_proposals
+        } else if selected_status == STATUS_KIND_CLOSED {
+            &closed_proposals
+        } else if selected_status == STATUS_KIND_APPLIED {
+            &applied_proposals
+        } else {
+            &proposal_events
+        };
+
+        let prompt = if proposal_events.len().eq(&open_proposals.len()) {
+            "all proposals"
+        } else if selected_status == STATUS_KIND_OPEN {
+            if open_proposals.is_empty() {
+                "proposals menu"
+            } else {
+                "open proposals"
+            }
+        } else if selected_status == STATUS_KIND_DRAFT {
+            "draft proposals"
+        } else if selected_status == STATUS_KIND_CLOSED {
+            "closed proposals"
+        } else {
+            "applied proposals"
+        };
+
+        let mut choices: Vec<String> = proposals_for_status
+            .iter()
+            .map(|e| {
+                if let Ok(cl) = event_to_cover_letter(e) {
+                    cl.title
+                } else if let Ok(msg) = tag_value(e, "description") {
+                    msg.split('\n').collect::<Vec<&str>>()[0].to_string()
+                } else {
+                    e.id.to_string()
+                }
+            })
+            .collect();
+
+        if !selected_status.eq(&STATUS_KIND_OPEN) && open_proposals.len().gt(&0) {
+            choices.push(format!("({}) Open proposals...", open_proposals.len()));
+        }
+        if !selected_status.eq(&STATUS_KIND_DRAFT) && draft_proposals.len().gt(&0) {
+            choices.push(format!("({}) Draft proposals...", draft_proposals.len()));
+        }
+        if !selected_status.eq(&STATUS_KIND_CLOSED) && closed_proposals.len().gt(&0) {
+            choices.push(format!("({}) Closed proposals...", closed_proposals.len()));
+        }
+        if !selected_status.eq(&STATUS_KIND_APPLIED) && applied_proposals.len().gt(&0) {
+            choices.push(format!(
+                "({}) Applied proposals...",
+                applied_proposals.len()
+            ));
+        }
+
         let selected_index = Interactor::default().choice(
             PromptChoiceParms::default()
-                .with_prompt("all proposals")
-                .with_choices(
-                    proposal_events
-                        .iter()
-                        .map(|e| {
-                            if let Ok(cl) = event_to_cover_letter(e) {
-                                cl.title
-                            } else if let Ok(msg) = tag_value(e, "description") {
-                                msg.split('\n').collect::<Vec<&str>>()[0].to_string()
-                            } else {
-                                e.id.to_string()
-                            }
-                        })
-                        .collect(),
-                ),
+                .with_prompt(prompt)
+                .with_choices(choices.clone()),
         )?;
 
-        let cover_letter = event_to_cover_letter(proposal_events[selected_index])
+        if (selected_index + 1).gt(&proposals_for_status.len()) {
+            if choices[selected_index].contains("Open") {
+                selected_status = STATUS_KIND_OPEN;
+            } else if choices[selected_index].contains("Draft") {
+                selected_status = STATUS_KIND_DRAFT;
+            } else if choices[selected_index].contains("Closed") {
+                selected_status = STATUS_KIND_CLOSED;
+            } else if choices[selected_index].contains("Applied") {
+                selected_status = STATUS_KIND_APPLIED;
+            }
+            continue;
+        }
+
+        let cover_letter = event_to_cover_letter(proposals_for_status[selected_index])
             .context("cannot extract proposal details from proposal root event")?;
 
         println!("finding commits...");
@@ -86,14 +181,16 @@ pub async fn launch() -> Result<()> {
         let commits_events: Vec<nostr::Event> = find_commits_for_proposal_root_events(
             &client,
             &[
-                vec![proposal_events[selected_index]],
-                proposal_events_and_revisions
+                vec![proposals_for_status[selected_index]],
+                proposal_events_and_revisions_and_statuses
                     .iter()
                     .filter(|e| {
-                        e.tags.iter().any(|t| {
-                            t.as_vec().len().gt(&1)
-                                && t.as_vec()[1].eq(&proposal_events[selected_index].id.to_string())
-                        })
+                        e.kind.as_u16().eq(&PATCH_KIND)
+                            && e.tags.iter().any(|t| {
+                                t.as_vec().len().gt(&1)
+                                    && t.as_vec()[1]
+                                        .eq(&proposals_for_status[selected_index].id.to_string())
+                            })
                     })
                     .collect::<Vec<&nostr::Event>>(),
             ]
@@ -718,45 +815,64 @@ pub fn get_most_recent_patch_with_ancestors(
     Ok(res)
 }
 
-pub async fn find_proposal_events(
+pub static STATUS_KIND_OPEN: u16 = 1630;
+pub static STATUS_KIND_APPLIED: u16 = 1631;
+pub static STATUS_KIND_CLOSED: u16 = 1632;
+pub static STATUS_KIND_DRAFT: u16 = 1633;
+
+fn status_kinds() -> Vec<nostr::Kind> {
+    vec![
+        nostr::Kind::Custom(STATUS_KIND_OPEN),
+        nostr::Kind::Custom(STATUS_KIND_APPLIED),
+        nostr::Kind::Custom(STATUS_KIND_CLOSED),
+        nostr::Kind::Custom(STATUS_KIND_DRAFT),
+    ]
+}
+
+pub async fn find_proposal_and_status_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     repo_ref: &RepoRef,
     root_commit: &str,
 ) -> Result<Vec<nostr::Event>> {
+    let repo_tags_filter = nostr::Filter::default().custom_tag(
+        nostr::SingleLetterTag::lowercase(nostr::Alphabet::A),
+        repo_ref
+            .maintainers
+            .iter()
+            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
+    );
     let mut proposals = client
         .get_events(
             repo_ref.relays.clone(),
             vec![
-                nostr::Filter::default()
+                repo_tags_filter
+                    .clone()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
                     .custom_tag(
                         nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
                         vec!["root"],
-                    )
-                    .custom_tag(
-                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::A),
-                        repo_ref
-                            .maintainers
-                            .iter()
-                            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
                     ),
                 // also pick up proposals from the same repo but no target at our maintainers repo
                 // events
                 nostr::Filter::default()
+                    .reference(root_commit)
                     .kind(nostr::Kind::Custom(PATCH_KIND))
                     .custom_tag(
                         nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
                         vec!["root"],
-                    )
-                    .reference(root_commit),
+                    ),
+                repo_tags_filter.clone().kinds(status_kinds().clone()),
+                nostr::Filter::default()
+                    .reference(root_commit)
+                    .kinds(status_kinds().clone()),
             ],
         )
         .await
         .context("cannot get proposal events")?
         .iter()
         .filter(|e| {
-            event_is_patch_set_root(e)
+            (event_is_patch_set_root(e) || status_kinds().contains(&e.kind()))
                 && (e
                     .tags
                     .iter()

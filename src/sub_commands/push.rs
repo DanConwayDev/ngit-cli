@@ -13,10 +13,13 @@ use crate::{
     sub_commands::{
         self,
         list::{
-            find_commits_for_proposal_root_events, find_proposal_events, get_commit_id_from_patch,
-            get_most_recent_patch_with_ancestors, tag_value,
+            find_commits_for_proposal_root_events, find_proposal_and_status_events,
+            get_commit_id_from_patch, get_most_recent_patch_with_ancestors, tag_value,
         },
-        send::{event_is_revision_root, event_to_cover_letter, generate_patch_event, send_events},
+        send::{
+            event_is_revision_root, event_to_cover_letter, generate_patch_event, send_events,
+            PATCH_KIND,
+        },
     },
     Cli,
 };
@@ -207,13 +210,13 @@ pub async fn fetch_proposal_root_and_most_recent_patch_chain(
     println!("finding proposal root event...");
 
     let proposal_events_and_revisions: Vec<nostr::Event> =
-        find_proposal_events(client, repo_ref, &root_commit.to_string())
+        find_proposal_and_status_events(client, repo_ref, &root_commit.to_string())
             .await
             .context("cannot get proposal events for repo")?;
 
     let proposal_events: Vec<&nostr::Event> = proposal_events_and_revisions
         .iter()
-        .filter(|e| !event_is_revision_root(e))
+        .filter(|e| !event_is_revision_root(e) && e.kind().as_u16().eq(&PATCH_KIND))
         .collect::<Vec<&nostr::Event>>();
 
     let proposal_root_event: &nostr::Event = proposal_events
