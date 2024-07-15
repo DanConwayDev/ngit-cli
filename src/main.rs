@@ -39,6 +39,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// update cache with latest updates from nostr
+    Fetch(sub_commands::fetch::SubCommandArgs),
     /// signal you are this repo's maintainer accepting proposals via nostr
     Init(sub_commands::init::SubCommandArgs),
     /// issue commits as a proposal
@@ -57,6 +59,7 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Commands::Fetch(args) => sub_commands::fetch::launch(&cli, args).await,
         Commands::Login(args) => sub_commands::login::launch(&cli, args).await,
         Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
         Commands::Send(args) => sub_commands::send::launch(&cli, args).await,

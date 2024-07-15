@@ -820,7 +820,7 @@ pub static STATUS_KIND_APPLIED: u16 = 1631;
 pub static STATUS_KIND_CLOSED: u16 = 1632;
 pub static STATUS_KIND_DRAFT: u16 = 1633;
 
-fn status_kinds() -> Vec<nostr::Kind> {
+pub fn status_kinds() -> Vec<nostr::Kind> {
     vec![
         nostr::Kind::Custom(STATUS_KIND_OPEN),
         nostr::Kind::Custom(STATUS_KIND_APPLIED),

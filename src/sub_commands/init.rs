@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use nostr::{FromBech32, PublicKey, ToBech32};
 
@@ -291,7 +293,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     println!("publishing repostory reference...");
 
     let repo_event = RepoRef {
-        identifier,
+        identifier: identifier.clone(),
         name,
         description,
         root_commit: earliest_unique_commit,
@@ -299,6 +301,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         web,
         relays: relays.clone(),
         maintainers: maintainers.clone(),
+        events: HashMap::new(),
     }
     .to_event(&signer)
     .await?;
@@ -322,7 +325,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         }
         Err(_) => true,
     } {
-        save_repo_config_to_yaml(&git_repo, maintainers.clone(), relays.clone())?;
+        save_repo_config_to_yaml(
+            &git_repo,
+            identifier.clone(),
+            maintainers.clone(),
+            relays.clone(),
+        )?;
         println!(
             "maintainers.yaml {}. commit and push.",
             if repo_config_result.is_err() {

@@ -1,8 +1,16 @@
-use std::{fs::File, io::BufReader, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::BufReader,
+    str::FromStr,
+};
 
 use anyhow::{bail, Context, Result};
-use nostr::{nips::nip19::Nip19, FromBech32, PublicKey, Tag, TagStandard, ToBech32};
-use nostr_sdk::NostrSigner;
+use nostr::{
+    nips::{nip01::Coordinate, nip19::Nip19},
+    FromBech32, PublicKey, Tag, TagStandard, ToBech32,
+};
+use nostr_sdk::{Kind, NostrSigner, Timestamp};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -11,7 +19,7 @@ use crate::client::Client;
 use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::{sign_event, Connect},
+    client::{get_event_from_cache, get_event_from_global_cache, sign_event, Connect},
     git::{Repo, RepoActions},
 };
 
@@ -25,6 +33,7 @@ pub struct RepoRef {
     pub web: Vec<String>,
     pub relays: Vec<String>,
     pub maintainers: Vec<PublicKey>,
+    pub events: HashMap<Coordinate, nostr::Event>,
     // code languages and hashtags
 }
 
@@ -88,7 +97,16 @@ impl TryFrom<nostr::Event> for RepoRef {
         } else {
             r.maintainers = vec![event.pubkey];
         }
-
+        r.events = HashMap::new();
+        r.events.insert(
+            Coordinate {
+                kind: event.kind,
+                identifier: event.identifier().unwrap().to_string(),
+                public_key: event.author(),
+                relays: vec![],
+            },
+            event,
+        );
         Ok(r)
     }
 }
@@ -160,6 +178,145 @@ impl RepoRef {
         .await
         .context("failed to create repository reference event")
     }
+    pub fn coordinates(&self) -> HashSet<Coordinate> {
+        let mut res = HashSet::new();
+        for m in &self.maintainers {
+            res.insert(Coordinate {
+                kind: Kind::Custom(REPO_REF_KIND),
+                public_key: *m,
+                identifier: self.identifier.clone(),
+                relays: vec![],
+            });
+        }
+        res
+    }
+    pub fn coordinates_with_timestamps(&self) -> Vec<(Coordinate, Option<Timestamp>)> {
+        self.coordinates()
+            .iter()
+            .map(|c| (c.clone(), self.events.get(c).map(|e| e.created_at)))
+            .collect::<Vec<(Coordinate, Option<Timestamp>)>>()
+    }
+}
+
+pub async fn get_repo_coordinates(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+) -> Result<HashSet<Coordinate>> {
+    let mut repo_coordinates = HashSet::new();
+
+    if let Some(repo_override) = git_repo.get_git_config_item("nostr.repo", Some(false))? {
+        for s in repo_override.split(',') {
+            if let Ok(c) = Coordinate::parse(s) {
+                repo_coordinates.insert(c);
+            }
+        }
+    }
+
+    // TODO: when nostr remotes functionality is added, iterate on each remote and
+    // extract coordinates
+
+    if repo_coordinates.is_empty() {
+        if let Ok(repo_config) = get_repo_config_from_yaml(git_repo) {
+            let maintainers = {
+                let mut maintainers = HashSet::new();
+                for m in &repo_config.maintainers {
+                    if let Ok(maintainer) = PublicKey::parse(m) {
+                        maintainers.insert(maintainer);
+                    }
+                }
+                maintainers
+            };
+            if let Some(identifier) = repo_config.identifier {
+                for public_key in maintainers {
+                    repo_coordinates.insert(Coordinate {
+                        kind: Kind::Custom(REPO_REF_KIND),
+                        public_key,
+                        identifier: identifier.clone(),
+                        relays: vec![],
+                    });
+                }
+            } else {
+                // if repo_config.identifier.is_empty() {
+                // this will only apply for a few repositories created before ngit v1.3
+                // that haven't updated their maintainers.yaml
+                if let Ok(Some(current_user_npub)) =
+                    git_repo.get_git_config_item("nostr.npub", None)
+                {
+                    if let Ok(current_user) = PublicKey::parse(current_user_npub) {
+                        for m in &repo_config.maintainers {
+                            if let Ok(maintainer) = PublicKey::parse(m) {
+                                if current_user.eq(&maintainer) {
+                                    println!(
+                                        "please run `nigt init` to add the repo identifier to maintainers.yaml"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // look find all repo refs with root_commit. for identifier
+                let filter = nostr::Filter::default()
+                    .kind(nostr::Kind::Custom(REPO_REF_KIND))
+                    .reference(git_repo.get_root_commit()?.to_string())
+                    .authors(maintainers.clone());
+                let mut events =
+                    get_event_from_cache(git_repo.get_path()?, vec![filter.clone()]).await?;
+                if events.is_empty() {
+                    events =
+                        get_event_from_global_cache(git_repo.get_path()?, vec![filter.clone()])
+                            .await?;
+                }
+                if events.is_empty() {
+                    events = client
+                        .get_events(client.get_fallback_relays().clone(), vec![filter.clone()])
+                        .await?;
+                }
+                if let Some(e) = events.first() {
+                    if let Some(identifier) = e.identifier() {
+                        for m in &repo_config.maintainers {
+                            if let Ok(maintainer) = PublicKey::parse(m) {
+                                repo_coordinates.insert(Coordinate {
+                                    kind: Kind::Custom(REPO_REF_KIND),
+                                    public_key: maintainer,
+                                    identifier: identifier.to_string(),
+                                    relays: vec![],
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    let c = ask_for_naddr()?;
+                    git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
+                    repo_coordinates.insert(c);
+                }
+            }
+        }
+    }
+
+    if repo_coordinates.is_empty() {
+        // TODO: present list of events filter by root_commit
+        // TODO: fallback to search based on identifier
+        let c = ask_for_naddr()?;
+        // PROBLEM: we are saving this before checking whether it actually exists, which
+        // means next time the user won't be prompted and may not know how to
+        // change the selected repo
+        git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
+        repo_coordinates.insert(c);
+    }
+    Ok(repo_coordinates)
+}
+
+fn ask_for_naddr() -> Result<Coordinate> {
+    let mut prompt = "repository naddr";
+    Ok(loop {
+        if let Ok(c) = Coordinate::parse(
+            Interactor::default().input(PromptInputParms::default().with_prompt(prompt))?,
+        ) {
+            break c;
+        }
+        prompt = "repository valid naddr";
+    })
 }
 
 pub async fn fetch(
@@ -248,6 +405,7 @@ pub async fn fetch(
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct RepoConfigYaml {
+    pub identifier: Option<String>,
     pub maintainers: Vec<String>,
     pub relays: Vec<String>,
 }
@@ -277,6 +435,7 @@ pub fn extract_pks(pk_strings: Vec<String>) -> Result<Vec<PublicKey>> {
 
 pub fn save_repo_config_to_yaml(
     git_repo: &Repo,
+    identifier: String,
     maintainers: Vec<PublicKey>,
     relays: Vec<String>,
 ) -> Result<()> {
@@ -301,6 +460,7 @@ pub fn save_repo_config_to_yaml(
     serde_yaml::to_writer(
         file,
         &RepoConfigYaml {
+            identifier: Some(identifier),
             maintainers: maintainers_npubs,
             relays,
         },
@@ -327,6 +487,7 @@ mod tests {
             ],
             relays: vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
+            events: HashMap::new(),
         }
         .to_event(&TEST_KEY_1_SIGNER)
         .await

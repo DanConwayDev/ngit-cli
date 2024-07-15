@@ -235,10 +235,15 @@ mod when_repo_not_previously_claimed {
                     let mut file = fs::File::open(yaml_path).expect("no such file");
                     let mut file_contents = "".to_string();
                     let _ = file.read_to_string(&mut file_contents);
+
+                    for p in [51, 52, 53, 55, 56, 57] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
                     assert_eq!(
                         file_contents,
                         format!(
                             "\
+                        identifier: example-identifier\n\
                         maintainers:\n\
                         - {TEST_KEY_1_NPUB}\n\
                         relays:\n\
@@ -247,9 +252,6 @@ mod when_repo_not_previously_claimed {
                         "
                         ),
                     );
-                    for p in [51, 52, 53, 55, 56, 57] {
-                        relay::shutdown_relay(8000 + p)?;
-                    }
                     Ok(())
                 });
 
