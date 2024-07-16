@@ -446,7 +446,7 @@ impl Connect for Client {
                         if report.to_string().is_empty() {
                             "fetching".to_string()
                         } else {
-                            format!("fetching... found {report}")
+                            format!("fetching... updates: {report}")
                         },
                     ))
                     .to_string(),
@@ -484,7 +484,7 @@ impl Connect for Client {
                     if report.to_string().is_empty() {
                         "no updates".to_string()
                     } else {
-                        format!("found {report}")
+                        format!("updates: {report}")
                     },
                 ))
                 .to_string(),
@@ -1062,28 +1062,28 @@ impl Display for FetchReport {
             display_items.push(format!(
                 "{} proposal{}",
                 self.proposals.len(),
-                if self.proposals.len() == 1 { "s" } else { "" },
+                if self.proposals.len() > 1 { "s" } else { "" },
             ));
         }
         if !self.commits.is_empty() {
             display_items.push(format!(
                 "{} commit{}",
                 self.commits.len(),
-                if self.commits.len() == 1 { "s" } else { "" },
+                if self.commits.len() > 1 { "s" } else { "" },
             ));
         }
         if !self.statuses.is_empty() {
             display_items.push(format!(
                 "{} status{}",
                 self.statuses.len(),
-                if self.statuses.len() == 1 { "es" } else { "" },
+                if self.statuses.len() > 1 { "es" } else { "" },
             ));
         }
         if !self.contributor_profiles.is_empty() {
             display_items.push(format!(
                 "{} contributor profile{}",
                 self.contributor_profiles.len(),
-                if self.contributor_profiles.len() == 1 {
+                if self.contributor_profiles.len() > 1 {
                     "s"
                 } else {
                     ""
