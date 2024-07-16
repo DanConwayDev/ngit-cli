@@ -282,89 +282,122 @@ impl Connect for Client {
         Ok((relay_results, progress_reporter))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn fetch_all(
         &self,
         git_repo_path: &Path,
         repo_coordinates: &HashSet<Coordinate>,
     ) -> Result<FetchReport> {
         println!("fetching updates...");
-        let mut fallback_relays = HashSet::new();
-        for r in &self.fallback_relays {
-            if let Ok(url) = Url::parse(r) {
-                fallback_relays.insert(url);
-            }
-        }
-        let request =
-            create_relays_request(git_repo_path, repo_coordinates, fallback_relays).await?;
+        let fallback_relays = &self
+            .fallback_relays
+            .iter()
+            .filter_map(|r| Url::parse(r).ok())
+            .collect::<HashSet<Url>>();
+
+        let mut request =
+            create_relays_request(git_repo_path, repo_coordinates, fallback_relays.clone()).await?;
 
         let progress_reporter = MultiProgress::new();
 
-        for relay in &request.relays {
-            self.client
-                .add_relay(relay.as_str())
-                .await
-                .context("cannot add relay")?;
-        }
+        let mut processed_relays = HashSet::new();
 
-        let dim = Style::new().color256(247);
+        let mut relay_reports: Vec<Result<FetchReport>> = vec![];
 
-        let futures: Vec<_> = request
-            .relays
-            .iter()
-            // don't look for events on blaster
-            .filter(|r| !r.as_str().contains("nostr.mutinywallet.com"))
-            .map(|r| FetchRequest {
-                selected_relay: Some(r.clone()),
-                ..request.clone()
-            })
-            .map(|request| async {
-                let relay_column_width = request.relay_column_width;
+        loop {
+            for relay in &request.relays {
+                self.client
+                    .add_relay(relay.as_str())
+                    .await
+                    .context("cannot add relay")?;
+            }
 
-                let relay_url = request
-                    .selected_relay
-                    .clone()
-                    .context("fetch_all_from_relay called without a relay")?;
+            let dim = Style::new().color256(247);
 
-                let pb = if std::env::var("NGITTEST").is_err() {
-                    let pb = progress_reporter.add(
-                        ProgressBar::new(1)
-                            .with_prefix(format!("{: <relay_column_width$} connecting", &relay_url))
-                            .with_style(pb_style()?),
-                    );
-                    pb.enable_steady_tick(Duration::from_millis(300));
-                    Some(pb)
-                } else {
-                    None
-                };
+            let futures: Vec<_> = request
+                .relays
+                .iter()
+                // don't look for events on blaster
+                .filter(|r| !r.as_str().contains("nostr.mutinywallet.com"))
+                .map(|r| FetchRequest {
+                    selected_relay: Some(r.clone()),
+                    ..request.clone()
+                })
+                .map(|request| async {
+                    let relay_column_width = request.relay_column_width;
 
-                #[allow(clippy::large_futures)]
-                match self.fetch_all_from_relay(git_repo_path, request, &pb).await {
-                    Err(error) => {
-                        if let Some(pb) = pb {
-                            pb.set_style(pb_after_style(false));
-                            pb.set_prefix(
-                                dim.apply_to(format!("{: <relay_column_width$}", &relay_url))
+                    let relay_url = request
+                        .selected_relay
+                        .clone()
+                        .context("fetch_all_from_relay called without a relay")?;
+
+                    let pb = if std::env::var("NGITTEST").is_err() {
+                        let pb = progress_reporter.add(
+                            ProgressBar::new(1)
+                                .with_prefix(
+                                    dim.apply_to(format!(
+                                        "{: <relay_column_width$} connecting",
+                                        &relay_url
+                                    ))
                                     .to_string(),
-                            );
-                            pb.finish_with_message(
-                                console::style(
-                                    error.to_string().replace("relay pool error:", "error:"),
                                 )
-                                .for_stderr()
-                                .red()
-                                .to_string(),
-                            );
+                                .with_style(pb_style()?),
+                        );
+                        pb.enable_steady_tick(Duration::from_millis(300));
+                        Some(pb)
+                    } else {
+                        None
+                    };
+
+                    #[allow(clippy::large_futures)]
+                    match self.fetch_all_from_relay(git_repo_path, request, &pb).await {
+                        Err(error) => {
+                            if let Some(pb) = pb {
+                                pb.set_style(pb_after_style(false));
+                                pb.set_prefix(
+                                    dim.apply_to(format!("{: <relay_column_width$}", &relay_url))
+                                        .to_string(),
+                                );
+                                pb.finish_with_message(
+                                    console::style(
+                                        error.to_string().replace("relay pool error:", "error:"),
+                                    )
+                                    .for_stderr()
+                                    .red()
+                                    .to_string(),
+                                );
+                            }
+                            Err(error)
                         }
-                        Err(error)
+                        Ok(res) => Ok(res),
                     }
-                    Ok(res) => Ok(res),
+                })
+                .collect();
+
+            for report in stream::iter(futures)
+                .buffer_unordered(15)
+                .collect::<Vec<Result<FetchReport>>>()
+                .await
+            {
+                relay_reports.push(report);
+            }
+
+            for relay in &request.relays {
+                processed_relays.insert(relay.clone());
+            }
+
+            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await {
+                request.relays = repo_ref
+                    .relays
+                    .iter()
+                    .filter_map(|r| Url::parse(r).ok())
+                    .filter(|r| !processed_relays.contains(r))
+                    .collect();
+                if request.relays.is_empty() {
+                    break;
                 }
-            })
-            .collect();
-
-        let relay_reports: Vec<Result<FetchReport>> =
-            stream::iter(futures).buffer_unordered(15).collect().await;
-
+            }
+        }
         let report = consolidate_fetch_reports(relay_reports);
 
         if report.to_string().is_empty() {
