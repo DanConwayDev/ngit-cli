@@ -38,7 +38,7 @@ use crate::{
     repo_ref::{RepoRef, REPO_REF_KIND},
     sub_commands::{
         list::status_kinds,
-        send::{event_is_patch_set_root, PATCH_KIND},
+        send::{event_is_patch_set_root, event_is_revision_root, PATCH_KIND},
     },
 };
 
@@ -419,7 +419,7 @@ impl Connect for Client {
             fresh_coordinates.insert(c);
         }
         let mut fresh_proposal_roots = request.proposals.clone();
-        let mut fresh_authors = request.contributor_profiles.clone();
+        let mut fresh_contributors = request.missing_contributor_profiles.clone();
 
         let mut report = FetchReport::default();
 
@@ -435,8 +435,11 @@ impl Connect for Client {
         let dim = Style::new().color256(247);
 
         loop {
-            let filters =
-                get_fetch_filters(&fresh_coordinates, &fresh_proposal_roots, &fresh_authors);
+            let filters = get_fetch_filters(
+                &fresh_coordinates,
+                &fresh_proposal_roots,
+                &fresh_contributors,
+            );
 
             if let Some(pb) = &pb {
                 pb.set_prefix(
@@ -455,7 +458,7 @@ impl Connect for Client {
 
             fresh_coordinates = HashSet::new();
             fresh_proposal_roots = HashSet::new();
-            fresh_authors = HashSet::new();
+            fresh_contributors = HashSet::new();
 
             let relay = self.client.relay(&relay_url).await?;
             let events: Vec<nostr::Event> = get_events_of(&relay, filters, &None).await?;
@@ -467,6 +470,7 @@ impl Connect for Client {
                 git_repo_path,
                 &mut fresh_coordinates,
                 &mut fresh_proposal_roots,
+                &mut fresh_contributors,
                 &mut report,
             )
             .await?;
@@ -749,6 +753,7 @@ pub async fn get_repo_ref_from_cache(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn create_relays_request(
     git_repo_path: &Path,
     repo_coordinates: &HashSet<Coordinate>,
@@ -793,29 +798,61 @@ async fn create_relays_request(
         repo_coordinates.clone()
     };
 
-    let proposals: HashSet<EventId> = get_local_cache_database(git_repo_path)
-        .await?
-        .negentropy_items(
-            nostr::Filter::default()
-                .kinds(vec![Kind::Custom(PATCH_KIND)])
-                .custom_tag(
-                    SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
-                    repo_coordinates
-                        .iter()
-                        .map(std::string::ToString::to_string)
-                        .collect::<Vec<String>>(),
-                ),
+    let mut proposals: HashSet<EventId> = HashSet::new();
+    let mut missing_contributor_profiles: HashSet<PublicKey> = HashSet::new();
+    let mut contributors: HashSet<PublicKey> = HashSet::new();
+
+    {
+        if let Ok(repo_ref) = &repo_ref {
+            for m in &repo_ref.maintainers {
+                contributors.insert(m.to_owned());
+            }
+        }
+
+        for event in &get_event_from_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .kinds(vec![Kind::Custom(PATCH_KIND)])
+                    .custom_tag(
+                        SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                        repo_coordinates
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<String>>(),
+                    ),
+            ],
         )
         .await?
-        .iter()
-        .map(|(id, _)| *id)
-        .collect();
+        {
+            if event_is_patch_set_root(event) || event_is_revision_root(event) {
+                proposals.insert(event.id());
+                contributors.insert(event.author());
+            }
+        }
 
-    let contributor_profiles = HashSet::new();
+        let profile_events = get_event_from_global_cache(
+            git_repo_path,
+            vec![get_filter_contributor_profiles(contributors.clone())],
+        )
+        .await?;
+        for c in &contributors {
+            if let Some(event) = profile_events
+                .iter()
+                .find(|e| e.kind() == Kind::Metadata && e.author().eq(c))
+            {
+                save_event_in_cache(git_repo_path, event).await?;
+            } else {
+                missing_contributor_profiles.insert(c.to_owned());
+            }
+        }
+    }
 
     let existing_events: HashSet<EventId> = {
         let mut existing_events: HashSet<EventId> = HashSet::new();
-        for filter in get_fetch_filters(&repo_coordinates, &proposals, &contributor_profiles) {
+        for filter in
+            get_fetch_filters(&repo_coordinates, &proposals, &missing_contributor_profiles)
+        {
             for (id, _) in get_local_cache_database(git_repo_path)
                 .await?
                 .negentropy_items(filter)
@@ -836,7 +873,8 @@ async fn create_relays_request(
             repo_coordinates.iter().map(|c| (c.clone(), None)).collect()
         },
         proposals,
-        contributor_profiles,
+        contributors,
+        missing_contributor_profiles,
         existing_events,
     })
 }
@@ -847,6 +885,7 @@ async fn process_fetched_events(
     git_repo_path: &Path,
     fresh_coordinates: &mut HashSet<Coordinate>,
     fresh_proposal_roots: &mut HashSet<EventId>,
+    fresh_contributors: &mut HashSet<PublicKey>,
     report: &mut FetchReport,
 ) -> Result<()> {
     for event in &events {
@@ -896,14 +935,25 @@ async fn process_fetched_events(
                                 identifier: repo_ref.identifier.clone(),
                                 relays: vec![],
                             });
+                            if !request.contributors.contains(m) && !fresh_contributors.contains(m)
+                            {
+                                fresh_contributors.insert(m.to_owned());
+                            }
                         }
                     }
                 }
             } else if event_is_patch_set_root(event) {
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
-            } else if event.kind().eq(&nostr_sdk::Kind::Metadata) {
-                report.contributor_profiles.insert(event.author());
+                if !request.contributors.contains(&event.author())
+                    && !fresh_contributors.contains(&event.author())
+                {
+                    fresh_contributors.insert(event.author());
+                }
+            } else if [Kind::RelayList, Kind::Metadata].contains(&event.kind()) {
+                if Kind::Metadata.eq(&event.kind()) {
+                    report.contributor_profiles.insert(event.author());
+                }
                 save_event_in_global_cache(git_repo_path, event).await?;
             }
         }
@@ -953,6 +1003,9 @@ fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchReport {
         for c in relay_report.statuses {
             report.statuses.insert(c);
         }
+        for c in relay_report.contributor_profiles {
+            report.contributor_profiles.insert(c);
+        }
     }
     report
 }
@@ -994,11 +1047,7 @@ pub fn get_fetch_filters(
         if required_profiles.is_empty() {
             vec![]
         } else {
-            vec![
-                nostr::Filter::default()
-                    .kinds(vec![Kind::Metadata, Kind::RelayList])
-                    .authors(required_profiles.clone()),
-            ]
+            vec![get_filter_contributor_profiles(required_profiles.clone())]
         },
     ]
     .concat()
@@ -1019,6 +1068,12 @@ pub fn get_filter_repo_events(repo_coordinates: &HashSet<Coordinate>) -> nostr::
                 .map(|c| c.public_key)
                 .collect::<Vec<PublicKey>>(),
         )
+}
+
+pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nostr::Filter {
+    nostr::Filter::default()
+        .kinds(vec![Kind::Metadata, Kind::RelayList])
+        .authors(contributors)
 }
 
 #[derive(Default)]
@@ -1101,6 +1156,7 @@ pub struct FetchRequest {
     relay_column_width: usize,
     repo_coordinates: Vec<(Coordinate, Option<Timestamp>)>,
     proposals: HashSet<EventId>,
-    contributor_profiles: HashSet<PublicKey>,
+    contributors: HashSet<PublicKey>,
+    missing_contributor_profiles: HashSet<PublicKey>,
     existing_events: HashSet<EventId>,
 }
