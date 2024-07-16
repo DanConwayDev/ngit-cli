@@ -81,9 +81,7 @@ pub trait Connect {
     async fn fetch_all_from_relay(
         &self,
         git_repo_path: &Path,
-        relay_url: Url,
         request: FetchRequest,
-        // progress_reporter: &MultiProgress,
         pb: &Option<ProgressBar>,
     ) -> Result<FetchReport>;
 }
@@ -284,7 +282,6 @@ impl Connect for Client {
         Ok((relay_results, progress_reporter))
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn fetch_all(
         &self,
         git_repo_path: &Path,
@@ -297,11 +294,12 @@ impl Connect for Client {
                 fallback_relays.insert(url);
             }
         }
-        let (relays, request) =
+        let request =
             create_relays_request(git_repo_path, repo_coordinates, fallback_relays).await?;
+
         let progress_reporter = MultiProgress::new();
 
-        for relay in &relays {
+        for relay in &request.relays {
             self.client
                 .add_relay(relay.as_str())
                 .await
@@ -310,24 +308,27 @@ impl Connect for Client {
 
         let dim = Style::new().color256(247);
 
-        let futures: Vec<_> = relays
+        let futures: Vec<_> = request
+            .relays
             .iter()
             // don't look for events on blaster
             .filter(|r| !r.as_str().contains("nostr.mutinywallet.com"))
-            .map(|r| (r.clone(), request.clone()))
-            .map(|(relay, request)| async {
+            .map(|r| FetchRequest {
+                selected_relay: Some(r.clone()),
+                ..request.clone()
+            })
+            .map(|request| async {
                 let relay_column_width = request.relay_column_width;
+
+                let relay_url = request
+                    .selected_relay
+                    .clone()
+                    .context("fetch_all_from_relay called without a relay")?;
 
                 let pb = if std::env::var("NGITTEST").is_err() {
                     let pb = progress_reporter.add(
                         ProgressBar::new(1)
-                            .with_prefix(
-                                dim.apply_to(format!(
-                                    "{: <relay_column_width$}{}",
-                                    "connecting", &relay
-                                ))
-                                .to_string(),
-                            )
+                            .with_prefix(format!("{: <relay_column_width$} connecting", &relay_url))
                             .with_style(pb_style()?),
                     );
                     pb.enable_steady_tick(Duration::from_millis(300));
@@ -337,19 +338,13 @@ impl Connect for Client {
                 };
 
                 #[allow(clippy::large_futures)]
-                match self
-                    .fetch_all_from_relay(git_repo_path, relay, request, &pb)
-                    .await
-                {
+                match self.fetch_all_from_relay(git_repo_path, request, &pb).await {
                     Err(error) => {
                         if let Some(pb) = pb {
                             pb.set_style(pb_after_style(false));
                             pb.set_prefix(
-                                dim.apply_to(format!(
-                                    "{: <relay_column_width$}{}",
-                                    "error", "&relay"
-                                ))
-                                .to_string(),
+                                dim.apply_to(format!("{: <relay_column_width$}", &relay_url))
+                                    .to_string(),
                             );
                             pb.finish_with_message(
                                 console::style(
@@ -362,29 +357,7 @@ impl Connect for Client {
                         }
                         Err(error)
                     }
-                    Ok(res) => {
-                        if let Some(pb) = pb {
-                            pb.set_style(pb_after_style(true));
-                            pb.set_prefix(
-                                dim.apply_to(format!(
-                                    "{: <relay_column_width$}{}",
-                                    if let Some(relay) = &res.relay {
-                                        format!("{relay}")
-                                    } else {
-                                        String::new()
-                                    },
-                                    if res.to_string().is_empty() {
-                                        "no updates".to_string()
-                                    } else {
-                                        format!("found {res}")
-                                    },
-                                ))
-                                .to_string(),
-                            );
-                            pb.finish_with_message("");
-                        }
-                        Ok(res)
-                    }
+                    Ok(res) => Ok(res),
                 }
             })
             .collect();
@@ -395,9 +368,9 @@ impl Connect for Client {
         let report = consolidate_fetch_reports(relay_reports);
 
         if report.to_string().is_empty() {
-            println!("no updates found");
+            println!("no updates");
         } else {
-            println!("fetched updates: {report}");
+            println!("updates: {report}");
         }
         Ok(report)
     }
@@ -405,9 +378,7 @@ impl Connect for Client {
     async fn fetch_all_from_relay(
         &self,
         git_repo_path: &Path,
-        relay_url: Url,
         request: FetchRequest,
-        // progress_reporter: &MultiProgress,
         pb: &Option<ProgressBar>,
     ) -> Result<FetchReport> {
         let mut fresh_coordinates: HashSet<Coordinate> = HashSet::new();
@@ -417,26 +388,16 @@ impl Connect for Client {
         let mut fresh_proposal_roots = request.proposals.clone();
         let mut fresh_authors = request.contributor_profiles.clone();
 
-        let mut report = FetchReport {
-            relay: Some(relay_url.clone()),
-            ..Default::default()
-        };
+        let mut report = FetchReport::default();
 
-        // let pb = if std::env::var("NGITTEST").is_err() {
-        //     let pb = progress_reporter.add(
-        //         ProgressBar::new(1)
-        //             .with_prefix(format!("{: <11}{}", "connecting", relay_url))
-        //             .with_style(pb_style()?),
-        //     );
-        //     pb.enable_steady_tick(Duration::from_millis(300));
-        //     Some(pb)
-        // } else {
-        //     None
-        // };
-
-        self.connect(&relay_url).await?;
+        let relay_url = request
+            .selected_relay
+            .clone()
+            .context("fetch_all_from_relay called without a relay")?;
 
         let relay_column_width = request.relay_column_width;
+
+        self.connect(&relay_url).await?;
 
         let dim = Style::new().color256(247);
 
@@ -447,12 +408,12 @@ impl Connect for Client {
             if let Some(pb) = &pb {
                 pb.set_prefix(
                     dim.apply_to(format!(
-                        "{: <relay_column_width$}{}",
+                        "{: <relay_column_width$} {}",
                         &relay_url,
                         if report.to_string().is_empty() {
-                            "fetching...".to_string()
+                            "fetching".to_string()
                         } else {
-                            format!("found {report}")
+                            format!("fetching... found {report}")
                         },
                     ))
                     .to_string(),
@@ -468,7 +429,6 @@ impl Connect for Client {
             // TODO: try reconcile
 
             for event in events {
-                // TODO existing_events or events in fresh
                 process_fetched_event(
                     event,
                     &request,
@@ -485,19 +445,20 @@ impl Connect for Client {
             }
         }
         if let Some(pb) = pb {
-            let report_display = format!("{report}");
+            pb.set_style(pb_after_style(true));
             pb.set_prefix(
                 dim.apply_to(format!(
-                    "{: <relay_column_width$}{}",
+                    "{: <relay_column_width$} {}",
                     relay_url,
-                    if report_display.is_empty() {
-                        String::new()
+                    if report.to_string().is_empty() {
+                        "no updates".to_string()
                     } else {
-                        format!("found {report_display}")
+                        format!("found {report}")
                     },
                 ))
                 .to_string(),
             );
+            pb.finish_with_message("");
         }
         Ok(report)
     }
@@ -761,7 +722,7 @@ async fn create_relays_request(
     git_repo_path: &Path,
     repo_coordinates: &HashSet<Coordinate>,
     fallback_relays: HashSet<Url>,
-) -> Result<(HashSet<Url>, FetchRequest)> {
+) -> Result<FetchRequest> {
     let repo_ref = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await;
 
     let relays = {
@@ -834,20 +795,19 @@ async fn create_relays_request(
         }
         existing_events
     };
-    Ok((
+    Ok(FetchRequest {
+        selected_relay: None,
         relays,
-        FetchRequest {
-            relay_column_width,
-            repo_coordinates: if let Ok(repo_ref) = repo_ref {
-                repo_ref.coordinates_with_timestamps()
-            } else {
-                repo_coordinates.iter().map(|c| (c.clone(), None)).collect()
-            },
-            proposals,
-            contributor_profiles,
-            existing_events,
+        relay_column_width,
+        repo_coordinates: if let Ok(repo_ref) = repo_ref {
+            repo_ref.coordinates_with_timestamps()
+        } else {
+            repo_coordinates.iter().map(|c| (c.clone(), None)).collect()
         },
-    ))
+        proposals,
+        contributor_profiles,
+        existing_events,
+    })
 }
 
 async fn process_fetched_event(
@@ -1027,7 +987,6 @@ pub fn get_filter_repo_events(repo_coordinates: &HashSet<Coordinate>) -> nostr::
 
 #[derive(Default)]
 pub struct FetchReport {
-    relay: Option<Url>,
     repo_coordinates: Vec<Coordinate>,
     updated_repo_announcements: Vec<(Coordinate, Timestamp)>,
     proposals: HashSet<EventId>,
@@ -1101,6 +1060,8 @@ impl Display for FetchReport {
 
 #[derive(Default, Clone)]
 pub struct FetchRequest {
+    relays: HashSet<Url>,
+    selected_relay: Option<Url>,
     relay_column_width: usize,
     repo_coordinates: Vec<(Coordinate, Option<Timestamp>)>,
     proposals: HashSet<EventId>,
