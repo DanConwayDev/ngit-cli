@@ -461,17 +461,15 @@ impl Connect for Client {
             let events: Vec<nostr::Event> = get_events_of(&relay, filters, &None).await?;
             // TODO: try reconcile
 
-            for event in events {
-                process_fetched_event(
-                    event,
-                    &request,
-                    git_repo_path,
-                    &mut fresh_coordinates,
-                    &mut fresh_proposal_roots,
-                    &mut report,
-                )
-                .await?;
-            }
+            process_fetched_events(
+                events,
+                &request,
+                git_repo_path,
+                &mut fresh_coordinates,
+                &mut fresh_proposal_roots,
+                &mut report,
+            )
+            .await?;
 
             if fresh_coordinates.is_empty() && fresh_proposal_roots.is_empty() {
                 break;
@@ -843,77 +841,82 @@ async fn create_relays_request(
     })
 }
 
-async fn process_fetched_event(
-    event: nostr::Event,
+async fn process_fetched_events(
+    events: Vec<nostr::Event>,
     request: &FetchRequest,
     git_repo_path: &Path,
     fresh_coordinates: &mut HashSet<Coordinate>,
     fresh_proposal_roots: &mut HashSet<EventId>,
     report: &mut FetchReport,
 ) -> Result<()> {
-    if !request.existing_events.contains(&event.id) {
-        save_event_in_cache(git_repo_path, &event).await?;
-        if event.kind().as_u16().eq(&REPO_REF_KIND) {
-            save_event_in_global_cache(git_repo_path, &event).await?;
-            let new_coordinate = !request.repo_coordinates.iter().any(|(c, _)| {
-                c.identifier.eq(event.identifier().unwrap()) && c.public_key.eq(&event.pubkey)
-            });
-            let update_to_existing = !new_coordinate
-                && request.repo_coordinates.iter().any(|(c, t)| {
-                    c.identifier.eq(event.identifier().unwrap())
-                        && c.public_key.eq(&event.pubkey)
-                        && if let Some(t) = t {
-                            event.created_at.gt(t)
-                        } else {
-                            false
-                        }
+    for event in &events {
+        if !request.existing_events.contains(&event.id) {
+            save_event_in_cache(git_repo_path, event).await?;
+            if event.kind().as_u16().eq(&REPO_REF_KIND) {
+                save_event_in_global_cache(git_repo_path, event).await?;
+                let new_coordinate = !request.repo_coordinates.iter().any(|(c, _)| {
+                    c.identifier.eq(event.identifier().unwrap()) && c.public_key.eq(&event.pubkey)
                 });
-            if new_coordinate || update_to_existing {
-                let c = Coordinate {
-                    kind: event.kind(),
-                    public_key: event.author(),
-                    identifier: event.identifier().unwrap().to_string(),
-                    relays: vec![],
-                };
-                if new_coordinate {
-                    fresh_coordinates.insert(c.clone());
-                    report.repo_coordinates.push(c.clone());
-                }
-                if update_to_existing {
-                    report
-                        .updated_repo_announcements
-                        .push((c, event.created_at));
-                }
-            }
-            // if contains new maintainer
-            if let Ok(repo_ref) = &RepoRef::try_from(event.clone()) {
-                for m in &repo_ref.maintainers {
-                    if !request
-                        .repo_coordinates
-                        .iter()
-                        .any(|(c, _)| c.identifier.eq(&repo_ref.identifier) && m.eq(&c.public_key))
-                    {
-                        fresh_coordinates.insert(Coordinate {
-                            kind: event.kind(),
-                            public_key: *m,
-                            identifier: repo_ref.identifier.clone(),
-                            relays: vec![],
-                        });
+                let update_to_existing = !new_coordinate
+                    && request.repo_coordinates.iter().any(|(c, t)| {
+                        c.identifier.eq(event.identifier().unwrap())
+                            && c.public_key.eq(&event.pubkey)
+                            && if let Some(t) = t {
+                                event.created_at.gt(t)
+                            } else {
+                                false
+                            }
+                    });
+                if new_coordinate || update_to_existing {
+                    let c = Coordinate {
+                        kind: event.kind(),
+                        public_key: event.author(),
+                        identifier: event.identifier().unwrap().to_string(),
+                        relays: vec![],
+                    };
+                    if new_coordinate {
+                        fresh_coordinates.insert(c.clone());
+                        report.repo_coordinates.push(c.clone());
+                    }
+                    if update_to_existing {
+                        report
+                            .updated_repo_announcements
+                            .push((c, event.created_at));
                     }
                 }
+                // if contains new maintainer
+                if let Ok(repo_ref) = &RepoRef::try_from(event.clone()) {
+                    for m in &repo_ref.maintainers {
+                        if !request.repo_coordinates.iter().any(|(c, _)| {
+                            c.identifier.eq(&repo_ref.identifier) && m.eq(&c.public_key)
+                        }) {
+                            fresh_coordinates.insert(Coordinate {
+                                kind: event.kind(),
+                                public_key: *m,
+                                identifier: repo_ref.identifier.clone(),
+                                relays: vec![],
+                            });
+                        }
+                    }
+                }
+            } else if event_is_patch_set_root(event) {
+                fresh_proposal_roots.insert(event.id);
+                report.proposals.insert(event.id);
+            } else if event.kind().eq(&nostr_sdk::Kind::Metadata) {
+                report.contributor_profiles.insert(event.author());
+                save_event_in_global_cache(git_repo_path, event).await?;
             }
-        } else if event_is_patch_set_root(&event) {
-            fresh_proposal_roots.insert(event.id);
-            report.proposals.insert(event.id);
-        } else if !event.event_ids().any(|id| report.proposals.contains(id)) {
-            if event.kind().as_u16() == PATCH_KIND {
+        }
+    }
+    for event in &events {
+        if !request.existing_events.contains(&event.id)
+            && !event.event_ids().any(|id| report.proposals.contains(id))
+        {
+            if event.kind().as_u16() == PATCH_KIND && !event_is_patch_set_root(event) {
                 report.commits.insert(event.id);
             } else if status_kinds().contains(&event.kind()) {
                 report.statuses.insert(event.id);
             }
-        } else if event.kind().eq(&nostr_sdk::Kind::Metadata) {
-            report.contributor_profiles.insert(event.author());
-            save_event_in_global_cache(git_repo_path, &event).await?;
         }
     }
     Ok(())
