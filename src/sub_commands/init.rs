@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use nostr::{FromBech32, PublicKey, ToBech32};
+use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
+use nostr_sdk::Kind;
 
 use super::send::send_events;
 #[cfg(not(test))]
@@ -13,7 +14,10 @@ use crate::{
     client::Connect,
     git::{Repo, RepoActions},
     login,
-    repo_ref::{self, extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml, RepoRef},
+    repo_ref::{
+        self, extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml, RepoRef,
+        REPO_REF_KIND,
+    },
     Cli,
 };
 
@@ -292,7 +296,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     println!("publishing repostory reference...");
 
-    let repo_event = RepoRef {
+    let repo_ref = RepoRef {
         identifier: identifier.clone(),
         name,
         description,
@@ -302,9 +306,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         relays: relays.clone(),
         maintainers: maintainers.clone(),
         events: HashMap::new(),
-    }
-    .to_event(&signer)
-    .await?;
+    };
+    let repo_event = repo_ref.to_event(&signer).await?;
 
     client.set_signer(signer).await;
 
@@ -316,6 +319,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         !cli_args.disable_cli_spinners,
     )
     .await?;
+
+    git_repo.save_git_config_item(
+        "nostr.repo",
+        &Coordinate {
+            kind: Kind::Custom(REPO_REF_KIND),
+            public_key: user_ref.public_key,
+            identifier: identifier.clone(),
+            relays: vec![],
+        }
+        .to_bech32()?,
+        false,
+    )?;
 
     // if yaml file doesnt exist or needs updating
     if match &repo_config_result {
