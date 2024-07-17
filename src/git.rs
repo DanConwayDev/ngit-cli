@@ -1,6 +1,7 @@
-#[cfg(test)]
-use std::path::PathBuf;
-use std::{env::current_dir, path::Path};
+use std::{
+    env::current_dir,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, Context, Result};
 use git2::{DiffOptions, Oid, Revwalk};
@@ -18,7 +19,6 @@ impl Repo {
             git_repo: git2::Repository::discover(current_dir()?)?,
         })
     }
-    #[cfg(test)]
     pub fn from_path(path: &PathBuf) -> Result<Self> {
         Ok(Self {
             git_repo: git2::Repository::open(path)?,

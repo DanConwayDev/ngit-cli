@@ -1,17 +1,14 @@
-use std::{fs::create_dir_all, str::FromStr, time::Duration};
+use std::{collections::HashSet, path::Path, str::FromStr, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use nostr::{
     nips::{nip05::get_nip46, nip46::NostrConnectURI},
     PublicKey,
 };
-use nostr_database::Order;
 use nostr_sdk::{
-    Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrDatabase, NostrSigner, SingleLetterTag,
-    ToBech32,
+    Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrSigner, SingleLetterTag, ToBech32, Url,
 };
 use nostr_signer::Nip46Signer;
-use nostr_sqlite::SQLiteDatabase;
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -21,8 +18,8 @@ use crate::{
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptPasswordParms,
     },
-    client::{fetch_public_key, Connect},
-    config::{get_dirs, UserMetadata, UserRef, UserRelayRef, UserRelays},
+    client::{fetch_public_key, get_event_from_global_cache, Connect},
+    config::{UserMetadata, UserRef, UserRelayRef, UserRelays},
     git::{Repo, RepoActions},
     key_handling::encryption::{decrypt_key, encrypt_key},
 };
@@ -107,7 +104,7 @@ pub async fn launch(
 
 fn print_logged_in_as(user_ref: &UserRef, offline_mode: bool) -> Result<()> {
     if !offline_mode && user_ref.metadata.created_at.eq(&0) {
-        println!("cannot find your account metadata (name, etc) on relays");
+        println!("cannot find profile...");
     } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
         println!("cannot extract account name from account metadata...");
     } else if !offline_mode && user_ref.relays.created_at.eq(&0) {
@@ -615,20 +612,6 @@ async fn get_user_details(
     #[cfg(not(test))] client: Option<&Client>,
     git_repo: &Repo,
 ) -> Result<UserRef> {
-    if client.is_some() {
-        println!("searching for profile and relay updates...");
-    }
-    let database = SQLiteDatabase::open(if std::env::var("NGITTEST").is_err() {
-        create_dir_all(get_dirs()?.config_dir()).context(format!(
-            "cannot create cache directory in: {:?}",
-            get_dirs()?.config_dir()
-        ))?;
-        get_dirs()?.config_dir().join("cache.sqlite")
-    } else {
-        git_repo.get_path()?.join(".git/test-global-cache.sqlite")
-    })
-    .await?;
-    let mut events: Vec<nostr::Event> = vec![];
     let filters = vec![
         nostr::Filter::default()
             .author(*public_key)
@@ -637,54 +620,63 @@ async fn get_user_details(
             .author(*public_key)
             .kind(Kind::RelayList),
     ];
-    if let Ok(cached_events) = database.query(filters.clone(), Order::Asc).await {
-        for event in cached_events {
-            events.push(event);
-        }
-    }
-    let mut relays_to_search = if let Some(client) = client {
-        client.get_fallback_relays().clone()
-    } else {
-        vec![]
-    };
-    let mut relays_searched = vec![];
-    let user_ref = loop {
-        if let Some(client) = client {
-            for event in client
-                .get_events(relays_to_search.clone(), filters.clone())
-                .await
-                .unwrap_or(vec![])
-            {
-                let _ = database.save_event(&event).await;
-                events.push(event);
+
+    let mut events = get_event_from_global_cache(git_repo.get_path()?, filters.clone()).await?;
+
+    if let Some(client) = client {
+        if events.is_empty() {
+            let term = console::Term::stderr();
+            term.write_line("searching for profile...")?;
+            let (_, progress_reporter) = client
+                .fetch_all(git_repo.get_path()?, &HashSet::new())
+                .await?;
+            events = get_event_from_global_cache(git_repo.get_path()?, filters).await?;
+            if !events.is_empty() {
+                progress_reporter.clear()?;
+                // term.clear_last_lines(1)?;
             }
         }
+    }
 
-        #[allow(clippy::clone_on_copy)]
-        let user_ref = UserRef {
-            public_key: public_key.clone(),
-            metadata: extract_user_metadata(public_key, &events)?,
-            relays: extract_user_relays(public_key, &events),
-        };
+    Ok(UserRef {
+        public_key: public_key.to_owned(),
+        metadata: extract_user_metadata(public_key, &events)?,
+        relays: extract_user_relays(public_key, &events),
+    })
+}
 
-        if client.is_none() {
-            break user_ref;
+pub async fn get_logged_in_user_and_relays_from_cache(
+    git_repo_path: &Path,
+) -> Result<(Option<PublicKey>, HashSet<Url>)> {
+    let git_repo = Repo::from_path(&git_repo_path.to_path_buf())?;
+    let current_user = if let Some(npub) = git_repo.get_git_config_item("nostr.npub", None)? {
+        if let Ok(pubic_key) = PublicKey::parse(npub) {
+            Some(pubic_key)
+        } else {
+            None
         }
-        for r in &relays_to_search {
-            relays_searched.push(r.clone());
-        }
-
-        relays_to_search = user_ref
-            .relays
-            .write()
-            .iter()
-            .filter(|r| !relays_searched.iter().any(|or| r.eq(&or)))
-            .map(std::clone::Clone::clone)
-            .collect();
-        if !relays_to_search.is_empty() {
-            continue;
-        }
-        break user_ref;
+    } else {
+        None
     };
-    Ok(user_ref)
+    let relays = if let Some(current_user) = current_user {
+        extract_user_relays(
+            &current_user,
+            &get_event_from_global_cache(
+                git_repo.get_path()?,
+                vec![
+                    nostr::Filter::default()
+                        .author((*current_user).into())
+                        .kind(Kind::RelayList),
+                ],
+            )
+            .await?,
+        )
+        .write()
+        .iter()
+        .filter_map(|r| Url::parse(r).ok())
+        .collect::<HashSet<Url>>()
+    } else {
+        HashSet::new()
+    };
+    Ok((current_user, relays))
 }

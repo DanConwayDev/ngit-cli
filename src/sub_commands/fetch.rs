@@ -9,7 +9,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
-    client::Connect,
+    client::{consolidate_fetch_reports, Connect},
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates,
     Cli,
@@ -38,9 +38,16 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         }
         repo_coordinates
     };
-    client
+    println!("fetching updates...");
+    let (relay_reports, _) = client
         .fetch_all(git_repo.get_path()?, &repo_coordinates)
         .await?;
+    let report = consolidate_fetch_reports(relay_reports);
+    if report.to_string().is_empty() {
+        println!("no updates");
+    } else {
+        println!("updates: {report}");
+    }
     client.disconnect().await?;
     Ok(())
 }

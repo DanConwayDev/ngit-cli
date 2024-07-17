@@ -3,7 +3,7 @@ use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
 
 fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
-    p.expect("searching for profile and relay updates...\r\n")?;
+    p.expect("searching for profile...\r\n")?;
     p.expect("logged in as fred\r\n")?;
     // // p.expect("searching for existing claims on repository...\r\n")?;
     p.expect("publishing repostory reference...\r\n")?;

@@ -133,7 +133,7 @@ fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()
     p.expect("creating proposal from 2 commits:\r\n")?;
     p.expect("fe973a8 add t4.md\r\n")?;
     p.expect("232efb3 add t3.md\r\n")?;
-    p.expect("searching for profile and relay updates...\r\n")?;
+    p.expect("searching for profile...\r\n")?;
     p.expect("logged in as fred\r\n")?;
     p.expect(format!(
         "posting 2 patches {} a covering letter...\r\n",
@@ -1173,7 +1173,7 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;
         p.expect("232efb3 add t3.md\r\n")?;
-        p.expect("searching for profile and relay updates...\r\n")?;
+        p.expect("searching for profile...\r\n")?;
         p.expect("logged in as fred\r\n")?;
         p.expect("posting 2 patches without a covering letter...\r\n")?;
         Ok(())
@@ -1367,7 +1367,7 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;
         p.expect("232efb3 add t3.md\r\n")?;
-        p.expect("searching for profile and relay updates...\r\n")?;
+        p.expect("searching for profile...\r\n")?;
         p.expect("logged in as fred\r\n")?;
         p.expect(format!(
             "posting 2 patches {} a covering letter...\r\n",

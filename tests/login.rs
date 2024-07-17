@@ -73,7 +73,7 @@ mod with_relays {
 
                         p.expect("saved login details to local git config\r\n")?;
 
-                        p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile...\r\n")?;
 
                         p.expect_end_with("logged in as fred\r\n")?;
                         for p in [51, 52] {
@@ -113,7 +113,7 @@ mod with_relays {
 
                         p.expect("saved login details to local git config\r\n")?;
 
-                        p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile...\r\n")?;
 
                         p.expect("cannot extract account name from account metadata...\r\n")?;
 
@@ -422,7 +422,7 @@ mod with_relays {
 
                             p.expect("saved login details to local git config\r\n")?;
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                            p.expect("searching for profile...\r\n")?;
 
                             p.expect_end_with("logged in as fred\r\n")?;
                             for p in [51, 52] {
@@ -489,7 +489,7 @@ mod with_relays {
                                 ["login", "--password", TEST_PASSWORD],
                             );
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                            p.expect("searching for profile...\r\n")?;
 
                             p.expect_end_with("logged in as fred\r\n")?;
                             for p in [51, 52] {
@@ -551,7 +551,7 @@ mod with_relays {
 
                             p.expect("saved login details to local git config\r\n")?;
 
-                            p.expect("searching for profile and relay updates...\r\n")?;
+                            p.expect("searching for profile...\r\n")?;
 
                             p.expect_end_with("logged in as fred\r\n")?;
                             for p in [51, 52] {
@@ -602,9 +602,9 @@ mod with_relays {
 
                         p.expect("saved login details to local git config\r\n")?;
 
-                        p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile...\r\n")?;
 
-                        p.expect("cannot find your account metadata (name, etc) on relays\r\n")?;
+                        p.expect("cannot find profile...\r\n")?;
 
                         p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())?;
                         for p in [51, 52] {
@@ -665,7 +665,7 @@ mod with_relays {
 
                         p.expect("saved login details to local git config\r\n")?;
 
-                        p.expect("searching for profile and relay updates...\r\n")?;
+                        p.expect("searching for profile...\r\n")?;
 
                         p.expect("cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
 
@@ -743,8 +743,6 @@ mod with_relays {
                             ["login", "--password", TEST_PASSWORD],
                         );
 
-                        p.expect("searching for profile and relay updates...\r\n")?;
-
                         p.expect_end_eventually_with("logged in as fred\r\n")?;
 
                         Ok(())
@@ -790,7 +788,7 @@ mod with_relays {
 
                     p.expect("saved login details to local git config\r\n")?;
 
-                    p.expect("searching for profile and relay updates...\r\n")?;
+                    p.expect("searching for profile...\r\n")?;
 
                     p.expect_end_with("logged in as fred\r\n")?;
                     for p in [51, 52, 53, 55] {
