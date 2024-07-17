@@ -19,7 +19,7 @@ use crate::client::Client;
 use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::{get_event_from_cache, get_event_from_global_cache, sign_event, Connect},
+    client::{get_event_from_global_cache, get_events_from_cache, sign_event, Connect},
     git::{Repo, RepoActions},
 };
 
@@ -261,7 +261,7 @@ pub async fn get_repo_coordinates(
                     .reference(git_repo.get_root_commit()?.to_string())
                     .authors(maintainers.clone());
                 let mut events =
-                    get_event_from_cache(git_repo.get_path()?, vec![filter.clone()]).await?;
+                    get_events_from_cache(git_repo.get_path()?, vec![filter.clone()]).await?;
                 if events.is_empty() {
                     events =
                         get_event_from_global_cache(git_repo.get_path()?, vec![filter.clone()])

@@ -628,7 +628,11 @@ async fn get_user_details(
             let term = console::Term::stderr();
             term.write_line("searching for profile...")?;
             let (_, progress_reporter) = client
-                .fetch_all(git_repo.get_path()?, &HashSet::new())
+                .fetch_all(
+                    git_repo.get_path()?,
+                    &HashSet::new(),
+                    &HashSet::from_iter(vec![*public_key]),
+                )
                 .await?;
             events = get_event_from_global_cache(git_repo.get_path()?, filters).await?;
             if !events.is_empty() {

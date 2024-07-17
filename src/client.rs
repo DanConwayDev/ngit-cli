@@ -78,6 +78,7 @@ pub trait Connect {
         &self,
         git_repo_path: &Path,
         repo_coordinates: &HashSet<Coordinate>,
+        user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)>;
     async fn fetch_all_from_relay(
         &self,
@@ -288,6 +289,7 @@ impl Connect for Client {
         &self,
         git_repo_path: &Path,
         repo_coordinates: &HashSet<Coordinate>,
+        user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
         let fallback_relays = &self
             .fallback_relays
@@ -295,8 +297,13 @@ impl Connect for Client {
             .filter_map(|r| Url::parse(r).ok())
             .collect::<HashSet<Url>>();
 
-        let mut request =
-            create_relays_request(git_repo_path, repo_coordinates, fallback_relays.clone()).await?;
+        let mut request = create_relays_request(
+            git_repo_path,
+            repo_coordinates,
+            user_profiles,
+            fallback_relays.clone(),
+        )
+        .await?;
 
         let progress_reporter = MultiProgress::new();
 
@@ -666,7 +673,7 @@ async fn get_global_cache_database(git_repo_path: &Path) -> Result<SQLiteDatabas
     .context("cannot open ngit global nostr cache database")
 }
 
-pub async fn get_event_from_cache(
+pub async fn get_events_from_cache(
     git_repo_path: &Path,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<nostr::Event>> {
@@ -725,7 +732,7 @@ pub async fn get_repo_ref_from_cache(
 
         let events = [
             get_event_from_global_cache(git_repo_path, vec![filter.clone()]).await?,
-            get_event_from_cache(git_repo_path, vec![filter]).await?,
+            get_events_from_cache(git_repo_path, vec![filter]).await?,
         ]
         .concat();
         for e in events {
@@ -778,6 +785,7 @@ pub async fn get_repo_ref_from_cache(
 async fn create_relays_request(
     git_repo_path: &Path,
     repo_coordinates: &HashSet<Coordinate>,
+    user_profiles: &HashSet<PublicKey>,
     fallback_relays: HashSet<Url>,
 ) -> Result<FetchRequest> {
     let repo_ref = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await;
@@ -799,7 +807,7 @@ async fn create_relays_request(
             }
         }
 
-        for event in &get_event_from_cache(
+        for event in &get_events_from_cache(
             git_repo_path,
             vec![
                 nostr::Filter::default()
@@ -843,6 +851,7 @@ async fn create_relays_request(
     if let Some(current_user) = current_user {
         missing_contributor_profiles.insert(current_user);
     }
+    missing_contributor_profiles.extend(user_profiles);
 
     let existing_events: HashSet<EventId> = {
         let mut existing_events: HashSet<EventId> = HashSet::new();

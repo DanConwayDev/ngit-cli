@@ -40,7 +40,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     };
     println!("fetching updates...");
     let (relay_reports, _) = client
-        .fetch_all(git_repo.get_path()?, &repo_coordinates)
+        .fetch_all(git_repo.get_path()?, &repo_coordinates, &HashSet::new())
         .await?;
     let report = consolidate_fetch_reports(relay_reports);
     if report.to_string().is_empty() {
