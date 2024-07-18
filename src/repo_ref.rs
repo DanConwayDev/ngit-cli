@@ -268,6 +268,9 @@ pub async fn get_repo_coordinates(
                             .await?;
                 }
                 if events.is_empty() {
+                    println!(
+                        "finding repository events for this repository for npubs in maintains.yaml"
+                    );
                     events = client
                         .get_events(client.get_fallback_relays().clone(), vec![filter.clone()])
                         .await?;
