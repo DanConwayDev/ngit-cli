@@ -749,13 +749,14 @@ pub async fn get_repo_ref_from_cache(
     repo_coordinates: &HashSet<Coordinate>,
 ) -> Result<RepoRef> {
     let mut maintainers = HashSet::new();
-    let mut new_coordinate = false;
+    let mut new_coordinate: bool;
 
     for c in repo_coordinates {
         maintainers.insert(c.public_key);
     }
     let mut repo_events = vec![];
     loop {
+        new_coordinate = false;
         let filter = get_filter_repo_events(repo_coordinates);
 
         let events = [
