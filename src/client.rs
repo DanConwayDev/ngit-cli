@@ -1023,6 +1023,7 @@ async fn create_relays_request(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn process_fetched_events(
     events: Vec<nostr::Event>,
     request: &FetchRequest,
@@ -1102,14 +1103,20 @@ async fn process_fetched_events(
                     fresh_profiles.insert(event.author());
                 }
             } else if [Kind::RelayList, Kind::Metadata].contains(&event.kind()) {
-                if Kind::Metadata.eq(&event.kind()) {
-                    if request
-                        .missing_contributor_profiles
-                        .contains(event.author_ref())
+                if request
+                    .missing_contributor_profiles
+                    .contains(event.author_ref())
+                {
+                    report.contributor_profiles.insert(event.author());
+                } else if let Some((_, (metadata_timestamp, relay_list_timestamp))) = request
+                    .profiles_to_fetch_from_user_relays
+                    .get_key_value(event.author_ref())
+                {
+                    if (Kind::Metadata.eq(&event.kind())
+                        && event.created_at().gt(metadata_timestamp))
+                        || (Kind::RelayList.eq(&event.kind())
+                            && event.created_at().gt(relay_list_timestamp))
                     {
-                        report.contributor_profiles.insert(event.author());
-                    } else {
-                        // TODO: how do we know if the recieved profile is new?
                         report.profile_updates.insert(event.author());
                     }
                 }
