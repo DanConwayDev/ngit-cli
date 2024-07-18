@@ -6,7 +6,7 @@ use nostr::{
     PublicKey,
 };
 use nostr_sdk::{
-    Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrSigner, SingleLetterTag, ToBech32,
+    Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrSigner, SingleLetterTag, Timestamp, ToBech32,
 };
 use nostr_signer::Nip46Signer;
 
@@ -104,11 +104,11 @@ pub async fn launch(
 }
 
 fn print_logged_in_as(user_ref: &UserRef, offline_mode: bool) -> Result<()> {
-    if !offline_mode && user_ref.metadata.created_at.eq(&0) {
+    if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
         println!("cannot find profile...");
     } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
         println!("cannot extract account name from account metadata...");
-    } else if !offline_mode && user_ref.relays.created_at.eq(&0) {
+    } else if !offline_mode && user_ref.relays.created_at.eq(&Timestamp::from(0)) {
         println!(
             "cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience."
         );
@@ -566,9 +566,9 @@ fn extract_user_metadata(
             public_key.to_bech32()?
         },
         created_at: if let Some(event) = event {
-            event.created_at.as_u64()
+            event.created_at
         } else {
-            0
+            Timestamp::from(0)
         },
     })
 }
@@ -600,9 +600,9 @@ fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event]) -
             vec![]
         },
         created_at: if let Some(event) = event {
-            event.created_at.as_u64()
+            event.created_at
         } else {
-            0
+            Timestamp::from(0)
         },
     }
 }

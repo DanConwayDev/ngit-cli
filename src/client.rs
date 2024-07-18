@@ -349,7 +349,13 @@ impl Connect for Client {
                             proposals: HashSet::new(),
                             missing_contributor_profiles: request
                                 .missing_contributor_profiles
-                                .union(&request.profiles_to_fetch_from_user_relays)
+                                .union(
+                                    &request
+                                        .profiles_to_fetch_from_user_relays
+                                        .clone()
+                                        .into_keys()
+                                        .collect(),
+                                )
                                 .copied()
                                 .collect(),
                             ..request.clone()
@@ -431,7 +437,12 @@ impl Connect for Client {
 
             request.user_relays_for_profiles = {
                 let mut set = HashSet::new();
-                for user in &request.profiles_to_fetch_from_user_relays {
+                for user in &request
+                    .profiles_to_fetch_from_user_relays
+                    .clone()
+                    .into_keys()
+                    .collect::<Vec<PublicKey>>()
+                {
                     if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, user).await {
                         for r in user_ref.relays.write() {
                             if let Ok(url) = Url::parse(&r) {
@@ -457,9 +468,15 @@ impl Connect for Client {
             fresh_coordinates.insert(c);
         }
         let mut fresh_proposal_roots = request.proposals.clone();
-        let mut fresh_contributors = request
+        let mut fresh_profiles = request
             .missing_contributor_profiles
-            .union(&request.profiles_to_fetch_from_user_relays)
+            .union(
+                &request
+                    .profiles_to_fetch_from_user_relays
+                    .clone()
+                    .into_keys()
+                    .collect(),
+            )
             .copied()
             .collect();
 
@@ -477,11 +494,8 @@ impl Connect for Client {
         let dim = Style::new().color256(247);
 
         loop {
-            let filters = get_fetch_filters(
-                &fresh_coordinates,
-                &fresh_proposal_roots,
-                &fresh_contributors,
-            );
+            let filters =
+                get_fetch_filters(&fresh_coordinates, &fresh_proposal_roots, &fresh_profiles);
 
             if let Some(pb) = &pb {
                 pb.set_prefix(
@@ -500,7 +514,7 @@ impl Connect for Client {
 
             fresh_coordinates = HashSet::new();
             fresh_proposal_roots = HashSet::new();
-            fresh_contributors = HashSet::new();
+            fresh_profiles = HashSet::new();
 
             let relay = self.client.relay(&relay_url).await?;
             let events: Vec<nostr::Event> = get_events_of(&relay, filters, &None).await?;
@@ -512,7 +526,7 @@ impl Connect for Client {
                 git_repo_path,
                 &mut fresh_coordinates,
                 &mut fresh_proposal_roots,
-                &mut fresh_contributors,
+                &mut fresh_profiles,
                 &mut report,
             )
             .await?;
@@ -885,16 +899,28 @@ async fn create_relays_request(
     }
 
     let profiles_to_fetch_from_user_relays = {
-        let mut set = user_profiles.clone();
+        let mut user_profiles = user_profiles.clone();
         if let Ok(Some(current_user)) = get_logged_in_user(git_repo_path).await {
-            set.insert(current_user);
+            user_profiles.insert(current_user);
         }
-        set
+        let mut map: HashMap<PublicKey, (Timestamp, Timestamp)> = HashMap::new();
+        for public_key in &user_profiles {
+            let user_ref = get_user_ref_from_cache(git_repo_path, public_key).await?;
+            map.insert(
+                public_key.to_owned(),
+                (user_ref.metadata.created_at, user_ref.relays.created_at),
+            );
+        }
+        map
     };
 
     let user_relays_for_profiles = {
         let mut set = HashSet::new();
-        for user in &profiles_to_fetch_from_user_relays {
+        for user in &profiles_to_fetch_from_user_relays
+            .clone()
+            .into_keys()
+            .collect::<Vec<PublicKey>>()
+        {
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, user).await {
                 for r in user_ref.relays.write() {
                     if let Ok(url) = Url::parse(&r) {
@@ -914,7 +940,12 @@ async fn create_relays_request(
             &repo_coordinates_without_relays,
             &proposals,
             &missing_contributor_profiles
-                .union(&profiles_to_fetch_from_user_relays)
+                .union(
+                    &profiles_to_fetch_from_user_relays
+                        .clone()
+                        .into_keys()
+                        .collect(),
+                )
                 .copied()
                 .collect(),
         ) {
@@ -994,7 +1025,7 @@ async fn process_fetched_events(
     git_repo_path: &Path,
     fresh_coordinates: &mut HashSet<Coordinate>,
     fresh_proposal_roots: &mut HashSet<EventId>,
-    fresh_contributors: &mut HashSet<PublicKey>,
+    fresh_profiles: &mut HashSet<PublicKey>,
     report: &mut FetchReport,
 ) -> Result<()> {
     for event in &events {
@@ -1044,9 +1075,16 @@ async fn process_fetched_events(
                                 identifier: repo_ref.identifier.clone(),
                                 relays: vec![],
                             });
-                            if !request.contributors.contains(m) && !fresh_contributors.contains(m)
+                            if !request.contributors.contains(m)
+                                && !request
+                                    .profiles_to_fetch_from_user_relays
+                                    .clone()
+                                    .into_keys()
+                                    .collect::<HashSet<PublicKey>>()
+                                    .contains(m)
+                                && !fresh_profiles.contains(m)
                             {
-                                fresh_contributors.insert(m.to_owned());
+                                fresh_profiles.insert(m.to_owned());
                             }
                         }
                     }
@@ -1055,13 +1093,21 @@ async fn process_fetched_events(
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
                 if !request.contributors.contains(&event.author())
-                    && !fresh_contributors.contains(&event.author())
+                    && !fresh_profiles.contains(&event.author())
                 {
-                    fresh_contributors.insert(event.author());
+                    fresh_profiles.insert(event.author());
                 }
             } else if [Kind::RelayList, Kind::Metadata].contains(&event.kind()) {
                 if Kind::Metadata.eq(&event.kind()) {
-                    report.contributor_profiles.insert(event.author());
+                    if request
+                        .missing_contributor_profiles
+                        .contains(event.author_ref())
+                    {
+                        report.contributor_profiles.insert(event.author());
+                    } else {
+                        // TODO: how do we know if the recieved profile is new?
+                        report.profile_updates.insert(event.author());
+                    }
                 }
                 save_event_in_global_cache(git_repo_path, event).await?;
             }
@@ -1114,6 +1160,9 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
         }
         for c in relay_report.contributor_profiles {
             report.contributor_profiles.insert(c);
+        }
+        for c in relay_report.profile_updates {
+            report.profile_updates.insert(c);
         }
     }
     report
@@ -1194,6 +1243,7 @@ pub struct FetchReport {
     commits: HashSet<EventId>,
     statuses: HashSet<EventId>,
     contributor_profiles: HashSet<PublicKey>,
+    profile_updates: HashSet<PublicKey>,
 }
 
 impl Display for FetchReport {
@@ -1254,6 +1304,17 @@ impl Display for FetchReport {
                 },
             ));
         }
+        if !self.profile_updates.is_empty() {
+            display_items.push(format!(
+                "{} profile update{}",
+                self.profile_updates.len(),
+                if self.profile_updates.len() > 1 {
+                    "s"
+                } else {
+                    ""
+                },
+            ));
+        }
         write!(f, "{}", display_items.join(", "))
     }
 }
@@ -1268,6 +1329,6 @@ pub struct FetchRequest {
     contributors: HashSet<PublicKey>,
     missing_contributor_profiles: HashSet<PublicKey>,
     existing_events: HashSet<EventId>,
-    profiles_to_fetch_from_user_relays: HashSet<PublicKey>,
+    profiles_to_fetch_from_user_relays: HashMap<PublicKey, (Timestamp, Timestamp)>,
     user_relays_for_profiles: HashSet<Url>,
 }

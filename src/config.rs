@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use nostr::PublicKey;
+use nostr_sdk::Timestamp;
 use serde::{self, Deserialize, Serialize};
 
 pub fn get_dirs() -> Result<ProjectDirs> {
@@ -19,13 +20,13 @@ pub struct UserRef {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserMetadata {
     pub name: String,
-    pub created_at: u64,
+    pub created_at: Timestamp,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRelays {
     pub relays: Vec<UserRelayRef>,
-    pub created_at: u64,
+    pub created_at: Timestamp,
 }
 
 impl UserRelays {
