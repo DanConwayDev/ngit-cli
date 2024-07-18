@@ -138,8 +138,8 @@ impl Connect for Client {
                 .opts(Options::new().relay_limits(RelayLimits::disable()))
                 .signer(&opts.keys.unwrap_or(nostr::Keys::generate()))
                 // .database(
-                //     SQLiteDatabase::open(get_dirs()?.config_dir().join("cache.sqlite")).await?,
-                // )
+                //     SQLiteDatabase::open(get_dirs()?.cache_dir().join("nostr-cache.sqlite")).
+                // await?, )
                 .build(),
             fallback_relays: opts.fallback_relays,
             more_fallback_relays: opts.more_fallback_relays,
@@ -689,11 +689,11 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<SQLiteDatabase
 
 async fn get_global_cache_database(git_repo_path: &Path) -> Result<SQLiteDatabase> {
     SQLiteDatabase::open(if std::env::var("NGITTEST").is_err() {
-        create_dir_all(get_dirs()?.config_dir()).context(format!(
+        create_dir_all(get_dirs()?.cache_dir()).context(format!(
             "cannot create cache directory in: {:?}",
-            get_dirs()?.config_dir()
+            get_dirs()?.cache_dir()
         ))?;
-        get_dirs()?.config_dir().join("cache.sqlite")
+        get_dirs()?.cache_dir().join("nostr-cache.sqlite")
     } else {
         git_repo_path.join(".git/test-global-cache.sqlite")
     })

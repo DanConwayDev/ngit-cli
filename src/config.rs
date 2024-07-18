@@ -5,7 +5,7 @@ use nostr_sdk::Timestamp;
 use serde::{self, Deserialize, Serialize};
 
 pub fn get_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("", "CodeCollaboration", "ngit").ok_or(anyhow!(
+    ProjectDirs::from("", "", "ngit").ok_or(anyhow!(
         "should find operating system home directories with rust-directories crate"
     ))
 }
