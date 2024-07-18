@@ -6,7 +6,7 @@ use nostr::{
     PublicKey,
 };
 use nostr_sdk::{
-    Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrSigner, SingleLetterTag, ToBech32, Url,
+    Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrSigner, SingleLetterTag, ToBech32,
 };
 use nostr_signer::Nip46Signer;
 
@@ -57,7 +57,8 @@ pub async fn launch(
                         get_config_item(git_repo, "nostr.npub")
                             .unwrap_or("unknown ncryptsec".to_string()),
                     ) {
-                        if let Ok(user_ref) = get_user_details(&public_key, client, git_repo).await
+                        if let Ok(user_ref) =
+                            get_user_details(&public_key, client, git_repo.get_path()?).await
                         {
                             user_ref.metadata.name
                         } else {
@@ -92,7 +93,7 @@ pub async fn launch(
                 .await
                 .context("cannot get public key from signer")?,
             client,
-            git_repo,
+            git_repo.get_path()?,
         )
         .await?;
         print_logged_in_as(&user_ref, client.is_none())?;
@@ -395,7 +396,7 @@ async fn fresh_login(
         signer.public_key().await?
     };
     // lookup profile
-    let user_ref = get_user_details(&public_key, client, git_repo).await?;
+    let user_ref = get_user_details(&public_key, client, git_repo.get_path()?).await?;
     print_logged_in_as(&user_ref, client.is_none())?;
     Ok((signer, user_ref))
 }
@@ -610,7 +611,57 @@ async fn get_user_details(
     public_key: &PublicKey,
     #[cfg(test)] client: Option<&crate::client::MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
-    git_repo: &Repo,
+    git_repo_path: &Path,
+) -> Result<UserRef> {
+    if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
+        Ok(user_ref)
+    } else {
+        let empty = UserRef {
+            public_key: public_key.to_owned(),
+            metadata: extract_user_metadata(public_key, &[])?,
+            relays: extract_user_relays(public_key, &[]),
+        };
+
+        if let Some(client) = client {
+            let term = console::Term::stderr();
+            term.write_line("searching for profile...")?;
+            let (_, progress_reporter) = client
+                .fetch_all(
+                    git_repo_path,
+                    &HashSet::new(),
+                    &HashSet::from_iter(vec![*public_key]),
+                )
+                .await?;
+            if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
+                progress_reporter.clear()?;
+                // term.clear_last_lines(1)?;
+                Ok(user_ref)
+            } else {
+                Ok(empty)
+            }
+        } else {
+            Ok(empty)
+        }
+    }
+}
+pub async fn get_logged_in_user(git_repo_path: &Path) -> Result<Option<PublicKey>> {
+    let git_repo = Repo::from_path(&git_repo_path.to_path_buf())?;
+    Ok(
+        if let Some(npub) = git_repo.get_git_config_item("nostr.npub", None)? {
+            if let Ok(pubic_key) = PublicKey::parse(npub) {
+                Some(pubic_key)
+            } else {
+                None
+            }
+        } else {
+            None
+        },
+    )
+}
+
+pub async fn get_user_ref_from_cache(
+    git_repo_path: &Path,
+    public_key: &PublicKey,
 ) -> Result<UserRef> {
     let filters = vec![
         nostr::Filter::default()
@@ -621,66 +672,14 @@ async fn get_user_details(
             .kind(Kind::RelayList),
     ];
 
-    let mut events = get_event_from_global_cache(git_repo.get_path()?, filters.clone()).await?;
+    let events = get_event_from_global_cache(git_repo_path, filters.clone()).await?;
 
-    if let Some(client) = client {
-        if events.is_empty() {
-            let term = console::Term::stderr();
-            term.write_line("searching for profile...")?;
-            let (_, progress_reporter) = client
-                .fetch_all(
-                    git_repo.get_path()?,
-                    &HashSet::new(),
-                    &HashSet::from_iter(vec![*public_key]),
-                )
-                .await?;
-            events = get_event_from_global_cache(git_repo.get_path()?, filters).await?;
-            if !events.is_empty() {
-                progress_reporter.clear()?;
-                // term.clear_last_lines(1)?;
-            }
-        }
+    if events.is_empty() {
+        bail!("no metadata and profile list in cache for selected public key");
     }
-
     Ok(UserRef {
         public_key: public_key.to_owned(),
         metadata: extract_user_metadata(public_key, &events)?,
         relays: extract_user_relays(public_key, &events),
     })
-}
-
-pub async fn get_logged_in_user_and_relays_from_cache(
-    git_repo_path: &Path,
-) -> Result<(Option<PublicKey>, HashSet<Url>)> {
-    let git_repo = Repo::from_path(&git_repo_path.to_path_buf())?;
-    let current_user = if let Some(npub) = git_repo.get_git_config_item("nostr.npub", None)? {
-        if let Ok(pubic_key) = PublicKey::parse(npub) {
-            Some(pubic_key)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let relays = if let Some(current_user) = current_user {
-        extract_user_relays(
-            &current_user,
-            &get_event_from_global_cache(
-                git_repo.get_path()?,
-                vec![
-                    nostr::Filter::default()
-                        .author((*current_user).into())
-                        .kind(Kind::RelayList),
-                ],
-            )
-            .await?,
-        )
-        .write()
-        .iter()
-        .filter_map(|r| Url::parse(r).ok())
-        .collect::<HashSet<Url>>()
-    } else {
-        HashSet::new()
-    };
-    Ok((current_user, relays))
 }

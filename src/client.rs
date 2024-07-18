@@ -35,7 +35,7 @@ use nostr_sqlite::SQLiteDatabase;
 
 use crate::{
     config::get_dirs,
-    login::get_logged_in_user_and_relays_from_cache,
+    login::{get_logged_in_user, get_user_ref_from_cache},
     repo_ref::{RepoRef, REPO_REF_KIND},
     sub_commands::{
         list::status_kinds,
@@ -313,8 +313,8 @@ impl Connect for Client {
 
         loop {
             let relays = request
-                .relays
-                .union(&request.current_user_write_relays)
+                .repo_relays
+                .union(&request.user_relays_for_profiles)
                 // don't look for events on blaster
                 .filter(|&r| !r.as_str().contains("nostr.mutinywallet.com"))
                 .cloned()
@@ -325,11 +325,11 @@ impl Connect for Client {
             if relays.is_empty() {
                 break;
             }
-            let only_user_relays = request
-                .current_user_write_relays
-                .difference(&request.relays)
+            let profile_relays_only = request
+                .user_relays_for_profiles
+                .difference(&request.repo_relays)
                 .collect::<HashSet<&Url>>();
-            for relay in &request.relays {
+            for relay in &request.repo_relays {
                 self.client
                     .add_relay(relay.as_str())
                     .await
@@ -341,15 +341,17 @@ impl Connect for Client {
             let futures: Vec<_> = relays
                 .iter()
                 .map(|r| {
-                    if only_user_relays.contains(r) {
-                        // if user write relay isn't a repo relay, just filter for user profile
+                    if profile_relays_only.contains(r) {
+                        // if relay isn't a repo relay, just filter for user profile
                         FetchRequest {
                             selected_relay: Some(r.to_owned()),
                             repo_coordinates: vec![],
                             proposals: HashSet::new(),
-                            missing_contributor_profiles: HashSet::from_iter(vec![
-                                request.current_user.unwrap(),
-                            ]),
+                            missing_contributor_profiles: request
+                                .missing_contributor_profiles
+                                .union(&request.profiles_to_fetch_from_user_relays)
+                                .copied()
+                                .collect(),
                             ..request.clone()
                         }
                     } else {
@@ -420,15 +422,26 @@ impl Connect for Client {
             processed_relays.extend(relays.clone());
 
             if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await {
-                request.relays = repo_ref
+                request.repo_relays = repo_ref
                     .relays
                     .iter()
                     .filter_map(|r| Url::parse(r).ok())
                     .collect();
             }
-            let (_, current_user_write_relays) =
-                get_logged_in_user_and_relays_from_cache(git_repo_path).await?;
-            request.current_user_write_relays = current_user_write_relays;
+
+            request.user_relays_for_profiles = {
+                let mut set = HashSet::new();
+                for user in &request.profiles_to_fetch_from_user_relays {
+                    if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, user).await {
+                        for r in user_ref.relays.write() {
+                            if let Ok(url) = Url::parse(&r) {
+                                set.insert(url);
+                            }
+                        }
+                    }
+                }
+                set
+            };
         }
         Ok((relay_reports, progress_reporter))
     }
@@ -444,10 +457,11 @@ impl Connect for Client {
             fresh_coordinates.insert(c);
         }
         let mut fresh_proposal_roots = request.proposals.clone();
-        let mut fresh_contributors = request.missing_contributor_profiles.clone();
-        if let Some(user) = request.current_user {
-            fresh_contributors.insert(user);
-        }
+        let mut fresh_contributors = request
+            .missing_contributor_profiles
+            .union(&request.profiles_to_fetch_from_user_relays)
+            .copied()
+            .collect();
 
         let mut report = FetchReport::default();
 
@@ -870,19 +884,39 @@ async fn create_relays_request(
         }
     }
 
-    let (current_user, current_user_write_relays) =
-        get_logged_in_user_and_relays_from_cache(git_repo_path).await?;
-    if let Some(current_user) = current_user {
-        missing_contributor_profiles.insert(current_user);
-    }
-    missing_contributor_profiles.extend(user_profiles);
+    let profiles_to_fetch_from_user_relays = {
+        let mut set = user_profiles.clone();
+        if let Ok(Some(current_user)) = get_logged_in_user(git_repo_path).await {
+            set.insert(current_user);
+        }
+        set
+    };
+
+    let user_relays_for_profiles = {
+        let mut set = HashSet::new();
+        for user in &profiles_to_fetch_from_user_relays {
+            if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, user).await {
+                for r in user_ref.relays.write() {
+                    if let Ok(url) = Url::parse(&r) {
+                        set.insert(url);
+                    }
+                }
+            } else {
+                missing_contributor_profiles.insert(user.to_owned());
+            }
+        }
+        set
+    };
 
     let existing_events: HashSet<EventId> = {
         let mut existing_events: HashSet<EventId> = HashSet::new();
         for filter in get_fetch_filters(
             &repo_coordinates_without_relays,
             &proposals,
-            &missing_contributor_profiles,
+            &missing_contributor_profiles
+                .union(&profiles_to_fetch_from_user_relays)
+                .copied()
+                .collect(),
         ) {
             for (id, _) in get_local_cache_database(git_repo_path)
                 .await?
@@ -915,7 +949,7 @@ async fn create_relays_request(
     };
 
     let relay_column_width = relays
-        .union(&current_user_write_relays)
+        .union(&user_relays_for_profiles)
         .reduce(|a, r| {
             if r.to_string()
                 .chars()
@@ -935,7 +969,7 @@ async fn create_relays_request(
 
     Ok(FetchRequest {
         selected_relay: None,
-        relays,
+        repo_relays: relays,
         relay_column_width,
         repo_coordinates: if let Ok(repo_ref) = repo_ref {
             repo_ref.coordinates_with_timestamps()
@@ -949,8 +983,8 @@ async fn create_relays_request(
         contributors,
         missing_contributor_profiles,
         existing_events,
-        current_user,
-        current_user_write_relays,
+        profiles_to_fetch_from_user_relays,
+        user_relays_for_profiles,
     })
 }
 
@@ -1226,7 +1260,7 @@ impl Display for FetchReport {
 
 #[derive(Default, Clone)]
 pub struct FetchRequest {
-    relays: HashSet<Url>,
+    repo_relays: HashSet<Url>,
     selected_relay: Option<Url>,
     relay_column_width: usize,
     repo_coordinates: Vec<(Coordinate, Option<Timestamp>)>,
@@ -1234,6 +1268,6 @@ pub struct FetchRequest {
     contributors: HashSet<PublicKey>,
     missing_contributor_profiles: HashSet<PublicKey>,
     existing_events: HashSet<EventId>,
-    current_user: Option<PublicKey>,
-    current_user_write_relays: HashSet<Url>,
+    profiles_to_fetch_from_user_relays: HashSet<PublicKey>,
+    user_relays_for_profiles: HashSet<Url>,
 }
