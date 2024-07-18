@@ -790,17 +790,41 @@ async fn create_relays_request(
 ) -> Result<FetchRequest> {
     let repo_ref = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await;
 
-    let repo_coordinates = if let Ok(repo_ref) = &repo_ref {
-        repo_ref.coordinates()
-    } else {
-        repo_coordinates.clone()
+    let repo_coordinates = {
+        // add coordinates of users listed in maintainers to explicitly specified
+        // coodinates
+        let mut repo_coordinates = repo_coordinates.clone();
+        if let Ok(repo_ref) = &repo_ref {
+            for c in repo_ref.coordinates() {
+                if !repo_coordinates
+                    .iter()
+                    .any(|e| e.identifier.eq(&c.identifier) && e.public_key.eq(&c.public_key))
+                {
+                    repo_coordinates.insert(c);
+                }
+            }
+        }
+        repo_coordinates
+    };
+
+    let repo_coordinates_without_relays = {
+        let mut set = HashSet::new();
+        for c in &repo_coordinates {
+            set.insert(Coordinate {
+                kind: c.kind,
+                identifier: c.identifier.clone(),
+                public_key: c.public_key,
+                relays: vec![],
+            });
+        }
+        set
     };
 
     let mut proposals: HashSet<EventId> = HashSet::new();
     let mut missing_contributor_profiles: HashSet<PublicKey> = HashSet::new();
     let mut contributors: HashSet<PublicKey> = HashSet::new();
 
-    if !repo_coordinates.is_empty() {
+    if !repo_coordinates_without_relays.is_empty() {
         if let Ok(repo_ref) = &repo_ref {
             for m in &repo_ref.maintainers {
                 contributors.insert(m.to_owned());
@@ -814,7 +838,7 @@ async fn create_relays_request(
                     .kinds(vec![Kind::Custom(PATCH_KIND)])
                     .custom_tag(
                         SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
-                        repo_coordinates
+                        repo_coordinates_without_relays
                             .iter()
                             .map(std::string::ToString::to_string)
                             .collect::<Vec<String>>(),
@@ -855,9 +879,11 @@ async fn create_relays_request(
 
     let existing_events: HashSet<EventId> = {
         let mut existing_events: HashSet<EventId> = HashSet::new();
-        for filter in
-            get_fetch_filters(&repo_coordinates, &proposals, &missing_contributor_profiles)
-        {
+        for filter in get_fetch_filters(
+            &repo_coordinates_without_relays,
+            &proposals,
+            &missing_contributor_profiles,
+        ) {
             for (id, _) in get_local_cache_database(git_repo_path)
                 .await?
                 .negentropy_items(filter)
@@ -873,6 +899,13 @@ async fn create_relays_request(
         let mut relays = fallback_relays;
         if let Ok(repo_ref) = &repo_ref {
             for r in &repo_ref.relays {
+                if let Ok(url) = Url::parse(r) {
+                    relays.insert(url);
+                }
+            }
+        }
+        for c in repo_coordinates {
+            for r in &c.relays {
                 if let Ok(url) = Url::parse(r) {
                     relays.insert(url);
                 }
@@ -907,7 +940,10 @@ async fn create_relays_request(
         repo_coordinates: if let Ok(repo_ref) = repo_ref {
             repo_ref.coordinates_with_timestamps()
         } else {
-            repo_coordinates.iter().map(|c| (c.clone(), None)).collect()
+            repo_coordinates_without_relays
+                .iter()
+                .map(|c| (c.clone(), None))
+                .collect()
         },
         proposals,
         contributors,
