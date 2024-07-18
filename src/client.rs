@@ -531,7 +531,10 @@ impl Connect for Client {
             )
             .await?;
 
-            if fresh_coordinates.is_empty() && fresh_proposal_roots.is_empty() {
+            if fresh_coordinates.is_empty()
+                && fresh_proposal_roots.is_empty()
+                && fresh_profiles.is_empty()
+            {
                 break;
             }
         }
