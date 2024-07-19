@@ -143,13 +143,11 @@ mod when_proposal_isnt_associated_with_branch_name {
                 test_repo.checkout("random-name")?;
 
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
-                p.expect("finding proposal root event...\r\n")?;
-                p.expect(
-                    "Error: cannot find a proposal root event associated with the checked out branch name\r\n",
+                p.expect("fetching updates...\r\n")?;
+                p.expect_eventually("\r\n")?; // some updates listed here
+                p.expect_end_with(
+                    "Error: cannot find proposal that matches the current branch name\r\n",
                 )?;
-
-                p.expect_end()?;
-
                 for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;
                 }
@@ -206,10 +204,9 @@ mod when_branch_is_checked_out {
                     create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
-                    p.expect("Error: proposal already up-to-date with local branch\r\n")?;
-                    p.expect_end()?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
+                    p.expect_end_with("Error: proposal already up-to-date with local branch\r\n")?;
 
                     for p in [51, 52, 53, 55, 56] {
                         relay::shutdown_relay(8000 + p)?;
@@ -265,8 +262,8 @@ mod when_branch_is_checked_out {
                     create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", true)?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect("Error: proposal is ahead of local branch\r\n")?;
                     p.expect_end()?;
 
@@ -341,12 +338,11 @@ mod when_branch_is_checked_out {
                                 "push",
                             ],
                         );
-                        p.expect("finding proposal root event...\r\n")?;
-                        p.expect("found proposal root event. finding commits...\r\n")?;
+                        p.expect("fetching updates...\r\n")?;
+                        p.expect_eventually("\r\n")?; // some updates listed here
                         p.expect(
                             "1 commits ahead. preparing to create creating patch events.\r\n",
                         )?;
-                        p.expect("searching for profile...\r\n")?;
                         p.expect("logged in as fred\r\n")?;
                         p.expect("pushing 1 commits\r\n")?;
 
@@ -497,8 +493,8 @@ mod when_branch_is_checked_out {
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
                     // p.expect_end_eventually_and_print()?;
 
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect("Error: local unpublished proposal has been rebased. consider force pushing\r\n")?;
                     p.expect_end()?;
 
@@ -568,8 +564,8 @@ mod when_branch_is_checked_out {
                                 "--no-cover-letter",
                             ],
                         );
-                        p.expect("finding proposal root event...\r\n")?;
-                        p.expect("found proposal root event. finding commits...\r\n")?;
+                        p.expect("fetching updates...\r\n")?;
+                        p.expect_eventually("\r\n")?; // some updates listed here
                         p.expect("preparing to force push proposal revision...\r\n")?;
                         // standard output from `ngit send`
                         p.expect("creating proposal revision for: ")?;
@@ -591,7 +587,6 @@ mod when_branch_is_checked_out {
                         p.expect("creating proposal from 2 commits:\r\n")?;
                         p.expect("355bdf1 add a4.md\r\n")?;
                         p.expect("dbd1115 add a3.md\r\n")?;
-                        p.expect("searching for profile...\r\n")?;
                         p.expect("logged in as fred\r\n")?;
                         p.expect("posting 2 patches without a covering letter...\r\n")?;
 

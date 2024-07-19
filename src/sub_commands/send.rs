@@ -53,7 +53,7 @@ pub struct SubCommandArgs {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -68,7 +68,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
 
-    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    if !no_fetch {
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    }
 
     let (root_proposal_id, mention_tags) =
         get_root_proposal_id_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)

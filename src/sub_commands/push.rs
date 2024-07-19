@@ -1,25 +1,22 @@
 use anyhow::{bail, Context, Result};
-use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
-    client::Connect,
+    client::{fetching_with_report, get_repo_ref_from_cache, Connect},
     git::{str_to_sha1, Repo, RepoActions},
     login,
-    repo_ref::{self, RepoRef},
+    repo_ref::get_repo_coordinates,
     sub_commands::{
         self,
         list::{
-            find_commits_for_proposal_root_events, find_proposal_and_status_events,
-            get_commit_id_from_patch, get_most_recent_patch_with_ancestors, tag_value,
+            get_all_proposal_patch_events_from_cache, get_commit_id_from_patch,
+            get_most_recent_patch_with_ancestors, get_proposals_and_revisions_from_cache,
+            tag_value,
         },
-        send::{
-            event_is_revision_root, event_to_cover_letter, generate_patch_event, send_events,
-            PATCH_KIND,
-        },
+        send::{event_to_cover_letter, generate_patch_event, send_events},
     },
     Cli,
 };
@@ -37,6 +34,7 @@ pub struct SubCommandArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo_path = git_repo.get_path()?;
 
     let (main_or_master_branch_name, _) = git_repo
         .get_main_or_master_branch()
@@ -58,20 +56,24 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     #[cfg(test)]
     let mut client = <MockConnect as std::default::Default>::default();
 
-    let repo_ref = repo_ref::fetch(
-        &git_repo,
-        root_commit.to_string(),
-        &client,
-        client.get_fallback_relays().clone(),
-        true,
-    )
-    .await?;
+    let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
 
-    let (proposal_root_event, commit_events) = fetch_proposal_root_and_most_recent_patch_chain(
-        &client,
+    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+
+    let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
+
+    let proposal_root_event =
+        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
+            .await?
+            .iter()
+            .find(|e| event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(&branch_name)))
+            .context("cannot find proposal that matches the current branch name")?
+            .clone();
+
+    let commit_events = get_all_proposal_patch_events_from_cache(
+        git_repo_path,
         &repo_ref,
-        &root_commit,
-        &branch_name,
+        &proposal_root_event.id(),
     )
     .await?;
 
@@ -116,6 +118,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 description: None,
                 no_cover_letter: args.no_cover_letter,
             },
+            true,
         )
         .await?;
         println!("force pushed proposal revision");
@@ -198,57 +201,4 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     println!("pushed {} commits", ahead.len());
 
     Ok(())
-}
-
-pub async fn fetch_proposal_root_and_most_recent_patch_chain(
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
-    repo_ref: &RepoRef,
-    root_commit: &Sha1Hash,
-    branch_name: &String,
-) -> Result<(nostr::Event, Vec<nostr::Event>)> {
-    println!("finding proposal root event...");
-
-    let proposal_events_and_revisions: Vec<nostr::Event> =
-        find_proposal_and_status_events(client, repo_ref, &root_commit.to_string())
-            .await
-            .context("cannot get proposal events for repo")?;
-
-    let proposal_events: Vec<&nostr::Event> = proposal_events_and_revisions
-        .iter()
-        .filter(|e| !event_is_revision_root(e) && e.kind().as_u16().eq(&PATCH_KIND))
-        .collect::<Vec<&nostr::Event>>();
-
-    let proposal_root_event: &nostr::Event = proposal_events
-        .iter()
-        .find(|e| {
-            event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(branch_name))
-            // TODO remove the dependancy on same branch name and replace with
-            // references stored in .git/ngit
-        })
-        .context("cannot find a proposal root event associated with the checked out branch name")?
-        .to_owned();
-
-    println!("found proposal root event. finding commits...");
-
-    let commits_events: Vec<nostr::Event> = find_commits_for_proposal_root_events(
-        client,
-        &[
-            vec![proposal_root_event],
-            proposal_events_and_revisions
-                .iter()
-                .filter(|e| {
-                    e.tags.iter().any(|t| {
-                        t.as_vec().len().gt(&1)
-                            && t.as_vec()[1].eq(&proposal_root_event.id.to_string())
-                    })
-                })
-                .collect::<Vec<&nostr::Event>>(),
-        ]
-        .concat(),
-        repo_ref,
-    )
-    .await?;
-
-    Ok((proposal_root_event.clone(), commits_events))
 }
