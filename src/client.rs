@@ -909,11 +909,17 @@ async fn create_relays_request(
         }
         let mut map: HashMap<PublicKey, (Timestamp, Timestamp)> = HashMap::new();
         for public_key in &user_profiles {
-            let user_ref = get_user_ref_from_cache(git_repo_path, public_key).await?;
-            map.insert(
-                public_key.to_owned(),
-                (user_ref.metadata.created_at, user_ref.relays.created_at),
-            );
+            if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
+                map.insert(
+                    public_key.to_owned(),
+                    (user_ref.metadata.created_at, user_ref.relays.created_at),
+                );
+            } else {
+                map.insert(
+                    public_key.to_owned(),
+                    (Timestamp::from(0), Timestamp::from(0)),
+                );
+            }
         }
         map
     };

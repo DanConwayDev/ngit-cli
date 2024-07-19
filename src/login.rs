@@ -634,7 +634,7 @@ async fn get_user_details(
                 .await?;
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
                 progress_reporter.clear()?;
-                // term.clear_last_lines(1)?;
+                // if std::env::var("NGITTEST").is_err() {term.clear_last_lines(1)?;}
                 Ok(user_ref)
             } else {
                 Ok(empty)
