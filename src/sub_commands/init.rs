@@ -52,6 +52,7 @@ pub struct SubCommandArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo_path = git_repo.get_path()?;
 
     let root_commit = git_repo
         .get_root_commit()
@@ -313,6 +314,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     send_events(
         &client,
+        git_repo_path,
         vec![repo_event],
         user_ref.relays.write(),
         relays.clone(),

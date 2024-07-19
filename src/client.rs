@@ -62,7 +62,12 @@ pub trait Connect {
     fn get_fallback_relays(&self) -> &Vec<String>;
     fn get_more_fallback_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
-    async fn send_event_to(&self, url: &str, event: nostr::event::Event) -> Result<nostr::EventId>;
+    async fn send_event_to(
+        &self,
+        git_repo_path: &Path,
+        url: &str,
+        event: nostr::event::Event,
+    ) -> Result<nostr::EventId>;
     async fn get_events(
         &self,
         relays: Vec<String>,
@@ -189,11 +194,21 @@ impl Connect for Client {
         &self.blaster_relays
     }
 
-    async fn send_event_to(&self, url: &str, event: Event) -> Result<nostr::EventId> {
+    async fn send_event_to(
+        &self,
+        git_repo_path: &Path,
+        url: &str,
+        event: Event,
+    ) -> Result<nostr::EventId> {
         self.client.add_relay(url).await?;
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
-        Ok(self.client.send_event_to(vec![url], event).await?)
+        let res = self.client.send_event_to(vec![url], event.clone()).await?;
+        save_event_in_cache(git_repo_path, &event).await?;
+        if event.kind().eq(&Kind::Custom(REPO_REF_KIND)) {
+            save_event_in_global_cache(git_repo_path, &event).await?;
+        }
+        Ok(res)
     }
 
     async fn get_events(

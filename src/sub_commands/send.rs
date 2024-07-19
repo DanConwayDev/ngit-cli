@@ -239,6 +239,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     send_events(
         &client,
+        git_repo_path,
         events.clone(),
         user_ref.relays.write(),
         repo_ref.relays.clone(),
@@ -279,6 +280,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
+    git_repo_path: &Path,
     events: Vec<nostr::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<String>,
@@ -392,7 +394,10 @@ pub async fn send_events(
         pb.inc(0); // need to make pb display intially
         let mut failed = false;
         for event in &events {
-            match client.send_event_to(relay.as_str(), event.clone()).await {
+            match client
+                .send_event_to(git_repo_path, relay.as_str(), event.clone())
+                .await
+            {
                 Ok(_) => pb.inc(1),
                 Err(e) => {
                     pb.set_style(pb_after_style_failed.clone());

@@ -191,6 +191,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     send_events(
         &client,
+        git_repo_path,
         patch_events,
         user_ref.relays.write(),
         repo_ref.relays.clone(),
