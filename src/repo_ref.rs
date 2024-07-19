@@ -191,6 +191,25 @@ impl RepoRef {
         }
         res
     }
+
+    /// coordinates without relay hints
+    pub fn coordinate_with_hint(&self) -> Coordinate {
+        Coordinate {
+            kind: Kind::Custom(REPO_REF_KIND),
+            public_key: *self
+                .maintainers
+                .first()
+                .context("no maintainers in repo ref")
+                .unwrap(),
+            identifier: self.identifier.clone(),
+            relays: if let Some(relay) = self.relays.first() {
+                vec![relay.to_string()]
+            } else {
+                vec![]
+            },
+        }
+    }
+
     /// coordinates without relay hints
     pub fn coordinates_with_timestamps(&self) -> Vec<(Coordinate, Option<Timestamp>)> {
         self.coordinates()

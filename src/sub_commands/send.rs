@@ -5,7 +5,11 @@ use console::Style;
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use nostr::{
-    nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19},
+    nips::{
+        nip01::Coordinate,
+        nip10::Marker,
+        nip19::{Nip19, Nip19Event},
+    },
     EventBuilder, FromBech32, Tag, TagKind, ToBech32, UncheckedUrl,
 };
 use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, NostrSigner, TagStandard};
@@ -242,23 +246,24 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     if root_proposal_id.is_none() {
         if let Some(event) = events.first() {
-            // TODO: add gitworkshop.dev to njump and remove direct gitworkshop link
+            let event_bech32 = if let Some(relay) = repo_ref.relays.first() {
+                Nip19Event::new(event.id(), vec![relay]).to_bech32()?
+            } else {
+                event.id().to_bech32()?
+            };
             println!(
                 "{}",
                 dim.apply_to(format!(
                     "view in gitworkshop.dev: https://gitworkshop.dev/repo/{}/proposal/{}",
-                    repo_ref.identifier,
-                    event.id(),
+                    repo_ref.coordinate_with_hint().to_bech32()?,
+                    &event_bech32,
                 ))
             );
             println!(
                 "{}",
                 dim.apply_to(format!(
                     "view in another client:  https://njump.me/{}",
-                    event
-                        .id()
-                        .to_bech32()
-                        .context("cannot produce nevent from event id")?
+                    &event_bech32,
                 ))
             );
         }
