@@ -218,10 +218,9 @@ mod when_branch_doesnt_exist {
                 test_repo.checkout("random-name")?;
 
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                p.expect("finding proposal root event...\r\n")?;
-                p.expect(
-                    "Error: cannot find a proposal root event associated with the checked out branch name\r\n",
-                )?;
+                p.expect("fetching updates...\r\n")?;
+                p.expect_eventually("\r\n")?; // some updates listed here
+                p.expect("Error: cannot find proposal that matches the current branch name\r\n")?;
 
                 p.expect_end()?;
 
@@ -281,8 +280,8 @@ mod when_branch_is_checked_out {
                     create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect("branch already up-to-date\r\n")?;
                     p.expect_end()?;
 
@@ -391,8 +390,8 @@ mod when_branch_is_checked_out {
                         create_and_populate_branch(&test_repo, FEATURE_BRANCH_NAME_1, "a", true)?;
 
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                        p.expect("finding proposal root event...\r\n")?;
-                        p.expect("found proposal root event. finding commits...\r\n")?;
+                        p.expect("fetching updates...\r\n")?;
+                        p.expect_eventually("\r\n")?; // some updates listed here
                         p.expect("applied 1 new commits\r\n")?;
                         p.expect_end()?;
 
@@ -469,8 +468,8 @@ mod when_branch_is_checked_out {
                     )?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect(
                         "you have an amended/rebase version the proposal that is unpublished\r\n",
                     )?;
@@ -547,8 +546,8 @@ mod when_branch_is_checked_out {
                     )?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect(
                         "you have an amended/rebase version the proposal that is unpublished\r\n",
                     )?;
@@ -613,8 +612,8 @@ mod when_branch_is_checked_out {
                     test_repo.stage_and_commit("appended commit")?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect("local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal\r\n")?;
                     p.expect_end()?;
 
@@ -672,8 +671,8 @@ mod when_branch_is_checked_out {
                     test_repo.stage_and_commit("appended commit")?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                    p.expect("finding proposal root event...\r\n")?;
-                    p.expect("found proposal root event. finding commits...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect("local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal\r\n")?;
                     p.expect_end()?;
 
@@ -708,7 +707,6 @@ mod when_branch_is_checked_out {
             Ok(())
         }
     }
-
     mod when_latest_event_rebases_branch {
         use std::time::Duration;
 
@@ -895,10 +893,9 @@ mod when_branch_is_checked_out {
                         test_repo.checkout(FEATURE_BRANCH_NAME_1)?;
 
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
-                        p.expect("finding proposal root event...\r\n")?;
-                        p.expect("found proposal root event. finding commits...\r\n")?;
+                        p.expect("fetching updates...\r\n")?;
+                        p.expect_eventually("\r\n")?; // some updates listed here
                         p.expect_end_with("pulled new version of proposal (2 ahead 0 behind 'main'), replacing old version (2 ahead 1 behind 'main')\r\n")?;
-
                         for p in [51, 52, 53, 55, 56] {
                             relay::shutdown_relay(8000 + p)?;
                         }

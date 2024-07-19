@@ -1,31 +1,31 @@
 use anyhow::{bail, Context, Result};
 
-use super::list::{get_commit_id_from_patch, tag_value};
-#[cfg(not(test))]
-use crate::client::Client;
+use super::{
+    list::{
+        get_all_proposal_patch_events_from_cache, get_commit_id_from_patch,
+        get_proposals_and_revisions_from_cache, tag_value,
+    },
+    send::event_to_cover_letter,
+};
 #[cfg(test)]
 use crate::client::MockConnect;
+#[cfg(not(test))]
+use crate::client::{Client, Connect};
 use crate::{
-    client::Connect,
+    client::{fetching_with_report, get_repo_ref_from_cache},
     git::{str_to_sha1, Repo, RepoActions},
-    repo_ref,
-    sub_commands::{
-        list::get_most_recent_patch_with_ancestors,
-        push::fetch_proposal_root_and_most_recent_patch_chain,
-    },
+    repo_ref::get_repo_coordinates,
+    sub_commands::list::get_most_recent_patch_with_ancestors,
 };
 
 #[allow(clippy::too_many_lines)]
 pub async fn launch() -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo_path = git_repo.get_path()?;
 
     let (main_or_master_branch_name, _) = git_repo
         .get_main_or_master_branch()
         .context("no main or master branch")?;
-
-    let root_commit = git_repo
-        .get_root_commit()
-        .context("failed to get root commit of the repository")?;
 
     let branch_name = git_repo
         .get_checked_out_branch_name()
@@ -39,20 +39,24 @@ pub async fn launch() -> Result<()> {
     #[cfg(test)]
     let client = <MockConnect as std::default::Default>::default();
 
-    let repo_ref = repo_ref::fetch(
-        &git_repo,
-        root_commit.to_string(),
-        &client,
-        client.get_fallback_relays().clone(),
-        true,
-    )
-    .await?;
+    let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
 
-    let (_proposal_root_event, commit_events) = fetch_proposal_root_and_most_recent_patch_chain(
-        &client,
+    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+
+    let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
+
+    let proposal_root_event =
+        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
+            .await?
+            .iter()
+            .find(|e| event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(&branch_name)))
+            .context("cannot find proposal that matches the current branch name")?
+            .clone();
+
+    let commit_events = get_all_proposal_patch_events_from_cache(
+        git_repo_path,
         &repo_ref,
-        &root_commit,
-        &branch_name,
+        &proposal_root_event.id(),
     )
     .await?;
 
