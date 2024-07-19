@@ -6,17 +6,12 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use nostr::{
-    nips::{nip01::Coordinate, nip19::Nip19},
-    FromBech32, PublicKey, Tag, TagStandard, ToBech32,
-};
+use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, Tag, TagStandard, ToBech32};
 use nostr_sdk::{Kind, NostrSigner, Timestamp};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(test))]
 use crate::client::Client;
-#[cfg(test)]
-use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{get_event_from_global_cache, get_events_from_cache, sign_event, Connect},
@@ -224,6 +219,15 @@ pub async fn get_repo_coordinates(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Result<HashSet<Coordinate>> {
+    try_and_get_repo_coordinates(git_repo, client, true).await
+}
+
+pub async fn try_and_get_repo_coordinates(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    prompt_user: bool,
+) -> Result<HashSet<Coordinate>> {
     let mut repo_coordinates = HashSet::new();
 
     if let Some(repo_override) = git_repo.get_git_config_item("nostr.repo", Some(false))? {
@@ -319,6 +323,9 @@ pub async fn get_repo_coordinates(
     }
 
     if repo_coordinates.is_empty() {
+        if !prompt_user {
+            bail!("couldn't find repo coordinates in git config nostr.repo or in maintainers.yaml");
+        }
         // TODO: present list of events filter by root_commit
         // TODO: fallback to search based on identifier
         let c = ask_for_naddr()?;
@@ -341,90 +348,6 @@ fn ask_for_naddr() -> Result<Coordinate> {
         }
         println!("not a valid naddr");
     })
-}
-
-pub async fn fetch(
-    git_repo: &Repo,
-    root_commit: String,
-    #[cfg(test)] client: &MockConnect,
-    #[cfg(not(test))] client: &Client,
-    // TODO: more rubust way of finding repo events
-    fallback_relays: Vec<String>,
-    prompt_for_nevent_if_cant_event: bool,
-) -> Result<RepoRef> {
-    let repo_config = get_repo_config_from_yaml(git_repo);
-
-    // TODO: check events only from maintainers. get relay list of maintainters.
-    // check those relays.
-
-    let mut repo_event_filter = nostr::Filter::default()
-        .kind(nostr::Kind::Custom(REPO_REF_KIND))
-        .reference(root_commit);
-
-    let mut relays = fallback_relays;
-    if let Ok(repo_config) = repo_config {
-        repo_event_filter =
-            repo_event_filter.authors(extract_pks(repo_config.maintainers.clone())?);
-        relays = repo_config.relays.clone();
-    }
-
-    let event = loop {
-        let events: Vec<nostr::Event> = client
-            .get_events(relays.clone(), vec![repo_event_filter.clone()])
-            .await?;
-
-        // TODO: if maintainers.yaml isn't present, as the user to select from the
-        // pubkeys they want to use. could use WoT as an indicator as well as the repo
-        // and user name.
-
-        // TODO: if maintainers.yaml isn't present, save the selected repo pubkey
-        // somewhere within .git folder for future use and seek to get that next time
-        if let Some(event) = events
-            .iter()
-            .filter(|e| e.kind.as_u16() == REPO_REF_KIND)
-            .max_by_key(|e| e.created_at)
-        {
-            break event.clone();
-        }
-        if !prompt_for_nevent_if_cant_event {
-            bail!("cannot find repo event");
-        }
-        println!("cannot find repo event");
-        loop {
-            let bech32 = Interactor::default()
-                .input(PromptInputParms::default().with_prompt("repository naddr or nevent"))?;
-            if let Ok(nip19) = Nip19::from_bech32(bech32) {
-                repo_event_filter =
-                    nostr::Filter::default().kind(nostr::Kind::Custom(REPO_REF_KIND));
-                match nip19 {
-                    Nip19::Coordinate(c) => {
-                        repo_event_filter = repo_event_filter
-                            .identifier(c.identifier)
-                            .author(c.public_key);
-                        for r in c.relays {
-                            relays.push(r);
-                        }
-                    }
-                    Nip19::Event(n) => {
-                        if let Some(author) = n.author {
-                            repo_event_filter = repo_event_filter.id(n.event_id).author(author);
-                        }
-                        for r in n.relays {
-                            relays.push(r);
-                        }
-                    }
-                    Nip19::EventId(id) => repo_event_filter = repo_event_filter.id(id),
-                    _ => (),
-                }
-            } else {
-                println!("not a valid nevent or naddr");
-                continue;
-            }
-            break;
-        }
-    };
-
-    RepoRef::try_from(event.clone()).context("cannot parse event as repo reference")
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]

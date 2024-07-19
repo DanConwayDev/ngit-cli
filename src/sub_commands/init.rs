@@ -11,12 +11,12 @@ use crate::client::Client;
 use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::Connect,
+    client::{fetching_with_report, get_repo_ref_from_cache, Connect},
     git::{Repo, RepoActions},
     login,
     repo_ref::{
-        self, extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml, RepoRef,
-        REPO_REF_KIND,
+        extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
+        try_and_get_repo_coordinates, RepoRef, REPO_REF_KIND,
     },
     Cli,
 };
@@ -66,6 +66,21 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     #[cfg(test)]
     let mut client = <MockConnect as std::default::Default>::default();
 
+    let repo_coordinates = if let Ok(repo_coordinates) =
+        try_and_get_repo_coordinates(&git_repo, &client, false).await
+    {
+        Some(repo_coordinates)
+    } else {
+        None
+    };
+
+    let repo_ref = if let Some(repo_coordinates) = repo_coordinates {
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        Some(get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?)
+    } else {
+        None
+    };
+
     let (signer, user_ref) = login::launch(
         &git_repo,
         &cli_args.bunker_uri,
@@ -76,20 +91,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         false,
     )
     .await?;
-
-    let repo_ref = if let Ok(rep_ref) = repo_ref::fetch(
-        &git_repo,
-        root_commit.to_string(),
-        &client,
-        user_ref.relays.write(),
-        false,
-    )
-    .await
-    {
-        Some(rep_ref)
-    } else {
-        None
-    };
 
     let repo_config_result = get_repo_config_from_yaml(&git_repo);
     // TODO: check for other claims
@@ -115,7 +116,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.identifier.clone()
                 } else {
-                    name.clone()
+                    let fallback = name
+                        .clone()
                         .replace(' ', "-")
                         .chars()
                         .map(|c| {
@@ -125,7 +127,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                                 '-'
                             }
                         })
-                        .collect()
+                        .collect();
+                    if let Ok(config) = &repo_config_result {
+                        if let Some(identifier) = &config.identifier {
+                            identifier.to_string()
+                        } else {
+                            fallback
+                        }
+                    } else {
+                        fallback
+                    }
                 }),
         )?,
     };
