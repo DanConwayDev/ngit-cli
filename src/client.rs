@@ -517,7 +517,13 @@ impl Connect for Client {
             fresh_profiles = HashSet::new();
 
             let relay = self.client.relay(&relay_url).await?;
-            let events: Vec<nostr::Event> = get_events_of(&relay, filters, &None).await?;
+            let events: Vec<nostr::Event> = get_events_of(&relay, filters.clone(), &None)
+                .await?
+                .iter()
+                // don't process events that don't match filters
+                .filter(|e| filters.iter().any(|f| f.match_event(e)))
+                .cloned()
+                .collect();
             // TODO: try reconcile
 
             process_fetched_events(
@@ -1362,4 +1368,27 @@ pub struct FetchRequest {
     existing_events: HashSet<EventId>,
     profiles_to_fetch_from_user_relays: HashMap<PublicKey, (Timestamp, Timestamp)>,
     user_relays_for_profiles: HashSet<Url>,
+}
+
+pub async fn fetching_with_report(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    repo_coordinates: &HashSet<Coordinate>,
+) -> Result<FetchReport> {
+    let term = console::Term::stderr();
+    term.write_line("fetching updates...")?;
+    let (relay_reports, progress_reporter) = client
+        .fetch_all(git_repo_path, repo_coordinates, &HashSet::new())
+        .await?;
+    if !relay_reports.iter().any(std::result::Result::is_err) {
+        let _ = progress_reporter.clear();
+    }
+    let report = consolidate_fetch_reports(relay_reports);
+    if report.to_string().is_empty() {
+        println!("no updates");
+    } else {
+        println!("updates: {report}");
+    }
+    Ok(report)
 }

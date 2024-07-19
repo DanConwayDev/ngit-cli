@@ -313,14 +313,14 @@ pub async fn get_repo_coordinates(
 }
 
 fn ask_for_naddr() -> Result<Coordinate> {
-    let mut prompt = "repository naddr";
     Ok(loop {
         if let Ok(c) = Coordinate::parse(
-            Interactor::default().input(PromptInputParms::default().with_prompt(prompt))?,
+            Interactor::default()
+                .input(PromptInputParms::default().with_prompt("repository naddr"))?,
         ) {
             break c;
         }
-        prompt = "repository valid naddr";
+        println!("not a valid naddr");
     })
 }
 

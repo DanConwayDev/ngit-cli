@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::{path::Path, str::FromStr, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use console::Style;
@@ -19,10 +19,12 @@ use crate::{
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
     },
-    client::{sign_event, Connect},
+    client::{
+        fetching_with_report, get_events_from_cache, get_repo_ref_from_cache, sign_event, Connect,
+    },
     git::{Repo, RepoActions},
     login,
-    repo_ref::{self, RepoRef, REPO_REF_KIND},
+    repo_ref::{get_repo_coordinates, RepoRef, REPO_REF_KIND},
     Cli,
 };
 
@@ -49,6 +51,7 @@ pub struct SubCommandArgs {
 #[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo_path = git_repo.get_path()?;
 
     let (main_branch_name, main_tip) = git_repo
         .get_main_or_master_branch()
@@ -59,13 +62,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     #[cfg(test)]
     let mut client = <MockConnect as std::default::Default>::default();
 
-    let (root_proposal_id, mention_tags) = get_root_proposal_id_and_mentions_from_in_reply_to(
-        &client,
-        // TODO: user repo relays when when event cache is in place
-        client.get_fallback_relays(),
-        &args.in_reply_to,
-    )
-    .await?;
+    let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
+
+    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+
+    let (root_proposal_id, mention_tags) =
+        get_root_proposal_id_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
+            .await?;
 
     if let Some(root_ref) = args.in_reply_to.first() {
         if root_proposal_id.is_some() {
@@ -191,17 +194,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     client.set_signer(signer.clone()).await;
 
-    let repo_ref = repo_ref::fetch(
-        &git_repo,
-        git_repo
-            .get_root_commit()
-            .context("failed to get root commit of the repository")?
-            .to_string(),
-        &client,
-        user_ref.relays.write(),
-        true,
-    )
-    .await?;
+    let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
 
     // oldest first
     commits.reverse();
@@ -520,9 +513,7 @@ fn summarise_commit_for_selection(git_repo: &Repo, commit: &Sha1Hash) -> Result<
 }
 
 async fn get_root_proposal_id_and_mentions_from_in_reply_to(
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
-    repo_relays: &[String],
+    git_repo_path: &Path,
     in_reply_to: &[String],
 ) -> Result<(Option<String>, Vec<nostr::Tag>)> {
     let root_proposal_id = if let Some(first) = in_reply_to.first() {
@@ -535,13 +526,10 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
                 marker: _,
                 public_key: _,
             }) => {
-                let events = client
-                    .get_events(
-                        repo_relays.to_vec(),
-                        vec![nostr::Filter::new().id(*event_id)],
-                    )
-                    .await
-                    .context("whilst getting events specified in --in-reply-to")?;
+                let events =
+                    get_events_from_cache(git_repo_path, vec![nostr::Filter::new().id(*event_id)])
+                        .await?;
+
                 if let Some(first) = events.iter().find(|e| e.id.eq(event_id)) {
                     if event_is_patch_set_root(first) {
                         Some(event_id.to_string())
@@ -549,10 +537,7 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
                         None
                     }
                 } else {
-                    bail!(
-                        "cannot find first event specified in --in-reply-to \"{}\"",
-                        first,
-                    )
+                    None
                 }
             }
             _ => None,

@@ -37,6 +37,8 @@ mod when_commits_behind_ask_to_proceed {
     }
 
     fn expect_confirm_prompt(p: &mut CliTester) -> Result<CliTesterConfirmPrompt> {
+        p.expect("fetching updates...\r\n")?;
+        p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;
         p.expect("232efb3 add t3.md\r\n")?;
@@ -130,11 +132,13 @@ fn cli_tester_create_proposal(git_repo: &GitTestRepo, include_cover_letter: bool
 }
 
 fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
+    p.expect("fetching updates...\r\n")?;
+    p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
     p.expect("creating proposal from 2 commits:\r\n")?;
     p.expect("fe973a8 add t4.md\r\n")?;
     p.expect("232efb3 add t3.md\r\n")?;
-    p.expect("searching for profile...\r\n")?;
-    p.expect("logged in as fred\r\n")?;
+    // sometimes there will be a 'searching for profile...' msg
+    p.expect_eventually("logged in as fred\r\n")?;
     p.expect(format!(
         "posting 2 patches {} a covering letter...\r\n",
         if include_cover_letter {
@@ -921,7 +925,6 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_create_proposal(&git_repo, true);
                     expect_msgs_first(&mut p, true)?;
-                    // p.expect_end_with("bla")?;
                     relay::expect_send_with_progress(
                         &mut p,
                         vec![
@@ -1159,6 +1162,8 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
         CliTester::new_from_dir(&git_repo.dir, args)
     }
     fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
+        p.expect("fetching updates...\r\n")?;
+        p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
         let mut selector = p.expect_multi_select(
             "select commits for proposal",
             vec![
@@ -1349,7 +1354,6 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
             "HEAD~2",
             "--in-reply-to",
             &proposal_root_bech32,
-            // "nevent1qqsged665nx6zz36puey9hzf6ds4n5ctxxzm7c6pfnmvu9l4c9988vgzyr6nuj7d02wdauzfeajx043c5yepjk9v6wm3avycy07kltdsy0tksh0zxyx",
             "--title",
             "exampletitle",
             "--description",
@@ -1358,16 +1362,16 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
         CliTester::new_from_dir(&git_repo.dir, args)
     }
     fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
+        p.expect("fetching updates...\r\n")?;
+        p.expect("updates: 1 new maintainer, 1 announcement update, 1 proposal\r\n")?;
         let proposal_root_bech32 = get_pretend_proposal_root_event().id.to_bech32().unwrap();
         p.expect(format!(
             "creating proposal revision for: {}\r\n",
             proposal_root_bech32,
         ))?;
-        // p.expect("creating proposal revision for: nevent1qqsged665nx6zz36puey9hzf6ds4n5ctxxzm7c6pfnmvu9l4c9988vgzyr6nuj7d02wdauzfeajx043c5yepjk9v6wm3avycy07kltdsy0tksh0zxyx\r\n")?;
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;
         p.expect("232efb3 add t3.md\r\n")?;
-        p.expect("searching for profile...\r\n")?;
         p.expect("logged in as fred\r\n")?;
         p.expect(format!(
             "posting 2 patches {} a covering letter...\r\n",
@@ -1574,7 +1578,7 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                         .unwrap()
                         .as_vec()[1],
                     // id of state nevent
-                    "8cb75aa4cda10a3a0f3242dc49d36159d30b3185bf63414cf6ce17f5c14a73b1",
+                    "431e58eb8e1b4e20292d1d5bbe81d5cfb042e1bc165de32eddfdd52245a4cce4",
                 );
             }
             Ok(())
@@ -1620,7 +1624,7 @@ mod in_reply_to_mentions_issue {
     }
 
     fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
-        let proposal_root_bech32 = get_pretend_issue_event().id.to_bech32().unwrap();
+        let issue_bech32 = get_pretend_issue_event().id.to_bech32().unwrap();
         let args = vec![
             "--nsec",
             TEST_KEY_1_NSEC,
@@ -1630,7 +1634,7 @@ mod in_reply_to_mentions_issue {
             "send",
             "HEAD~2",
             "--in-reply-to",
-            &proposal_root_bech32,
+            &issue_bech32,
             // "note1a9z8vhtzttnny0ggpksd7p5uwf4qu4ys59a52tu9fkz7rrmczkyqc46ngg",
             "--title",
             "exampletitle",
@@ -1738,7 +1742,6 @@ mod in_reply_to_mentions_issue {
     }
 }
 mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root {
-    use nostr::JsonUtil;
 
     use super::*;
 
@@ -1835,7 +1838,6 @@ mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root 
         for relay in [&r53, &r55, &r56] {
             let cover_letter_event: &nostr::Event =
                 relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
-            println!("{:?}", &cover_letter_event.as_json());
             assert!(cover_letter_event.iter_tags().any(|t| {
                 t.as_vec()[0].eq("p")
                     && t.as_vec()[1].eq(&nostr::Keys::parse(

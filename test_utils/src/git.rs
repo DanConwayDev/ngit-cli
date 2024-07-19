@@ -5,6 +5,10 @@ use std::{env::current_dir, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use git2::{Oid, RepositoryInitOptions, Signature, Time};
+use nostr::nips::nip01::Coordinate;
+use nostr_sdk::{Kind, ToBech32};
+
+use crate::{generate_repo_ref_event, REPOSITORY_KIND};
 
 pub struct GitTestRepo {
     pub dir: PathBuf,
@@ -13,7 +17,24 @@ pub struct GitTestRepo {
 
 impl Default for GitTestRepo {
     fn default() -> Self {
-        Self::new("main").unwrap()
+        let repo_event = generate_repo_ref_event();
+        let coordinate = Coordinate {
+            kind: Kind::Custom(REPOSITORY_KIND),
+            public_key: repo_event.author(),
+            identifier: repo_event.identifier().unwrap().to_string(),
+            relays: vec![
+                "ws://localhost:8055".to_string(),
+                "ws://localhost:8056".to_string(),
+            ],
+        };
+
+        let repo = Self::new("main").unwrap();
+        let _ = repo
+            .git_repo
+            .config()
+            .unwrap()
+            .set_str("nostr.repo", &coordinate.to_bech32().unwrap());
+        repo
     }
 }
 impl GitTestRepo {
@@ -32,6 +53,9 @@ impl GitTestRepo {
             dir: path,
             git_repo,
         })
+    }
+    pub fn without_repo_in_git_config() -> Self {
+        Self::new("main").unwrap()
     }
 
     pub fn initial_commit(&self) -> Result<Oid> {

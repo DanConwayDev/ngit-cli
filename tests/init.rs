@@ -57,7 +57,7 @@ mod when_repo_not_previously_claimed {
         use super::*;
 
         fn prep_git_repo() -> Result<GitTestRepo> {
-            let test_repo = GitTestRepo::default();
+            let test_repo = GitTestRepo::without_repo_in_git_config();
             test_repo.populate()?;
             test_repo.add_remote("origin", "https://localhost:1000")?;
             Ok(test_repo)
