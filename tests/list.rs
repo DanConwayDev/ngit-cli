@@ -132,17 +132,10 @@ fn cli_tester_create_proposal(
 mod cannot_find_repo_event {
     use super::*;
     mod cli_prompts {
-        use nostr::{
-            nips::{nip01::Coordinate, nip19::Nip19Event},
-            ToBech32,
-        };
+        use nostr::{nips::nip01::Coordinate, ToBech32};
 
         use super::*;
-        async fn run_async_repo_event_ref_needed(
-            invalid_input: bool,
-            nevent: bool,
-            naddr: bool,
-        ) -> Result<()> {
+        async fn run_async_repo_event_ref_needed(invalid_input: bool, naddr: bool) -> Result<()> {
             let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
                 Relay::new(8051, None, None),
                 Relay::new(8052, None, None),
@@ -161,35 +154,19 @@ mod cannot_find_repo_event {
             r56.events.push(repo_event.clone());
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let test_repo = GitTestRepo::default();
+                let test_repo = GitTestRepo::without_repo_in_git_config();
                 test_repo.populate()?;
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                p.expect("cannot find repo event\r\n")?;
-
                 if invalid_input {
-                    let mut input = p.expect_input("repository naddr or nevent")?;
+                    let mut input = p.expect_input("repository naddr")?;
                     input.succeeds_with("dfgvfvfzadvd")?;
-                    p.expect("not a valid nevent or naddr\r\n")?;
-                    let _ = p.expect_input("repository naddr or nevent")?;
+                    p.expect("not a valid naddr\r\n")?;
+                    let _ = p.expect_input("repository naddr")?;
                     p.exit()?;
                 }
-                if nevent {
-                    let mut input = p.expect_input("repository naddr or nevent")?;
-                    input.succeeds_with(
-                        &Nip19Event {
-                            event_id: repo_event.id,
-                            author: Some(TEST_KEY_1_KEYS.public_key()),
-                            relays: vec!["ws://localhost:8056".to_string()],
-                            kind: None,
-                        }
-                        .to_bech32()?,
-                    )?;
-                    p.expect("finding proposals...\r\n")?;
-                    p.expect_end_with("no proposals found... create one? try `ngit send`\r\n")?;
-                }
                 if naddr {
-                    let mut input = p.expect_input("repository naddr or nevent")?;
+                    let mut input = p.expect_input("repository naddr")?;
                     input.succeeds_with(
                         &Coordinate {
                             kind: nostr::Kind::Custom(REPOSITORY_KIND),
@@ -199,9 +176,9 @@ mod cannot_find_repo_event {
                         }
                         .to_bech32()?,
                     )?;
-                    p.expect("finding proposals...\r\n")?;
+                    p.expect("fetching updates...\r\n")?;
+                    p.expect_eventually("\r\n")?; // some updates listed here
                     p.expect_end_with("no proposals found... create one? try `ngit send`\r\n")?;
-                    p.expect_end_eventually()?;
                 }
 
                 for p in [51, 52, 53, 55, 56] {
@@ -225,19 +202,13 @@ mod cannot_find_repo_event {
         #[tokio::test]
         #[serial]
         async fn warns_not_valid_input_and_asks_again() -> Result<()> {
-            run_async_repo_event_ref_needed(true, false, false).await
-        }
-
-        #[tokio::test]
-        #[serial]
-        async fn finds_based_on_nevent_on_embeded_relay() -> Result<()> {
-            run_async_repo_event_ref_needed(false, true, false).await
+            run_async_repo_event_ref_needed(true, false).await
         }
 
         #[tokio::test]
         #[serial]
         async fn finds_based_on_naddr_on_embeded_relay() -> Result<()> {
-            run_async_repo_event_ref_needed(false, false, true).await
+            run_async_repo_event_ref_needed(false, true).await
         }
     }
 }
@@ -281,7 +252,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -292,7 +264,6 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(2, true, None)?;
 
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -356,7 +327,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -366,7 +338,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -465,7 +436,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -476,7 +448,6 @@ mod when_main_branch_is_uptodate {
                             )?;
                             c.succeeds_with(0, true, None)?;
 
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -542,7 +513,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -552,7 +524,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -657,7 +628,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -668,7 +640,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -741,7 +712,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -752,7 +724,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -866,7 +837,8 @@ mod when_main_branch_is_uptodate {
                                 false,
                             )?;
                             test_repo.checkout("main")?;
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -876,7 +848,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -948,7 +919,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             test_repo.checkout("main")?;
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -958,7 +930,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -1043,7 +1014,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             test_repo.checkout("main")?;
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -1053,7 +1025,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -1124,7 +1095,8 @@ mod when_main_branch_is_uptodate {
                             )?;
                             test_repo.checkout("main")?;
 
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -1134,7 +1106,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
                                 vec![
@@ -1236,7 +1207,8 @@ mod when_main_branch_is_uptodate {
                             )?;
 
                             test_repo.checkout("main")?;
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -1246,7 +1218,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             p.expect_eventually("--force`\r\n")?;
 
                             let mut c = p.expect_choice(
@@ -1329,7 +1300,8 @@ mod when_main_branch_is_uptodate {
                             )?;
 
                             test_repo.checkout("main")?;
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -1339,7 +1311,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             p.expect("you have an amended/rebase version the proposal that is unpublished\r\n")?;
                             p.expect("you have previously applied the latest version of the proposal (2 ahead 0 behind 'main') but your local proposal branch has amended or rebased it (2 ahead 0 behind 'main')\r\n")?;
                             p.expect("to view the latest proposal but retain your changes:\r\n")?;
@@ -1435,7 +1406,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.stage_and_commit("appended commit")?;
 
                             test_repo.checkout("main")?;
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -1445,7 +1417,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             p.expect(
                                 "local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal (3 ahead 0 behind 'main')\r\n",
                             )?;
@@ -1521,7 +1492,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.stage_and_commit("appended commit")?;
 
                             test_repo.checkout("main")?;
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -1531,7 +1503,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             p.expect(
                                 "local proposal branch exists with 1 unpublished commits on top of the most up-to-date version of the proposal (3 ahead 0 behind 'main')\r\n",
                             )?;
@@ -1680,7 +1651,8 @@ mod when_main_branch_is_uptodate {
                             test_repo.stage_and_commit("commit for rebasing on top of")?;
 
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                            p.expect("finding proposals...\r\n")?;
+                            p.expect("fetching updates...\r\n")?;
+                            p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
                                 vec![
@@ -1690,7 +1662,6 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(2, true, None)?;
-                            p.expect("finding commits...\r\n")?;
                             p.expect("updated proposal available (2 ahead 0 behind 'main'). existing version is 2 ahead 1 behind 'main'\r\n")?;
                             let mut c = p.expect_choice(
                                 "",
@@ -1814,7 +1785,8 @@ mod when_main_branch_is_uptodate {
                                 test_repo.stage_and_commit("commit for rebasing on top of")?;
 
                                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                                p.expect("finding proposals...\r\n")?;
+                                p.expect("fetching updates...\r\n")?;
+                                p.expect_eventually("\r\n")?; // some updates listed here
                                 let mut c = p.expect_choice(
                                     "all proposals",
                                     vec![
@@ -1824,7 +1796,6 @@ mod when_main_branch_is_uptodate {
                                     ],
                                 )?;
                                 c.succeeds_with(2, true, None)?;
-                                p.expect("finding commits...\r\n")?;
                                 p.expect("updated proposal available (2 ahead 0 behind 'main'). existing version is 2 ahead 1 behind 'main'\r\n")?;
                                 let mut c = p.expect_choice(
                                     "",

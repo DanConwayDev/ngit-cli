@@ -1,17 +1,19 @@
-use std::{io::Write, ops::Add};
+use std::{collections::HashSet, io::Write, ops::Add, path::Path};
 
 use anyhow::{bail, Context, Result};
+use nostr::nips::nip01::Coordinate;
+use nostr_sdk::PublicKey;
 
 use super::send::event_is_patch_set_root;
-#[cfg(not(test))]
-use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
+#[cfg(not(test))]
+use crate::client::{Client, Connect};
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
-    client::Connect,
+    client::{fetching_with_report, get_events_from_cache, get_repo_ref_from_cache},
     git::{str_to_sha1, Repo, RepoActions},
-    repo_ref::{self, RepoRef, REPO_REF_KIND},
+    repo_ref::{get_repo_coordinates, RepoRef},
     sub_commands::send::{
         commit_msg_from_patch_oneliner, event_is_cover_letter, event_is_revision_root,
         event_to_cover_letter, patch_supports_commit_ids, PATCH_KIND,
@@ -21,10 +23,7 @@ use crate::{
 #[allow(clippy::too_many_lines)]
 pub async fn launch() -> Result<()> {
     let git_repo = Repo::discover().context("cannot find a git repository")?;
-
-    let root_commit = git_repo
-        .get_root_commit()
-        .context("failed to get root commit of the repository")?;
+    let git_repo_path = git_repo.get_path()?;
 
     // TODO: check for empty repo
     // TODO: check for existing maintaiers file
@@ -35,36 +34,47 @@ pub async fn launch() -> Result<()> {
     #[cfg(test)]
     let client = <MockConnect as std::default::Default>::default();
 
-    let repo_ref = repo_ref::fetch(
-        &git_repo,
-        root_commit.to_string(),
-        &client,
-        client.get_fallback_relays().clone(),
-        true,
-    )
-    .await?;
+    let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
 
-    println!("finding proposals...");
+    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 
-    let proposal_events_and_revisions_and_statuses: Vec<nostr::Event> =
-        find_proposal_and_status_events(&client, &repo_ref, &root_commit.to_string()).await?;
+    let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
 
-    if proposal_events_and_revisions_and_statuses.is_empty() {
+    let proposals_and_revisions: Vec<nostr::Event> =
+        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
+    if proposals_and_revisions.is_empty() {
         println!("no proposals found... create one? try `ngit send`");
         return Ok(());
     }
-    let proposal_events: Vec<&nostr::Event> = proposal_events_and_revisions_and_statuses
-        .iter()
-        .filter(|e| !event_is_revision_root(e) && e.kind().as_u16().eq(&PATCH_KIND))
-        .collect::<Vec<&nostr::Event>>();
+
+    let statuses: Vec<nostr::Event> = {
+        let mut statuses = get_events_from_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .kinds(status_kinds().clone())
+                    .events(proposals_and_revisions.iter().map(nostr::Event::id)),
+            ],
+        )
+        .await?;
+        statuses.sort_by_key(|e| e.created_at);
+        statuses.reverse();
+        statuses
+    };
 
     let mut open_proposals: Vec<&nostr::Event> = vec![];
     let mut draft_proposals: Vec<&nostr::Event> = vec![];
     let mut closed_proposals: Vec<&nostr::Event> = vec![];
     let mut applied_proposals: Vec<&nostr::Event> = vec![];
 
-    for proposal in &proposal_events {
-        let status = if let Some(e) = proposal_events_and_revisions_and_statuses
+    let proposals: Vec<nostr::Event> = proposals_and_revisions
+        .iter()
+        .filter(|e| !event_is_revision_root(e))
+        .cloned()
+        .collect();
+
+    for proposal in &proposals {
+        let status = if let Some(e) = statuses
             .iter()
             .filter(|e| {
                 status_kinds().contains(&e.kind())
@@ -89,11 +99,6 @@ pub async fn launch() -> Result<()> {
         }
     }
 
-    if proposal_events_and_revisions_and_statuses.is_empty() {
-        println!("no open proposals found... create one? try `ngit send`");
-        return Ok(());
-    }
-
     let mut selected_status = STATUS_KIND_OPEN;
 
     loop {
@@ -106,10 +111,10 @@ pub async fn launch() -> Result<()> {
         } else if selected_status == STATUS_KIND_APPLIED {
             &applied_proposals
         } else {
-            &proposal_events
+            &open_proposals
         };
 
-        let prompt = if proposal_events.len().eq(&open_proposals.len()) {
+        let prompt = if proposals.len().eq(&open_proposals.len()) {
             "all proposals"
         } else if selected_status == STATUS_KIND_OPEN {
             if open_proposals.is_empty() {
@@ -176,31 +181,12 @@ pub async fn launch() -> Result<()> {
         let cover_letter = event_to_cover_letter(proposals_for_status[selected_index])
             .context("cannot extract proposal details from proposal root event")?;
 
-        println!("finding commits...");
-
-        let commits_events: Vec<nostr::Event> = find_commits_for_proposal_root_events(
-            &client,
-            &[
-                vec![proposals_for_status[selected_index]],
-                proposal_events_and_revisions_and_statuses
-                    .iter()
-                    .filter(|e| {
-                        e.kind.as_u16().eq(&PATCH_KIND)
-                            && e.tags.iter().any(|t| {
-                                t.as_vec().len().gt(&1)
-                                    && t.as_vec()[1]
-                                        .eq(&proposals_for_status[selected_index].id.to_string())
-                            })
-                    })
-                    .collect::<Vec<&nostr::Event>>(),
-            ]
-            .concat(),
+        let commits_events: Vec<nostr::Event> = get_all_proposal_patch_events_from_cache(
+            git_repo_path,
             &repo_ref,
+            &proposals_for_status[selected_index].id(),
         )
         .await?;
-        // for commit in &commits_events {
-        //     println!("cevent: {:?}", commit.as_json());
-        // }
 
         let Ok(most_recent_proposal_patch_chain) =
             get_most_recent_patch_with_ancestors(commits_events.clone())
@@ -829,109 +815,93 @@ pub fn status_kinds() -> Vec<nostr::Kind> {
     ]
 }
 
-pub async fn find_proposal_and_status_events(
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
-    repo_ref: &RepoRef,
-    root_commit: &str,
+pub async fn get_proposals_and_revisions_from_cache(
+    git_repo_path: &Path,
+    repo_coordinates: HashSet<Coordinate>,
 ) -> Result<Vec<nostr::Event>> {
-    let repo_tags_filter = nostr::Filter::default().custom_tag(
-        nostr::SingleLetterTag::lowercase(nostr::Alphabet::A),
-        repo_ref
-            .maintainers
-            .iter()
-            .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier)),
-    );
-    let mut proposals = client
-        .get_events(
-            repo_ref.relays.clone(),
-            vec![
-                repo_tags_filter
-                    .clone()
-                    .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .custom_tag(
-                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                        vec!["root"],
-                    ),
-                // also pick up proposals from the same repo but no target at our maintainers repo
-                // events
-                nostr::Filter::default()
-                    .reference(root_commit)
-                    .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .custom_tag(
-                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                        vec!["root"],
-                    ),
-                repo_tags_filter.clone().kinds(status_kinds().clone()),
-                nostr::Filter::default()
-                    .reference(root_commit)
-                    .kinds(status_kinds().clone()),
-            ],
-        )
-        .await
-        .context("cannot get proposal events")?
-        .iter()
-        .filter(|e| {
-            (event_is_patch_set_root(e) || status_kinds().contains(&e.kind()))
-                && (e
-                    .tags
-                    .iter()
-                    .any(|t| t.as_vec().len() > 1 && t.as_vec()[1].eq(root_commit))
-                    || e.tags.iter().any(|t| {
-                        t.as_vec().len() > 1
-                            && repo_ref
-                                .maintainers
-                                .iter()
-                                .map(|m| format!("{REPO_REF_KIND}:{m}:{}", repo_ref.identifier))
-                                .any(|d| t.as_vec()[1].eq(&d))
-                    }))
-        })
-        .map(std::borrow::ToOwned::to_owned)
-        .collect::<Vec<nostr::Event>>();
+    let mut proposals = get_events_from_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .kind(nostr::Kind::Custom(PATCH_KIND))
+                .custom_tag(
+                    nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                    repo_coordinates
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<String>>(),
+                ),
+        ],
+    )
+    .await?
+    .iter()
+    .filter(|e| event_is_patch_set_root(e))
+    .cloned()
+    .collect::<Vec<nostr::Event>>();
     proposals.sort_by_key(|e| e.created_at);
     proposals.reverse();
     Ok(proposals)
 }
 
-pub async fn find_commits_for_proposal_root_events(
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
-    proposal_root_events: &Vec<&nostr::Event>,
+pub async fn get_all_proposal_patch_events_from_cache(
+    git_repo_path: &Path,
     repo_ref: &RepoRef,
+    proposal_id: &nostr::EventId,
 ) -> Result<Vec<nostr::Event>> {
-    let mut patch_events: Vec<nostr::Event> = client
-        .get_events(
-            repo_ref.relays.clone(),
+    let mut commit_events = get_events_from_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .kind(nostr::Kind::Custom(PATCH_KIND))
+                .event(*proposal_id),
+            nostr::Filter::default()
+                .kind(nostr::Kind::Custom(PATCH_KIND))
+                .id(*proposal_id),
+        ],
+    )
+    .await?;
+
+    let permissioned_users: HashSet<PublicKey> = [
+        repo_ref.maintainers.clone(),
+        vec![
+            commit_events
+                .iter()
+                .find(|e| e.id().eq(proposal_id))
+                .context("proposal not in cache")?
+                .author(),
+        ],
+    ]
+    .concat()
+    .iter()
+    .copied()
+    .collect();
+    commit_events.retain(|e| permissioned_users.contains(e.author_ref()));
+
+    let revision_roots: HashSet<nostr::EventId> = commit_events
+        .iter()
+        .filter(|e| event_is_revision_root(e))
+        .map(nostr::Event::id)
+        .collect();
+
+    if !revision_roots.is_empty() {
+        for event in get_events_from_cache(
+            git_repo_path,
             vec![
                 nostr::Filter::default()
                     .kind(nostr::Kind::Custom(PATCH_KIND))
-                    .events(
-                        proposal_root_events
-                            .iter()
-                            .map(|e| e.id)
-                            .collect::<Vec<nostr::EventId>>(),
-                    ),
+                    .events(revision_roots)
+                    .authors(permissioned_users.clone()),
             ],
         )
-        .await
-        .context("cannot fetch patch events")?
-        .iter()
-        .filter(|e| {
-            e.kind.as_u16() == PATCH_KIND
-                && e.tags.iter().any(|t| {
-                    t.as_vec().len() > 2
-                        && proposal_root_events
-                            .iter()
-                            .any(|e| t.as_vec()[1].eq(&e.id.to_string()))
-                })
-        })
-        .map(std::borrow::ToOwned::to_owned)
-        .collect();
-
-    for e in proposal_root_events {
-        if !event_is_cover_letter(e) && !patch_events.iter().any(|e2| e2.id.eq(&e.id)) {
-            patch_events.push(e.to_owned().clone());
+        .await?
+        {
+            commit_events.push(event);
         }
     }
-    Ok(patch_events)
+
+    Ok(commit_events
+        .iter()
+        .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(e.author_ref()))
+        .cloned()
+        .collect())
 }
