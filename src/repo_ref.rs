@@ -178,6 +178,7 @@ impl RepoRef {
         .await
         .context("failed to create repository reference event")
     }
+    /// coordinates without relay hints
     pub fn coordinates(&self) -> HashSet<Coordinate> {
         let mut res = HashSet::new();
         for m in &self.maintainers {
@@ -190,6 +191,7 @@ impl RepoRef {
         }
         res
     }
+    /// coordinates without relay hints
     pub fn coordinates_with_timestamps(&self) -> Vec<(Coordinate, Option<Timestamp>)> {
         self.coordinates()
             .iter()

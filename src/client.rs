@@ -345,7 +345,7 @@ impl Connect for Client {
                         // if relay isn't a repo relay, just filter for user profile
                         FetchRequest {
                             selected_relay: Some(r.to_owned()),
-                            repo_coordinates: vec![],
+                            repo_coordinates_without_relays: vec![],
                             proposals: HashSet::new(),
                             missing_contributor_profiles: request
                                 .missing_contributor_profiles
@@ -464,11 +464,11 @@ impl Connect for Client {
         pb: &Option<ProgressBar>,
     ) -> Result<FetchReport> {
         let mut fresh_coordinates: HashSet<Coordinate> = HashSet::new();
-        for (c, _) in request.repo_coordinates.clone() {
+        for (c, _) in request.repo_coordinates_without_relays.clone() {
             fresh_coordinates.insert(c);
         }
         let mut fresh_proposal_roots = request.proposals.clone();
-        let mut fresh_profiles = request
+        let mut fresh_profiles: HashSet<PublicKey> = request
             .missing_contributor_profiles
             .union(
                 &request
@@ -1006,7 +1006,7 @@ async fn create_relays_request(
         selected_relay: None,
         repo_relays: relays,
         relay_column_width,
-        repo_coordinates: if let Ok(repo_ref) = repo_ref {
+        repo_coordinates_without_relays: if let Ok(repo_ref) = repo_ref {
             repo_ref.coordinates_with_timestamps()
         } else {
             repo_coordinates_without_relays
@@ -1038,48 +1038,58 @@ async fn process_fetched_events(
             save_event_in_cache(git_repo_path, event).await?;
             if event.kind().as_u16().eq(&REPO_REF_KIND) {
                 save_event_in_global_cache(git_repo_path, event).await?;
-                let new_coordinate = !request.repo_coordinates.iter().any(|(c, _)| {
-                    c.identifier.eq(event.identifier().unwrap()) && c.public_key.eq(&event.pubkey)
-                });
-                let update_to_existing = !new_coordinate
-                    && request.repo_coordinates.iter().any(|(c, t)| {
+                let new_coordinate = !request
+                    .repo_coordinates_without_relays
+                    .iter()
+                    .map(|(c, _)| c.clone())
+                    .any(|c| {
                         c.identifier.eq(event.identifier().unwrap())
                             && c.public_key.eq(&event.pubkey)
-                            && if let Some(t) = t {
-                                event.created_at.gt(t)
-                            } else {
-                                false
-                            }
                     });
-                if new_coordinate || update_to_existing {
-                    let c = Coordinate {
-                        kind: event.kind(),
-                        public_key: event.author(),
-                        identifier: event.identifier().unwrap().to_string(),
-                        relays: vec![],
-                    };
-                    if new_coordinate {
-                        fresh_coordinates.insert(c.clone());
-                        report.repo_coordinates.push(c.clone());
-                    }
-                    if update_to_existing {
-                        report
-                            .updated_repo_announcements
-                            .push((c, event.created_at));
-                    }
+                let update_to_existing = !new_coordinate
+                    && request
+                        .repo_coordinates_without_relays
+                        .iter()
+                        .any(|(c, t)| {
+                            c.identifier.eq(event.identifier().unwrap())
+                                && c.public_key.eq(&event.pubkey)
+                                && if let Some(t) = t {
+                                    event.created_at.gt(t)
+                                } else {
+                                    true
+                                }
+                        });
+                if update_to_existing {
+                    report.updated_repo_announcements.push((
+                        Coordinate {
+                            kind: event.kind(),
+                            public_key: event.author(),
+                            identifier: event.identifier().unwrap().to_owned(),
+                            relays: vec![],
+                        },
+                        event.created_at,
+                    ));
                 }
                 // if contains new maintainer
                 if let Ok(repo_ref) = &RepoRef::try_from(event.clone()) {
                     for m in &repo_ref.maintainers {
-                        if !request.repo_coordinates.iter().any(|(c, _)| {
-                            c.identifier.eq(&repo_ref.identifier) && m.eq(&c.public_key)
-                        }) {
-                            fresh_coordinates.insert(Coordinate {
+                        if !request
+                            .repo_coordinates_without_relays // prexisting maintainers
+                            .iter()
+                            .map(|(c, _)| c.clone())
+                            .collect::<HashSet<Coordinate>>()
+                            .union(&report.repo_coordinates_without_relays) // already added maintainers
+                            .any(|c| c.identifier.eq(&repo_ref.identifier) && m.eq(&c.public_key))
+                        {
+                            let c = Coordinate {
                                 kind: event.kind(),
                                 public_key: *m,
                                 identifier: repo_ref.identifier.clone(),
                                 relays: vec![],
-                            });
+                            };
+                            fresh_coordinates.insert(c.clone());
+                            report.repo_coordinates_without_relays.insert(c);
+
                             if !request.contributors.contains(m)
                                 && !request
                                     .profiles_to_fetch_from_user_relays
@@ -1141,9 +1151,13 @@ async fn process_fetched_events(
 pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchReport {
     let mut report = FetchReport::default();
     for relay_report in reports.into_iter().flatten() {
-        for c in relay_report.repo_coordinates {
-            if !report.repo_coordinates.iter().any(|e| e.eq(&c)) {
-                report.repo_coordinates.push(c);
+        for c in relay_report.repo_coordinates_without_relays {
+            if !report
+                .repo_coordinates_without_relays
+                .iter()
+                .any(|e| e.eq(&c))
+            {
+                report.repo_coordinates_without_relays.insert(c);
             }
         }
         for (r, t) in relay_report.updated_repo_announcements {
@@ -1247,7 +1261,7 @@ pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nost
 
 #[derive(Default)]
 pub struct FetchReport {
-    repo_coordinates: Vec<Coordinate>,
+    repo_coordinates_without_relays: HashSet<Coordinate>,
     updated_repo_announcements: Vec<(Coordinate, Timestamp)>,
     proposals: HashSet<EventId>,
     /// commits against existing propoals
@@ -1261,11 +1275,11 @@ impl Display for FetchReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // report: "1 new maintainer, 1 announcement, 1 proposal, 3 commits, 2 statuses"
         let mut display_items: Vec<String> = vec![];
-        if !self.repo_coordinates.is_empty() {
+        if !self.repo_coordinates_without_relays.is_empty() {
             display_items.push(format!(
                 "{} new maintainer{}",
-                self.repo_coordinates.len(),
-                if self.repo_coordinates.len() == 1 {
+                self.repo_coordinates_without_relays.len(),
+                if self.repo_coordinates_without_relays.len() > 1 {
                     "s"
                 } else {
                     ""
@@ -1276,7 +1290,7 @@ impl Display for FetchReport {
             display_items.push(format!(
                 "{} announcement update{}",
                 self.updated_repo_announcements.len(),
-                if self.updated_repo_announcements.len() == 1 {
+                if self.updated_repo_announcements.len() > 1 {
                     "s"
                 } else {
                     ""
@@ -1335,7 +1349,7 @@ pub struct FetchRequest {
     repo_relays: HashSet<Url>,
     selected_relay: Option<Url>,
     relay_column_width: usize,
-    repo_coordinates: Vec<(Coordinate, Option<Timestamp>)>,
+    repo_coordinates_without_relays: Vec<(Coordinate, Option<Timestamp>)>,
     proposals: HashSet<EventId>,
     contributors: HashSet<PublicKey>,
     missing_contributor_profiles: HashSet<PublicKey>,
