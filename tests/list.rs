@@ -157,7 +157,9 @@ mod cannot_find_repo_event {
                 let test_repo = GitTestRepo::without_repo_in_git_config();
                 test_repo.populate()?;
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-
+                p.expect(
+                    "hint: https://gitworkshop.dev/repos lists repositories and their naddr\r\n",
+                )?;
                 if invalid_input {
                     let mut input = p.expect_input("repository naddr")?;
                     input.succeeds_with("dfgvfvfzadvd")?;

@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use console::Style;
 use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, Tag, TagStandard, ToBech32};
 use nostr_sdk::{Kind, NostrSigner, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -273,7 +274,7 @@ pub async fn try_and_get_repo_coordinates(
                             if let Ok(maintainer) = PublicKey::parse(m) {
                                 if current_user.eq(&maintainer) {
                                     println!(
-                                        "please run `nigt init` to add the repo identifier to maintainers.yaml"
+                                        "please run `ngit init` to add the repo identifier to maintainers.yaml"
                                     );
                                 }
                             }
@@ -294,7 +295,7 @@ pub async fn try_and_get_repo_coordinates(
                 }
                 if events.is_empty() {
                     println!(
-                        "finding repository events for this repository for npubs in maintains.yaml"
+                        "finding repository events for this repository for npubs in maintainers.yaml"
                     );
                     events = client
                         .get_events(client.get_fallback_relays().clone(), vec![filter.clone()])
@@ -339,6 +340,12 @@ pub async fn try_and_get_repo_coordinates(
 }
 
 fn ask_for_naddr() -> Result<Coordinate> {
+    let dim = Style::new().color256(247);
+    println!(
+        "{}",
+        dim.apply_to("hint: https://gitworkshop.dev/repos lists repositories and their naddr"),
+    );
+
     Ok(loop {
         if let Ok(c) = Coordinate::parse(
             Interactor::default()
