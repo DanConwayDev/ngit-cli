@@ -405,7 +405,7 @@ pub async fn send_events(
                         console::style(
                             e.to_string()
                                 .replace("relay pool error:", "error:")
-                                .replace("event not published: ", ""),
+                                .replace("event not published: ", "error: "),
                         )
                         .for_stderr()
                         .red()

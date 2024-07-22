@@ -204,11 +204,18 @@ impl Connect for Client {
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
         let res = self.client.send_event_to(vec![url], event.clone()).await?;
+        if let Some(err) = res.failed.get(&Url::parse(url)?) {
+            bail!(if let Some(err) = err {
+                err.to_string()
+            } else {
+                "error: unknown".to_string()
+            });
+        }
         save_event_in_cache(git_repo_path, &event).await?;
         if event.kind().eq(&Kind::Custom(REPO_REF_KIND)) {
             save_event_in_global_cache(git_repo_path, &event).await?;
         }
-        Ok(res)
+        Ok(event.id())
     }
 
     async fn get_events(

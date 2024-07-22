@@ -23,11 +23,11 @@ futures = "0.3.28"
 git2 = "0.18.1"
 indicatif = "0.17.7"
 keyring = "2.0.5"
-nostr = { git = "https://github.com/DanConwayDev/nostr", branch= "v0.32-get-nip46-from-nip05-address" }
-nostr-database = { git = "https://github.com/DanConwayDev/nostr", branch= "v0.32-get-nip46-from-nip05-address" }
-nostr-sdk = { git = "https://github.com/DanConwayDev/nostr", branch= "v0.32-get-nip46-from-nip05-address" }
-nostr-signer = { git = "https://github.com/DanConwayDev/nostr", branch= "v0.32-get-nip46-from-nip05-address" }
-nostr-sqlite = { git = "https://github.com/DanConwayDev/nostr", branch= "v0.32-get-nip46-from-nip05-address" }
+nostr = "0.33.0"
+nostr-database = "0.33.0"
+nostr-sdk = "0.33.0"
+nostr-signer = "0.33.0"
+nostr-sqlite = "0.33.0"
 passwords = "3.1.13"
 scrypt = "0.11.0"
 serde = { version = "1.0.181", features = ["derive"] }

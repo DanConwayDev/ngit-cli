@@ -1821,8 +1821,9 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
 name = "nostr"
-version = "0.32.1"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f08db214560a34bf7c4c1fea09a8461b9412bae58ba06e99ce3177d89fa1e0a6"
 dependencies = [
  "aes 0.8.4",
  "base64 0.21.7",
@@ -1850,8 +1851,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-database"
-version = "0.32.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f6c72d0d0842de637f7fba6e70764f719257d29dad8fc5f7352810b0f117ad"
 dependencies = [
  "async-trait",
  "flatbuffers",
@@ -1864,8 +1866,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-relay-pool"
-version = "0.32.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afa5502a3df456790ca16d90cc688a677117d57ab56b079dcfa091390ac9f202"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -1879,8 +1882,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.32.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b427dceefbbb49a9dd98abb8c4e40d25fdd467e99821aaad88615252bdb915bd"
 dependencies = [
  "async-utility",
  "atomic-destructor",
@@ -1898,8 +1902,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-signer"
-version = "0.32.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "665268b316f41cd8fa791be54b6c7935c5a239461708c380a699d6677be9af38"
 dependencies = [
  "async-utility",
  "nostr",
@@ -1911,8 +1916,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sqlite"
-version = "0.32.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31f643ba919864f3a9bb004244c0d5c958646b07fe760823fdc33aae1c8fc0fc"
 dependencies = [
  "async-trait",
  "nostr",
@@ -1925,8 +1931,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-zapper"
-version = "0.32.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69922e74f8eab1f9d287008c0c06acdec87277a2d8f44bd9d38e003422aea0ab"
 dependencies = [
  "async-trait",
  "nostr",
@@ -2026,8 +2033,9 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "nwc"
-version = "0.32.0"
-source = "git+https://github.com/DanConwayDev/nostr?branch=v0.32-get-nip46-from-nip05-address#429f3c1396f05bf08793f60ed1d92d7bc02ea438"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb2e04b3edb5e9572e95b62842430625f1718e8a4a3596a30aeb04e6734764ea"
 dependencies = [
  "async-utility",
  "nostr",

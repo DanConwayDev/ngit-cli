@@ -2,7 +2,7 @@ use std::{collections::HashSet, path::Path, str::FromStr, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use nostr::{
-    nips::{nip05::get_nip46, nip46::NostrConnectURI},
+    nips::{nip05, nip46::NostrConnectURI},
     PublicKey,
 };
 use nostr_sdk::{
@@ -404,17 +404,17 @@ async fn fresh_login(
 pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
     let term = console::Term::stderr();
     term.write_line("contacting login service provider...")?;
-    let res = get_nip46(&nip05, None).await;
+    let res = nip05::profile(&nip05, None).await;
     term.clear_last_lines(1)?;
     match res {
-        Ok((signer_public_key, relays)) => {
-            if relays.is_empty() {
+        Ok(profile) => {
+            if profile.nip46.is_empty() {
                 println!("nip05 provider isn't configured for remote login");
                 bail!("nip05 provider isn't configured for remote login")
             }
             Ok(NostrConnectURI::Bunker {
-                signer_public_key,
-                relays,
+                signer_public_key: profile.public_key,
+                relays: profile.nip46,
                 secret: None,
             })
         }
