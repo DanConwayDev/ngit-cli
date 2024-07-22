@@ -15,7 +15,7 @@ use crate::{
     client::{fetching_with_report, get_repo_ref_from_cache},
     git::{str_to_sha1, Repo, RepoActions},
     repo_ref::get_repo_coordinates,
-    sub_commands::list::get_most_recent_patch_with_ancestors,
+    sub_commands::{list::get_most_recent_patch_with_ancestors, send::event_is_revision_root},
 };
 
 #[allow(clippy::too_many_lines)]
@@ -49,10 +49,12 @@ pub async fn launch() -> Result<()> {
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()
-            .find(|e| event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(&branch_name)))
+            .find(|e| {
+                event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(&branch_name))
+                    && !event_is_revision_root(e)
+            })
             .context("cannot find proposal that matches the current branch name")?
             .clone();
-
     let commit_events = get_all_proposal_patch_events_from_cache(
         git_repo_path,
         &repo_ref,
