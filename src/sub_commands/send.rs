@@ -769,8 +769,22 @@ pub struct CoverLetter {
     pub title: String,
     pub description: String,
     pub branch_name: String,
+    pub event_id: Option<nostr::EventId>,
 }
 
+impl CoverLetter {
+    pub fn get_branch_name(&self) -> Result<String> {
+        Ok(format!(
+            "prs/{}({})",
+            self.branch_name,
+            &self
+                .event_id
+                .context("proposal root event_id must be know to get it's branch name")?
+                .to_hex()
+                .as_str()[..8],
+        ))
+    }
+}
 pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
     // TODO: look for Subject:[ PATCH 0/n ] but watch out for:
     //   [PATCH v1 0/n ] or
@@ -841,6 +855,7 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
                 .collect();
             s
         },
+        event_id: Some(event.id()),
     })
 }
 

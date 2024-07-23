@@ -50,7 +50,8 @@ pub async fn launch() -> Result<()> {
             .await?
             .iter()
             .find(|e| {
-                event_to_cover_letter(e).is_ok_and(|cl| cl.branch_name.eq(&branch_name))
+                event_to_cover_letter(e)
+                    .is_ok_and(|cl| cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name)))
                     && !event_is_revision_root(e)
             })
             .context("cannot find proposal that matches the current branch name")?

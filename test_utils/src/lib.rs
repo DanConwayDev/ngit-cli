@@ -1,9 +1,17 @@
-use std::{ffi::OsStr, path::PathBuf, str::FromStr};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
+use futures::executor::block_on;
+use git::GitTestRepo;
 use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
+use nostr_database::{NostrDatabase, Order};
 use nostr_sdk::{serde_json, NostrSigner, TagStandard};
+use nostr_sqlite::SQLiteDatabase;
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -934,4 +942,54 @@ where
             strip_ansi_escape_codes: true,
         },
     )
+}
+
+/** copied from client.rs */
+async fn get_local_cache_database(git_repo_path: &Path) -> Result<SQLiteDatabase> {
+    SQLiteDatabase::open(git_repo_path.join(".git/nostr-cache.sqlite"))
+        .await
+        .context("cannot open or create nostr cache database at .git/nostr-cache.sqlite")
+}
+
+/** copied from client.rs */
+pub async fn get_events_from_cache(
+    git_repo_path: &Path,
+    filters: Vec<nostr::Filter>,
+) -> Result<Vec<nostr::Event>> {
+    get_local_cache_database(git_repo_path)
+        .await?
+        .query(filters.clone(), Order::Asc)
+        .await
+        .context(
+            "cannot execute query on opened git repo nostr cache database .git/nostr-cache.sqlite",
+        )
+}
+
+pub fn get_proposal_branch_name(
+    test_repo: &GitTestRepo,
+    branch_name_in_event: &str,
+) -> Result<String> {
+    let events = block_on(get_events_from_cache(
+        &test_repo.dir,
+        vec![
+            nostr::Filter::default()
+                .kind(nostr_sdk::Kind::GitPatch)
+                .hashtag("root"),
+        ],
+    ))?;
+    for event in events {
+        if event.iter_tags().any(|t| {
+            !t.as_vec()[1].eq("revision-root")
+                && event.iter_tags().any(|t| {
+                    t.as_vec()[0].eq("branch-name") && t.as_vec()[1].eq(branch_name_in_event)
+                })
+        }) {
+            return Ok(format!(
+                "prs/{}({})",
+                branch_name_in_event,
+                &event.id.to_hex().as_str()[..8],
+            ));
+        }
+    }
+    bail!("cannot find proposal root with branch-name tag matching title")
 }
