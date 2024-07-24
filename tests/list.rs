@@ -1105,7 +1105,8 @@ mod when_main_branch_is_uptodate {
                             let (_, test_repo) =
                                 create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                            ammend_last_commit_and_checkout_main(&test_repo)?;
+                            amend_last_commit(&test_repo)?;
+                            test_repo.checkout("main")?;
 
                             // run test
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);

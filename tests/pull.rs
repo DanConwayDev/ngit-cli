@@ -203,9 +203,11 @@ mod when_branch_is_checked_out {
                     let (originating_repo, test_repo) =
                         create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
-                        &test_repo,
-                    )?;
+                    let branch_name =
+                        remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
+                            &test_repo,
+                        )?;
+                    test_repo.checkout(&branch_name)?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                     p.expect_end_eventually()?;
@@ -257,9 +259,11 @@ mod when_branch_is_checked_out {
                         let (originating_repo, test_repo) =
                             create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                        remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
-                            &test_repo,
-                        )?;
+                        let branch_name =
+                            remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
+                                &test_repo,
+                            )?;
+                        test_repo.checkout(&branch_name)?;
 
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                         p.expect("fetching updates...\r\n")?;
@@ -330,10 +334,11 @@ mod when_branch_is_checked_out {
                     let (originating_repo, test_repo) =
                         create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    let branch_name = ammend_last_commit_and_checkout_main(&test_repo)?;
+                    let branch_name = amend_last_commit(&test_repo)?;
 
                     // create and send a revision from another repository
                     originating_repo.checkout("main")?;
+                    test_repo.checkout("main")?;
                     test_repo.git_repo.branch(
                         &branch_name,
                         &test_repo
@@ -414,7 +419,7 @@ mod when_branch_is_checked_out {
                     let (_, test_repo) =
                         create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    ammend_last_commit_and_checkout_main(&test_repo)?;
+                    amend_last_commit(&test_repo)?;
 
                     // run test
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
@@ -479,7 +484,6 @@ mod when_branch_is_checked_out {
                     // add another commit (so we have a local branch 1 ahead)
                     std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
                     test_repo.stage_and_commit("add ammended-commit.md")?;
-                    test_repo.checkout("main")?;
 
                     // run test
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
@@ -537,7 +541,6 @@ mod when_branch_is_checked_out {
                     // add another commit (so we have a local branch 1 ahead)
                     std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
                     test_repo.stage_and_commit("add ammended-commit.md")?;
-                    test_repo.checkout("main")?;
 
                     // run test
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);

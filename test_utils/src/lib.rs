@@ -1196,14 +1196,13 @@ pub fn remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
     Ok(branch_name)
 }
 
-pub fn ammend_last_commit_and_checkout_main(test_repo: &GitTestRepo) -> Result<String> {
+pub fn amend_last_commit(test_repo: &GitTestRepo) -> Result<String> {
     let branch_name =
         remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(test_repo)?;
     // add another commit (so we have an ammened local branch)
     test_repo.checkout(&branch_name)?;
     std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
     test_repo.stage_and_commit("add ammended-commit.md")?;
-    test_repo.checkout("main")?;
     Ok(branch_name)
 }
 
