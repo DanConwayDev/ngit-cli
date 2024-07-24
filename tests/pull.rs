@@ -3,128 +3,6 @@ use futures::join;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, relay::Relay, *};
 
-static FEATURE_BRANCH_NAME_1: &str = "feature-example-t";
-static FEATURE_BRANCH_NAME_2: &str = "feature-example-f";
-static FEATURE_BRANCH_NAME_3: &str = "feature-example-c";
-
-static PROPOSAL_TITLE_1: &str = "proposal a";
-static PROPOSAL_TITLE_2: &str = "proposal b";
-static PROPOSAL_TITLE_3: &str = "proposal c";
-
-fn cli_tester_create_proposals() -> Result<GitTestRepo> {
-    let git_repo = GitTestRepo::default();
-    git_repo.populate()?;
-    cli_tester_create_proposal(
-        &git_repo,
-        FEATURE_BRANCH_NAME_1,
-        "a",
-        Some((PROPOSAL_TITLE_1, "proposal a description")),
-        None,
-    )?;
-    cli_tester_create_proposal(
-        &git_repo,
-        FEATURE_BRANCH_NAME_2,
-        "b",
-        Some((PROPOSAL_TITLE_2, "proposal b description")),
-        None,
-    )?;
-    cli_tester_create_proposal(
-        &git_repo,
-        FEATURE_BRANCH_NAME_3,
-        "c",
-        Some((PROPOSAL_TITLE_3, "proposal c description")),
-        None,
-    )?;
-    Ok(git_repo)
-}
-
-fn create_and_populate_branch(
-    test_repo: &GitTestRepo,
-    branch_name: &str,
-    prefix: &str,
-    only_one_commit: bool,
-) -> Result<()> {
-    test_repo.checkout("main")?;
-    test_repo.create_branch(branch_name)?;
-    test_repo.checkout(branch_name)?;
-    std::fs::write(
-        test_repo.dir.join(format!("{}3.md", prefix)),
-        "some content",
-    )?;
-    test_repo.stage_and_commit(format!("add {}3.md", prefix).as_str())?;
-    if !only_one_commit {
-        std::fs::write(
-            test_repo.dir.join(format!("{}4.md", prefix)),
-            "some content",
-        )?;
-        test_repo.stage_and_commit(format!("add {}4.md", prefix).as_str())?;
-    }
-    Ok(())
-}
-
-fn cli_tester_create_proposal(
-    test_repo: &GitTestRepo,
-    branch_name: &str,
-    prefix: &str,
-    cover_letter_title_and_description: Option<(&str, &str)>,
-    in_reply_to: Option<String>,
-) -> Result<()> {
-    create_and_populate_branch(test_repo, branch_name, prefix, false)?;
-
-    if let Some(in_reply_to) = in_reply_to {
-        let mut p = CliTester::new_from_dir(
-            &test_repo.dir,
-            [
-                "--nsec",
-                TEST_KEY_1_NSEC,
-                "--password",
-                TEST_PASSWORD,
-                "--disable-cli-spinners",
-                "send",
-                "HEAD~2",
-                "--no-cover-letter",
-                "--in-reply-to",
-                in_reply_to.as_str(),
-            ],
-        );
-        p.expect_end_eventually()?;
-    } else if let Some((title, description)) = cover_letter_title_and_description {
-        let mut p = CliTester::new_from_dir(
-            &test_repo.dir,
-            [
-                "--nsec",
-                TEST_KEY_1_NSEC,
-                "--password",
-                TEST_PASSWORD,
-                "--disable-cli-spinners",
-                "send",
-                "HEAD~2",
-                "--title",
-                format!("\"{title}\"").as_str(),
-                "--description",
-                format!("\"{description}\"").as_str(),
-            ],
-        );
-        p.expect_end_eventually()?;
-    } else {
-        let mut p = CliTester::new_from_dir(
-            &test_repo.dir,
-            [
-                "--nsec",
-                TEST_KEY_1_NSEC,
-                "--password",
-                TEST_PASSWORD,
-                "--disable-cli-spinners",
-                "send",
-                "HEAD~2",
-                "--no-cover-letter",
-            ],
-        );
-        p.expect_end_eventually()?;
-    }
-    Ok(())
-}
-
 mod when_main_is_checked_out {
     use super::*;
 
@@ -153,33 +31,8 @@ mod when_main_is_checked_out {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 cli_tester_create_proposals()?;
 
-                let test_repo = GitTestRepo::default();
-                test_repo.populate()?;
+                let test_repo = create_repo_with_first_proposal_branch_pulled_and_checkedout()?;
 
-                // create proposal branch
-                let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                p.expect("fetching updates...\r\n")?;
-                p.expect_eventually("\r\n")?; // some updates listed here
-                let mut c = p.expect_choice(
-                    "all proposals",
-                    vec![
-                        format!("\"{PROPOSAL_TITLE_3}\""),
-                        format!("\"{PROPOSAL_TITLE_2}\""),
-                        format!("\"{PROPOSAL_TITLE_1}\""),
-                    ],
-                )?;
-                c.succeeds_with(2, true, None)?;
-                let mut c = p.expect_choice(
-                    "",
-                    vec![
-                        format!("create and checkout proposal branch (2 ahead 0 behind 'main')"),
-                        format!("apply to current branch with `git am`"),
-                        format!("download to ./patches"),
-                        format!("back"),
-                    ],
-                )?;
-                c.succeeds_with(0, false, Some(0))?;
-                p.expect_end_eventually()?;
                 test_repo.checkout("main")?;
 
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
@@ -295,37 +148,8 @@ mod when_branch_is_checked_out {
                 r55.events.push(generate_test_key_1_relay_list_event());
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    cli_tester_create_proposals()?;
-
-                    let test_repo = GitTestRepo::default();
-                    test_repo.populate()?;
-
-                    // create proposal branch
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                    p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
-                    let mut c = p.expect_choice(
-                        "all proposals",
-                        vec![
-                            format!("\"{PROPOSAL_TITLE_3}\""),
-                            format!("\"{PROPOSAL_TITLE_2}\""),
-                            format!("\"{PROPOSAL_TITLE_1}\""),
-                        ],
-                    )?;
-                    c.succeeds_with(2, true, None)?;
-                    let mut c = p.expect_choice(
-                        "",
-                        vec![
-                            format!(
-                                "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            format!("back"),
-                        ],
-                    )?;
-                    c.succeeds_with(0, false, Some(0))?;
-                    p.expect_end_eventually()?;
+                    let (_, test_repo) =
+                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                     p.expect("fetching updates...\r\n")?;
@@ -376,37 +200,8 @@ mod when_branch_is_checked_out {
 
             let cli_tester_handle =
                 std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                    let originating_repo = cli_tester_create_proposals()?;
-
-                    let test_repo = GitTestRepo::default();
-                    test_repo.populate()?;
-
-                    // create proposal branch
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                    p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
-                    let mut c = p.expect_choice(
-                        "all proposals",
-                        vec![
-                            format!("\"{PROPOSAL_TITLE_3}\""),
-                            format!("\"{PROPOSAL_TITLE_2}\""),
-                            format!("\"{PROPOSAL_TITLE_1}\""),
-                        ],
-                    )?;
-                    c.succeeds_with(2, true, None)?;
-                    let mut c = p.expect_choice(
-                        "",
-                        vec![
-                            format!(
-                                "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            format!("back"),
-                        ],
-                    )?;
-                    c.succeeds_with(0, false, Some(0))?;
-                    p.expect_end_eventually()?;
+                    let (originating_repo, test_repo) =
+                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                     // remove latest commit so it is behind
                     let branch_name = test_repo.get_checked_out_branch_name()?;
@@ -467,37 +262,8 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle =
                     std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
-                        let originating_repo = cli_tester_create_proposals()?;
-
-                        let test_repo = GitTestRepo::default();
-                        test_repo.populate()?;
-
-                        // create proposal branch
-                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                        p.expect("fetching updates...\r\n")?;
-                        p.expect_eventually("\r\n")?; // some updates listed here
-                        let mut c = p.expect_choice(
-                            "all proposals",
-                            vec![
-                                format!("\"{PROPOSAL_TITLE_3}\""),
-                                format!("\"{PROPOSAL_TITLE_2}\""),
-                                format!("\"{PROPOSAL_TITLE_1}\""),
-                            ],
-                        )?;
-                        c.succeeds_with(2, true, None)?;
-                        let mut c = p.expect_choice(
-                            "",
-                            vec![
-                                format!(
-                                    "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                                ),
-                                format!("apply to current branch with `git am`"),
-                                format!("download to ./patches"),
-                                format!("back"),
-                            ],
-                        )?;
-                        c.succeeds_with(0, false, Some(0))?;
-                        p.expect_end_eventually()?;
+                        let (originating_repo, test_repo) =
+                            create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                         // remove latest commit so it is behind
                         let branch_name = test_repo.get_checked_out_branch_name()?;
@@ -577,37 +343,8 @@ mod when_branch_is_checked_out {
                 r55.events.push(generate_test_key_1_relay_list_event());
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    let originating_repo = cli_tester_create_proposals()?;
-
-                    let test_repo = GitTestRepo::default();
-                    test_repo.populate()?;
-
-                    // create proposal branch
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                    p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
-                    let mut c = p.expect_choice(
-                        "all proposals",
-                        vec![
-                            format!("\"{PROPOSAL_TITLE_3}\""),
-                            format!("\"{PROPOSAL_TITLE_2}\""),
-                            format!("\"{PROPOSAL_TITLE_1}\""),
-                        ],
-                    )?;
-                    c.succeeds_with(2, true, None)?;
-                    let mut c = p.expect_choice(
-                        "",
-                        vec![
-                            format!(
-                                "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            format!("back"),
-                        ],
-                    )?;
-                    c.succeeds_with(0, false, Some(0))?;
-                    p.expect_end_eventually()?;
+                    let (originating_repo, test_repo) =
+                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                     // remove latest commit so it is behind
                     let branch_name = test_repo.get_checked_out_branch_name()?;
@@ -705,37 +442,8 @@ mod when_branch_is_checked_out {
                 r55.events.push(generate_test_key_1_relay_list_event());
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    cli_tester_create_proposals()?;
-
-                    let test_repo = GitTestRepo::default();
-                    test_repo.populate()?;
-
-                    // create proposal branch
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                    p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
-                    let mut c = p.expect_choice(
-                        "all proposals",
-                        vec![
-                            format!("\"{PROPOSAL_TITLE_3}\""),
-                            format!("\"{PROPOSAL_TITLE_2}\""),
-                            format!("\"{PROPOSAL_TITLE_1}\""),
-                        ],
-                    )?;
-                    c.succeeds_with(2, true, None)?;
-                    let mut c = p.expect_choice(
-                        "",
-                        vec![
-                            format!(
-                                "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            format!("back"),
-                        ],
-                    )?;
-                    c.succeeds_with(0, false, Some(0))?;
-                    p.expect_end_eventually()?;
+                    let (_, test_repo) =
+                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                     // remove latest commit so it is behind
                     let branch_name = test_repo.get_checked_out_branch_name()?;
@@ -811,37 +519,8 @@ mod when_branch_is_checked_out {
 
             let cli_tester_handle = std::thread::spawn(
                 move || -> Result<(GitTestRepo, GitTestRepo)> {
-                    let originating_repo = cli_tester_create_proposals()?;
-
-                    let test_repo = GitTestRepo::default();
-                    test_repo.populate()?;
-
-                    // create proposal branch
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                    p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
-                    let mut c = p.expect_choice(
-                        "all proposals",
-                        vec![
-                            format!("\"{PROPOSAL_TITLE_3}\""),
-                            format!("\"{PROPOSAL_TITLE_2}\""),
-                            format!("\"{PROPOSAL_TITLE_1}\""),
-                        ],
-                    )?;
-                    c.succeeds_with(2, true, None)?;
-                    let mut c = p.expect_choice(
-                        "",
-                        vec![
-                            format!(
-                                "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            format!("back"),
-                        ],
-                    )?;
-                    c.succeeds_with(0, false, Some(0))?;
-                    p.expect_end_eventually()?;
+                    let (originating_repo, test_repo) =
+                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                     // add another commit (so we have a local branch 1 ahead)
                     std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
@@ -898,37 +577,8 @@ mod when_branch_is_checked_out {
                 r55.events.push(generate_test_key_1_relay_list_event());
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    cli_tester_create_proposals()?;
-
-                    let test_repo = GitTestRepo::default();
-                    test_repo.populate()?;
-
-                    // create proposal branch
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                    p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
-                    let mut c = p.expect_choice(
-                        "all proposals",
-                        vec![
-                            format!("\"{PROPOSAL_TITLE_3}\""),
-                            format!("\"{PROPOSAL_TITLE_2}\""),
-                            format!("\"{PROPOSAL_TITLE_1}\""),
-                        ],
-                    )?;
-                    c.succeeds_with(2, true, None)?;
-                    let mut c = p.expect_choice(
-                        "",
-                        vec![
-                            format!(
-                                "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            format!("back"),
-                        ],
-                    )?;
-                    c.succeeds_with(0, false, Some(0))?;
-                    p.expect_end_eventually()?;
+                    let (_, test_repo) =
+                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                     // add another commit (so we have a local branch 1 ahead)
                     std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
@@ -1004,37 +654,8 @@ mod when_branch_is_checked_out {
 
             let cli_tester_handle: JoinHandle<Result<(GitTestRepo, GitTestRepo)>> =
                 tokio::task::spawn_blocking(move || {
-                    // create 3 proposals
-                    let _ = cli_tester_create_proposals()?;
-                    // download the origianl version of the first proposal
-                    let test_repo = GitTestRepo::default();
-                    test_repo.populate()?;
-
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                    p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
-                    let mut c = p.expect_choice(
-                        "all proposals",
-                        vec![
-                            format!("\"{PROPOSAL_TITLE_3}\""),
-                            format!("\"{PROPOSAL_TITLE_2}\""),
-                            format!("\"{PROPOSAL_TITLE_1}\""),
-                        ],
-                    )?;
-                    c.succeeds_with(2, true, None)?;
-                    let mut c = p.expect_choice(
-                        "",
-                        vec![
-                            format!(
-                                "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                            ),
-                            format!("apply to current branch with `git am`"),
-                            format!("download to ./patches"),
-                            format!("back"),
-                        ],
-                    )?;
-                    c.succeeds_with(0, false, Some(0))?;
-                    p.expect_end_eventually()?;
+                    let (_, test_repo) =
+                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                     // get proposal id of first
                     let client = Client::default();
@@ -1131,37 +752,8 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle: JoinHandle<Result<()>> = tokio::task::spawn_blocking(
                     move || {
-                        // create 3 proposals
-                        let _ = cli_tester_create_proposals()?;
-                        // download the origianl version of the first proposal
-                        let test_repo = GitTestRepo::default();
-                        test_repo.populate()?;
-
-                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
-                        p.expect("fetching updates...\r\n")?;
-                        p.expect_eventually("\r\n")?; // some updates listed here
-                        let mut c = p.expect_choice(
-                            "all proposals",
-                            vec![
-                                format!("\"{PROPOSAL_TITLE_3}\""),
-                                format!("\"{PROPOSAL_TITLE_2}\""),
-                                format!("\"{PROPOSAL_TITLE_1}\""),
-                            ],
-                        )?;
-                        c.succeeds_with(2, true, None)?;
-                        let mut c = p.expect_choice(
-                            "",
-                            vec![
-                                format!(
-                                    "create and checkout proposal branch (2 ahead 0 behind 'main')"
-                                ),
-                                format!("apply to current branch with `git am`"),
-                                format!("download to ./patches"),
-                                format!("back"),
-                            ],
-                        )?;
-                        c.succeeds_with(0, false, Some(0))?;
-                        p.expect_end_eventually()?;
+                        let (_, test_repo) =
+                            create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
 
                         // get proposal id of first
                         let client = Client::default();

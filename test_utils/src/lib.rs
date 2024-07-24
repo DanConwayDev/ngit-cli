@@ -993,3 +993,169 @@ pub fn get_proposal_branch_name(
     }
     bail!("cannot find proposal root with branch-name tag matching title")
 }
+
+pub static FEATURE_BRANCH_NAME_1: &str = "feature-example-t";
+pub static FEATURE_BRANCH_NAME_2: &str = "feature-example-f";
+pub static FEATURE_BRANCH_NAME_3: &str = "feature-example-c";
+
+pub static PROPOSAL_TITLE_1: &str = "proposal a";
+pub static PROPOSAL_TITLE_2: &str = "proposal b";
+pub static PROPOSAL_TITLE_3: &str = "proposal c";
+
+pub fn cli_tester_create_proposals() -> Result<GitTestRepo> {
+    let git_repo = GitTestRepo::default();
+    git_repo.populate()?;
+    cli_tester_create_proposal(
+        &git_repo,
+        FEATURE_BRANCH_NAME_1,
+        "a",
+        Some((PROPOSAL_TITLE_1, "proposal a description")),
+        None,
+    )?;
+    cli_tester_create_proposal(
+        &git_repo,
+        FEATURE_BRANCH_NAME_2,
+        "b",
+        Some((PROPOSAL_TITLE_2, "proposal b description")),
+        None,
+    )?;
+    cli_tester_create_proposal(
+        &git_repo,
+        FEATURE_BRANCH_NAME_3,
+        "c",
+        Some((PROPOSAL_TITLE_3, "proposal c description")),
+        None,
+    )?;
+    Ok(git_repo)
+}
+
+pub fn create_and_populate_branch(
+    test_repo: &GitTestRepo,
+    branch_name: &str,
+    prefix: &str,
+    only_one_commit: bool,
+) -> Result<()> {
+    test_repo.checkout("main")?;
+    test_repo.create_branch(branch_name)?;
+    test_repo.checkout(branch_name)?;
+    std::fs::write(
+        test_repo.dir.join(format!("{}3.md", prefix)),
+        "some content",
+    )?;
+    test_repo.stage_and_commit(format!("add {}3.md", prefix).as_str())?;
+    if !only_one_commit {
+        std::fs::write(
+            test_repo.dir.join(format!("{}4.md", prefix)),
+            "some content",
+        )?;
+        test_repo.stage_and_commit(format!("add {}4.md", prefix).as_str())?;
+    }
+    Ok(())
+}
+
+pub fn cli_tester_create_proposal(
+    test_repo: &GitTestRepo,
+    branch_name: &str,
+    prefix: &str,
+    cover_letter_title_and_description: Option<(&str, &str)>,
+    in_reply_to: Option<String>,
+) -> Result<()> {
+    create_and_populate_branch(test_repo, branch_name, prefix, false)?;
+
+    if let Some(in_reply_to) = in_reply_to {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "HEAD~2",
+                "--no-cover-letter",
+                "--in-reply-to",
+                in_reply_to.as_str(),
+            ],
+        );
+        p.expect_end_eventually()?;
+    } else if let Some((title, description)) = cover_letter_title_and_description {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "HEAD~2",
+                "--title",
+                format!("\"{title}\"").as_str(),
+                "--description",
+                format!("\"{description}\"").as_str(),
+            ],
+        );
+        p.expect_end_eventually()?;
+    } else {
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "HEAD~2",
+                "--no-cover-letter",
+            ],
+        );
+        p.expect_end_eventually()?;
+    }
+    Ok(())
+}
+/// returns (originating_repo, test_repo)
+pub fn create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()
+-> Result<(GitTestRepo, GitTestRepo)> {
+    Ok((
+        cli_tester_create_proposals()?,
+        create_repo_with_first_proposal_branch_pulled_and_checkedout()?,
+    ))
+}
+
+pub fn create_repo_with_first_proposal_branch_pulled_and_checkedout() -> Result<GitTestRepo> {
+    let test_repo = GitTestRepo::default();
+    test_repo.populate()?;
+    use_ngit_list_to_download_and_checkout_first_proposal_branch(&test_repo)?;
+    Ok(test_repo)
+}
+
+pub fn use_ngit_list_to_download_and_checkout_first_proposal_branch(
+    test_repo: &GitTestRepo,
+) -> Result<()> {
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+    p.expect("fetching updates...\r\n")?;
+    p.expect_eventually("\r\n")?; // some updates listed here
+    let mut c = p.expect_choice(
+        "all proposals",
+        vec![
+            format!("\"{PROPOSAL_TITLE_3}\""),
+            format!("\"{PROPOSAL_TITLE_2}\""),
+            format!("\"{PROPOSAL_TITLE_1}\""),
+        ],
+    )?;
+    c.succeeds_with(2, true, None)?;
+    let mut c = p.expect_choice(
+        "",
+        vec![
+            format!("create and checkout proposal branch (2 ahead 0 behind 'main')"),
+            format!("apply to current branch with `git am`"),
+            format!("download to ./patches"),
+            format!("back"),
+        ],
+    )?;
+    c.succeeds_with(0, false, Some(0))?;
+    p.expect_end_eventually()?;
+    Ok(())
+}
