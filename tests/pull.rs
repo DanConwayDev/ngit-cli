@@ -331,28 +331,11 @@ mod when_branch_is_checked_out {
                 r55.events.push(generate_test_key_1_relay_list_event());
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    let (originating_repo, test_repo) =
-                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
+                    let (o, test_repo) =
+                        create_proposals_with_first_revised_and_repo_with_unrevised_proposal_checkedout()?;
 
-                    let branch_name = amend_last_commit(&test_repo)?;
+                    amend_last_commit(&test_repo, "add different ammended-commit.md")?;
 
-                    // create and send a revision from another repository
-                    originating_repo.checkout("main")?;
-                    test_repo.checkout("main")?;
-                    test_repo.git_repo.branch(
-                        &branch_name,
-                        &test_repo
-                            .git_repo
-                            .find_commit(test_repo.get_tip_of_local_branch(&branch_name)?)?
-                            .parent(0)?,
-                        true,
-                    )?;
-                    originating_repo.checkout(&branch_name)?;
-                    test_repo.checkout(&branch_name)?;
-                    std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
-                    test_repo.stage_and_commit("add ammended-commit.md")?;
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["push", "--force"]);
-                    p.expect_end_eventually()?;
                     // test when branch is ammended an older version of the proposal
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                     p.expect("fetching updates...\r\n")?;
@@ -384,7 +367,6 @@ mod when_branch_is_checked_out {
                     r56.listen_until_close(),
                 );
                 cli_tester_handle.join().unwrap()?;
-                println!("{:?}", r55.events);
                 Ok(())
             }
         }
@@ -419,7 +401,7 @@ mod when_branch_is_checked_out {
                     let (_, test_repo) =
                         create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    amend_last_commit(&test_repo)?;
+                    amend_last_commit(&test_repo, "add ammended-commit.md")?;
 
                     // run test
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);

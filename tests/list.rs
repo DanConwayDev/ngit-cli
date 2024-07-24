@@ -1105,7 +1105,7 @@ mod when_main_branch_is_uptodate {
                             let (_, test_repo) =
                                 create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                            amend_last_commit(&test_repo)?;
+                            amend_last_commit(&test_repo, "add ammended-commit.md")?;
                             test_repo.checkout("main")?;
 
                             // run test

@@ -1196,13 +1196,13 @@ pub fn remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
     Ok(branch_name)
 }
 
-pub fn amend_last_commit(test_repo: &GitTestRepo) -> Result<String> {
+pub fn amend_last_commit(test_repo: &GitTestRepo, commit_msg: &str) -> Result<String> {
     let branch_name =
         remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(test_repo)?;
     // add another commit (so we have an ammened local branch)
     test_repo.checkout(&branch_name)?;
-    std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
-    test_repo.stage_and_commit("add ammended-commit.md")?;
+    std::fs::write(test_repo.dir.join("ammended-commit.md"), commit_msg)?;
+    test_repo.stage_and_commit(commit_msg)?;
     Ok(branch_name)
 }
 
@@ -1210,6 +1210,33 @@ pub fn create_proposals_with_first_rebased_and_repo_with_latest_main_and_unrebas
 -> Result<(GitTestRepo, GitTestRepo)> {
     let (_, test_repo) = create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
+    // recreate proposal 1 on top of a another commit (like a rebase on top
+    // of one extra commit)
+    let second_originating_repo = GitTestRepo::default();
+    second_originating_repo.populate()?;
+    std::fs::write(
+        second_originating_repo.dir.join("amazing.md"),
+        "some content",
+    )?;
+    second_originating_repo.stage_and_commit("commit for rebasing on top of")?;
+    cli_tester_create_proposal(
+        &second_originating_repo,
+        FEATURE_BRANCH_NAME_1,
+        "a",
+        Some((PROPOSAL_TITLE_1, "proposal a description")),
+        Some(get_first_proposal_event_id()?.to_string()),
+    )?;
+
+    // pretend we have pulled the updated main branch
+    let branch_name = test_repo.get_checked_out_branch_name()?;
+    test_repo.checkout("main")?;
+    std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
+    test_repo.stage_and_commit("commit for rebasing on top of")?;
+    test_repo.checkout(&branch_name)?;
+    Ok((second_originating_repo, test_repo))
+}
+
+fn get_first_proposal_event_id() -> Result<nostr::EventId> {
     // get proposal id of first
     let client = Client::default();
     Handle::current().block_on(client.add_relay("ws://localhost:8055"))?;
@@ -1236,28 +1263,31 @@ pub fn create_proposals_with_first_rebased_and_repo_with_latest_main_and_unrebas
         })
         .unwrap()
         .id;
-    // recreate proposal 1 on top of a another commit (like a rebase on top
-    // of one extra commit)
-    let second_originating_repo = GitTestRepo::default();
-    second_originating_repo.populate()?;
-    std::fs::write(
-        second_originating_repo.dir.join("amazing.md"),
-        "some content",
-    )?;
-    second_originating_repo.stage_and_commit("commit for rebasing on top of")?;
-    cli_tester_create_proposal(
-        &second_originating_repo,
-        FEATURE_BRANCH_NAME_1,
-        "a",
-        Some((PROPOSAL_TITLE_1, "proposal a description")),
-        Some(proposal_1_id.to_string()),
-    )?;
+    Ok(proposal_1_id)
+}
 
-    // pretend we have pulled the updated main branch
-    let branch_name = test_repo.get_checked_out_branch_name()?;
-    test_repo.checkout("main")?;
-    std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
-    test_repo.stage_and_commit("commit for rebasing on top of")?;
-    test_repo.checkout(&branch_name)?;
-    Ok((second_originating_repo, test_repo))
+pub fn create_proposals_with_first_revised_and_repo_with_unrevised_proposal_checkedout()
+-> Result<(GitTestRepo, GitTestRepo)> {
+    let (originating_repo, test_repo) =
+        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
+
+    use_ngit_list_to_download_and_checkout_proposal_branch(&originating_repo, 1)?;
+
+    amend_last_commit(&originating_repo, "add some ammended-commit.md")?;
+
+    let mut p = CliTester::new_from_dir(
+        &originating_repo.dir,
+        [
+            "--nsec",
+            TEST_KEY_1_NSEC,
+            "--password",
+            TEST_PASSWORD,
+            "--disable-cli-spinners",
+            "push",
+            "--force",
+        ],
+    );
+    p.expect_end_eventually()?;
+
+    Ok((originating_repo, test_repo))
 }
