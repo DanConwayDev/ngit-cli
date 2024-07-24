@@ -1,7 +1,8 @@
+identifier: ngit
 maintainers:
-- npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr
+  - npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr
 relays:
-- wss://relay.damus.io
-- wss://nos.lol
-- wss://relay.nostr.band
-- wss://nostr.einundzwanzig.space
+  - wss://relay.damus.io
+  - wss://nos.lol
+  - wss://relay.nostr.band
+  - wss://nostr.einundzwanzig.space
