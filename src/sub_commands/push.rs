@@ -16,7 +16,10 @@ use crate::{
             get_most_recent_patch_with_ancestors, get_proposals_and_revisions_from_cache,
             tag_value,
         },
-        send::{event_is_revision_root, event_to_cover_letter, generate_patch_event, send_events},
+        send::{
+            event_is_revision_root, event_to_cover_letter, generate_patch_event,
+            identify_ahead_behind, send_events,
+        },
     },
     Cli,
 };
@@ -26,9 +29,6 @@ pub struct SubCommandArgs {
     #[arg(long, action)]
     /// send proposal revision from checked out proposal branch
     force: bool,
-    #[arg(long, action)]
-    /// dont prompt for cover letter when force pushing
-    no_cover_letter: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -116,11 +116,23 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         sub_commands::send::launch(
             cli_args,
             &sub_commands::send::SubCommandArgs {
-                since_or_range: String::new(),
+                // if not ahead of master prompt, otherwise assume proposal revision is all commits
+                // ahead
+                since_or_range: if let Ok((_, _, ahead, _)) =
+                    identify_ahead_behind(&git_repo, &None, &None)
+                {
+                    if ahead.is_empty() {
+                        String::new()
+                    } else {
+                        format!("HEAD~{}", ahead.len())
+                    }
+                } else {
+                    String::new()
+                },
                 in_reply_to: vec![proposal_root_event.id.to_string()],
                 title: None,
                 description: None,
-                no_cover_letter: args.no_cover_letter,
+                no_cover_letter: true,
             },
             true,
         )

@@ -1042,7 +1042,7 @@ pub async fn generate_patch_event(
 /**
  * returns `(from_branch,to_branch,ahead,behind)`
  */
-fn identify_ahead_behind(
+pub fn identify_ahead_behind(
     git_repo: &Repo,
     from_branch: &Option<String>,
     to_branch: &Option<String>,

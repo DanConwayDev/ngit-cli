@@ -478,7 +478,6 @@ mod when_branch_is_checked_out {
                                 "--disable-cli-spinners",
                                 "push",
                                 "--force",
-                                "--no-cover-letter",
                             ],
                         );
                         p.expect("fetching updates...\r\n")?;
@@ -488,19 +487,6 @@ mod when_branch_is_checked_out {
                         p.expect("creating proposal revision for: ")?;
                         // proposal id will be printed in this gap
                         p.expect_eventually("\r\n")?;
-                        let mut selector = p.expect_multi_select(
-                            "select commits for proposal",
-                            vec![
-                                format!("(Joe Bloggs) add a4.md [{branch_name}] 355bdf1"),
-                                "(Joe Bloggs) add a3.md dbd1115".to_string(),
-                                "(Joe Bloggs) commit for rebasing on top of [main] 1aa2cfe"
-                                    .to_string(),
-                                "(Joe Bloggs) add t2.md 431b84e".to_string(),
-                                "(Joe Bloggs) add t1.md af474d8".to_string(),
-                                "(Joe Bloggs) Initial commit 9ee507f".to_string(),
-                            ],
-                        )?;
-                        selector.succeeds_with(vec![0, 1], false, vec![0, 1])?;
                         p.expect("creating proposal from 2 commits:\r\n")?;
                         p.expect("355bdf1 add a4.md\r\n")?;
                         p.expect("dbd1115 add a3.md\r\n")?;
