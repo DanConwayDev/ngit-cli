@@ -109,7 +109,7 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let (_, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
                     p.expect("fetching updates...\r\n")?;
@@ -163,19 +163,13 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let (_, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    // remove latest commit so it is behind
-                    let branch_name = test_repo.get_checked_out_branch_name()?;
-                    test_repo.checkout("main")?;
-                    test_repo.git_repo.branch(
-                        &branch_name,
-                        &test_repo
-                            .git_repo
-                            .find_commit(test_repo.get_tip_of_local_branch(&branch_name)?)?
-                            .parent(0)?,
-                        true,
-                    )?;
+                    let branch_name =
+                        remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
+                            &test_repo,
+                        )?;
+
                     test_repo.checkout(&branch_name)?;
                     // run test
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["push"]);
@@ -235,7 +229,7 @@ mod when_branch_is_checked_out {
                 let cli_tester_handle =
                     std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
                         let (originating_repo, test_repo) =
-                            create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                            create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
                         // add another commit (so we have an ammened local branch)
                         std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
@@ -315,7 +309,7 @@ mod when_branch_is_checked_out {
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<GitTestRepo> {
                 let (_, test_repo) =
-                    create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                    create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
                 // add another commit (so we have an ammened local branch)
                 std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
@@ -398,7 +392,7 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let (_, tmp_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
                     let branch_name = tmp_repo.get_checked_out_branch_name()?;
 
                     let test_repo = GitTestRepo::default();
@@ -464,7 +458,7 @@ mod when_branch_is_checked_out {
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let (_, tmp_repo) =
-                            create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                            create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
                         let branch_name = tmp_repo.get_checked_out_branch_name()?;
 
                         let test_repo = GitTestRepo::default();

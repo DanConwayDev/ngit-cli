@@ -31,7 +31,7 @@ mod when_main_is_checked_out {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 cli_tester_create_proposals()?;
 
-                let test_repo = create_repo_with_first_proposal_branch_pulled_and_checkedout()?;
+                let test_repo = create_repo_with_proposal_branch_pulled_and_checkedout(1)?;
 
                 test_repo.checkout("main")?;
 
@@ -149,7 +149,7 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let (_, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                     p.expect("fetching updates...\r\n")?;
@@ -201,18 +201,10 @@ mod when_branch_is_checked_out {
             let cli_tester_handle =
                 std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
                     let (originating_repo, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    // remove latest commit so it is behind
-                    let branch_name = test_repo.get_checked_out_branch_name()?;
-                    test_repo.checkout("main")?;
-                    test_repo.git_repo.branch(
-                        &branch_name,
-                        &test_repo
-                            .git_repo
-                            .find_commit(test_repo.get_tip_of_local_branch(&branch_name)?)?
-                            .parent(0)?,
-                        true,
+                    remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
+                        &test_repo,
                     )?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
@@ -263,18 +255,10 @@ mod when_branch_is_checked_out {
                 let cli_tester_handle =
                     std::thread::spawn(move || -> Result<(GitTestRepo, GitTestRepo)> {
                         let (originating_repo, test_repo) =
-                            create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                            create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                        // remove latest commit so it is behind
-                        let branch_name = test_repo.get_checked_out_branch_name()?;
-                        test_repo.checkout("main")?;
-                        test_repo.git_repo.branch(
-                            &branch_name,
-                            &test_repo
-                                .git_repo
-                                .find_commit(test_repo.get_tip_of_local_branch(&branch_name)?)?
-                                .parent(0)?,
-                            true,
+                        remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
+                            &test_repo,
                         )?;
 
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
@@ -344,24 +328,9 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let (originating_repo, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    // remove latest commit so it is behind
-                    let branch_name = test_repo.get_checked_out_branch_name()?;
-                    test_repo.checkout("main")?;
-                    test_repo.git_repo.branch(
-                        &branch_name,
-                        &test_repo
-                            .git_repo
-                            .find_commit(test_repo.get_tip_of_local_branch(&branch_name)?)?
-                            .parent(0)?,
-                        true,
-                    )?;
-                    // add another commit (so we have an ammened local branch)
-                    test_repo.checkout(&branch_name)?;
-                    std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
-                    test_repo.stage_and_commit("add ammended-commit.md")?;
-                    test_repo.checkout("main")?;
+                    let branch_name = ammend_last_commit_and_checkout_main(&test_repo)?;
 
                     // create and send a revision from another repository
                     originating_repo.checkout("main")?;
@@ -443,24 +412,9 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let (_, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
-                    // remove latest commit so it is behind
-                    let branch_name = test_repo.get_checked_out_branch_name()?;
-                    test_repo.checkout("main")?;
-                    test_repo.git_repo.branch(
-                        &branch_name,
-                        &test_repo
-                            .git_repo
-                            .find_commit(test_repo.get_tip_of_local_branch(&branch_name)?)?
-                            .parent(0)?,
-                        true,
-                    )?;
-                    // add another commit (so we have an ammened local branch)
-                    test_repo.checkout(&branch_name)?;
-                    std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
-                    test_repo.stage_and_commit("add ammended-commit.md")?;
-                    test_repo.checkout("main")?;
+                    ammend_last_commit_and_checkout_main(&test_repo)?;
 
                     // run test
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
@@ -520,7 +474,7 @@ mod when_branch_is_checked_out {
             let cli_tester_handle = std::thread::spawn(
                 move || -> Result<(GitTestRepo, GitTestRepo)> {
                     let (originating_repo, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
                     // add another commit (so we have a local branch 1 ahead)
                     std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
@@ -578,7 +532,7 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let (_, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
+                        create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
 
                     // add another commit (so we have a local branch 1 ahead)
                     std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
@@ -627,10 +581,7 @@ mod when_branch_is_checked_out {
         }
     }
     mod when_latest_event_rebases_branch {
-        use std::time::Duration;
-
-        use nostr_sdk::Client;
-        use tokio::{runtime::Handle, task::JoinHandle};
+        use tokio::task::JoinHandle;
 
         use super::*;
 
@@ -654,57 +605,7 @@ mod when_branch_is_checked_out {
 
             let cli_tester_handle: JoinHandle<Result<(GitTestRepo, GitTestRepo)>> =
                 tokio::task::spawn_blocking(move || {
-                    let (_, test_repo) =
-                        create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
-
-                    // get proposal id of first
-                    let client = Client::default();
-                    Handle::current().block_on(client.add_relay("ws://localhost:8055"))?;
-                    Handle::current().block_on(client.connect_relay("ws://localhost:8055"))?;
-                    let proposals = Handle::current().block_on(client.get_events_of(
-                        vec![
-                                nostr::Filter::default()
-                                    .kind(nostr::Kind::Custom(PATCH_KIND))
-                                    .custom_tag(
-                                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                                        vec!["root"],
-                                    ),
-                            ],
-                        Some(Duration::from_millis(500)),
-                    ))?;
-                    Handle::current().block_on(client.disconnect())?;
-
-                    let proposal_1_id = proposals
-                        .iter()
-                        .find(|e| {
-                            e.tags
-                                .iter()
-                                .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
-                        })
-                        .unwrap()
-                        .id;
-                    // recreate proposal 1 on top of a another commit (like a rebase on top
-                    // of one extra commit)
-                    let second_originating_repo = GitTestRepo::default();
-                    second_originating_repo.populate()?;
-                    std::fs::write(
-                        second_originating_repo.dir.join("amazing.md"),
-                        "some content",
-                    )?;
-                    second_originating_repo.stage_and_commit("commit for rebasing on top of")?;
-                    cli_tester_create_proposal(
-                        &second_originating_repo,
-                        FEATURE_BRANCH_NAME_1,
-                        "a",
-                        Some((PROPOSAL_TITLE_1, "proposal a description")),
-                        Some(proposal_1_id.to_string()),
-                    )?;
-
-                    // pretend we have pulled the updated main branch
-                    test_repo.checkout("main")?;
-                    std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
-                    test_repo.stage_and_commit("commit for rebasing on top of")?;
-                    test_repo.checkout(FEATURE_BRANCH_NAME_1)?;
+                    let (originating_repo, test_repo) = create_proposals_with_first_rebased_and_repo_with_latest_main_and_unrebased_proposal()?;
 
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                     p.expect_end_eventually_and_print()?;
@@ -712,7 +613,7 @@ mod when_branch_is_checked_out {
                     for p in [51, 52, 53, 55, 56] {
                         relay::shutdown_relay(8000 + p)?;
                     }
-                    Ok((second_originating_repo, test_repo))
+                    Ok((originating_repo, test_repo))
                 });
 
             // launch relay
@@ -752,58 +653,7 @@ mod when_branch_is_checked_out {
 
                 let cli_tester_handle: JoinHandle<Result<()>> = tokio::task::spawn_blocking(
                     move || {
-                        let (_, test_repo) =
-                            create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()?;
-
-                        // get proposal id of first
-                        let client = Client::default();
-                        Handle::current().block_on(client.add_relay("ws://localhost:8055"))?;
-                        Handle::current().block_on(client.connect_relay("ws://localhost:8055"))?;
-                        let proposals = Handle::current().block_on(client.get_events_of(
-                            vec![
-                                nostr::Filter::default()
-                                    .kind(nostr::Kind::Custom(PATCH_KIND))
-                                    .custom_tag(
-                                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                                        vec!["root"],
-                                    ),
-                            ],
-                            Some(Duration::from_millis(500)),
-                        ))?;
-                        Handle::current().block_on(client.disconnect())?;
-
-                        let proposal_1_id = proposals
-                            .iter()
-                            .find(|e| {
-                                e.tags
-                                    .iter()
-                                    .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
-                            })
-                            .unwrap()
-                            .id;
-                        // recreate proposal 1 on top of a another commit (like a rebase on top
-                        // of one extra commit)
-                        let second_originating_repo = GitTestRepo::default();
-                        second_originating_repo.populate()?;
-                        std::fs::write(
-                            second_originating_repo.dir.join("amazing.md"),
-                            "some content",
-                        )?;
-                        second_originating_repo
-                            .stage_and_commit("commit for rebasing on top of")?;
-                        cli_tester_create_proposal(
-                            &second_originating_repo,
-                            FEATURE_BRANCH_NAME_1,
-                            "a",
-                            Some((PROPOSAL_TITLE_1, "proposal a description")),
-                            Some(proposal_1_id.to_string()),
-                        )?;
-
-                        // pretend we have pulled the updated main branch
-                        test_repo.checkout("main")?;
-                        std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
-                        test_repo.stage_and_commit("commit for rebasing on top of")?;
-                        test_repo.checkout(FEATURE_BRANCH_NAME_1)?;
+                        let (_, test_repo) = create_proposals_with_first_rebased_and_repo_with_latest_main_and_unrebased_proposal()?;
 
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                         p.expect("fetching updates...\r\n")?;

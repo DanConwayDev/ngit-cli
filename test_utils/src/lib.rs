@@ -2,6 +2,7 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use anyhow::{bail, ensure, Context, Result};
@@ -10,11 +11,12 @@ use futures::executor::block_on;
 use git::GitTestRepo;
 use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
 use nostr_database::{NostrDatabase, Order};
-use nostr_sdk::{serde_json, NostrSigner, TagStandard};
+use nostr_sdk::{serde_json, Client, NostrSigner, TagStandard};
 use nostr_sqlite::SQLiteDatabase;
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
+use tokio::runtime::Handle;
 
 pub mod git;
 pub mod relay;
@@ -997,6 +999,7 @@ pub fn get_proposal_branch_name(
 pub static FEATURE_BRANCH_NAME_1: &str = "feature-example-t";
 pub static FEATURE_BRANCH_NAME_2: &str = "feature-example-f";
 pub static FEATURE_BRANCH_NAME_3: &str = "feature-example-c";
+pub static FEATURE_BRANCH_NAME_4: &str = "feature-example-d";
 
 pub static PROPOSAL_TITLE_1: &str = "proposal a";
 pub static PROPOSAL_TITLE_2: &str = "proposal b";
@@ -1119,23 +1122,27 @@ pub fn cli_tester_create_proposal(
 }
 
 /// returns (originating_repo, test_repo)
-pub fn create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()
--> Result<(GitTestRepo, GitTestRepo)> {
+pub fn create_proposals_and_repo_with_proposal_pulled_and_checkedout(
+    proposal_number: u16,
+) -> Result<(GitTestRepo, GitTestRepo)> {
     Ok((
         cli_tester_create_proposals()?,
-        create_repo_with_first_proposal_branch_pulled_and_checkedout()?,
+        create_repo_with_proposal_branch_pulled_and_checkedout(proposal_number)?,
     ))
 }
 
-pub fn create_repo_with_first_proposal_branch_pulled_and_checkedout() -> Result<GitTestRepo> {
+pub fn create_repo_with_proposal_branch_pulled_and_checkedout(
+    proposal_number: u16,
+) -> Result<GitTestRepo> {
     let test_repo = GitTestRepo::default();
     test_repo.populate()?;
-    use_ngit_list_to_download_and_checkout_first_proposal_branch(&test_repo)?;
+    use_ngit_list_to_download_and_checkout_proposal_branch(&test_repo, proposal_number)?;
     Ok(test_repo)
 }
 
-pub fn use_ngit_list_to_download_and_checkout_first_proposal_branch(
+pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
     test_repo: &GitTestRepo,
+    proposal_number: u16,
 ) -> Result<()> {
     let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
     p.expect("fetching updates...\r\n")?;
@@ -1148,7 +1155,17 @@ pub fn use_ngit_list_to_download_and_checkout_first_proposal_branch(
             format!("\"{PROPOSAL_TITLE_1}\""),
         ],
     )?;
-    c.succeeds_with(2, true, None)?;
+    c.succeeds_with(
+        if proposal_number == 3 {
+            0
+        } else if proposal_number == 2 {
+            1
+        } else {
+            2
+        },
+        true,
+        None,
+    )?;
     let mut c = p.expect_choice(
         "",
         vec![
@@ -1161,4 +1178,87 @@ pub fn use_ngit_list_to_download_and_checkout_first_proposal_branch(
     c.succeeds_with(0, false, Some(0))?;
     p.expect_end_eventually()?;
     Ok(())
+}
+
+pub fn remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
+    test_repo: &GitTestRepo,
+) -> Result<String> {
+    let branch_name = test_repo.get_checked_out_branch_name()?;
+    test_repo.checkout("main")?;
+    test_repo.git_repo.branch(
+        &branch_name,
+        &test_repo
+            .git_repo
+            .find_commit(test_repo.get_tip_of_local_branch(&branch_name)?)?
+            .parent(0)?,
+        true,
+    )?;
+    Ok(branch_name)
+}
+
+pub fn ammend_last_commit_and_checkout_main(test_repo: &GitTestRepo) -> Result<String> {
+    let branch_name =
+        remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(test_repo)?;
+    // add another commit (so we have an ammened local branch)
+    test_repo.checkout(&branch_name)?;
+    std::fs::write(test_repo.dir.join("ammended-commit.md"), "some content")?;
+    test_repo.stage_and_commit("add ammended-commit.md")?;
+    test_repo.checkout("main")?;
+    Ok(branch_name)
+}
+
+pub fn create_proposals_with_first_rebased_and_repo_with_latest_main_and_unrebased_proposal()
+-> Result<(GitTestRepo, GitTestRepo)> {
+    let (_, test_repo) = create_proposals_and_repo_with_proposal_pulled_and_checkedout(1)?;
+
+    // get proposal id of first
+    let client = Client::default();
+    Handle::current().block_on(client.add_relay("ws://localhost:8055"))?;
+    Handle::current().block_on(client.connect_relay("ws://localhost:8055"))?;
+    let proposals = Handle::current().block_on(client.get_events_of(
+        vec![
+        nostr::Filter::default()
+            .kind(nostr::Kind::Custom(PATCH_KIND))
+            .custom_tag(
+                nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                vec!["root"],
+            ),
+    ],
+        Some(Duration::from_millis(500)),
+    ))?;
+    Handle::current().block_on(client.disconnect())?;
+
+    let proposal_1_id = proposals
+        .iter()
+        .find(|e| {
+            e.tags
+                .iter()
+                .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
+        })
+        .unwrap()
+        .id;
+    // recreate proposal 1 on top of a another commit (like a rebase on top
+    // of one extra commit)
+    let second_originating_repo = GitTestRepo::default();
+    second_originating_repo.populate()?;
+    std::fs::write(
+        second_originating_repo.dir.join("amazing.md"),
+        "some content",
+    )?;
+    second_originating_repo.stage_and_commit("commit for rebasing on top of")?;
+    cli_tester_create_proposal(
+        &second_originating_repo,
+        FEATURE_BRANCH_NAME_1,
+        "a",
+        Some((PROPOSAL_TITLE_1, "proposal a description")),
+        Some(proposal_1_id.to_string()),
+    )?;
+
+    // pretend we have pulled the updated main branch
+    let branch_name = test_repo.get_checked_out_branch_name()?;
+    test_repo.checkout("main")?;
+    std::fs::write(test_repo.dir.join("amazing.md"), "some content")?;
+    test_repo.stage_and_commit("commit for rebasing on top of")?;
+    test_repo.checkout(&branch_name)?;
+    Ok((second_originating_repo, test_repo))
 }
