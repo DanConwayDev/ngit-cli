@@ -1012,6 +1012,7 @@ pub fn cli_tester_create_proposals() -> Result<GitTestRepo> {
         Some((PROPOSAL_TITLE_1, "proposal a description")),
         None,
     )?;
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_2,
@@ -1019,6 +1020,7 @@ pub fn cli_tester_create_proposals() -> Result<GitTestRepo> {
         Some((PROPOSAL_TITLE_2, "proposal b description")),
         None,
     )?;
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     cli_tester_create_proposal(
         &git_repo,
         FEATURE_BRANCH_NAME_3,
@@ -1061,7 +1063,7 @@ pub fn cli_tester_create_proposal(
     in_reply_to: Option<String>,
 ) -> Result<()> {
     create_and_populate_branch(test_repo, branch_name, prefix, false)?;
-
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     if let Some(in_reply_to) = in_reply_to {
         let mut p = CliTester::new_from_dir(
             &test_repo.dir,
@@ -1115,6 +1117,7 @@ pub fn cli_tester_create_proposal(
     }
     Ok(())
 }
+
 /// returns (originating_repo, test_repo)
 pub fn create_proposals_and_repo_with_first_proposal_pulled_and_checkedout()
 -> Result<(GitTestRepo, GitTestRepo)> {
