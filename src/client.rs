@@ -36,10 +36,10 @@ use nostr_sqlite::SQLiteDatabase;
 use crate::{
     config::get_dirs,
     login::{get_logged_in_user, get_user_ref_from_cache},
-    repo_ref::{RepoRef, REPO_REF_KIND},
+    repo_ref::RepoRef,
     sub_commands::{
         list::status_kinds,
-        send::{event_is_patch_set_root, event_is_revision_root, PATCH_KIND},
+        send::{event_is_patch_set_root, event_is_revision_root},
     },
 };
 
@@ -212,7 +212,7 @@ impl Connect for Client {
             });
         }
         save_event_in_cache(git_repo_path, &event).await?;
-        if event.kind().eq(&Kind::Custom(REPO_REF_KIND)) {
+        if event.kind().eq(&Kind::GitRepoAnnouncement) {
             save_event_in_global_cache(git_repo_path, &event).await?;
         }
         Ok(event.id())
@@ -895,7 +895,7 @@ async fn create_relays_request(
             git_repo_path,
             vec![
                 nostr::Filter::default()
-                    .kinds(vec![Kind::Custom(PATCH_KIND)])
+                    .kinds(vec![Kind::GitPatch])
                     .custom_tag(
                         SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                         repo_coordinates_without_relays
@@ -1070,7 +1070,7 @@ async fn process_fetched_events(
     for event in &events {
         if !request.existing_events.contains(&event.id) {
             save_event_in_cache(git_repo_path, event).await?;
-            if event.kind().as_u16().eq(&REPO_REF_KIND) {
+            if event.kind().eq(&Kind::GitRepoAnnouncement) {
                 save_event_in_global_cache(git_repo_path, event).await?;
                 let new_coordinate = !request
                     .repo_coordinates_without_relays
@@ -1172,7 +1172,7 @@ async fn process_fetched_events(
         if !request.existing_events.contains(&event.id)
             && !event.event_ids().any(|id| report.proposals.contains(id))
         {
-            if event.kind().as_u16() == PATCH_KIND && !event_is_patch_set_root(event) {
+            if event.kind().eq(&Kind::GitPatch) && !event_is_patch_set_root(event) {
                 report.commits.insert(event.id);
             } else if status_kinds().contains(&event.kind()) {
                 report.statuses.insert(event.id);
@@ -1238,7 +1238,7 @@ pub fn get_fetch_filters(
             vec![
                 get_filter_repo_events(repo_coordinates),
                 nostr::Filter::default()
-                    .kinds(vec![Kind::Custom(PATCH_KIND), Kind::EventDeletion])
+                    .kinds(vec![Kind::GitPatch, Kind::EventDeletion])
                     .custom_tag(
                         SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                         repo_coordinates
@@ -1252,13 +1252,9 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
-                nostr::Filter::default().events(proposal_ids.clone()).kinds(
-                    [
-                        vec![Kind::Custom(PATCH_KIND), Kind::EventDeletion],
-                        status_kinds(),
-                    ]
-                    .concat(),
-                ),
+                nostr::Filter::default()
+                    .events(proposal_ids.clone())
+                    .kinds([vec![Kind::GitPatch, Kind::EventDeletion], status_kinds()].concat()),
             ]
         },
         if required_profiles.is_empty() {
@@ -1272,7 +1268,7 @@ pub fn get_fetch_filters(
 
 pub fn get_filter_repo_events(repo_coordinates: &HashSet<Coordinate>) -> nostr::Filter {
     nostr::Filter::default()
-        .kind(Kind::Custom(REPO_REF_KIND))
+        .kind(Kind::GitRepoAnnouncement)
         .identifiers(
             repo_coordinates
                 .iter()

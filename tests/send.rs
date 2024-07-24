@@ -1,5 +1,6 @@
 use anyhow::Result;
 use futures::join;
+use nostr_sdk::Kind;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, relay::Relay, *};
 
@@ -84,13 +85,11 @@ mod when_commits_behind_ask_to_proceed {
 }
 
 fn is_cover_letter(event: &nostr::Event) -> bool {
-    event.kind.as_u16().eq(&PATCH_KIND)
-        && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+    event.kind.eq(&Kind::GitPatch) && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
 fn is_patch(event: &nostr::Event) -> bool {
-    event.kind.as_u16().eq(&PATCH_KIND)
-        && !event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+    event.kind.eq(&Kind::GitPatch) && !event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
 fn prep_git_repo() -> Result<GitTestRepo> {
@@ -386,12 +385,14 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
                 assert!(cover_letter_event.iter_tags().any(|t| t.as_vec()[0].eq("a")
                     && t.as_vec()[1].eq(&format!(
-                        "{REPOSITORY_KIND}:{TEST_KEY_1_PUBKEY_HEX}:{}",
+                        "{}:{TEST_KEY_1_PUBKEY_HEX}:{}",
+                        Kind::GitRepoAnnouncement,
                         generate_repo_ref_event().identifier().unwrap()
                     ))));
                 assert!(cover_letter_event.iter_tags().any(|t| t.as_vec()[0].eq("a")
                     && t.as_vec()[1].eq(&format!(
-                        "{REPOSITORY_KIND}:{TEST_KEY_2_PUBKEY_HEX}:{}",
+                        "{}:{TEST_KEY_2_PUBKEY_HEX}:{}",
+                        Kind::GitRepoAnnouncement,
                         generate_repo_ref_event().identifier().unwrap()
                     ))));
             }
@@ -577,14 +578,16 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
             assert!(prep().await?.tags.iter().any(|t| {
                 t.as_vec()[0].eq("a")
                     && t.as_vec()[1].eq(&format!(
-                        "{REPOSITORY_KIND}:{TEST_KEY_1_PUBKEY_HEX}:{}",
+                        "{}:{TEST_KEY_1_PUBKEY_HEX}:{}",
+                        Kind::GitRepoAnnouncement,
                         generate_repo_ref_event().identifier().unwrap()
                     ))
             }));
             assert!(prep().await?.tags.iter().any(|t| {
                 t.as_vec()[0].eq("a")
                     && t.as_vec()[1].eq(&format!(
-                        "{REPOSITORY_KIND}:{TEST_KEY_2_PUBKEY_HEX}:{}",
+                        "{}:{TEST_KEY_2_PUBKEY_HEX}:{}",
+                        Kind::GitRepoAnnouncement,
                         generate_repo_ref_event().identifier().unwrap()
                     ))
             }));

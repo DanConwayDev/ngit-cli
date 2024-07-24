@@ -8,7 +8,7 @@ use git2::{Oid, RepositoryInitOptions, Signature, Time};
 use nostr::nips::nip01::Coordinate;
 use nostr_sdk::{Kind, ToBech32};
 
-use crate::{generate_repo_ref_event, REPOSITORY_KIND};
+use crate::generate_repo_ref_event;
 
 pub struct GitTestRepo {
     pub dir: PathBuf,
@@ -19,7 +19,7 @@ impl Default for GitTestRepo {
     fn default() -> Self {
         let repo_event = generate_repo_ref_event();
         let coordinate = Coordinate {
-            kind: Kind::Custom(REPOSITORY_KIND),
+            kind: Kind::GitRepoAnnouncement,
             public_key: repo_event.author(),
             identifier: repo_event.identifier().unwrap().to_string(),
             relays: vec![

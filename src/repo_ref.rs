@@ -37,7 +37,7 @@ impl TryFrom<nostr::Event> for RepoRef {
     type Error = anyhow::Error;
 
     fn try_from(event: nostr::Event) -> Result<Self> {
-        if !event.kind.as_u16().eq(&REPO_REF_KIND) {
+        if !event.kind.eq(&Kind::GitRepoAnnouncement) {
             bail!("incorrect kind");
         }
         let mut r = Self::default();
@@ -107,13 +107,11 @@ impl TryFrom<nostr::Event> for RepoRef {
     }
 }
 
-pub static REPO_REF_KIND: u16 = 30_617;
-
 impl RepoRef {
     pub async fn to_event(&self, signer: &NostrSigner) -> Result<nostr::Event> {
         sign_event(
             nostr_sdk::EventBuilder::new(
-                nostr::event::Kind::Custom(REPO_REF_KIND),
+                nostr::event::Kind::GitRepoAnnouncement,
                 "",
                 [
                     vec![
@@ -179,7 +177,7 @@ impl RepoRef {
         let mut res = HashSet::new();
         for m in &self.maintainers {
             res.insert(Coordinate {
-                kind: Kind::Custom(REPO_REF_KIND),
+                kind: Kind::GitRepoAnnouncement,
                 public_key: *m,
                 identifier: self.identifier.clone(),
                 relays: vec![],
@@ -191,7 +189,7 @@ impl RepoRef {
     /// coordinates without relay hints
     pub fn coordinate_with_hint(&self) -> Coordinate {
         Coordinate {
-            kind: Kind::Custom(REPO_REF_KIND),
+            kind: Kind::GitRepoAnnouncement,
             public_key: *self
                 .maintainers
                 .first()
@@ -256,7 +254,7 @@ pub async fn try_and_get_repo_coordinates(
             if let Some(identifier) = repo_config.identifier {
                 for public_key in maintainers {
                     repo_coordinates.insert(Coordinate {
-                        kind: Kind::Custom(REPO_REF_KIND),
+                        kind: Kind::GitRepoAnnouncement,
                         public_key,
                         identifier: identifier.clone(),
                         relays: vec![],
@@ -283,7 +281,7 @@ pub async fn try_and_get_repo_coordinates(
                 }
                 // look find all repo refs with root_commit. for identifier
                 let filter = nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(REPO_REF_KIND))
+                    .kind(nostr::Kind::GitRepoAnnouncement)
                     .reference(git_repo.get_root_commit()?.to_string())
                     .authors(maintainers.clone());
                 let mut events =
@@ -306,7 +304,7 @@ pub async fn try_and_get_repo_coordinates(
                         for m in &repo_config.maintainers {
                             if let Ok(maintainer) = PublicKey::parse(m) {
                                 repo_coordinates.insert(Coordinate {
-                                    kind: Kind::Custom(REPO_REF_KIND),
+                                    kind: Kind::GitRepoAnnouncement,
                                     public_key: maintainer,
                                     identifier: identifier.to_string(),
                                     relays: vec![],

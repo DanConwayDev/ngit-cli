@@ -12,7 +12,7 @@ use nostr::{
     },
     EventBuilder, FromBech32, Tag, TagKind, ToBech32, UncheckedUrl,
 };
-use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, NostrSigner, TagStandard};
+use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, Kind, NostrSigner, TagStandard};
 
 use super::list::tag_value;
 #[cfg(not(test))]
@@ -28,7 +28,7 @@ use crate::{
     },
     git::{Repo, RepoActions},
     login,
-    repo_ref::{get_repo_coordinates, RepoRef, REPO_REF_KIND},
+    repo_ref::{get_repo_coordinates, RepoRef},
     Cli,
 };
 
@@ -288,7 +288,10 @@ pub async fn send_events(
 ) -> Result<()> {
     let fallback = [
         client.get_fallback_relays().clone(),
-        if events.iter().any(|e| e.kind().as_u16().eq(&REPO_REF_KIND)) {
+        if events
+            .iter()
+            .any(|e| e.kind().eq(&Kind::GitRepoAnnouncement))
+        {
             client.get_blaster_relays().clone()
         } else {
             vec![]
@@ -573,8 +576,6 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
     Ok((root_proposal_id, mention_tags))
 }
 
-pub static PATCH_KIND: u16 = 1617;
-
 #[allow(clippy::too_many_lines)]
 pub async fn generate_cover_letter_and_patch_events(
     cover_letter_title_description: Option<(String, String)>,
@@ -593,7 +594,7 @@ pub async fn generate_cover_letter_and_patch_events(
 
     if let Some((title, description)) = cover_letter_title_description {
         events.push(sign_event(EventBuilder::new(
-        nostr::event::Kind::Custom(PATCH_KIND),
+        nostr::event::Kind::GitPatch,
         format!(
             "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
             commits.last().unwrap(),
@@ -601,7 +602,7 @@ pub async fn generate_cover_letter_and_patch_events(
         ),
         [
             repo_ref.maintainers.iter().map(|m| Tag::coordinate(Coordinate {
-                kind: nostr::Kind::Custom(REPO_REF_KIND),
+                kind: nostr::Kind::GitRepoAnnouncement,
                 public_key: *m,
                 identifier: repo_ref.identifier.to_string(),
                 relays: repo_ref.relays.clone(),
@@ -789,7 +790,7 @@ pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
     // TODO: look for Subject:[ PATCH 0/n ] but watch out for:
     //   [PATCH v1 0/n ] or
     //   [PATCH subsystem v2 0/n ]
-    event.kind.as_u16().eq(&PATCH_KIND)
+    event.kind.eq(&Kind::GitPatch)
         && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
         && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
 }
@@ -860,16 +861,15 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
 }
 
 pub fn event_is_patch_set_root(event: &nostr::Event) -> bool {
-    event.kind.as_u16().eq(&PATCH_KIND) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
+    event.kind.eq(&Kind::GitPatch) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
 }
 
 pub fn event_is_revision_root(event: &nostr::Event) -> bool {
-    event.kind.as_u16().eq(&PATCH_KIND)
-        && event.iter_tags().any(|t| t.as_vec()[1].eq("revision-root"))
+    event.kind.eq(&Kind::GitPatch) && event.iter_tags().any(|t| t.as_vec()[1].eq("revision-root"))
 }
 
 pub fn patch_supports_commit_ids(event: &nostr::Event) -> bool {
-    event.kind.as_u16().eq(&PATCH_KIND)
+    event.kind.eq(&Kind::GitPatch)
         && event
             .iter_tags()
             .any(|t| t.as_vec()[0].eq("commit-pgp-sig"))
@@ -897,7 +897,7 @@ pub async fn generate_patch_event(
 
     sign_event(
         EventBuilder::new(
-            nostr::event::Kind::Custom(PATCH_KIND),
+            nostr::event::Kind::GitPatch,
             git_repo
                 .make_patch_from_commit(commit, &series_count)
                 .context(format!("cannot make patch for commit {commit}"))?,
@@ -907,7 +907,7 @@ pub async fn generate_patch_event(
                     .iter()
                     .map(|m| {
                         Tag::coordinate(Coordinate {
-                            kind: nostr::Kind::Custom(REPO_REF_KIND),
+                            kind: nostr::Kind::GitRepoAnnouncement,
                             public_key: *m,
                             identifier: repo_ref.identifier.to_string(),
                             relays: repo_ref.relays.clone(),
@@ -1238,7 +1238,7 @@ mod tests {
 
         fn generate_cover_letter(title: &str, description: &str) -> Result<nostr::Event> {
             Ok(nostr::event::EventBuilder::new(
-                nostr::event::Kind::Custom(PATCH_KIND),
+                nostr::event::Kind::GitPatch,
                 format!("From ea897e987ea9a7a98e7a987e97987ea98e7a3334 Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/2] {title}\n\n{description}"),
                 [
                     Tag::hashtag("cover-letter"),

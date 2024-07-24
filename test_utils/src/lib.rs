@@ -21,9 +21,6 @@ use tokio::runtime::Handle;
 pub mod git;
 pub mod relay;
 
-pub static PATCH_KIND: u16 = 1617;
-pub static REPOSITORY_KIND: u16 = 30617;
-
 pub static TEST_KEY_1_NSEC: &str =
     "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
 pub static TEST_KEY_1_SK_HEX: &str =
@@ -158,7 +155,7 @@ pub fn generate_repo_ref_event() -> nostr::Event {
     // author and committer from global git config
     let root_commit = "9ee507fc4357d7ee16a5d8901bedcd103f23c17d";
     nostr::event::EventBuilder::new(
-        nostr::Kind::Custom(REPOSITORY_KIND),
+        nostr::Kind::GitRepoAnnouncement,
         "",
         [
             Tag::identifier(
@@ -1244,7 +1241,7 @@ fn get_first_proposal_event_id() -> Result<nostr::EventId> {
     let proposals = Handle::current().block_on(client.get_events_of(
         vec![
         nostr::Filter::default()
-            .kind(nostr::Kind::Custom(PATCH_KIND))
+            .kind(nostr::Kind::GitPatch)
             .custom_tag(
                 nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
                 vec!["root"],

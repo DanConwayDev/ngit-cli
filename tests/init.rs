@@ -1,4 +1,5 @@
 use anyhow::Result;
+use nostr_sdk::Kind;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
 
@@ -124,6 +125,7 @@ mod when_repo_not_previously_claimed {
         }
 
         mod sent_to_correct_relays {
+
             use super::*;
 
             #[tokio::test]
@@ -135,7 +137,7 @@ mod when_repo_not_previously_claimed {
                         relay
                             .events
                             .iter()
-                            .filter(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                            .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                             .count(),
                         1,
                     );
@@ -152,7 +154,7 @@ mod when_repo_not_previously_claimed {
                         relay
                             .events
                             .iter()
-                            .filter(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                            .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                             .count(),
                         1,
                     );
@@ -169,7 +171,7 @@ mod when_repo_not_previously_claimed {
                         relay
                             .events
                             .iter()
-                            .filter(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                            .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                             .count(),
                         1,
                     );
@@ -184,7 +186,7 @@ mod when_repo_not_previously_claimed {
                 assert_eq!(
                     r57.events
                         .iter()
-                        .filter(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .count(),
                     1,
                 );
@@ -324,7 +326,7 @@ mod when_repo_not_previously_claimed {
                             .value()
                             .unwrap(),
                         Coordinate {
-                            kind: nostr_sdk::Kind::Custom(REPOSITORY_KIND),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
                             identifier: "example-identifier".to_string(),
                             public_key: TEST_KEY_1_KEYS.public_key(),
                             relays: vec![],
@@ -367,7 +369,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
                     assert!(
@@ -387,7 +389,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
                     assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("r")
@@ -405,7 +407,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
                     assert!(
@@ -426,7 +428,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
                     assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("alt")
@@ -443,7 +445,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
                     assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("description")
@@ -460,7 +462,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
                     assert!(
@@ -479,7 +481,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
                     let relays_tag = event
                         .tags
@@ -501,7 +503,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
                     let web_tag = event
                         .tags
@@ -523,7 +525,7 @@ mod when_repo_not_previously_claimed {
                     let event: &nostr::Event = relay
                         .events
                         .iter()
-                        .find(|e| e.kind.as_u16().eq(&REPOSITORY_KIND))
+                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
                     let maintainers_tag = event
                         .tags

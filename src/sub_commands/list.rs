@@ -2,7 +2,7 @@ use std::{collections::HashSet, io::Write, ops::Add, path::Path};
 
 use anyhow::{bail, Context, Result};
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::PublicKey;
+use nostr_sdk::{Kind, PublicKey};
 
 use super::send::event_is_patch_set_root;
 #[cfg(test)]
@@ -16,7 +16,7 @@ use crate::{
     repo_ref::{get_repo_coordinates, RepoRef},
     sub_commands::send::{
         commit_msg_from_patch_oneliner, event_is_cover_letter, event_is_revision_root,
-        event_to_cover_letter, patch_supports_commit_ids, PATCH_KIND,
+        event_to_cover_letter, patch_supports_commit_ids,
     },
 };
 
@@ -84,31 +84,31 @@ pub async fn launch() -> Result<()> {
             .collect::<Vec<&nostr::Event>>()
             .first()
         {
-            e.kind().as_u16()
+            e.kind()
         } else {
-            STATUS_KIND_OPEN
+            Kind::GitStatusOpen
         };
-        if status.eq(&STATUS_KIND_OPEN) {
+        if status.eq(&Kind::GitStatusOpen) {
             open_proposals.push(proposal);
-        } else if status.eq(&STATUS_KIND_CLOSED) {
+        } else if status.eq(&Kind::GitStatusClosed) {
             closed_proposals.push(proposal);
-        } else if status.eq(&STATUS_KIND_DRAFT) {
+        } else if status.eq(&Kind::GitStatusDraft) {
             draft_proposals.push(proposal);
-        } else if status.eq(&STATUS_KIND_APPLIED) {
+        } else if status.eq(&Kind::GitStatusApplied) {
             applied_proposals.push(proposal);
         }
     }
 
-    let mut selected_status = STATUS_KIND_OPEN;
+    let mut selected_status = Kind::GitStatusOpen;
 
     loop {
-        let proposals_for_status = if selected_status == STATUS_KIND_OPEN {
+        let proposals_for_status = if selected_status == Kind::GitStatusOpen {
             &open_proposals
-        } else if selected_status == STATUS_KIND_DRAFT {
+        } else if selected_status == Kind::GitStatusDraft {
             &draft_proposals
-        } else if selected_status == STATUS_KIND_CLOSED {
+        } else if selected_status == Kind::GitStatusClosed {
             &closed_proposals
-        } else if selected_status == STATUS_KIND_APPLIED {
+        } else if selected_status == Kind::GitStatusApplied {
             &applied_proposals
         } else {
             &open_proposals
@@ -116,15 +116,15 @@ pub async fn launch() -> Result<()> {
 
         let prompt = if proposals.len().eq(&open_proposals.len()) {
             "all proposals"
-        } else if selected_status == STATUS_KIND_OPEN {
+        } else if selected_status == Kind::GitStatusOpen {
             if open_proposals.is_empty() {
                 "proposals menu"
             } else {
                 "open proposals"
             }
-        } else if selected_status == STATUS_KIND_DRAFT {
+        } else if selected_status == Kind::GitStatusDraft {
             "draft proposals"
-        } else if selected_status == STATUS_KIND_CLOSED {
+        } else if selected_status == Kind::GitStatusClosed {
             "closed proposals"
         } else {
             "applied proposals"
@@ -143,16 +143,16 @@ pub async fn launch() -> Result<()> {
             })
             .collect();
 
-        if !selected_status.eq(&STATUS_KIND_OPEN) && open_proposals.len().gt(&0) {
+        if !selected_status.eq(&Kind::GitStatusOpen) && open_proposals.len().gt(&0) {
             choices.push(format!("({}) Open proposals...", open_proposals.len()));
         }
-        if !selected_status.eq(&STATUS_KIND_DRAFT) && draft_proposals.len().gt(&0) {
+        if !selected_status.eq(&Kind::GitStatusDraft) && draft_proposals.len().gt(&0) {
             choices.push(format!("({}) Draft proposals...", draft_proposals.len()));
         }
-        if !selected_status.eq(&STATUS_KIND_CLOSED) && closed_proposals.len().gt(&0) {
+        if !selected_status.eq(&Kind::GitStatusClosed) && closed_proposals.len().gt(&0) {
             choices.push(format!("({}) Closed proposals...", closed_proposals.len()));
         }
-        if !selected_status.eq(&STATUS_KIND_APPLIED) && applied_proposals.len().gt(&0) {
+        if !selected_status.eq(&Kind::GitStatusApplied) && applied_proposals.len().gt(&0) {
             choices.push(format!(
                 "({}) Applied proposals...",
                 applied_proposals.len()
@@ -167,13 +167,13 @@ pub async fn launch() -> Result<()> {
 
         if (selected_index + 1).gt(&proposals_for_status.len()) {
             if choices[selected_index].contains("Open") {
-                selected_status = STATUS_KIND_OPEN;
+                selected_status = Kind::GitStatusOpen;
             } else if choices[selected_index].contains("Draft") {
-                selected_status = STATUS_KIND_DRAFT;
+                selected_status = Kind::GitStatusDraft;
             } else if choices[selected_index].contains("Closed") {
-                selected_status = STATUS_KIND_CLOSED;
+                selected_status = Kind::GitStatusClosed;
             } else if choices[selected_index].contains("Applied") {
-                selected_status = STATUS_KIND_APPLIED;
+                selected_status = Kind::GitStatusApplied;
             }
             continue;
         }
@@ -804,17 +804,12 @@ pub fn get_most_recent_patch_with_ancestors(
     Ok(res)
 }
 
-pub static STATUS_KIND_OPEN: u16 = 1630;
-pub static STATUS_KIND_APPLIED: u16 = 1631;
-pub static STATUS_KIND_CLOSED: u16 = 1632;
-pub static STATUS_KIND_DRAFT: u16 = 1633;
-
 pub fn status_kinds() -> Vec<nostr::Kind> {
     vec![
-        nostr::Kind::Custom(STATUS_KIND_OPEN),
-        nostr::Kind::Custom(STATUS_KIND_APPLIED),
-        nostr::Kind::Custom(STATUS_KIND_CLOSED),
-        nostr::Kind::Custom(STATUS_KIND_DRAFT),
+        nostr::Kind::GitStatusOpen,
+        nostr::Kind::GitStatusApplied,
+        nostr::Kind::GitStatusClosed,
+        nostr::Kind::GitStatusDraft,
     ]
 }
 
@@ -826,7 +821,7 @@ pub async fn get_proposals_and_revisions_from_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
-                .kind(nostr::Kind::Custom(PATCH_KIND))
+                .kind(nostr::Kind::GitPatch)
                 .custom_tag(
                     nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                     repo_coordinates
@@ -855,10 +850,10 @@ pub async fn get_all_proposal_patch_events_from_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
-                .kind(nostr::Kind::Custom(PATCH_KIND))
+                .kind(nostr::Kind::GitPatch)
                 .event(*proposal_id),
             nostr::Filter::default()
-                .kind(nostr::Kind::Custom(PATCH_KIND))
+                .kind(nostr::Kind::GitPatch)
                 .id(*proposal_id),
         ],
     )
@@ -891,7 +886,7 @@ pub async fn get_all_proposal_patch_events_from_cache(
             git_repo_path,
             vec![
                 nostr::Filter::default()
-                    .kind(nostr::Kind::Custom(PATCH_KIND))
+                    .kind(nostr::Kind::GitPatch)
                     .events(revision_roots)
                     .authors(permissioned_users.clone()),
             ],

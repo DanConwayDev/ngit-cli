@@ -16,7 +16,7 @@ use crate::{
     login,
     repo_ref::{
         extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
-        try_and_get_repo_coordinates, RepoRef, REPO_REF_KIND,
+        try_and_get_repo_coordinates, RepoRef,
     },
     Cli,
 };
@@ -336,7 +336,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     git_repo.save_git_config_item(
         "nostr.repo",
         &Coordinate {
-            kind: Kind::Custom(REPO_REF_KIND),
+            kind: Kind::GitRepoAnnouncement,
             public_key: user_ref.public_key,
             identifier: identifier.clone(),
             relays: vec![],
