@@ -97,23 +97,15 @@ impl<'a> Relay<'a> {
         client_id: u64,
         subscription_id: &nostr::SubscriptionId,
         // TODO: enable filters
-        _filters: &[nostr::Filter],
+        filters: &[nostr::Filter],
     ) -> Result<bool> {
-        // let t: Vec<nostr::Kind> = self.events.iter().map(|e| e.kind).collect();
-        // .filter(|e| filters.iter().any(|filter| filter.match_event(e)))
-        // println!("letsgo{:?}", t);
-
         self.respond_events(
             client_id,
             subscription_id,
             &self
                 .events
                 .iter()
-                // FIXME:
-                // `filter.match_events` does not exist anymore
-                // it has been moved to `nostr_database_::FilterIndex`
-                // but it's private now
-                // .filter(|e| filters.iter().any(|filter|filter.match_event(e)))
+                .filter(|e| filters.iter().any(|filter| filter.match_event(e)))
                 .filter(|_| true)
                 .cloned()
                 .collect(),
