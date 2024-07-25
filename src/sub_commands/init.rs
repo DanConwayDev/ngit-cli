@@ -348,8 +348,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     // if yaml file doesnt exist or needs updating
     if match &repo_config_result {
         Ok(config) => {
-            !(extract_pks(config.maintainers.clone())?.eq(&maintainers)
-                && config.relays.eq(&relays))
+            !<std::option::Option<std::string::String> as Clone>::clone(&config.identifier)
+                .unwrap_or_default()
+                .eq(&identifier)
+                || !extract_pks(config.maintainers.clone())?.eq(&maintainers)
+                || !config.relays.eq(&relays)
         }
         Err(_) => true,
     } {
