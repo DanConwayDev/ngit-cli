@@ -10,7 +10,7 @@ use nostr_sdk::hashes::{sha1::Hash as Sha1Hash, Hash};
 use crate::sub_commands::list::{get_commit_id_from_patch, tag_value};
 
 pub struct Repo {
-    git_repo: git2::Repository,
+    pub git_repo: git2::Repository,
 }
 
 impl Repo {

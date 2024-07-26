@@ -5,7 +5,7 @@ use clap;
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
-use crate::{client::Connect, git::Repo, login, Cli};
+use crate::{cli::Cli, client::Connect, git::Repo, login};
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {

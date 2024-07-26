@@ -20,6 +20,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
+    cli::Cli,
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
     },
@@ -29,7 +30,6 @@ use crate::{
     git::{Repo, RepoActions},
     login,
     repo_ref::{get_repo_coordinates, RepoRef},
-    Cli,
 };
 
 #[derive(Debug, clap::Args)]

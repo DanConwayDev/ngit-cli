@@ -5,6 +5,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
+    cli::Cli,
     client::{fetching_with_report, get_repo_ref_from_cache, Connect},
     git::{str_to_sha1, Repo, RepoActions},
     login,
@@ -21,7 +22,6 @@ use crate::{
             identify_ahead_behind, send_events,
         },
     },
-    Cli,
 };
 
 #[derive(Debug, clap::Args)]

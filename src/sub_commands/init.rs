@@ -10,6 +10,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
+    cli::Cli,
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{fetching_with_report, get_repo_ref_from_cache, Connect},
     git::{Repo, RepoActions},
@@ -18,7 +19,6 @@ use crate::{
         extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
         try_and_get_repo_coordinates, RepoRef,
     },
-    Cli,
 };
 
 #[derive(Debug, clap::Args)]

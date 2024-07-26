@@ -49,3 +49,11 @@ test_utils = { path = "test_utils" }
 members = [
     "test_utils",
 ]
+
+[[bin]]
+name = "ngit"
+path = "src/main.rs"
+
+[[bin]]
+name = "git-remote-nostr"
+path = "src/git_remote_helper.rs"

@@ -9,10 +9,10 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
+    cli::Cli,
     client::{fetching_with_report, Connect},
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates,
-    Cli,
 };
 
 #[derive(clap::Args)]
