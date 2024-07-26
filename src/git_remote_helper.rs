@@ -13,6 +13,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use auth_git2::GitAuthenticator;
 #[cfg(not(test))]
 use client::Connect;
 use client::{fetching_with_report, get_repo_ref_from_cache};
@@ -97,8 +98,8 @@ async fn main() -> Result<()> {
                 println!();
             }
             ["push", refspec] => {
-                temp_remote.connect(git2::Direction::Push)?;
-                temp_remote.push(&[refspec], None)?;
+                let auth = GitAuthenticator::default();
+                auth.push(&git_repo.git_repo, &mut temp_remote, &[refspec])?;
                 temp_remote.disconnect()?;
                 println!();
             }
