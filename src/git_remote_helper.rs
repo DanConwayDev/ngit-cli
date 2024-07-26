@@ -18,6 +18,7 @@ use auth_git2::GitAuthenticator;
 use client::Connect;
 use client::{fetching_with_report, get_repo_ref_from_cache};
 use git::RepoActions;
+use git2::{Remote, Repository};
 use nostr::nips::nip01::Coordinate;
 use nostr_sdk::Url;
 
@@ -98,8 +99,10 @@ async fn main() -> Result<()> {
                 println!();
             }
             ["push", refspec] => {
+                // Why are new branches being pushed without -u?
                 let auth = GitAuthenticator::default();
                 auth.push(&git_repo.git_repo, &mut temp_remote, &[refspec])?;
+                update_remote_refs_from_push_refspecs(&git_repo.git_repo, refspec, url)?;
                 temp_remote.disconnect()?;
                 println!();
             }
@@ -154,4 +157,73 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
         bail!("naddr doesnt point to a git repository announcement");
     }
     Ok(repo_coordinattes)
+}
+
+fn update_remote_refs_from_push_refspecs(
+    git_repo: &Repository,
+    refspec: &str,
+    url: &str,
+) -> Result<()> {
+    if !refspec.contains(':') {
+        bail!(
+            "refspec should contain a colon (:) but consists of: {}",
+            refspec
+        );
+    }
+    let parts = refspec.split(':').collect::<Vec<&str>>();
+    let from = parts.first().unwrap();
+    let to = parts.get(1).unwrap();
+
+    let remote = get_remote_by_url(git_repo, url)?;
+
+    let target_ref_name = format!(
+        "refs/remotes/{}/{}",
+        remote.name().context("remote should have a name")?,
+        to.replace("refs/heads/", ""), // TODO only replace if it begins with this
+    );
+    if from.is_empty() {
+        if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
+            remote_ref.delete()?;
+        }
+    } else {
+        let local_ref = git_repo
+            .find_reference(from)
+            .context(format!("from ref in refspec should exist: {from}"))?;
+        let commit = local_ref
+            .peel_to_commit()
+            .context(format!("from ref in refspec should peel to commit: {from}"))?;
+        if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
+            remote_ref.set_target(commit.id(), "updated by nostr remote helper")?;
+        } else {
+            git_repo.reference(
+                &target_ref_name,
+                commit.id(),
+                false,
+                "created by nostr remote helper",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn get_remote_by_url<'a>(git_repo: &'a Repository, url: &'a str) -> Result<Remote<'a>> {
+    let remotes = git_repo.remotes()?;
+    let remote_name = remotes
+        .iter()
+        .find(|r| {
+            if let Some(name) = r {
+                if let Some(remote_url) = git_repo.find_remote(name).unwrap().url() {
+                    url == remote_url
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        })
+        .context("could not find remote with matching url")?
+        .context("remote with matching url must be named")?;
+    git_repo
+        .find_remote(remote_name)
+        .context("we should have just located this remote")
 }
