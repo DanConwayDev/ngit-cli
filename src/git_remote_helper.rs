@@ -8,7 +8,7 @@ use core::str;
 use std::{
     collections::HashSet,
     env,
-    io::{self},
+    io::{self, Stdin},
     path::PathBuf,
 };
 
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
             }
             ["fetch", _oid, refstr] => {
                 temp_remote.connect(git2::Direction::Fetch)?;
-                temp_remote.download(&[refstr], None)?;
+                temp_remote.download(&get_refstrs_from_fetch_batch(&stdin, refstr)?, None)?;
                 temp_remote.disconnect()?;
                 println!();
             }
@@ -105,7 +105,10 @@ async fn main() -> Result<()> {
                 let mut remote_callbacks = git2::RemoteCallbacks::new();
                 remote_callbacks.credentials(auth.credentials(&git_config));
                 push_options.remote_callbacks(remote_callbacks);
-                temp_remote.push(&[refspec], Some(&mut push_options))?;
+                temp_remote.push(
+                    &get_refspecs_from_push_batch(&stdin, refspec)?,
+                    Some(&mut push_options),
+                )?;
                 update_remote_refs_from_push_refspecs(&git_repo.git_repo, refspec, url)?;
                 temp_remote.disconnect()?;
                 println!();
@@ -230,4 +233,40 @@ fn get_remote_by_url<'a>(git_repo: &'a Repository, url: &'a str) -> Result<Remot
     git_repo
         .find_remote(remote_name)
         .context("we should have just located this remote")
+}
+
+fn get_refstrs_from_fetch_batch(stdin: &Stdin, initial_refstr: &str) -> Result<Vec<String>> {
+    let mut line = String::new();
+    let mut refstrs = vec![initial_refstr.to_string()];
+    loop {
+        let tokens = read_line(stdin, &mut line)?;
+        match tokens.as_slice() {
+            ["fetch", _oid, refstr] => {
+                refstrs.push((*refstr).to_string());
+            }
+            [] => break,
+            _ => bail!(
+                "after a `fetch` command we are only expecting another fetch or an empty line"
+            ),
+        }
+    }
+    Ok(refstrs)
+}
+
+fn get_refspecs_from_push_batch(stdin: &Stdin, initial_refspec: &str) -> Result<Vec<String>> {
+    let mut line = String::new();
+    let mut refspecs = vec![initial_refspec.to_string()];
+    loop {
+        let tokens = read_line(stdin, &mut line)?;
+        match tokens.as_slice() {
+            ["push", spec] => {
+                refspecs.push((*spec).to_string());
+            }
+            [] => break,
+            _ => {
+                bail!("after a `push` command we are only expecting another push or an empty line")
+            }
+        }
+    }
+    Ok(refspecs)
 }
