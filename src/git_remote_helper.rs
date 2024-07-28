@@ -92,33 +92,10 @@ async fn main() -> Result<()> {
                 println!("unsupported");
             }
             ["fetch", _oid, refstr] => {
-                temp_remote.connect(git2::Direction::Fetch)?;
-                temp_remote.download(&get_refstrs_from_fetch_batch(&stdin, refstr)?, None)?;
-                temp_remote.disconnect()?;
-                println!();
+                fetch(&mut temp_remote, &stdin, refstr)?;
             }
             ["push", refspec] => {
-                let auth = GitAuthenticator::default();
-                let git_config = git_repo.git_repo.config()?;
-                let mut push_options = git2::PushOptions::new();
-                let mut remote_callbacks = git2::RemoteCallbacks::new();
-                remote_callbacks.credentials(auth.credentials(&git_config));
-                remote_callbacks.push_update_reference(|name, error| {
-                    if let Some(error) = error {
-                        println!("error {name} {error}");
-                    } else {
-                        println!("ok {name}",);
-                    }
-                    Ok(())
-                });
-                push_options.remote_callbacks(remote_callbacks);
-                temp_remote.push(
-                    &get_refspecs_from_push_batch(&stdin, refspec)?,
-                    Some(&mut push_options),
-                )?;
-                update_remote_refs_from_push_refspecs(&git_repo.git_repo, refspec, url)?;
-                temp_remote.disconnect()?;
-                println!();
+                push(&git_repo.git_repo, url, &mut temp_remote, &stdin, refspec)?;
             }
             ["list"] => {
                 temp_remote.connect(git2::Direction::Fetch)?;
@@ -171,6 +148,45 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
         bail!("naddr doesnt point to a git repository announcement");
     }
     Ok(repo_coordinattes)
+}
+
+fn fetch(temp_remote: &mut Remote, stdin: &Stdin, refstr: &str) -> Result<()> {
+    temp_remote.connect(git2::Direction::Fetch)?;
+    temp_remote.download(&get_refstrs_from_fetch_batch(stdin, refstr)?, None)?;
+    temp_remote.disconnect()?;
+    println!();
+    Ok(())
+}
+
+fn push(
+    git_repo: &Repository,
+    nostr_url: &str,
+    temp_remote: &mut Remote,
+    stdin: &Stdin,
+    initial_refspec: &str,
+) -> Result<()> {
+    let auth = GitAuthenticator::default();
+    let git_config = git_repo.config()?;
+    let mut push_options = git2::PushOptions::new();
+    let mut remote_callbacks = git2::RemoteCallbacks::new();
+    remote_callbacks.credentials(auth.credentials(&git_config));
+    remote_callbacks.push_update_reference(|name, error| {
+        if let Some(error) = error {
+            println!("error {name} {error}");
+        } else {
+            println!("ok {name}",);
+        }
+        Ok(())
+    });
+    push_options.remote_callbacks(remote_callbacks);
+    temp_remote.push(
+        &get_refspecs_from_push_batch(stdin, initial_refspec)?,
+        Some(&mut push_options),
+    )?;
+    update_remote_refs_from_push_refspecs(git_repo, initial_refspec, nostr_url)?;
+    temp_remote.disconnect()?;
+    println!();
+    Ok(())
 }
 
 fn update_remote_refs_from_push_refspecs(
