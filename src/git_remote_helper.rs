@@ -165,6 +165,7 @@ fn push(
     stdin: &Stdin,
     initial_refspec: &str,
 ) -> Result<()> {
+    let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
     let auth = GitAuthenticator::default();
     let git_config = git_repo.config()?;
     let mut push_options = git2::PushOptions::new();
@@ -174,26 +175,28 @@ fn push(
         if let Some(error) = error {
             println!("error {name} {error}");
         } else {
+            if let Some(refspec) = refspecs
+                .iter()
+                .find(|r| r.contains(format!(":{name}").as_str()))
+            {
+                if let Err(e) = update_remote_refs_pushed(git_repo, refspec, nostr_url)
+                    .context("could not update remote_ref locally")
+                {
+                    return Err(git2::Error::from_str(e.to_string().as_str()));
+                }
+            }
             println!("ok {name}",);
         }
         Ok(())
     });
     push_options.remote_callbacks(remote_callbacks);
-    temp_remote.push(
-        &get_refspecs_from_push_batch(stdin, initial_refspec)?,
-        Some(&mut push_options),
-    )?;
-    update_remote_refs_from_push_refspecs(git_repo, initial_refspec, nostr_url)?;
+    temp_remote.push(&refspecs, Some(&mut push_options))?;
     temp_remote.disconnect()?;
     println!();
     Ok(())
 }
 
-fn update_remote_refs_from_push_refspecs(
-    git_repo: &Repository,
-    refspec: &str,
-    url: &str,
-) -> Result<()> {
+fn update_remote_refs_pushed(git_repo: &Repository, refspec: &str, url: &str) -> Result<()> {
     if !refspec.contains(':') {
         bail!(
             "refspec should contain a colon (:) but consists of: {}",
