@@ -75,7 +75,6 @@ async fn main() -> Result<()> {
         .context("no git server listed in nostr repository announcement")?;
 
     let mut temp_remote = git_repo.git_repo.remote_anonymous(temp_remote_url)?;
-
     loop {
         let tokens = read_line(&stdin, &mut line)?;
 
@@ -104,6 +103,14 @@ async fn main() -> Result<()> {
                 let mut push_options = git2::PushOptions::new();
                 let mut remote_callbacks = git2::RemoteCallbacks::new();
                 remote_callbacks.credentials(auth.credentials(&git_config));
+                remote_callbacks.push_update_reference(|name, error| {
+                    if let Some(error) = error {
+                        println!("error {name} {error}");
+                    } else {
+                        println!("ok {name}",);
+                    }
+                    Ok(())
+                });
                 push_options.remote_callbacks(remote_callbacks);
                 temp_remote.push(
                     &get_refspecs_from_push_batch(&stdin, refspec)?,
