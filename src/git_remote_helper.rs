@@ -99,9 +99,13 @@ async fn main() -> Result<()> {
                 println!();
             }
             ["push", refspec] => {
-                // Why are new branches being pushed without -u?
                 let auth = GitAuthenticator::default();
-                auth.push(&git_repo.git_repo, &mut temp_remote, &[refspec])?;
+                let git_config = git_repo.git_repo.config()?;
+                let mut push_options = git2::PushOptions::new();
+                let mut remote_callbacks = git2::RemoteCallbacks::new();
+                remote_callbacks.credentials(auth.credentials(&git_config));
+                push_options.remote_callbacks(remote_callbacks);
+                temp_remote.push(&[refspec], Some(&mut push_options))?;
                 update_remote_refs_from_push_refspecs(&git_repo.git_repo, refspec, url)?;
                 temp_remote.disconnect()?;
                 println!();
