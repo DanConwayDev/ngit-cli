@@ -788,11 +788,11 @@ pub async fn get_repo_ref_from_cache(
     let mut repo_events = vec![];
     loop {
         new_coordinate = false;
-        let filter = get_filter_repo_events(repo_coordinates);
+        let repo_events_filter = get_filter_repo_events(repo_coordinates);
 
         let events = [
-            get_event_from_global_cache(git_repo_path, vec![filter.clone()]).await?,
-            get_events_from_cache(git_repo_path, vec![filter]).await?,
+            get_event_from_global_cache(git_repo_path, vec![repo_events_filter.clone()]).await?,
+            get_events_from_cache(git_repo_path, vec![repo_events_filter]).await?,
         ]
         .concat();
         for e in events {
@@ -839,6 +839,19 @@ pub async fn get_repo_ref_from_cache(
         events,
         ..repo_ref
     })
+}
+
+pub async fn get_state_from_cache(
+    git_repo_path: &Path,
+    repo_ref: &RepoRef,
+) -> Result<Option<nostr::Event>> {
+    let mut state_events = get_events_from_cache(
+        git_repo_path,
+        vec![get_filter_state_events(&repo_ref.coordinates())],
+    )
+    .await?;
+    state_events.sort_by_key(|e| e.created_at);
+    Ok(state_events.first().map(std::borrow::ToOwned::to_owned))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1040,13 +1053,22 @@ async fn create_relays_request(
         selected_relay: None,
         repo_relays: relays,
         relay_column_width,
-        repo_coordinates_without_relays: if let Ok(repo_ref) = repo_ref {
+        repo_coordinates_without_relays: if let Ok(repo_ref) = &repo_ref {
             repo_ref.coordinates_with_timestamps()
         } else {
             repo_coordinates_without_relays
                 .iter()
                 .map(|c| (c.clone(), None))
                 .collect()
+        },
+        state: if let Ok(repo_ref) = &repo_ref {
+            if let Ok(Some(existing_state)) = get_state_from_cache(git_repo_path, repo_ref).await {
+                Some((existing_state.created_at, existing_state.id))
+            } else {
+                None
+            }
+        } else {
+            None
         },
         proposals,
         contributors,
@@ -1138,6 +1160,19 @@ async fn process_fetched_events(
                         }
                     }
                 }
+            } else if event.kind().eq(&STATE_KIND) {
+                let existing_state = if report.updated_state.is_some() {
+                    report.updated_state
+                } else {
+                    request.state
+                };
+                if let Some((timestamp, id)) = existing_state {
+                    if event.created_at.gt(&timestamp)
+                        || (event.created_at.eq(&timestamp) && event.id.gt(&id))
+                    {
+                        report.updated_state = Some((event.created_at, event.id));
+                    }
+                }
             } else if event_is_patch_set_root(event) {
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
@@ -1208,6 +1243,17 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
                 report.updated_repo_announcements.push((r, t));
             }
         }
+        if let Some((timestamp, id)) = relay_report.updated_state {
+            if let Some((existing_timestamp, existing_id)) = report.updated_state {
+                if timestamp.gt(&existing_timestamp)
+                    || (timestamp.eq(&existing_timestamp) && id.gt(&existing_id))
+                {
+                    report.updated_state = Some((timestamp, id));
+                }
+            } else {
+                report.updated_state = Some((timestamp, id));
+            }
+        }
         for c in relay_report.proposals {
             report.proposals.insert(c);
         }
@@ -1236,6 +1282,7 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
+                get_filter_state_events(repo_coordinates),
                 get_filter_repo_events(repo_coordinates),
                 nostr::Filter::default()
                     .kinds(vec![Kind::GitPatch, Kind::EventDeletion])
@@ -1283,6 +1330,24 @@ pub fn get_filter_repo_events(repo_coordinates: &HashSet<Coordinate>) -> nostr::
         )
 }
 
+pub static STATE_KIND: nostr::Kind = Kind::Custom(30618);
+pub fn get_filter_state_events(repo_coordinates: &HashSet<Coordinate>) -> nostr::Filter {
+    nostr::Filter::default()
+        .kind(STATE_KIND)
+        .identifiers(
+            repo_coordinates
+                .iter()
+                .map(|c| c.identifier.clone())
+                .collect::<Vec<String>>(),
+        )
+        .authors(
+            repo_coordinates
+                .iter()
+                .map(|c| c.public_key)
+                .collect::<Vec<PublicKey>>(),
+        )
+}
+
 pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nostr::Filter {
     nostr::Filter::default()
         .kinds(vec![Kind::Metadata, Kind::RelayList])
@@ -1293,6 +1358,7 @@ pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nost
 pub struct FetchReport {
     repo_coordinates_without_relays: HashSet<Coordinate>,
     updated_repo_announcements: Vec<(Coordinate, Timestamp)>,
+    updated_state: Option<(Timestamp, EventId)>,
     proposals: HashSet<EventId>,
     /// commits against existing propoals
     commits: HashSet<EventId>,
@@ -1326,6 +1392,9 @@ impl Display for FetchReport {
                     ""
                 },
             ));
+        }
+        if self.updated_state.is_some() {
+            display_items.push("new state".to_string());
         }
         if !self.proposals.is_empty() {
             display_items.push(format!(
@@ -1380,6 +1449,7 @@ pub struct FetchRequest {
     selected_relay: Option<Url>,
     relay_column_width: usize,
     repo_coordinates_without_relays: Vec<(Coordinate, Option<Timestamp>)>,
+    state: Option<(Timestamp, EventId)>,
     proposals: HashSet<EventId>,
     contributors: HashSet<PublicKey>,
     missing_contributor_profiles: HashSet<PublicKey>,
