@@ -98,22 +98,10 @@ async fn main() -> Result<()> {
                 push(&git_repo.git_repo, url, &mut temp_remote, &stdin, refspec)?;
             }
             ["list"] => {
-                temp_remote.connect(git2::Direction::Fetch)?;
-                for head in temp_remote.list()? {
-                    println!("{} {}", head.oid(), head.name());
-                }
-                temp_remote.disconnect()?;
-                println!();
+                list(&mut temp_remote, false)?;
             }
             ["list", "for-push"] => {
-                temp_remote.connect(git2::Direction::Fetch)?;
-                for head in temp_remote.list()? {
-                    if head.name() != "HEAD" {
-                        println!("{} {}", head.oid(), head.name());
-                    }
-                }
-                temp_remote.disconnect()?;
-                println!();
+                list(&mut temp_remote, true)?;
             }
             [] => {
                 return Ok(());
@@ -148,6 +136,18 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
         bail!("naddr doesnt point to a git repository announcement");
     }
     Ok(repo_coordinattes)
+}
+
+fn list(temp_remote: &mut Remote, for_push: bool) -> Result<()> {
+    temp_remote.connect(git2::Direction::Fetch)?;
+    for head in temp_remote.list()? {
+        if !for_push || head.name() != "HEAD" {
+            println!("{} {}", head.oid(), head.name());
+        }
+    }
+    temp_remote.disconnect()?;
+    println!();
+    Ok(())
 }
 
 fn fetch(temp_remote: &mut Remote, stdin: &Stdin, refstr: &str) -> Result<()> {
