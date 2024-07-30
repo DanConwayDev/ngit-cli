@@ -14,6 +14,7 @@ mod git;
 mod key_handling;
 mod login;
 mod repo_ref;
+mod repo_state;
 mod sub_commands;
 
 #[tokio::main]

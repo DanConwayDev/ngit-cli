@@ -37,6 +37,7 @@ use crate::{
     config::get_dirs,
     login::{get_logged_in_user, get_user_ref_from_cache},
     repo_ref::RepoRef,
+    repo_state::RepoState,
     sub_commands::{
         list::status_kinds,
         send::{event_is_patch_set_root, event_is_revision_root},
@@ -841,17 +842,14 @@ pub async fn get_repo_ref_from_cache(
     })
 }
 
-pub async fn get_state_from_cache(
-    git_repo_path: &Path,
-    repo_ref: &RepoRef,
-) -> Result<Option<nostr::Event>> {
-    let mut state_events = get_events_from_cache(
-        git_repo_path,
-        vec![get_filter_state_events(&repo_ref.coordinates())],
+pub async fn get_state_from_cache(git_repo_path: &Path, repo_ref: &RepoRef) -> Result<RepoState> {
+    RepoState::try_from(
+        get_events_from_cache(
+            git_repo_path,
+            vec![get_filter_state_events(&repo_ref.coordinates())],
+        )
+        .await?,
     )
-    .await?;
-    state_events.sort_by_key(|e| e.created_at);
-    Ok(state_events.first().map(std::borrow::ToOwned::to_owned))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1062,8 +1060,8 @@ async fn create_relays_request(
                 .collect()
         },
         state: if let Ok(repo_ref) = &repo_ref {
-            if let Ok(Some(existing_state)) = get_state_from_cache(git_repo_path, repo_ref).await {
-                Some((existing_state.created_at, existing_state.id))
+            if let Ok(existing_state) = get_state_from_cache(git_repo_path, repo_ref).await {
+                Some((existing_state.event.created_at, existing_state.event.id))
             } else {
                 None
             }
