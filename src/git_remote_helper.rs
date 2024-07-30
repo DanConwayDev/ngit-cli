@@ -21,6 +21,7 @@ use git::RepoActions;
 use git2::{Remote, Repository};
 use nostr::nips::nip01::Coordinate;
 use nostr_sdk::Url;
+use repo_ref::RepoRef;
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -43,7 +44,7 @@ async fn main() -> Result<()> {
     let args = env::args();
     let args = args.skip(1).take(2).collect::<Vec<_>>();
 
-    let ([_, url] | [url]) = args.as_slice() else {
+    let ([_, nostr_remote_url] | [nostr_remote_url]) = args.as_slice() else {
         bail!("invalid arguments - no url");
     };
     if env::args().nth(1).as_deref() == Some("--version") {
@@ -60,7 +61,8 @@ async fn main() -> Result<()> {
     #[cfg(test)]
     let client = <MockConnect as std::default::Default>::default();
 
-    let repo_coordinates = nostr_git_url_to_repo_coordinates(url).context("invalid nostr url")?;
+    let repo_coordinates =
+        nostr_git_url_to_repo_coordinates(nostr_remote_url).context("invalid nostr url")?;
 
     fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 
@@ -69,12 +71,6 @@ async fn main() -> Result<()> {
     let stdin = io::stdin();
     let mut line = String::new();
 
-    let temp_remote_url = repo_ref
-        .git_server
-        .first()
-        .context("no git server listed in nostr repository announcement")?;
-
-    let mut temp_remote = git_repo.git_repo.remote_anonymous(temp_remote_url)?;
     loop {
         let tokens = read_line(&stdin, &mut line)?;
 
@@ -92,16 +88,22 @@ async fn main() -> Result<()> {
                 println!("unsupported");
             }
             ["fetch", _oid, refstr] => {
-                fetch(&mut temp_remote, &stdin, refstr)?;
+                fetch(&git_repo.git_repo, &repo_ref, &stdin, refstr)?;
             }
             ["push", refspec] => {
-                push(&git_repo.git_repo, url, &mut temp_remote, &stdin, refspec)?;
+                push(
+                    &git_repo.git_repo,
+                    &repo_ref,
+                    nostr_remote_url,
+                    &stdin,
+                    refspec,
+                )?;
             }
             ["list"] => {
-                list(&mut temp_remote, false)?;
+                list(&git_repo.git_repo, &repo_ref, false)?;
             }
             ["list", "for-push"] => {
-                list(&mut temp_remote, true)?;
+                list(&git_repo.git_repo, &repo_ref, true)?;
             }
             [] => {
                 return Ok(());
@@ -138,34 +140,50 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
     Ok(repo_coordinattes)
 }
 
-fn list(temp_remote: &mut Remote, for_push: bool) -> Result<()> {
-    temp_remote.connect(git2::Direction::Fetch)?;
-    for head in temp_remote.list()? {
+fn list(git_repo: &Repository, repo_ref: &RepoRef, for_push: bool) -> Result<()> {
+    let git_server_remote_url = repo_ref
+        .git_server
+        .first()
+        .context("no git server listed in nostr repository announcement")?;
+    let mut git_server_remote = git_repo.remote_anonymous(git_server_remote_url)?;
+    git_server_remote.connect(git2::Direction::Fetch)?;
+    for head in git_server_remote.list()? {
         if !for_push || head.name() != "HEAD" {
             println!("{} {}", head.oid(), head.name());
         }
     }
-    temp_remote.disconnect()?;
+    git_server_remote.disconnect()?;
     println!();
     Ok(())
 }
 
-fn fetch(temp_remote: &mut Remote, stdin: &Stdin, refstr: &str) -> Result<()> {
-    temp_remote.connect(git2::Direction::Fetch)?;
-    temp_remote.download(&get_refstrs_from_fetch_batch(stdin, refstr)?, None)?;
-    temp_remote.disconnect()?;
+fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, refstr: &str) -> Result<()> {
+    let git_server_remote_url = repo_ref
+        .git_server
+        .first()
+        .context("no git server listed in nostr repository announcement")?;
+    let mut git_server_remote = git_repo.remote_anonymous(git_server_remote_url)?;
+    git_server_remote.connect(git2::Direction::Fetch)?;
+    git_server_remote.download(&get_refstrs_from_fetch_batch(stdin, refstr)?, None)?;
+    git_server_remote.disconnect()?;
     println!();
     Ok(())
 }
 
 fn push(
     git_repo: &Repository,
-    nostr_url: &str,
-    temp_remote: &mut Remote,
+    repo_ref: &RepoRef,
+    nostr_remote_url: &str,
     stdin: &Stdin,
     initial_refspec: &str,
 ) -> Result<()> {
+    // if no state events - create from first git server listed
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
+    let git_server_url = repo_ref
+        .git_server
+        .first()
+        .context("no git server listed in nostr repository announcement")?;
+    let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;
     let auth = GitAuthenticator::default();
     let git_config = git_repo.config()?;
     let mut push_options = git2::PushOptions::new();
@@ -179,7 +197,7 @@ fn push(
                 .iter()
                 .find(|r| r.contains(format!(":{name}").as_str()))
             {
-                if let Err(e) = update_remote_refs_pushed(git_repo, refspec, nostr_url)
+                if let Err(e) = update_remote_refs_pushed(git_repo, refspec, nostr_remote_url)
                     .context("could not update remote_ref locally")
                 {
                     return Err(git2::Error::from_str(e.to_string().as_str()));
@@ -190,13 +208,17 @@ fn push(
         Ok(())
     });
     push_options.remote_callbacks(remote_callbacks);
-    temp_remote.push(&refspecs, Some(&mut push_options))?;
-    temp_remote.disconnect()?;
+    git_server_remote.push(&refspecs, Some(&mut push_options))?;
+    git_server_remote.disconnect()?;
     println!();
     Ok(())
 }
 
-fn update_remote_refs_pushed(git_repo: &Repository, refspec: &str, url: &str) -> Result<()> {
+fn update_remote_refs_pushed(
+    git_repo: &Repository,
+    refspec: &str,
+    nostr_remote_url: &str,
+) -> Result<()> {
     if !refspec.contains(':') {
         bail!(
             "refspec should contain a colon (:) but consists of: {}",
@@ -207,11 +229,11 @@ fn update_remote_refs_pushed(git_repo: &Repository, refspec: &str, url: &str) ->
     let from = parts.first().unwrap();
     let to = parts.get(1).unwrap();
 
-    let remote = get_remote_by_url(git_repo, url)?;
+    let nostr_remote = get_remote_by_url(git_repo, nostr_remote_url)?;
 
     let target_ref_name = format!(
         "refs/remotes/{}/{}",
-        remote.name().context("remote should have a name")?,
+        nostr_remote.name().context("remote should have a name")?,
         to.replace("refs/heads/", ""), // TODO only replace if it begins with this
     );
     if from.is_empty() {
