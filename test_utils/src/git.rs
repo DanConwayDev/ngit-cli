@@ -58,6 +58,49 @@ impl GitTestRepo {
         Self::new("main").unwrap()
     }
 
+    fn clone(existing_repo: &GitTestRepo) -> Result<Self> {
+        let path = current_dir()?.join(format!("tmpgit-{}", rand::random::<u64>()));
+        let git_repo = git2::Repository::clone(existing_repo.dir.to_str().unwrap(), path.clone())?;
+        Ok(Self {
+            dir: path,
+            git_repo,
+        })
+    }
+
+    pub fn recreate_as_bare(existing_repo: &GitTestRepo) -> Result<Self> {
+        // create bare repo
+        let path = current_dir()?.join(format!("tmpgit-{}", rand::random::<u64>()));
+        let git_repo = git2::Repository::init_opts(
+            &path,
+            RepositoryInitOptions::new()
+                .initial_head("main")
+                .bare(true)
+                .mkpath(true),
+        )?;
+        // clone existing to a temp repo
+        let tmp_repo = Self::clone(existing_repo)?;
+        // add bare as a remote and push branches
+        let mut remote = tmp_repo.git_repo.remote("tmp", path.to_str().unwrap())?;
+        let refspecs = tmp_repo
+            .git_repo
+            .branches(Some(git2::BranchType::Local))?
+            .filter_map(|b| b.ok())
+            .map(|(b, _)| {
+                format!(
+                    "refs/heads/{}:refs/heads/{}",
+                    b.name().unwrap().unwrap(),
+                    b.name().unwrap().unwrap(),
+                )
+            })
+            .collect::<Vec<String>>();
+        remote.push(&refspecs, None)?;
+        // TODO: push tags
+        Ok(Self {
+            dir: path,
+            git_repo,
+        })
+    }
+
     pub fn initial_commit(&self) -> Result<Oid> {
         let oid = self.git_repo.index()?.write_tree()?;
         let tree = self.git_repo.find_tree(oid)?;
