@@ -150,6 +150,10 @@ pub fn make_event_old_or_change_user(
 }
 
 pub fn generate_repo_ref_event() -> nostr::Event {
+    generate_repo_ref_event_with_git_server("git:://123.gitexample.com/test".to_string())
+}
+
+pub fn generate_repo_ref_event_with_git_server(git_server: String) -> nostr::Event {
     // taken from test git_repo
     // TODO - this may not be consistant across computers as it might take the
     // author and committer from global git config
@@ -167,7 +171,7 @@ pub fn generate_repo_ref_event() -> nostr::Event {
             Tag::from_standardized(TagStandard::Description("example description".into())),
             Tag::custom(
                 nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                vec!["git:://123.gitexample.com/test".to_string()],
+                vec![git_server],
             ),
             Tag::custom(
                 nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
@@ -728,6 +732,14 @@ impl CliTester {
         }
     }
 
+    pub fn new_remote_helper_from_dir(dir: &PathBuf, nostr_remote_url: &str) -> Self {
+        Self {
+            rexpect_session: remote_helper_rexpect_with_from_dir(dir, nostr_remote_url, 3000)
+                .expect("rexpect to spawn new process"),
+            formatter: ColorfulTheme::default(),
+        }
+    }
+
     pub fn restart_with<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -933,6 +945,27 @@ where
     cmd.env("RUST_BACKTRACE", "0");
     cmd.current_dir(dir);
     cmd.args(args);
+    // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
+    rexpect::session::spawn_with_options(
+        cmd,
+        Options {
+            timeout_ms: Some(timeout_ms),
+            strip_ansi_escape_codes: true,
+        },
+    )
+}
+
+pub fn remote_helper_rexpect_with_from_dir(
+    dir: &PathBuf,
+    nostr_remote_url: &str,
+    timeout_ms: u64,
+) -> Result<PtySession, rexpect::error::Error> {
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("git-remote-nostr"));
+    cmd.env("NGITTEST", "TRUE");
+    cmd.env("GIT_DIR", dir);
+    cmd.env("RUST_BACKTRACE", "0");
+    cmd.current_dir(dir);
+    cmd.args([dir.as_os_str().to_str().unwrap(), nostr_remote_url]);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
     rexpect::session::spawn_with_options(
         cmd,
