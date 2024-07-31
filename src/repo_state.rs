@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use git2::Oid;
 
 pub struct RepoState {
+    pub identifier: String,
     pub state: Vec<(String, String)>,
     pub event: nostr::Event,
 }
@@ -26,6 +27,10 @@ impl RepoState {
             }
         }
         Ok(RepoState {
+            identifier: event
+                .identifier()
+                .context("existing event must have an identifier")?
+                .to_string(),
             state,
             event: event.clone(),
         })

@@ -178,6 +178,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         &cli_args.password,
         Some(&client),
         false,
+        false,
     )
     .await?;
 
@@ -212,6 +213,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         user_ref.relays.write(),
         repo_ref.relays.clone(),
         !cli_args.disable_cli_spinners,
+        false,
     )
     .await?;
 

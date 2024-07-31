@@ -25,6 +25,7 @@ use crate::{
 };
 
 /// handles the encrpytion and storage of key material
+#[allow(clippy::too_many_arguments)]
 pub async fn launch(
     git_repo: &Repo,
     bunker_uri: &Option<String>,
@@ -34,6 +35,7 @@ pub async fn launch(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     change_user: bool,
+    silent: bool,
 ) -> Result<(NostrSigner, UserRef)> {
     if let Ok(signer) = match get_signer_without_prompts(
         git_repo,
@@ -58,7 +60,8 @@ pub async fn launch(
                             .unwrap_or("unknown ncryptsec".to_string()),
                     ) {
                         if let Ok(user_ref) =
-                            get_user_details(&public_key, client, git_repo.get_path()?).await
+                            get_user_details(&public_key, client, git_repo.get_path()?, silent)
+                                .await
                         {
                             user_ref.metadata.name
                         } else {
@@ -94,10 +97,15 @@ pub async fn launch(
                 .context("cannot get public key from signer")?,
             client,
             git_repo.get_path()?,
+            silent,
         )
         .await?;
-        print_logged_in_as(&user_ref, client.is_none())?;
+        if !silent {
+            print_logged_in_as(&user_ref, client.is_none())?;
+        }
         Ok((signer, user_ref))
+    } else if silent {
+        bail!("TODO: enable interactive login in nostr git remote helper");
     } else {
         fresh_login(git_repo, client, change_user).await
     }
@@ -396,7 +404,7 @@ async fn fresh_login(
         signer.public_key().await?
     };
     // lookup profile
-    let user_ref = get_user_details(&public_key, client, git_repo.get_path()?).await?;
+    let user_ref = get_user_details(&public_key, client, git_repo.get_path()?, false).await?;
     print_logged_in_as(&user_ref, client.is_none())?;
     Ok((signer, user_ref))
 }
@@ -612,6 +620,7 @@ async fn get_user_details(
     #[cfg(test)] client: Option<&crate::client::MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     git_repo_path: &Path,
+    cache_only: bool,
 ) -> Result<UserRef> {
     if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
         Ok(user_ref)
@@ -621,8 +630,9 @@ async fn get_user_details(
             metadata: extract_user_metadata(public_key, &[])?,
             relays: extract_user_relays(public_key, &[]),
         };
-
-        if let Some(client) = client {
+        if cache_only {
+            Ok(empty)
+        } else if let Some(client) = client {
             let term = console::Term::stderr();
             term.write_line("searching for profile...")?;
             let (_, progress_reporter) = client

@@ -3,7 +3,7 @@ use std::{path::Path, str::FromStr, time::Duration};
 use anyhow::{bail, Context, Result};
 use console::Style;
 use futures::future::join_all;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use nostr::{
     nips::{
         nip01::Coordinate,
@@ -195,6 +195,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         &cli_args.password,
         Some(&client),
         false,
+        false,
     )
     .await?;
 
@@ -244,6 +245,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         user_ref.relays.write(),
         repo_ref.relays.clone(),
         !cli_args.disable_cli_spinners,
+        false,
     )
     .await?;
 
@@ -285,6 +287,7 @@ pub async fn send_events(
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<String>,
     animate: bool,
+    silent: bool,
 ) -> Result<()> {
     let fallback = [
         client.get_fallback_relays().clone(),
@@ -327,7 +330,11 @@ pub async fn send_events(
         }
     }
 
-    let m = MultiProgress::new();
+    let m = if silent {
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    };
     let pb_style = ProgressStyle::with_template(if animate {
         " {spinner} {prefix} {bar} {pos}/{len} {msg}"
     } else {

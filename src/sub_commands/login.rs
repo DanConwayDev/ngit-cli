@@ -25,6 +25,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
             &args.password,
             None,
             true,
+            false,
         )
         .await?;
         Ok(())
@@ -42,6 +43,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
             &args.password,
             Some(&client),
             true,
+            false,
         )
         .await?;
         client.disconnect().await?;
