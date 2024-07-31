@@ -150,10 +150,10 @@ pub fn make_event_old_or_change_user(
 }
 
 pub fn generate_repo_ref_event() -> nostr::Event {
-    generate_repo_ref_event_with_git_server("git:://123.gitexample.com/test".to_string())
+    generate_repo_ref_event_with_git_server("git:://123.gitexample.com/test")
 }
 
-pub fn generate_repo_ref_event_with_git_server(git_server: String) -> nostr::Event {
+pub fn generate_repo_ref_event_with_git_server(git_server: &str) -> nostr::Event {
     // taken from test git_repo
     // TODO - this may not be consistant across computers as it might take the
     // author and committer from global git config
@@ -171,7 +171,7 @@ pub fn generate_repo_ref_event_with_git_server(git_server: String) -> nostr::Eve
             Tag::from_standardized(TagStandard::Description("example description".into())),
             Tag::custom(
                 nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                vec![git_server],
+                vec![git_server.to_string()],
             ),
             Tag::custom(
                 nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
@@ -887,7 +887,7 @@ impl CliTester {
         self.expect_end()
     }
 
-    fn send_line(&mut self, line: &str) -> Result<()> {
+    pub fn send_line(&mut self, line: &str) -> Result<()> {
         self.rexpect_session
             .send_line(line)
             .context("send_line failed")?;
