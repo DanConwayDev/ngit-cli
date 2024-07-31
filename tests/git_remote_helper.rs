@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use futures::join;
 use nostr::nips::nip01::Coordinate;
@@ -110,6 +112,13 @@ mod list {
         std::fs::write(source_git_repo.dir.join("commit.md"), "some content")?;
         let main_commit_id = source_git_repo.stage_and_commit("commit.md")?;
 
+        source_git_repo.create_branch("vnext")?;
+        source_git_repo.checkout("vnext")?;
+        std::fs::write(source_git_repo.dir.join("vnext.md"), "some content")?;
+        let vnext_commit_id = source_git_repo.stage_and_commit("vnext.md")?;
+
+        let head_commit_id = source_git_repo.checkout("main")?;
+
         let git_repo = prep_git_repo()?;
         let events = vec![
             generate_test_key_1_metadata_event("fred"),
@@ -131,14 +140,17 @@ mod list {
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = cli_tester_after_fetch(&git_repo)?;
             p.send_line("list")?;
+            // println!("{}", p.expect_eventually("\r\n\r\n")?);
             assert_eq!(
                 p.expect_eventually("\r\n\r\n")?
                     .split("\r\n")
-                    .collect::<Vec<&str>>(),
-                vec![
-                    &format!("{} HEAD", main_commit_id),
-                    &format!("{} refs/heads/main", main_commit_id),
-                ],
+                    .map(|e| e.to_string())
+                    .collect::<HashSet<String>>(),
+                HashSet::from([
+                    format!("{} HEAD", head_commit_id),
+                    format!("{} refs/heads/main", main_commit_id),
+                    format!("{} refs/heads/vnext", vnext_commit_id),
+                ]),
             );
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
@@ -161,7 +173,7 @@ mod list {
 
     #[tokio::test]
     #[serial]
-    async fn lists_head_and_main_heads() -> Result<()> {
+    async fn lists_head_and_2_branches_and_commit_ids_from_git_server() -> Result<()> {
         async_run_test().await
     }
 }
