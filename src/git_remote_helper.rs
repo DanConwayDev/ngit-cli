@@ -6,7 +6,7 @@
 
 use core::str;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     io::{self, Stdin},
     path::PathBuf,
@@ -261,41 +261,25 @@ async fn generate_updated_state(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     refspecs: &Vec<String>,
-) -> Result<Vec<(String, String)>> {
+) -> Result<HashMap<String, String>> {
     let new_state = {
         if let Ok(mut repo_state) = get_state_from_cache(git_repo.get_path()?, repo_ref).await {
             for refspec in refspecs {
                 let (from, to) = refspec_to_from_to(refspec)?;
-                if to.is_empty() {
+                if from.is_empty() {
                     // delete
-                    repo_state.state.retain(|(name, _)| !name.eq(to));
-                } else if repo_state.state.iter().any(|(name, _)| name.eq(from)) {
-                    // update
-                    repo_state.state = repo_state
-                        .state
-                        .iter()
-                        .map(|(name, value)| {
-                            (
-                                name.clone(),
-                                if name.eq(to) {
-                                    reference_to_ref_value(&git_repo.git_repo, to).unwrap()
-                                } else {
-                                    value.to_string()
-                                },
-                            )
-                        })
-                        .collect();
+                    repo_state.state.remove(to);
                 } else {
-                    // add
-                    repo_state.state.push((
+                    // add or update
+                    repo_state.state.insert(
                         to.to_string(),
                         reference_to_ref_value(&git_repo.git_repo, to).unwrap(),
-                    ));
+                    );
                 }
             }
             repo_state.state
         } else {
-            let mut state = vec![];
+            let mut state = HashMap::new();
             let git_server_url = repo_ref
                 .git_server
                 .first()
@@ -303,14 +287,14 @@ async fn generate_updated_state(
             let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
             git_server_remote.connect(git2::Direction::Fetch)?;
             for head in git_server_remote.list()? {
-                state.push((
+                state.insert(
                     head.name().to_string(),
                     if let Some(symbolic_ref) = head.symref_target() {
-                        format!("ref: {}", symbolic_ref)
+                        format!("ref: {symbolic_ref}")
                     } else {
                         head.oid().to_string()
                     },
-                ));
+                );
             }
             git_server_remote.disconnect()?;
             state
@@ -460,7 +444,7 @@ fn get_refspecs_from_push_batch(stdin: &Stdin, initial_refspec: &str) -> Result<
 impl RepoState {
     pub async fn build(
         identifier: String,
-        state: Vec<(String, String)>,
+        state: HashMap<String, String>,
         signer: &NostrSigner,
     ) -> Result<RepoState> {
         let mut tags = vec![Tag::identifier(identifier.clone())];
