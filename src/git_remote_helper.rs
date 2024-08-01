@@ -22,7 +22,7 @@ use client::{
 use git::RepoActions;
 use git2::{Oid, Repository};
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{EventBuilder, Tag, Url};
+use nostr_sdk::{EventBuilder, PublicKey, Tag, Url};
 use nostr_signer::NostrSigner;
 use repo_ref::RepoRef;
 use repo_state::RepoState;
@@ -139,13 +139,53 @@ pub(crate) fn read_line<'a>(stdin: &io::Stdin, line: &'a mut String) -> io::Resu
 
 fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
     let mut repo_coordinattes = HashSet::new();
-    let coordinate = Coordinate::parse(Url::parse(url)?.domain().context("no naddr")?)?;
-    if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
-        repo_coordinattes.insert(coordinate);
-    } else {
+    let url = Url::parse(url)?;
+
+    if url.scheme().ne("nostr") {
+        bail!("nostr git url must start with nostr://")
+    }
+
+    if let Ok(coordinate) = Coordinate::parse(url.domain().context("no naddr")?) {
+        if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
+            repo_coordinattes.insert(coordinate);
+            return Ok(repo_coordinattes);
+        }
         bail!("naddr doesnt point to a git repository announcement");
     }
-    Ok(repo_coordinattes)
+
+    if let Some(domain) = url.domain() {
+        if let Ok(public_key) = PublicKey::parse(domain) {
+            if url.path().is_empty() {
+                bail!(
+                    "nostr git url should include the repo identifier eg nostr://npub123/the-repo-identifer"
+                );
+            }
+            let mut relays = vec![];
+            for (name, value) in url.query_pairs() {
+                if name.contains("relay") {
+                    let mut decoded = urlencoding::decode(&value)
+                        .context("could not parse relays in nostr git url")?
+                        .to_string();
+                    if !decoded.starts_with("ws://") && !decoded.starts_with("wss://") {
+                        decoded = format!("wss://{decoded}");
+                    }
+                    let url =
+                        Url::parse(&decoded).context("could not parse relays in nostr git url")?;
+                    relays.push(url.to_string());
+                }
+            }
+            repo_coordinattes.insert(Coordinate {
+                identifier: "ngit".to_string(),
+                public_key,
+                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                relays,
+            });
+            return Ok(repo_coordinattes);
+        }
+    }
+    bail!(
+        "nostr git url must be in format nostr://naddr123 or nostr://npub123/identifer?relay=wss://relay-example.com&relay1=wss://relay-example.org"
+    );
 }
 
 async fn list(git_repo: &Repo, repo_ref: &RepoRef, for_push: bool) -> Result<()> {
@@ -528,7 +568,7 @@ mod tests {
 
         use super::*;
 
-        fn get_model_coordinate() -> Coordinate {
+        fn get_model_coordinate(relays: bool) -> Coordinate {
             Coordinate {
                 identifier: "ngit".to_string(),
                 public_key: PublicKey::parse(
@@ -536,7 +576,11 @@ mod tests {
                 )
                 .unwrap(),
                 kind: nostr_sdk::Kind::GitRepoAnnouncement,
-                relays: vec!["wss://nos.lol".to_string()],
+                relays: if relays {
+                    vec!["wss://nos.lol/".to_string()]
+                } else {
+                    vec![]
+                },
             }
         }
 
@@ -546,9 +590,69 @@ mod tests {
                 nostr_git_url_to_repo_coordinates(
                     "nostr://naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqvzqqqrhnym0k2qj"
                 )?,
-                HashSet::from([get_model_coordinate()]),
+                HashSet::from([get_model_coordinate(true)]),
             );
             Ok(())
+        }
+        mod from_npub_slah_identifier {
+            use super::*;
+
+            #[test]
+            fn without_relay() -> Result<()> {
+                assert_eq!(
+                    nostr_git_url_to_repo_coordinates(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit"
+                    )?,
+                    HashSet::from([get_model_coordinate(false)]),
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn with_relay_without_scheme_defaults_to_wss() -> Result<()> {
+                assert_eq!(
+                    nostr_git_url_to_repo_coordinates(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay=nos.lol"
+                    )?,
+                    HashSet::from([get_model_coordinate(true)]),
+                );
+                Ok(())
+            }
+
+            #[test]
+            fn with_encoded_relay() -> Result<()> {
+                assert_eq!(
+                    nostr_git_url_to_repo_coordinates(&format!(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}",
+                        urlencoding::encode("wss://nos.lol")
+                    ))?,
+                    HashSet::from([get_model_coordinate(true)]),
+                );
+                Ok(())
+            }
+            #[test]
+            fn with_multiple_encoded_relays() -> Result<()> {
+                assert_eq!(
+                    nostr_git_url_to_repo_coordinates(&format!(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}&relay1={}",
+                        urlencoding::encode("wss://nos.lol"),
+                        urlencoding::encode("wss://relay.damus.io"),
+                    ))?,
+                    HashSet::from([Coordinate {
+                        identifier: "ngit".to_string(),
+                        public_key: PublicKey::parse(
+                            "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                        )
+                        .unwrap(),
+                        kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        relays: vec![
+                            "wss://nos.lol/".to_string(),
+                            "wss://relay.damus.io/".to_string(),
+                        ],
+                    }]),
+                );
+                Ok(())
+            }
         }
     }
 }
