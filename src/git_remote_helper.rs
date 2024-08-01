@@ -93,8 +93,8 @@ async fn main() -> Result<()> {
             ["option", ..] => {
                 println!("unsupported");
             }
-            ["fetch", _oid, refstr] => {
-                fetch(&git_repo.git_repo, &repo_ref, &stdin, refstr)?;
+            ["fetch", oid, _refstr] => {
+                fetch(&git_repo.git_repo, &repo_ref, &stdin, oid)?;
             }
             ["push", refspec] => {
                 push(
@@ -182,14 +182,14 @@ async fn list(git_repo: &Repo, repo_ref: &RepoRef, for_push: bool) -> Result<()>
     Ok(())
 }
 
-fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, refstr: &str) -> Result<()> {
+fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, oid: &str) -> Result<()> {
     let git_server_remote_url = repo_ref
         .git_server
         .first()
         .context("no git server listed in nostr repository announcement")?;
     let mut git_server_remote = git_repo.remote_anonymous(git_server_remote_url)?;
     git_server_remote.connect(git2::Direction::Fetch)?;
-    git_server_remote.download(&get_refstrs_from_fetch_batch(stdin, refstr)?, None)?;
+    git_server_remote.download(&get_oids_from_fetch_batch(stdin, oid)?, None)?;
     git_server_remote.disconnect()?;
     println!();
     Ok(())
@@ -422,14 +422,14 @@ fn get_remote_name_by_url(git_repo: &Repository, url: &str) -> Result<String> {
         .to_string())
 }
 
-fn get_refstrs_from_fetch_batch(stdin: &Stdin, initial_refstr: &str) -> Result<Vec<String>> {
+fn get_oids_from_fetch_batch(stdin: &Stdin, initial_oid: &str) -> Result<Vec<String>> {
     let mut line = String::new();
-    let mut refstrs = vec![initial_refstr.to_string()];
+    let mut oids = vec![initial_oid.to_string()];
     loop {
         let tokens = read_line(stdin, &mut line)?;
         match tokens.as_slice() {
-            ["fetch", _oid, refstr] => {
-                refstrs.push((*refstr).to_string());
+            ["fetch", oid, _refstr] => {
+                oids.push((*oid).to_string());
             }
             [] => break,
             _ => bail!(
@@ -437,7 +437,7 @@ fn get_refstrs_from_fetch_batch(stdin: &Stdin, initial_refstr: &str) -> Result<V
             ),
         }
     }
-    Ok(refstrs)
+    Ok(oids)
 }
 
 fn get_refspecs_from_push_batch(stdin: &Stdin, initial_refspec: &str) -> Result<Vec<String>> {
