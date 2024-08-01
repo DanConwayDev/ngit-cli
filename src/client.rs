@@ -642,7 +642,7 @@ fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event>
 
 pub async fn sign_event(event_builder: EventBuilder, signer: &NostrSigner) -> Result<nostr::Event> {
     if signer.r#type().eq(&nostr_signer::NostrSignerType::NIP46) {
-        let term = console::Term::stderr();
+        let term = console::Term::stdout();
         term.write_line("signing event with remote signer...")?;
         let event = signer
             .sign_event_builder(event_builder)
@@ -659,7 +659,7 @@ pub async fn sign_event(event_builder: EventBuilder, signer: &NostrSigner) -> Re
 }
 
 pub async fn fetch_public_key(signer: &NostrSigner) -> Result<nostr::PublicKey> {
-    let term = console::Term::stderr();
+    let term = console::Term::stdout();
     term.write_line("fetching npub from remote signer...")?;
     let public_key = signer
         .public_key()
@@ -1462,7 +1462,7 @@ pub async fn fetching_with_report(
     #[cfg(not(test))] client: &Client,
     repo_coordinates: &HashSet<Coordinate>,
 ) -> Result<FetchReport> {
-    let term = console::Term::stderr();
+    let term = console::Term::stdout();
     term.write_line("fetching updates...")?;
     let (relay_reports, progress_reporter) = client
         .fetch_all(git_repo_path, repo_coordinates, &HashSet::new())
