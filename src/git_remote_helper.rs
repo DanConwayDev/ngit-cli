@@ -518,3 +518,37 @@ impl RepoState {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod nostr_git_url_to_repo_coordinates {
+        use nostr_sdk::PublicKey;
+
+        use super::*;
+
+        fn get_model_coordinate() -> Coordinate {
+            Coordinate {
+                identifier: "ngit".to_string(),
+                public_key: PublicKey::parse(
+                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                )
+                .unwrap(),
+                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                relays: vec!["wss://nos.lol".to_string()],
+            }
+        }
+
+        #[test]
+        fn from_naddr() -> Result<()> {
+            assert_eq!(
+                nostr_git_url_to_repo_coordinates(
+                    "nostr://naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqvzqqqrhnym0k2qj"
+                )?,
+                HashSet::from([get_model_coordinate()]),
+            );
+            Ok(())
+        }
+    }
+}
