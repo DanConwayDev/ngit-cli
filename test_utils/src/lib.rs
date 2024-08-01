@@ -150,10 +150,10 @@ pub fn make_event_old_or_change_user(
 }
 
 pub fn generate_repo_ref_event() -> nostr::Event {
-    generate_repo_ref_event_with_git_server("git:://123.gitexample.com/test")
+    generate_repo_ref_event_with_git_server(vec!["git:://123.gitexample.com/test".to_string()])
 }
 
-pub fn generate_repo_ref_event_with_git_server(git_server: &str) -> nostr::Event {
+pub fn generate_repo_ref_event_with_git_server(git_servers: Vec<String>) -> nostr::Event {
     // taken from test git_repo
     // TODO - this may not be consistant across computers as it might take the
     // author and committer from global git config
@@ -171,7 +171,7 @@ pub fn generate_repo_ref_event_with_git_server(git_server: &str) -> nostr::Event
             Tag::from_standardized(TagStandard::Description("example description".into())),
             Tag::custom(
                 nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                vec![git_server.to_string()],
+                git_servers,
             ),
             Tag::custom(
                 nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),

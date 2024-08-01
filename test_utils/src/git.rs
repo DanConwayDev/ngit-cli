@@ -62,7 +62,7 @@ impl GitTestRepo {
         Self::new("main").unwrap()
     }
 
-    fn duplicate(existing_repo: &GitTestRepo) -> Result<Self> {
+    pub fn duplicate(existing_repo: &GitTestRepo) -> Result<Self> {
         let path = current_dir()?.join(format!("tmpgit-{}", rand::random::<u64>()));
         // function source: https://stackoverflow.com/a/65192210
         fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {

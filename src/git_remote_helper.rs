@@ -270,6 +270,24 @@ async fn push(
     )
     .await?;
 
+    // silently push to any other git servers
+    for (i, git_server_url) in repo_ref.git_server.iter().enumerate() {
+        // we have already pushed to the first one
+        if i.gt(&0) {
+            if let Ok(mut git_server_remote) = git_repo.git_repo.remote_anonymous(git_server_url) {
+                let auth = GitAuthenticator::default();
+                let git_config = git_repo.git_repo.config()?;
+                let mut push_options = git2::PushOptions::new();
+                let mut remote_callbacks = git2::RemoteCallbacks::new();
+                remote_callbacks.credentials(auth.credentials(&git_config));
+                push_options.remote_callbacks(remote_callbacks);
+                let _ = git_server_remote.push(&refspecs, Some(&mut push_options));
+                let _ = git_server_remote.disconnect();
+            }
+        }
+    }
+    // todo report on errors
+
     println!();
     Ok(())
 }
