@@ -58,7 +58,7 @@ fn cli_tester(git_repo: &GitTestRepo) -> CliTester {
 
 fn cli_tester_after_fetch(git_repo: &GitTestRepo) -> Result<CliTester> {
     let mut p = cli_tester(git_repo);
-    p.expect("fetching updates...\r\n")?;
+    p.expect("nostr: fetching...\r\n")?;
     p.expect_eventually("updates")?; // some updates
     p.expect_eventually("\r\n")?;
     Ok(p)
