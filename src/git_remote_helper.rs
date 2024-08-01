@@ -183,15 +183,36 @@ async fn list(git_repo: &Repo, repo_ref: &RepoRef, for_push: bool) -> Result<()>
 }
 
 fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, oid: &str) -> Result<()> {
-    let git_server_remote_url = repo_ref
-        .git_server
-        .first()
-        .context("no git server listed in nostr repository announcement")?;
-    let mut git_server_remote = git_repo.remote_anonymous(git_server_remote_url)?;
+    let oids = get_oids_from_fetch_batch(stdin, oid)?;
+
+    let mut errors = HashMap::new();
+    for git_server_url in &repo_ref.git_server {
+        if let Err(e) = fetch_from_git_server(git_repo, &oids, git_server_url) {
+            errors.insert(git_server_url.to_string(), e);
+        } else {
+            println!();
+            return Ok(());
+        }
+    }
+    bail!(
+        "failed to fetch objects in nostr state event from:\r\n{}",
+        errors
+            .iter()
+            .map(|(url, error)| format!("{url}: {error}"))
+            .collect::<Vec<String>>()
+            .join("\r\n")
+    );
+}
+
+fn fetch_from_git_server(
+    git_repo: &Repository,
+    oids: &[String],
+    git_server_url: &str,
+) -> Result<()> {
+    let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;
     git_server_remote.connect(git2::Direction::Fetch)?;
-    git_server_remote.download(&get_oids_from_fetch_batch(stdin, oid)?, None)?;
+    git_server_remote.download(oids, None)?;
     git_server_remote.disconnect()?;
-    println!();
     Ok(())
 }
 

@@ -154,6 +154,12 @@ impl GitTestRepo {
         self.stage_and_commit("add t2.md")
     }
 
+    pub fn populate_minus_1(&self) -> Result<Oid> {
+        self.initial_commit()?;
+        fs::write(self.dir.join("t1.md"), "some content")?;
+        self.stage_and_commit("add t1.md")
+    }
+
     pub fn populate_with_test_branch(&self) -> Result<Oid> {
         self.populate()?;
         self.create_branch("add-example-feature")?;
