@@ -9,15 +9,14 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     io::{self, Stdin},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
 use auth_git2::GitAuthenticator;
-#[cfg(not(test))]
-use client::Connect;
 use client::{
-    fetching_with_report, get_repo_ref_from_cache, get_state_from_cache, sign_event, STATE_KIND,
+    consolidate_fetch_reports, get_repo_ref_from_cache, get_state_from_cache, sign_event, Connect,
+    STATE_KIND,
 };
 use git::RepoActions;
 use git2::{Oid, Repository};
@@ -72,7 +71,7 @@ async fn main() -> Result<()> {
     let repo_coordinates =
         nostr_git_url_to_repo_coordinates(nostr_remote_url).context("invalid nostr url")?;
 
-    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    fetching_with_report_for_helper(git_repo_path, &client, &repo_coordinates).await?;
 
     let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
 
@@ -188,6 +187,30 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
     bail!(
         "nostr git url must be in format nostr://naddr123 or nostr://npub123/identifer?relay=wss://relay-example.com&relay1=wss://relay-example.org"
     );
+}
+
+async fn fetching_with_report_for_helper(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    repo_coordinates: &HashSet<Coordinate>,
+) -> Result<()> {
+    let term = console::Term::stderr();
+    term.write_line("fetching from nostr...")?;
+    let (relay_reports, progress_reporter) = client
+        .fetch_all(git_repo_path, repo_coordinates, &HashSet::new())
+        .await?;
+    if !relay_reports.iter().any(std::result::Result::is_err) {
+        let _ = progress_reporter.clear();
+        term.clear_last_lines(1)?;
+    }
+    let report = consolidate_fetch_reports(relay_reports);
+    if report.to_string().is_empty() {
+        term.write_line("no updates on nostr")?;
+    } else {
+        term.write_line(&format!("nostr updates: {report}"))?;
+    }
+    Ok(())
 }
 
 async fn list(git_repo: &Repo, repo_ref: &RepoRef, for_push: bool) -> Result<()> {
