@@ -1,7 +1,11 @@
 //create
 
 // implement drop?
-use std::{env::current_dir, fs, path::PathBuf};
+use std::{
+    env::current_dir,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use git2::{Oid, RepositoryInitOptions, Signature, Time};
@@ -58,9 +62,27 @@ impl GitTestRepo {
         Self::new("main").unwrap()
     }
 
-    fn clone(existing_repo: &GitTestRepo) -> Result<Self> {
+    fn duplicate(existing_repo: &GitTestRepo) -> Result<Self> {
         let path = current_dir()?.join(format!("tmpgit-{}", rand::random::<u64>()));
-        let git_repo = git2::Repository::clone(existing_repo.dir.to_str().unwrap(), path.clone())?;
+        // function source: https://stackoverflow.com/a/65192210
+        fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+            fs::create_dir_all(&dst)?;
+            for entry in fs::read_dir(src)? {
+                let entry = entry?;
+                let ty = entry.file_type()?;
+                if ty.is_dir() {
+                    copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+                } else {
+                    fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+                }
+            }
+            Ok(())
+        }
+        copy_dir_all(existing_repo.dir.clone(), path.clone())?;
+        let git_repo = git2::Repository::open(path.clone())?;
+
+        // let git_repo = git2::Repository::clone(existing_repo.dir.to_str().unwrap(),
+        // path.clone())?;
         Ok(Self {
             dir: path,
             git_repo,
@@ -78,7 +100,7 @@ impl GitTestRepo {
                 .mkpath(true),
         )?;
         // clone existing to a temp repo
-        let tmp_repo = Self::clone(existing_repo)?;
+        let tmp_repo = Self::duplicate(existing_repo)?;
         // add bare as a remote and push branches
         let mut remote = tmp_repo.git_repo.remote("tmp", path.to_str().unwrap())?;
         let refspecs = tmp_repo
