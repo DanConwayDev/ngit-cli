@@ -280,7 +280,7 @@ fn get_keys_with_password(git_repo: &Repo, password: &str) -> Result<nostr::Keys
 }
 
 async fn get_nip46_signer_from_uri_and_key(uri: &str, app_key: &str) -> Result<NostrSigner> {
-    let term = console::Term::stdout();
+    let term = console::Term::stderr();
     term.write_line("connecting to remote signer...")?;
     let uri = NostrConnectURI::parse(uri)?;
     let signer = NostrSigner::nip46(
@@ -410,7 +410,7 @@ async fn fresh_login(
 }
 
 pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
-    let term = console::Term::stdout();
+    let term = console::Term::stderr();
     term.write_line("contacting login service provider...")?;
     let res = nip05::profile(&nip05, None).await;
     term.clear_last_lines(1)?;
@@ -633,7 +633,7 @@ async fn get_user_details(
         if cache_only {
             Ok(empty)
         } else if let Some(client) = client {
-            let term = console::Term::stdout();
+            let term = console::Term::stderr();
             term.write_line("searching for profile...")?;
             let (_, progress_reporter) = client
                 .fetch_all(

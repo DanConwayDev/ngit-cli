@@ -463,7 +463,7 @@ fn choose_commits(git_repo: &Repo, proposed_commits: Vec<Sha1Hash>) -> Result<Ve
         }
     }
 
-    let term = console::Term::stdout();
+    let term = console::Term::stderr();
     let mut printed_error_line = false;
 
     let selected_commits = 'outer: loop {
