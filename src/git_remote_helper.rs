@@ -108,10 +108,10 @@ async fn main() -> Result<()> {
                 .await?;
             }
             ["list"] => {
-                list(&git_repo.git_repo, &repo_ref, false)?;
+                list(&git_repo, &repo_ref, false).await?;
             }
             ["list", "for-push"] => {
-                list(&git_repo.git_repo, &repo_ref, true)?;
+                list(&git_repo, &repo_ref, true).await?;
             }
             [] => {
                 return Ok(());
@@ -148,19 +148,36 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
     Ok(repo_coordinattes)
 }
 
-fn list(git_repo: &Repository, repo_ref: &RepoRef, for_push: bool) -> Result<()> {
-    let git_server_remote_url = repo_ref
-        .git_server
-        .first()
-        .context("no git server listed in nostr repository announcement")?;
-    let mut git_server_remote = git_repo.remote_anonymous(git_server_remote_url)?;
-    git_server_remote.connect(git2::Direction::Fetch)?;
-    for head in git_server_remote.list()? {
-        if !for_push || head.name() != "HEAD" {
-            println!("{} {}", head.oid(), head.name());
+async fn list(git_repo: &Repo, repo_ref: &RepoRef, for_push: bool) -> Result<()> {
+    if let Ok(repo_state) = get_state_from_cache(git_repo.get_path()?, repo_ref).await {
+        for (name, value) in &repo_state.state {
+            if value.starts_with("ref: ") {
+                if !for_push {
+                    println!("{} {name}", value.replace("ref: ", "@"));
+                }
+            } else {
+                println!("{value} {name}");
+            }
         }
+    } else {
+        let git_server_remote_url = repo_ref
+            .git_server
+            .first()
+            .context("no git server listed in nostr repository announcement")?;
+        let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_remote_url)?;
+        git_server_remote.connect(git2::Direction::Fetch)?;
+
+        for head in git_server_remote.list()? {
+            if let Some(symbolic_reference) = head.symref_target() {
+                if !for_push {
+                    println!("@{} {}", symbolic_reference, head.name());
+                }
+            } else {
+                println!("{} {}", head.oid(), head.name());
+            }
+        }
+        git_server_remote.disconnect()?;
     }
-    git_server_remote.disconnect()?;
     println!();
     Ok(())
 }
