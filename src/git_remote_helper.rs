@@ -54,7 +54,9 @@ async fn main() -> Result<()> {
         bail!("invalid arguments - no url");
     };
     if env::args().nth(1).as_deref() == Some("--version") {
-        println!("v0.0.1");
+        const VERSION: &str = env!("CARGO_PKG_VERSION");
+        println!("v{VERSION}");
+        return Ok(());
     }
 
     let git_repo = Repo::from_path(&PathBuf::from(
