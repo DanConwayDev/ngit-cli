@@ -1469,6 +1469,7 @@ pub async fn fetching_with_report(
         .await?;
     if !relay_reports.iter().any(std::result::Result::is_err) {
         let _ = progress_reporter.clear();
+        term.clear_last_lines(1)?;
     }
     let report = consolidate_fetch_reports(relay_reports);
     if report.to_string().is_empty() {
