@@ -213,38 +213,100 @@ async fn fetching_with_report_for_helper(
     Ok(())
 }
 
-async fn list(git_repo: &Repo, repo_ref: &RepoRef, for_push: bool) -> Result<()> {
-    if let Ok(repo_state) = get_state_from_cache(git_repo.get_path()?, repo_ref).await {
-        for (name, value) in &repo_state.state {
-            if value.starts_with("ref: ") {
-                if !for_push {
-                    println!("{} {name}", value.replace("ref: ", "@"));
-                }
-            } else {
-                println!("{value} {name}");
-            }
-        }
-    } else {
-        let git_server_remote_url = repo_ref
-            .git_server
-            .first()
-            .context("no git server listed in nostr repository announcement")?;
-        let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_remote_url)?;
-        git_server_remote.connect(git2::Direction::Fetch)?;
+async fn list(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    for_push: bool,
+) -> Result<HashMap<String, HashMap<String, String>>> {
+    let nostr_state =
+        if let Ok(nostr_state) = get_state_from_cache(git_repo.get_path()?, repo_ref).await {
+            Some(nostr_state)
+        } else {
+            None
+        };
 
-        for head in git_server_remote.list()? {
-            if let Some(symbolic_reference) = head.symref_target() {
-                if !for_push {
-                    println!("@{} {}", symbolic_reference, head.name());
-                }
-            } else {
-                println!("{} {}", head.oid(), head.name());
+    let term = console::Term::stderr();
+
+    let mut remote_states = HashMap::new();
+    for url in &repo_ref.git_server {
+        match list_from_remote(git_repo, url) {
+            Ok(remote_state) => {
+                remote_states.insert(url.clone(), remote_state);
+            }
+            Err(error) => {
+                term.write_line(
+                    format!("WARNING: failed to list refs git server in nostr events from {url} error: {error}").as_str(),
+                )?;
             }
         }
-        git_server_remote.disconnect()?;
     }
+
+    let state = if let Some(nostr_state) = nostr_state {
+        let term = console::Term::stderr();
+        for (name, value) in &nostr_state.state {
+            for (url, remote_state) in &remote_states {
+                if let Some(remote_value) = remote_state.get(name) {
+                    if value.ne(remote_value) {
+                        term.write_line(
+                            format!(
+                                "WARNING: git server {url} is out of sync with nostr for {name}"
+                            )
+                            .as_str(),
+                        )?;
+                    }
+                } else {
+                    term.write_line(
+                        format!("WARNING: git server {url} is out of sync with nostr. it is missing {name}. if you are a maintainer consider pushing it.").as_str(),
+                    )?;
+                }
+            }
+        }
+        nostr_state.state
+    } else {
+        repo_ref
+            .git_server
+            .iter()
+            .filter_map(|server| remote_states.get(server))
+            .cloned()
+            .collect::<Vec<HashMap<String, String>>>()
+            .first()
+            .context("failed to get refs from git server")?
+            .clone()
+    };
+
+    for (name, value) in state {
+        if value.starts_with("ref: ") {
+            if !for_push {
+                println!("{} {name}", value.replace("ref: ", "@"));
+            }
+        } else {
+            println!("{value} {name}");
+        }
+    }
+
     println!();
-    Ok(())
+    Ok(remote_states)
+}
+
+fn list_from_remote(
+    git_repo: &Repo,
+    git_server_remote_url: &str,
+) -> Result<HashMap<String, String>> {
+    let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_remote_url)?;
+    git_server_remote.connect(git2::Direction::Fetch)?;
+    let mut state = HashMap::new();
+    for head in git_server_remote.list()? {
+        if let Some(symbolic_reference) = head.symref_target() {
+            state.insert(
+                head.name().to_string(),
+                format!("ref: {symbolic_reference}"),
+            );
+        } else {
+            state.insert(head.name().to_string(), head.oid().to_string());
+        }
+    }
+    git_server_remote.disconnect()?;
+    Ok(state)
 }
 
 fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, oid: &str) -> Result<()> {
@@ -290,6 +352,13 @@ async fn push(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Result<()> {
+    // TODO check
+    // bail!(
+    //     "git server {} tip for branch {} conflicts with nostr and local branch.
+    // to resolve either:\r\n  1. pull from that git server and resolve\r\n  2.
+    // force push your branch to the git server before pushing to nostr remote"
+    // )?;
+
     // if no state events - create from first git server listed
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
     let git_server_url = repo_ref
