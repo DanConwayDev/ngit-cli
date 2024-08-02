@@ -156,7 +156,7 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
 
     if let Some(domain) = url.domain() {
         if let Ok(public_key) = PublicKey::parse(domain) {
-            if url.path().is_empty() {
+            if url.path().len() < 2 {
                 bail!(
                     "nostr git url should include the repo identifier eg nostr://npub123/the-repo-identifer"
                 );
@@ -176,7 +176,7 @@ fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
                 }
             }
             repo_coordinattes.insert(Coordinate {
-                identifier: "ngit".to_string(),
+                identifier: url.path()[1..].to_string(),
                 public_key,
                 kind: nostr_sdk::Kind::GitRepoAnnouncement,
                 relays,
