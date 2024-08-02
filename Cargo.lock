@@ -1873,9 +1873,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-database"
-version = "0.33.0"
+version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f6c72d0d0842de637f7fba6e70764f719257d29dad8fc5f7352810b0f117ad"
+checksum = "50eebf5020d70891e3c229128de5fc73af632b651d02742383b314d3d0c7e953"
 dependencies = [
  "async-trait",
  "flatbuffers",
