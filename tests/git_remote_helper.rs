@@ -207,6 +207,7 @@ mod list {
 
         async fn async_run_test() -> Result<()> {
             let source_git_repo = prep_git_repo()?;
+            let source_path = source_git_repo.dir.to_str().unwrap().to_string();
             std::fs::write(source_git_repo.dir.join("commit.md"), "some content")?;
             let main_commit_id = source_git_repo.stage_and_commit("commit.md")?;
 
@@ -239,10 +240,15 @@ mod list {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
+                p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
+                let res = p.expect_eventually("\r\n\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
                 assert_eq!(
-                    p.expect_eventually("\r\n\r\n")?
-                        .split("\r\n")
+                    res.split("\r\n")
                         .map(|e| e.to_string())
                         .collect::<HashSet<String>>(),
                     HashSet::from([
@@ -251,10 +257,6 @@ mod list {
                         format!("{} refs/heads/vnext", vnext_commit_id),
                     ]),
                 );
-                p.exit()?;
-                for p in [51, 52, 53, 55, 56, 57] {
-                    relay::shutdown_relay(8000 + p)?;
-                }
                 Ok(())
             });
             // launch relays
@@ -286,6 +288,7 @@ mod list {
 
             async fn async_run_test() -> Result<()> {
                 let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
+                let source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
                 let main_commit_id = source_git_repo.get_tip_of_local_branch("main")?;
                 let example_commit_id =
@@ -315,10 +318,15 @@ mod list {
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_after_fetch(&git_repo)?;
                     p.send_line("list")?;
+                    p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
                     // println!("{}", p.expect_eventually("\r\n\r\n")?);
+                    let res = p.expect_eventually("\r\n\r\n")?;
+                    p.exit()?;
+                    for p in [51, 52, 53, 55, 56, 57] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
                     assert_eq!(
-                        p.expect_eventually("\r\n\r\n")?
-                            .split("\r\n")
+                        res.split("\r\n")
                             .map(|e| e.to_string())
                             .collect::<HashSet<String>>(),
                         HashSet::from([
@@ -327,10 +335,7 @@ mod list {
                             format!("{} refs/heads/example-branch", example_commit_id),
                         ]),
                     );
-                    p.exit()?;
-                    for p in [51, 52, 53, 55, 56, 57] {
-                        relay::shutdown_relay(8000 + p)?;
-                    }
+
                     Ok(())
                 });
                 // launch relays
@@ -358,6 +363,7 @@ mod list {
 
             async fn async_run_test() -> Result<()> {
                 let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
+                let source_path = source_git_repo.dir.to_str().unwrap().to_string();
                 let main_original_commit_id = source_git_repo.get_tip_of_local_branch("main")?;
 
                 {
@@ -398,10 +404,16 @@ mod list {
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_after_fetch(&git_repo)?;
                     p.send_line("list")?;
+                    p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+
                     // println!("{}", p.expect_eventually("\r\n\r\n")?);
+                    let res = p.expect_eventually("\r\n\r\n")?;
+                    p.exit()?;
+                    for p in [51, 52, 53, 55, 56, 57] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
                     assert_eq!(
-                        p.expect_eventually("\r\n\r\n")?
-                            .split("\r\n")
+                        res.split("\r\n")
                             .map(|e| e.to_string())
                             .collect::<HashSet<String>>(),
                         HashSet::from([
@@ -410,10 +422,6 @@ mod list {
                             format!("{} refs/heads/example-branch", example_commit_id),
                         ]),
                     );
-                    p.exit()?;
-                    for p in [51, 52, 53, 55, 56, 57] {
-                        relay::shutdown_relay(8000 + p)?;
-                    }
                     Ok(())
                 });
                 // launch relays

@@ -235,7 +235,7 @@ async fn list(
             }
             Err(error) => {
                 term.write_line(
-                    format!("WARNING: failed to list refs git server in nostr events from {url} error: {error}").as_str(),
+                    format!("WARNING: failed to list refs from {url} error: {error}").as_str(),
                 )?;
             }
         }
@@ -248,15 +248,13 @@ async fn list(
                 if let Some(remote_value) = remote_state.get(name) {
                     if value.ne(remote_value) {
                         term.write_line(
-                            format!(
-                                "WARNING: git server {url} is out of sync with nostr for {name}"
-                            )
-                            .as_str(),
+                            format!("WARNING: {name} out of sync with nostr on {url}").as_str(),
                         )?;
                     }
                 } else {
                     term.write_line(
-                        format!("WARNING: git server {url} is out of sync with nostr. it is missing {name}. if you are a maintainer consider pushing it.").as_str(),
+                        format!("WARNING: {name} is missing from {url} but tracked on nostr")
+                            .as_str(),
                     )?;
                 }
             }
