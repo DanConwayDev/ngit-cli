@@ -229,6 +229,7 @@ async fn list(
 
     let mut remote_states = HashMap::new();
     for url in &repo_ref.git_server {
+        term.write_line(format!("fetching refs list: {url}...").as_str())?;
         match list_from_remote(git_repo, url) {
             Ok(remote_state) => {
                 remote_states.insert(url.clone(), remote_state);
@@ -239,10 +240,10 @@ async fn list(
                 )?;
             }
         }
+        term.clear_last_lines(1)?;
     }
 
     let state = if let Some(nostr_state) = nostr_state {
-        let term = console::Term::stderr();
         for (name, value) in &nostr_state.state {
             for (url, remote_state) in &remote_states {
                 if let Some(remote_value) = remote_state.get(name) {
