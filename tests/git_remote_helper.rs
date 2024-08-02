@@ -405,6 +405,13 @@ mod list {
                     let mut p = cli_tester_after_fetch(&git_repo)?;
                     p.send_line("list")?;
                     p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+                    p.expect(
+                        format!(
+                            "WARNING: refs/heads/main out of sync with nostr on {}\r\n",
+                            source_path
+                        )
+                        .as_str(),
+                    )?;
 
                     // println!("{}", p.expect_eventually("\r\n\r\n")?);
                     let res = p.expect_eventually("\r\n\r\n")?;
