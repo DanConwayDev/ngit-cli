@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
     let stdin = io::stdin();
     let mut line = String::new();
 
+    let mut list_outputs = None;
     loop {
         let tokens = read_line(&stdin, &mut line)?;
 
@@ -105,14 +106,15 @@ async fn main() -> Result<()> {
                     &stdin,
                     refspec,
                     &client,
+                    list_outputs.clone(),
                 )
                 .await?;
             }
             ["list"] => {
-                list(&git_repo, &repo_ref, false).await?;
+                list_outputs = Some(list(&git_repo, &repo_ref, false).await?);
             }
             ["list", "for-push"] => {
-                list(&git_repo, &repo_ref, true).await?;
+                list_outputs = Some(list(&git_repo, &repo_ref, true).await?);
             }
             [] => {
                 return Ok(());
@@ -351,6 +353,7 @@ fn fetch_from_git_server(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn push(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -359,56 +362,63 @@ async fn push(
     initial_refspec: &str,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
+    list_outputs: Option<HashMap<String, HashMap<String, String>>>,
 ) -> Result<()> {
-    // TODO check
-    // bail!(
-    //     "git server {} tip for branch {} conflicts with nostr and local branch.
-    // to resolve either:\r\n  1. pull from that git server and resolve\r\n  2.
-    // force push your branch to the git server before pushing to nostr remote"
-    // )?;
+    let mut refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
 
-    // if no state events - create from first git server listed
-    let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
-    let git_server_url = repo_ref
-        .git_server
-        .first()
-        .context("no git server listed in nostr repository announcement")?;
-    let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
+    let term = console::Term::stderr();
 
-    let auth = GitAuthenticator::default();
-    let git_config = git_repo.git_repo.config()?;
-    let mut push_options = git2::PushOptions::new();
-    let mut remote_callbacks = git2::RemoteCallbacks::new();
-    remote_callbacks.credentials(auth.credentials(&git_config));
-    remote_callbacks.push_update_reference(|name, error| {
-        if let Some(error) = error {
-            println!("error {name} {error}");
+    let list_outputs = match list_outputs {
+        Some(outputs) => outputs,
+        _ => list_from_remotes(&term, git_repo, &repo_ref.git_server)?,
+    };
+
+    let nostr_state = get_state_from_cache(git_repo.get_path()?, repo_ref).await;
+
+    let existing_state = {
+        // if no state events - create from first git server listed
+        if let Ok(nostr_state) = &nostr_state {
+            nostr_state.state.clone()
+        } else if let Some(url) = repo_ref
+            .git_server
+            .iter()
+            .find(|&url| list_outputs.contains_key(url))
+        {
+            list_outputs.get(url).unwrap().to_owned()
         } else {
-            if let Some(refspec) = refspecs
-                .iter()
-                .find(|r| r.contains(format!(":{name}").as_str()))
-            {
-                if let Err(e) =
-                    update_remote_refs_pushed(&git_repo.git_repo, refspec, nostr_remote_url)
-                        .context("could not update remote_ref locally")
-                {
-                    return Err(git2::Error::from_str(e.to_string().as_str()));
-                }
-            }
-            println!("ok {name}",);
+            bail!(
+                "cannot connect to git servers: {}",
+                repo_ref.git_server.join(" ")
+            );
         }
-        Ok(())
+    };
+
+    let (rejected_refspecs, remote_refspecs) = create_rejected_refspecs_and_remotes_refspecs(
+        &term,
+        git_repo,
+        &refspecs,
+        &existing_state,
+        &list_outputs,
+    )?;
+
+    refspecs.retain(|refspec| {
+        if let Some(rejected) = rejected_refspecs.get(&refspec.to_string()) {
+            let (_, to) = refspec_to_from_to(refspec).unwrap();
+            println!("error {to} {} out of sync with nostr", rejected.join(" "));
+            false
+        } else {
+            true
+        }
     });
-    push_options.remote_callbacks(remote_callbacks);
-    git_server_remote.push(&refspecs, Some(&mut push_options))?;
-    git_server_remote.disconnect()?;
 
-    // TODO check whether push was succesful before proceeding - geting outcome from
-    // callback isn't straightforward
+    if refspecs.is_empty() {
+        // all refspecs rejected
+        println!();
+        return Ok(());
+    }
 
-    let new_state = generate_updated_state(git_repo, repo_ref, &refspecs).await?;
+    let new_state = generate_updated_state(git_repo, &existing_state, &refspecs)?;
 
-    // TODO enable interactive login
     let (signer, user_ref) = login::launch(
         git_repo,
         &None,
@@ -420,7 +430,11 @@ async fn push(
         true,
     )
     .await?;
+
     let new_repo_state = RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
+
+    // TODO check whether tip of each branch pushed is on at least one git server
+    // before broadcasting the nostr state
 
     send_events(
         client,
@@ -433,71 +447,218 @@ async fn push(
     )
     .await?;
 
-    // silently push to any other git servers
-    for (i, git_server_url) in repo_ref.git_server.iter().enumerate() {
-        // we have already pushed to the first one
-        if i.gt(&0) {
-            if let Ok(mut git_server_remote) = git_repo.git_repo.remote_anonymous(git_server_url) {
+    for refspec in &refspecs {
+        let (_, to) = refspec_to_from_to(refspec)?;
+        println!("ok {to}");
+        update_remote_refs_pushed(&git_repo.git_repo, refspec, nostr_remote_url)
+            .context("could not update remote_ref locally")?;
+    }
+
+    // TODO make async - check gitlib2 callbacks work async
+    let git_config = git_repo.git_repo.config()?;
+    for (git_server_url, refspecs) in remote_refspecs {
+        if !refspecs.is_empty() {
+            if let Ok(mut git_server_remote) = git_repo.git_repo.remote_anonymous(&git_server_url) {
                 let auth = GitAuthenticator::default();
-                let git_config = git_repo.git_repo.config()?;
                 let mut push_options = git2::PushOptions::new();
                 let mut remote_callbacks = git2::RemoteCallbacks::new();
                 remote_callbacks.credentials(auth.credentials(&git_config));
+                remote_callbacks.push_update_reference(|name, error| {
+                    if let Some(error) = error {
+                        term.write_line(
+                            format!("WARNING: error pushing {name} to {git_server_url} {error}")
+                                .as_str(),
+                        )
+                        .unwrap();
+                    }
+                    Ok(())
+                });
                 push_options.remote_callbacks(remote_callbacks);
                 let _ = git_server_remote.push(&refspecs, Some(&mut push_options));
                 let _ = git_server_remote.disconnect();
             }
         }
     }
-    // todo report on errors
-
     println!();
     Ok(())
 }
 
-async fn generate_updated_state(
+type HashMapUrlRefspecs = HashMap<String, Vec<String>>;
+
+#[allow(clippy::too_many_lines)]
+fn create_rejected_refspecs_and_remotes_refspecs(
+    term: &console::Term,
     git_repo: &Repo,
-    repo_ref: &RepoRef,
+    refspecs: &Vec<String>,
+    nostr_state: &HashMap<String, String>,
+    list_outputs: &HashMap<String, HashMap<String, String>>,
+) -> Result<(HashMapUrlRefspecs, HashMapUrlRefspecs)> {
+    let mut refspecs_for_remotes = HashMap::new();
+
+    let mut rejected_refspecs: HashMapUrlRefspecs = HashMap::new();
+
+    for (url, remote_state) in list_outputs {
+        let mut refspecs_for_remote = vec![];
+        for refspec in refspecs {
+            let (from, to) = refspec_to_from_to(refspec)?;
+            let nostr_value = nostr_state.get(to);
+            let remote_value = remote_state.get(to);
+            if from.is_empty() {
+                if remote_value.is_some() {
+                    // delete remote branch
+                    refspecs_for_remote.push(refspec.clone());
+                }
+                continue;
+            }
+            let from_tip = git_repo.get_commit_or_tip_of_reference(from)?;
+            if let Some(nostr_value) = nostr_value {
+                if let Some(remote_value) = remote_value {
+                    if nostr_value.eq(remote_value) {
+                        // in sync - existing branch at same state
+                        let is_remote_tip_ancestor_of_commit = if let Ok(remote_value_tip) =
+                            git_repo.get_commit_or_tip_of_reference(remote_value)
+                        {
+                            if let Ok((_, behind)) =
+                                git_repo.get_commits_ahead_behind(&remote_value_tip, &from_tip)
+                            {
+                                behind.is_empty()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if is_remote_tip_ancestor_of_commit {
+                            refspecs_for_remote.push(refspec.clone());
+                        } else {
+                            // this is a force push so we need to force push to git server too
+                            if refspec.starts_with('+') {
+                                refspecs_for_remote.push(refspec.clone());
+                            } else {
+                                refspecs_for_remote.push(format!("+{refspec}"));
+                            }
+                        }
+                        // TODO do we need to force push to this remote?
+                    } else if let Ok(remote_value_tip) =
+                        git_repo.get_commit_or_tip_of_reference(remote_value)
+                    {
+                        if from_tip.eq(&remote_value_tip) {
+                            // remote already at correct state
+                            term.write_line(
+                                format!("{to} already at pushed commit state on {url}").as_str(),
+                            )?;
+                        }
+                        let (_, behind) =
+                            git_repo.get_commits_ahead_behind(&remote_value_tip, &from_tip)?;
+                        if behind.is_empty() {
+                            // can soft push
+                            refspecs_for_remote.push(refspec.clone());
+                        } else {
+                            // cant soft push
+                            rejected_refspecs
+                                .entry(refspec.to_string())
+                                .and_modify(|a| a.push(url.to_string()))
+                                .or_insert(vec![url.to_string()]);
+                            term.write_line(
+                                format!("ERROR: {to} on {url} conflicts with nostr and is {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote", behind.len()).as_str(),
+                            )?;
+                        };
+                    } else {
+                        // remote_value oid is not present locally
+                        // TODO can we download the remote reference?
+
+                        // cant soft push
+                        rejected_refspecs
+                            .entry(refspec.to_string())
+                            .and_modify(|a| a.push(url.to_string()))
+                            .or_insert(vec![url.to_string()]);
+                        term.write_line(
+                            format!("ERROR: {to} on {url} conflicts with nostr and is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                        )?;
+                    }
+                } else {
+                    // existing nostr branch not on remote
+                    // report - creating new branch
+                    term.write_line(format!("pushing {to} as new branch on {url}").as_str())?;
+                    refspecs_for_remote.push(refspec.clone());
+                }
+            } else if let Some(remote_value) = remote_value {
+                // new to nostr but on remote
+                if let Ok(remote_value_tip) = git_repo.get_commit_or_tip_of_reference(remote_value)
+                {
+                    let (_, behind) =
+                        git_repo.get_commits_ahead_behind(&remote_value_tip, &from_tip)?;
+                    if behind.is_empty() {
+                        // can soft push
+                        refspecs_for_remote.push(refspec.clone());
+                    } else {
+                        // cant soft push
+                        rejected_refspecs
+                            .entry(refspec.to_string())
+                            .and_modify(|a| a.push(url.to_string()))
+                            .or_insert(vec![url.to_string()]);
+                        term.write_line(
+                                    format!("ERROR: {to} not on nostr but on {url} is {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote", behind.len()).as_str(),
+                                )?;
+                    }
+                } else {
+                    // havn't fetched oid from remote
+                    // TODO fetch oid from remote
+                    // cant soft push
+                    rejected_refspecs
+                        .entry(refspec.to_string())
+                        .and_modify(|a| a.push(url.to_string()))
+                        .or_insert(vec![url.to_string()]);
+                    term.write_line(
+                        format!("ERROR: {to} not on nostr but on {url} is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                    )?;
+                }
+            } else {
+                // in sync - new branch
+                refspecs_for_remote.push(refspec.clone());
+            }
+        }
+        refspecs_for_remotes.insert(url.to_string(), refspecs_for_remote);
+    }
+
+    // remove rejected refspecs so they dont get pushed to some remotes
+    let mut remotes_refspecs_without_rejected = HashMap::new();
+    for (url, value) in &refspecs_for_remotes {
+        remotes_refspecs_without_rejected.insert(
+            url.to_string(),
+            value
+                .iter()
+                .filter(|refspec| !rejected_refspecs.contains_key(*refspec))
+                .cloned()
+                .collect(),
+        );
+    }
+    Ok((rejected_refspecs, remotes_refspecs_without_rejected))
+}
+
+fn generate_updated_state(
+    git_repo: &Repo,
+    existing_state: &HashMap<String, String>,
     refspecs: &Vec<String>,
 ) -> Result<HashMap<String, String>> {
-    let new_state = {
-        if let Ok(mut repo_state) = get_state_from_cache(git_repo.get_path()?, repo_ref).await {
-            for refspec in refspecs {
-                let (from, to) = refspec_to_from_to(refspec)?;
-                if from.is_empty() {
-                    // delete
-                    repo_state.state.remove(to);
-                } else {
-                    // add or update
-                    repo_state.state.insert(
-                        to.to_string(),
-                        reference_to_ref_value(&git_repo.git_repo, to).unwrap(),
-                    );
-                }
-            }
-            repo_state.state
+    let mut new_state = existing_state.clone();
+
+    for refspec in refspecs {
+        let (from, to) = refspec_to_from_to(refspec)?;
+        if from.is_empty() {
+            // delete
+            new_state.remove(to);
         } else {
-            let mut state = HashMap::new();
-            let git_server_url = repo_ref
-                .git_server
-                .first()
-                .context("no git server listed in nostr repository announcement")?;
-            let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
-            git_server_remote.connect(git2::Direction::Fetch)?;
-            for head in git_server_remote.list()? {
-                state.insert(
-                    head.name().to_string(),
-                    if let Some(symbolic_ref) = head.symref_target() {
-                        format!("ref: {symbolic_ref}")
-                    } else {
-                        head.oid().to_string()
-                    },
-                );
-            }
-            git_server_remote.disconnect()?;
-            state
+            // add or update
+            new_state.insert(
+                to.to_string(),
+                git_repo
+                    .get_commit_or_tip_of_reference(from)
+                    .unwrap()
+                    .to_string(),
+            );
         }
-    };
+    }
     Ok(new_state)
 }
 

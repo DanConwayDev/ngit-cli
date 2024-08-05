@@ -39,6 +39,7 @@ pub trait RepoActions {
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_checked_out_branch_name(&self) -> Result<String>;
     fn get_tip_of_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
+    fn get_commit_or_tip_of_reference(&self, reference: &str) -> Result<Sha1Hash>;
     fn get_root_commit(&self) -> Result<Sha1Hash>;
     fn does_commit_exist(&self, commit: &str) -> Result<bool>;
     fn get_head_commit(&self) -> Result<Sha1Hash>;
@@ -213,6 +214,21 @@ impl RepoActions for Repo {
                 .context(format!("cannot find local or remote branch {branch_name}"))?
         };
         Ok(oid_to_sha1(&branch.into_reference().peel_to_commit()?.id()))
+    }
+
+    fn get_commit_or_tip_of_reference(&self, sha1_or_reference: &str) -> Result<Sha1Hash> {
+        let oid = {
+            if let Ok(oid) = Oid::from_str(sha1_or_reference) {
+                self.git_repo.find_commit(oid)?;
+                oid
+            } else {
+                self.git_repo
+                    .find_reference(sha1_or_reference)?
+                    .peel_to_commit()?
+                    .id()
+            }
+        };
+        Ok(oid_to_sha1(&oid))
     }
 
     fn get_root_commit(&self) -> Result<Sha1Hash> {

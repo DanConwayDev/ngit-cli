@@ -64,6 +64,19 @@ fn cli_tester_after_fetch(git_repo: &GitTestRepo) -> Result<CliTester> {
     Ok(p)
 }
 
+/// git runs `list for-push` before `push`. in `push` we use the git server
+/// remote refs downloaded by `list` to assess how to push to git servers.
+/// we are therefore running it this way in our tests
+fn cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(
+    git_repo: &GitTestRepo,
+) -> Result<CliTester> {
+    let mut p = cli_tester_after_fetch(git_repo)?;
+
+    p.send_line("list for-push")?;
+    p.expect_eventually_and_print("\r\n\r\n")?;
+    Ok(p)
+}
+
 async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)> {
     let git_repo = prep_git_repo()?;
     git_repo.create_branch("example-branch")?;
@@ -93,12 +106,11 @@ async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)>
     r55.events = events;
 
     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-        let mut p = cli_tester_after_fetch(&git_repo)?;
+        let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
         p.send_line("push refs/heads/main:refs/heads/main")?;
         p.send_line("")?;
-        p.expect("ok refs/heads/main\r\n")?;
-        p.expect("\r\n")?;
-
+        // p.expect("ok refs/heads/main\r\n")?;
+        p.expect_eventually_and_print("\r\n\r\n")?;
         p.exit()?;
         for p in [51, 52, 53, 55, 56, 57] {
             relay::shutdown_relay(8000 + p)?;
@@ -574,19 +586,12 @@ mod push {
 
     use super::*;
 
-    /// git runs `list for-push` before `push`. in `push` we use the git server
-    /// remote refs downloaded by `list` to assess how to push to git servers.
-    /// we are therefore running it this way in our tests
-    fn cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(
-        git_repo: &GitTestRepo,
-    ) -> Result<CliTester> {
-        let mut p = cli_tester_after_fetch(git_repo)?;
-
-        p.send_line("list for-push")?;
-        p.expect_eventually_and_print("\r\n\r\n")?;
-        Ok(p)
+    #[tokio::test]
+    #[serial]
+    async fn new_branch_when_no_state_event_exists() -> Result<()> {
+        generate_repo_with_state_event().await?;
+        Ok(())
     }
-
     mod two_branches_in_batch_one_added_one_updated {
 
         use super::*;
@@ -861,7 +866,7 @@ mod push {
                 p.send_line("push refs/heads/main:refs/heads/main")?;
                 p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
-                p.expect_eventually("\r\n\r\n")?;
+                p.expect_eventually_and_print("\r\n\r\n")?;
                 p.exit()?;
                 for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
@@ -1073,7 +1078,7 @@ mod push {
                     cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push :refs/heads/vnext")?;
                 p.send_line("")?;
-                p.expect_eventually("\r\n\r\n")?;
+                p.expect_eventually_and_print("\r\n\r\n")?;
                 p.exit()?;
                 for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
@@ -1238,80 +1243,172 @@ mod push {
             Ok(())
         }
 
-        #[tokio::test]
-        #[serial]
-        async fn existing_state_event_updated_with_branch_deleted_and_ok_printed() -> Result<()> {
-            let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
+        mod when_existing_state_event {
+            use super::*;
 
-            let git_repo = prep_git_repo()?;
-            let main_commit_id = git_repo.get_tip_of_local_branch("main")?.to_string(); // same as example
+            #[tokio::test]
+            #[serial]
+            async fn state_event_updated_and_branch_deleted_and_ok_printed() -> Result<()> {
+                let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
 
-            let events = vec![
-                generate_test_key_1_metadata_event("fred"),
-                generate_test_key_1_relay_list_event(),
-                generate_repo_ref_event_with_git_server(vec![
-                    source_git_repo.dir.to_str().unwrap().to_string(),
-                ]),
-                state_event.clone(),
-            ];
+                let git_repo = prep_git_repo()?;
+                let main_commit_id = git_repo.get_tip_of_local_branch("main")?.to_string(); // same as example
 
-            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                Relay::new(8051, None, None),
-                Relay::new(8052, None, None),
-                Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
-                Relay::new(8056, None, None),
-                Relay::new(8057, None, None),
-            );
-            r51.events = events.clone();
-            r55.events = events;
+                let events = vec![
+                    generate_test_key_1_metadata_event("fred"),
+                    generate_test_key_1_relay_list_event(),
+                    generate_repo_ref_event_with_git_server(vec![
+                        source_git_repo.dir.to_str().unwrap().to_string(),
+                    ]),
+                    state_event.clone(),
+                ];
 
-            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p =
-                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
-                p.send_line("push :refs/heads/example-branch")?;
-                p.send_line("")?;
-                p.expect("ok refs/heads/example-branch\r\n")?;
-                p.expect("\r\n")?;
-                p.exit()?;
-                for p in [51, 52, 53, 55, 56, 57] {
-                    relay::shutdown_relay(8000 + p)?;
-                }
-                Ok(())
-            });
-            // launch relays
-            let _ = join!(
-                r51.listen_until_close(),
-                r52.listen_until_close(),
-                r53.listen_until_close(),
-                r55.listen_until_close(),
-                r56.listen_until_close(),
-                r57.listen_until_close(),
-            );
+                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                    Relay::new(8051, None, None),
+                    Relay::new(8052, None, None),
+                    Relay::new(8053, None, None),
+                    Relay::new(8055, None, None),
+                    Relay::new(8056, None, None),
+                    Relay::new(8057, None, None),
+                );
+                r51.events = events.clone();
+                r55.events = events;
 
-            cli_tester_handle.join().unwrap()?;
+                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                    let mut p =
+                        cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
+                    p.send_line("push :refs/heads/example-branch")?;
+                    p.send_line("")?;
+                    p.expect("ok refs/heads/example-branch\r\n")?;
+                    p.expect("\r\n")?;
+                    p.exit()?;
+                    for p in [51, 52, 53, 55, 56, 57] {
+                        relay::shutdown_relay(8000 + p)?;
+                    }
+                    Ok(())
+                });
+                // launch relays
+                let _ = join!(
+                    r51.listen_until_close(),
+                    r52.listen_until_close(),
+                    r53.listen_until_close(),
+                    r55.listen_until_close(),
+                    r56.listen_until_close(),
+                    r57.listen_until_close(),
+                );
 
-            let state_event = r56
-                .events
-                .iter()
-                .find(|e| e.kind().eq(&STATE_KIND))
-                .context("state event not created")?;
+                cli_tester_handle.join().unwrap()?;
 
-            // println!("{:#?}", state_event);
-            assert_eq!(
-                state_event
-                    .tags
+                let state_event = r56
+                    .events
                     .iter()
-                    .filter(|t| t.kind().to_string().as_str().ne("d"))
-                    .map(|t| t.as_vec().to_vec())
-                    .collect::<HashSet<Vec<String>>>(),
-                HashSet::from([
-                    vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
-                    vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
-                ]),
-            );
-            Ok(())
+                    .find(|e| e.kind().eq(&STATE_KIND))
+                    .context("state event not created")?;
+
+                // println!("{:#?}", state_event);
+                assert_eq!(
+                    state_event
+                        .tags
+                        .iter()
+                        .filter(|t| t.kind().to_string().as_str().ne("d"))
+                        .map(|t| t.as_vec().to_vec())
+                        .collect::<HashSet<Vec<String>>>(),
+                    HashSet::from([
+                        vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
+                        vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
+                    ]),
+                );
+                Ok(())
+            }
+
+            mod already_deleted_on_git_server {
+                use super::*;
+
+                #[tokio::test]
+                #[serial]
+                async fn existing_state_event_updated_and_ok_printed() -> Result<()> {
+                    let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
+
+                    {
+                        // delete branch on git server
+                        let tmp_repo = GitTestRepo::clone_repo(&source_git_repo)?;
+                        let mut remote = tmp_repo.git_repo.find_remote("origin")?;
+                        remote.push(&[":refs/heads/example-branch"], None)?;
+                    }
+
+                    let git_repo = prep_git_repo()?;
+                    let main_commit_id = git_repo.get_tip_of_local_branch("main")?.to_string(); // same as example
+
+                    let events = vec![
+                        generate_test_key_1_metadata_event("fred"),
+                        generate_test_key_1_relay_list_event(),
+                        generate_repo_ref_event_with_git_server(vec![
+                            source_git_repo.dir.to_str().unwrap().to_string(),
+                        ]),
+                        state_event.clone(),
+                    ];
+
+                    // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+                    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                        Relay::new(8051, None, None),
+                        Relay::new(8052, None, None),
+                        Relay::new(8053, None, None),
+                        Relay::new(8055, None, None),
+                        Relay::new(8056, None, None),
+                        Relay::new(8057, None, None),
+                    );
+                    r51.events = events.clone();
+                    r55.events = events;
+
+                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                        let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(
+                            &git_repo,
+                        )?;
+                        p.send_line("push :refs/heads/example-branch")?;
+                        p.send_line("")?;
+                        p.expect("ok refs/heads/example-branch\r\n")?;
+                        p.expect("\r\n")?;
+                        p.exit()?;
+                        for p in [51, 52, 53, 55, 56, 57] {
+                            relay::shutdown_relay(8000 + p)?;
+                        }
+                        Ok(())
+                    });
+                    // launch relays
+                    let _ = join!(
+                        r51.listen_until_close(),
+                        r52.listen_until_close(),
+                        r53.listen_until_close(),
+                        r55.listen_until_close(),
+                        r56.listen_until_close(),
+                        r57.listen_until_close(),
+                    );
+
+                    cli_tester_handle.join().unwrap()?;
+
+                    let state_event = r56
+                        .events
+                        .iter()
+                        .find(|e| e.kind().eq(&STATE_KIND))
+                        .context("state event not created")?;
+
+                    // println!("{:#?}", state_event);
+                    assert_eq!(
+                        state_event
+                            .tags
+                            .iter()
+                            .filter(|t| t.kind().to_string().as_str().ne("d"))
+                            .map(|t| t.as_vec().to_vec())
+                            .collect::<HashSet<Vec<String>>>(),
+                        HashSet::from([
+                            vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
+                            vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
+                        ]),
+                    );
+                    Ok(())
+                }
+            }
         }
     }
 
