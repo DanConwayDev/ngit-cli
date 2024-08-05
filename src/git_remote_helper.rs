@@ -237,12 +237,12 @@ async fn list(
                 if let Some(remote_value) = remote_state.get(name) {
                     if value.ne(remote_value) {
                         term.write_line(
-                            format!("WARNING: {name} out of sync with nostr on {url}").as_str(),
+                            format!("WARNING: {url} {name} out of sync with nostr ").as_str(),
                         )?;
                     }
                 } else {
                     term.write_line(
-                        format!("WARNING: {name} is missing from {url} but tracked on nostr")
+                        format!("WARNING: {url} is missing {name} which is tracked on nostr")
                             .as_str(),
                     )?;
                 }
@@ -289,7 +289,7 @@ fn list_from_remotes(
             }
             Err(error) => {
                 term.write_line(
-                    format!("WARNING: failed to list refs from {url} error: {error}").as_str(),
+                    format!("WARNING: {url} failed to list refs error: {error}").as_str(),
                 )?;
             }
         }
@@ -466,8 +466,10 @@ async fn push(
                 remote_callbacks.push_update_reference(|name, error| {
                     if let Some(error) = error {
                         term.write_line(
-                            format!("WARNING: error pushing {name} to {git_server_url} {error}")
-                                .as_str(),
+                            format!(
+                                "WARNING: {git_server_url} failed to push {name} error: {error}"
+                            )
+                            .as_str(),
                         )
                         .unwrap();
                     }
@@ -544,12 +546,12 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                     {
                         if from_tip.eq(&remote_value_tip) {
                             // remote already at correct state
-                            term.write_line(
-                                format!("{to} already at pushed commit state on {url}").as_str(),
-                            )?;
+                            term.write_line(format!("{url} {to} already up-to-date").as_str())?;
                         }
-                        let (_, behind) =
-                            git_repo.get_commits_ahead_behind(&remote_value_tip, &from_tip)?;
+                        let nostr_value_tip =
+                            git_repo.get_commit_or_tip_of_reference(nostr_value)?;
+                        let (ahead, behind) = git_repo
+                            .get_commits_ahead_behind(&remote_value_tip, &nostr_value_tip)?;
                         if behind.is_empty() {
                             // can soft push
                             refspecs_for_remote.push(refspec.clone());
@@ -560,7 +562,11 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 .and_modify(|a| a.push(url.to_string()))
                                 .or_insert(vec![url.to_string()]);
                             term.write_line(
-                                format!("ERROR: {to} on {url} conflicts with nostr and is {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote", behind.len()).as_str(),
+                                format!(
+                                    "ERROR: {url} {to} conflicts with nostr ({} ahead {} behind). either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
+                                    ahead.len(),
+                                    behind.len(),
+                                ).as_str(),
                             )?;
                         };
                     } else {
@@ -573,20 +579,23 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             .and_modify(|a| a.push(url.to_string()))
                             .or_insert(vec![url.to_string()]);
                         term.write_line(
-                            format!("ERROR: {to} on {url} conflicts with nostr and is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                            format!("ERROR: {url} {to} conflicts with nostr and is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
                         )?;
                     }
                 } else {
                     // existing nostr branch not on remote
                     // report - creating new branch
-                    term.write_line(format!("pushing {to} as new branch on {url}").as_str())?;
+                    term.write_line(
+                        format!("{url} {to} doesn't exist and will be added as a new branch")
+                            .as_str(),
+                    )?;
                     refspecs_for_remote.push(refspec.clone());
                 }
             } else if let Some(remote_value) = remote_value {
                 // new to nostr but on remote
                 if let Ok(remote_value_tip) = git_repo.get_commit_or_tip_of_reference(remote_value)
                 {
-                    let (_, behind) =
+                    let (ahead, behind) =
                         git_repo.get_commits_ahead_behind(&remote_value_tip, &from_tip)?;
                     if behind.is_empty() {
                         // can soft push
@@ -598,7 +607,11 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             .and_modify(|a| a.push(url.to_string()))
                             .or_insert(vec![url.to_string()]);
                         term.write_line(
-                                    format!("ERROR: {to} not on nostr but on {url} is {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote", behind.len()).as_str(),
+                                    format!(
+                                        "ERROR: {url} already contains {to} {} ahead and {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
+                                        ahead.len(),
+                                        behind.len(),
+                                    ).as_str(),
                                 )?;
                     }
                 } else {
@@ -610,7 +623,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                         .and_modify(|a| a.push(url.to_string()))
                         .or_insert(vec![url.to_string()]);
                     term.write_line(
-                        format!("ERROR: {to} not on nostr but on {url} is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                        format!("ERROR: {url} already contains {to} at {remote_value} which is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
                     )?;
                 }
             } else {
