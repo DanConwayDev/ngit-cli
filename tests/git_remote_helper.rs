@@ -145,7 +145,10 @@ async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)>
 mod initially_runs_fetch {
 
     use super::*;
-    async fn async_run_test() -> Result<()> {
+
+    #[tokio::test]
+    #[serial]
+    async fn runs_fetch_and_reports() -> Result<()> {
         let source_git_repo = prep_git_repo()?;
         let git_repo = prep_git_repo()?;
         let events = vec![
@@ -189,12 +192,6 @@ mod initially_runs_fetch {
         cli_tester_handle.join().unwrap()?;
         Ok(())
     }
-
-    #[tokio::test]
-    #[serial]
-    async fn runs_fetch_and_reports() -> Result<()> {
-        async_run_test().await
-    }
 }
 
 mod list {
@@ -205,7 +202,9 @@ mod list {
 
         use super::*;
 
-        async fn async_run_test() -> Result<()> {
+        #[tokio::test]
+        #[serial]
+        async fn lists_head_and_2_branches_and_commit_ids_from_git_server() -> Result<()> {
             let source_git_repo = prep_git_repo()?;
             let source_path = source_git_repo.dir.to_str().unwrap().to_string();
             std::fs::write(source_git_repo.dir.join("commit.md"), "some content")?;
@@ -271,12 +270,6 @@ mod list {
             cli_tester_handle.join().unwrap()?;
             Ok(())
         }
-
-        #[tokio::test]
-        #[serial]
-        async fn lists_head_and_2_branches_and_commit_ids_from_git_server() -> Result<()> {
-            async_run_test().await
-        }
     }
     mod with_state_announcement {
 
@@ -286,7 +279,9 @@ mod list {
 
             use super::*;
 
-            async fn async_run_test() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn lists_head_and_2_branches_and_commit_ids_announcement() -> Result<()> {
                 let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
                 let source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
@@ -350,18 +345,14 @@ mod list {
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn lists_head_and_2_branches_and_commit_ids_announcement() -> Result<()> {
-                async_run_test().await
-            }
         }
         mod when_announcement_doesnt_match_git_server {
 
             use super::*;
 
-            async fn async_run_test() -> Result<()> {
+            #[tokio::test]
+            #[serial]
+            async fn anouncement_state_is_used() -> Result<()> {
                 let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
                 let source_path = source_git_repo.dir.to_str().unwrap().to_string();
                 let main_original_commit_id = source_git_repo.get_tip_of_local_branch("main")?;
@@ -443,12 +434,6 @@ mod list {
                 cli_tester_handle.join().unwrap()?;
                 Ok(())
             }
-
-            #[tokio::test]
-            #[serial]
-            async fn anouncement_state_is_used() -> Result<()> {
-                async_run_test().await
-            }
         }
     }
 }
@@ -457,7 +442,9 @@ mod fetch {
 
     use super::*;
 
-    async fn async_run_test() -> Result<()> {
+    #[tokio::test]
+    #[serial]
+    async fn fetch_downloads_speficied_commits_from_git_server() -> Result<()> {
         let source_git_repo = prep_git_repo()?;
         std::fs::write(source_git_repo.dir.join("commit.md"), "some content")?;
         let main_commit_id = source_git_repo.stage_and_commit("commit.md")?;
@@ -519,15 +506,12 @@ mod fetch {
         Ok(())
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn fetch_downloads_speficied_commits_from_git_server() -> Result<()> {
-        async_run_test().await
-    }
-
     mod when_first_git_server_fails_ {
         use super::*;
-        async fn async_run_test() -> Result<()> {
+
+        #[tokio::test]
+        #[serial]
+        async fn fetch_downloads_speficied_commits_from_second_git_server() -> Result<()> {
             let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
 
             let main_commit_id = source_git_repo.get_tip_of_local_branch("main")?;
@@ -582,12 +566,6 @@ mod fetch {
             );
             cli_tester_handle.join().unwrap()?;
             Ok(())
-        }
-
-        #[tokio::test]
-        #[serial]
-        async fn fetch_downloads_speficied_commits_from_second_git_server() -> Result<()> {
-            async_run_test().await
         }
     }
 }
@@ -970,7 +948,7 @@ mod push {
                 p.send_line("push refs/heads/main:refs/heads/main")?;
                 p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
-                p.expect_eventually("\r\n\r\n")?;
+                p.expect_eventually_and_print("\r\n\r\n")?;
                 p.exit()?;
                 for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
