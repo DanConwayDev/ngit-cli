@@ -600,695 +600,335 @@ mod push {
 
         use super::*;
 
-        mod git_server_updated {
-
-            use super::*;
-
-            async fn async_run_test() -> Result<()> {
-                let git_repo = prep_git_repo()?;
-                let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
-
-                std::fs::write(git_repo.dir.join("commit.md"), "some content")?;
-                let main_commit_id = git_repo.stage_and_commit("commit.md")?;
-
-                git_repo.create_branch("vnext")?;
-                git_repo.checkout("vnext")?;
-                std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
-                let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
-
-                let events = vec![
-                    generate_test_key_1_metadata_event("fred"),
-                    generate_test_key_1_relay_list_event(),
-                    generate_repo_ref_event_with_git_server(vec![
-                        source_git_repo.dir.to_str().unwrap().to_string(),
-                    ]),
-                ];
-                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                    Relay::new(8051, None, None),
-                    Relay::new(8052, None, None),
-                    Relay::new(8053, None, None),
-                    Relay::new(8055, None, None),
-                    Relay::new(8056, None, None),
-                    Relay::new(8057, None, None),
-                );
-                r51.events = events.clone();
-                r55.events = events;
-
-                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    assert_ne!(
-                        source_git_repo.get_tip_of_local_branch("main")?,
-                        main_commit_id
-                    );
-
-                    let mut p = cli_tester_after_fetch(&git_repo)?;
-                    p.send_line("push refs/heads/main:refs/heads/main")?;
-                    p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
-                    p.send_line("")?;
-                    p.expect("ok refs/heads/main\r\n")?;
-                    p.expect("ok refs/heads/vnext\r\n")?;
-                    p.expect("\r\n")?;
-
-                    assert_eq!(
-                        source_git_repo.get_tip_of_local_branch("main")?,
-                        main_commit_id
-                    );
-
-                    assert_eq!(
-                        source_git_repo.get_tip_of_local_branch("vnext")?,
-                        vnext_commit_id
-                    );
-
-                    p.exit()?;
-                    for p in [51, 52, 53, 55, 56, 57] {
-                        relay::shutdown_relay(8000 + p)?;
-                    }
-                    Ok(())
-                });
-                // launch relays
-                let _ = join!(
-                    r51.listen_until_close(),
-                    r52.listen_until_close(),
-                    r53.listen_until_close(),
-                    r55.listen_until_close(),
-                    r56.listen_until_close(),
-                    r57.listen_until_close(),
-                );
-                cli_tester_handle.join().unwrap()?;
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn push_updates_ref_on_git_server() -> Result<()> {
-                async_run_test().await
-            }
-        }
-        mod remote_refs_updated {
-
-            use super::*;
-
-            async fn async_run_test() -> Result<()> {
-                let git_repo = prep_git_repo()?;
-                let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
-
-                std::fs::write(git_repo.dir.join("commit.md"), "some content")?;
-                let main_commit_id = git_repo.stage_and_commit("commit.md")?;
-
-                git_repo.create_branch("vnext")?;
-                git_repo.checkout("vnext")?;
-                std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
-                let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
-
-                let events = vec![
-                    generate_test_key_1_metadata_event("fred"),
-                    generate_test_key_1_relay_list_event(),
-                    generate_repo_ref_event_with_git_server(vec![
-                        source_git_repo.dir.to_str().unwrap().to_string(),
-                    ]),
-                ];
-                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                    Relay::new(8051, None, None),
-                    Relay::new(8052, None, None),
-                    Relay::new(8053, None, None),
-                    Relay::new(8055, None, None),
-                    Relay::new(8056, None, None),
-                    Relay::new(8057, None, None),
-                );
-                r51.events = events.clone();
-                r55.events = events;
-
-                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    assert_ne!(
-                        source_git_repo.get_tip_of_local_branch("main")?,
-                        main_commit_id
-                    );
-
-                    let mut p = cli_tester_after_fetch(&git_repo)?;
-                    p.send_line("push refs/heads/main:refs/heads/main")?;
-                    p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
-                    p.send_line("")?;
-                    p.expect("ok refs/heads/main\r\n")?;
-                    p.expect("ok refs/heads/vnext\r\n")?;
-                    p.expect("\r\n")?;
-
-                    assert_eq!(
-                        git_repo
-                            .git_repo
-                            .find_reference("refs/remotes/nostr/main")?
-                            .peel_to_commit()?
-                            .id(),
-                        main_commit_id,
-                    );
-
-                    assert_eq!(
-                        git_repo
-                            .git_repo
-                            .find_reference("refs/remotes/nostr/vnext")?
-                            .peel_to_commit()?
-                            .id(),
-                        vnext_commit_id
-                    );
-
-                    p.exit()?;
-                    for p in [51, 52, 53, 55, 56, 57] {
-                        relay::shutdown_relay(8000 + p)?;
-                    }
-                    Ok(())
-                });
-                // launch relays
-                let _ = join!(
-                    r51.listen_until_close(),
-                    r52.listen_until_close(),
-                    r53.listen_until_close(),
-                    r55.listen_until_close(),
-                    r56.listen_until_close(),
-                    r57.listen_until_close(),
-                );
-                cli_tester_handle.join().unwrap()?;
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn push_updates_refs() -> Result<()> {
-                async_run_test().await
-            }
-        }
-        mod no_existing_state_event {
-            use super::*;
-
-            mod state_on_git_server_published_in_nostr_state_event {
-
-                use super::*;
-
-                async fn async_run_test() -> Result<()> {
-                    let git_repo = prep_git_repo()?;
-                    let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
-
-                    std::fs::write(git_repo.dir.join("commit.md"), "some content")?;
-                    let main_commit_id = git_repo.stage_and_commit("commit.md")?;
-
-                    git_repo.create_branch("vnext")?;
-                    git_repo.checkout("vnext")?;
-                    std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
-                    let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
-
-                    let events = vec![
-                        generate_test_key_1_metadata_event("fred"),
-                        generate_test_key_1_relay_list_event(),
-                        generate_repo_ref_event_with_git_server(vec![
-                            source_git_repo.dir.to_str().unwrap().to_string(),
-                        ]),
-                    ];
-                    // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-                    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                        Relay::new(8051, None, None),
-                        Relay::new(8052, None, None),
-                        Relay::new(8053, None, None),
-                        Relay::new(8055, None, None),
-                        Relay::new(8056, None, None),
-                        Relay::new(8057, None, None),
-                    );
-                    r51.events = events.clone();
-                    r55.events = events;
-
-                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        let mut p = cli_tester_after_fetch(&git_repo)?;
-                        p.send_line("push refs/heads/main:refs/heads/main")?;
-                        p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
-                        p.send_line("")?;
-                        p.expect("ok refs/heads/main\r\n")?;
-                        p.expect("ok refs/heads/vnext\r\n")?;
-                        p.expect("\r\n")?;
-
-                        p.exit()?;
-                        for p in [51, 52, 53, 55, 56, 57] {
-                            relay::shutdown_relay(8000 + p)?;
-                        }
-                        Ok(())
-                    });
-                    // launch relays
-                    let _ = join!(
-                        r51.listen_until_close(),
-                        r52.listen_until_close(),
-                        r53.listen_until_close(),
-                        r55.listen_until_close(),
-                        r56.listen_until_close(),
-                        r57.listen_until_close(),
-                    );
-                    cli_tester_handle.join().unwrap()?;
-
-                    let state_event = r56
-                        .events
-                        .iter()
-                        .find(|e| e.kind().eq(&STATE_KIND))
-                        .context("state event not created")?;
-
-                    assert_eq!(
-                        state_event.identifier(),
-                        generate_repo_ref_event().identifier(),
-                    );
-                    // println!("{:#?}", state_event);
-                    assert_eq!(
-                        state_event
-                            .tags
-                            .iter()
-                            .filter(|t| t.kind().to_string().as_str().ne("d"))
-                            .map(|t| t.as_vec().to_vec())
-                            .collect::<HashSet<Vec<String>>>(),
-                        HashSet::from([
-                            vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
-                            vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
-                            vec!["refs/heads/vnext".to_string(), vnext_commit_id.to_string()],
-                        ]),
-                    );
-                    Ok(())
-                }
-
-                #[tokio::test]
-                #[serial]
-                async fn state_event_reflects_git_server_state() -> Result<()> {
-                    async_run_test().await
-                }
-            }
-        }
-        mod existing_state_event {
-            use super::*;
-
-            mod state_on_git_server_published_in_nostr_state_event {
-
-                use super::*;
-
-                async fn async_run_test() -> Result<()> {
-                    let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
-
-                    let git_repo = prep_git_repo()?;
-                    let example_branch_commit_id =
-                        git_repo.get_tip_of_local_branch("main")?.to_string(); // same as example
-
-                    std::fs::write(git_repo.dir.join("new.md"), "some content")?;
-                    let main_commit_id = git_repo.stage_and_commit("new.md")?;
-                    git_repo.create_branch("vnext")?;
-                    git_repo.checkout("vnext")?;
-                    std::fs::write(git_repo.dir.join("more.md"), "some content")?;
-                    let vnext_commit_id = git_repo.stage_and_commit("more.md")?;
-
-                    let events = vec![
-                        generate_test_key_1_metadata_event("fred"),
-                        generate_test_key_1_relay_list_event(),
-                        generate_repo_ref_event_with_git_server(vec![
-                            source_git_repo.dir.to_str().unwrap().to_string(),
-                        ]),
-                        state_event.clone(),
-                    ];
-
-                    // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-                    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                        Relay::new(8051, None, None),
-                        Relay::new(8052, None, None),
-                        Relay::new(8053, None, None),
-                        Relay::new(8055, None, None),
-                        Relay::new(8056, None, None),
-                        Relay::new(8057, None, None),
-                    );
-                    r51.events = events.clone();
-                    r55.events = events;
-
-                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        let mut p = cli_tester_after_fetch(&git_repo)?;
-                        p.send_line("push refs/heads/main:refs/heads/main")?;
-                        p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
-                        p.send_line("")?;
-                        p.expect("ok refs/heads/main\r\n")?;
-                        p.expect("ok refs/heads/vnext\r\n")?;
-                        p.expect("\r\n")?;
-                        p.exit()?;
-                        // local refs updated
-                        assert_eq!(
-                            git_repo
-                                .git_repo
-                                .find_reference("refs/remotes/nostr/main")?
-                                .peel_to_commit()?
-                                .id(),
-                            main_commit_id,
-                        );
-
-                        assert_eq!(
-                            git_repo
-                                .git_repo
-                                .find_reference("refs/remotes/nostr/vnext")?
-                                .peel_to_commit()?
-                                .id(),
-                            vnext_commit_id
-                        );
-                        for p in [51, 52, 53, 55, 56, 57] {
-                            relay::shutdown_relay(8000 + p)?;
-                        }
-                        Ok(())
-                    });
-                    // launch relays
-                    let _ = join!(
-                        r51.listen_until_close(),
-                        r52.listen_until_close(),
-                        r53.listen_until_close(),
-                        r55.listen_until_close(),
-                        r56.listen_until_close(),
-                        r57.listen_until_close(),
-                    );
-
-                    cli_tester_handle.join().unwrap()?;
-
-                    // git_server updated
-                    assert_eq!(
-                        source_git_repo.get_tip_of_local_branch("main")?,
-                        main_commit_id
-                    );
-
-                    assert_eq!(
-                        source_git_repo.get_tip_of_local_branch("vnext")?,
-                        vnext_commit_id
-                    );
-
-                    // state annoucement updated
-                    let state_event = r56
-                        .events
-                        .iter()
-                        .find(|e| e.kind().eq(&STATE_KIND))
-                        .context("state event not created")?;
-
-                    // println!("{:#?}", state_event);
-                    assert_eq!(
-                        state_event
-                            .tags
-                            .iter()
-                            .filter(|t| t.kind().to_string().as_str().ne("d"))
-                            .map(|t| t.as_vec().to_vec())
-                            .collect::<HashSet<Vec<String>>>(),
-                        HashSet::from([
-                            vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
-                            vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
-                            vec![
-                                "refs/heads/example-branch".to_string(),
-                                example_branch_commit_id.to_string()
-                            ],
-                            vec!["refs/heads/vnext".to_string(), vnext_commit_id.to_string()],
-                        ]),
-                    );
-                    Ok(())
-                }
-
-                #[tokio::test]
-                #[serial]
-                async fn state_event_reflects_updated_with_pushed_changes() -> Result<()> {
-                    async_run_test().await
-                }
-            }
-        }
-    }
-    mod delete_one_branch {
-
-        use super::*;
-
-        mod git_server_updated {
-
-            use super::*;
-
-            async fn async_run_test() -> Result<()> {
-                let git_repo = prep_git_repo()?;
-
-                git_repo.create_branch("vnext")?;
-                git_repo.checkout("vnext")?;
-                std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
-                let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
-
-                let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
-
-                let events = vec![
-                    generate_test_key_1_metadata_event("fred"),
-                    generate_test_key_1_relay_list_event(),
-                    generate_repo_ref_event_with_git_server(vec![
-                        source_git_repo.dir.to_str().unwrap().to_string(),
-                    ]),
-                ];
-                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                    Relay::new(8051, None, None),
-                    Relay::new(8052, None, None),
-                    Relay::new(8053, None, None),
-                    Relay::new(8055, None, None),
-                    Relay::new(8056, None, None),
-                    Relay::new(8057, None, None),
-                );
-                r51.events = events.clone();
-                r55.events = events;
-
-                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    assert_eq!(
-                        source_git_repo
-                            .git_repo
-                            .find_reference("refs/heads/vnext")?
-                            .peel_to_commit()?
-                            .id(),
-                        vnext_commit_id
-                    );
-
-                    let mut p = cli_tester_after_fetch(&git_repo)?;
-                    p.send_line("push :refs/heads/vnext")?;
-                    p.send_line("")?;
-                    p.expect("ok refs/heads/vnext\r\n")?;
-                    p.expect("\r\n")?;
-
-                    assert!(
-                        source_git_repo
-                            .git_repo
-                            .find_reference("refs/heads/vnext")
-                            .is_err()
-                    );
-                    // p.exit()?;
-                    for p in [51, 52, 53, 55, 56, 57] {
-                        relay::shutdown_relay(8000 + p)?;
-                    }
-                    Ok(())
-                });
-                // launch relays
-                let _ = join!(
-                    r51.listen_until_close(),
-                    r52.listen_until_close(),
-                    r53.listen_until_close(),
-                    r55.listen_until_close(),
-                    r56.listen_until_close(),
-                    r57.listen_until_close(),
-                );
-                cli_tester_handle.join().unwrap()?;
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn push_deletes_branch_on_git_server() -> Result<()> {
-                async_run_test().await
-            }
-        }
-        mod remote_refs_updated {
-
-            use super::*;
-
-            async fn async_run_test() -> Result<()> {
-                let git_repo = prep_git_repo()?;
-
-                git_repo.create_branch("vnext")?;
-                git_repo.checkout("vnext")?;
-                std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
-                let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
-
-                let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
-
-                git_repo.git_repo.reference(
-                    "refs/remotes/nostr/vnext",
-                    vnext_commit_id,
-                    true,
-                    "",
-                )?;
-
-                let events = vec![
-                    generate_test_key_1_metadata_event("fred"),
-                    generate_test_key_1_relay_list_event(),
-                    generate_repo_ref_event_with_git_server(vec![
-                        source_git_repo.dir.to_str().unwrap().to_string(),
-                    ]),
-                ];
-                // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-                let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                    Relay::new(8051, None, None),
-                    Relay::new(8052, None, None),
-                    Relay::new(8053, None, None),
-                    Relay::new(8055, None, None),
-                    Relay::new(8056, None, None),
-                    Relay::new(8057, None, None),
-                );
-                r51.events = events.clone();
-                r55.events = events;
-
-                let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                    assert_eq!(
-                        git_repo
-                            .git_repo
-                            .find_reference("refs/remotes/nostr/vnext")?
-                            .peel_to_commit()?
-                            .id(),
-                        vnext_commit_id
-                    );
-
-                    let mut p = cli_tester_after_fetch(&git_repo)?;
-                    p.send_line("push :refs/heads/vnext")?;
-                    p.send_line("")?;
-                    // let res = p.expect_eventually("\r\n\r\n")?;
-                    // println!("{res}");
-                    p.expect("ok refs/heads/vnext\r\n")?;
-                    p.expect("\r\n")?;
-
-                    assert!(
-                        git_repo
-                            .git_repo
-                            .find_reference("refs/remotes/nostr/vnext")
-                            .is_err()
-                    );
-
-                    p.exit()?;
-                    for p in [51, 52, 53, 55, 56, 57] {
-                        relay::shutdown_relay(8000 + p)?;
-                    }
-                    Ok(())
-                });
-                // launch relays
-                let _ = join!(
-                    r51.listen_until_close(),
-                    r52.listen_until_close(),
-                    r53.listen_until_close(),
-                    r55.listen_until_close(),
-                    r56.listen_until_close(),
-                    r57.listen_until_close(),
-                );
-                cli_tester_handle.join().unwrap()?;
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn push_remotes_refs() -> Result<()> {
-                async_run_test().await
-            }
-        }
-        mod existing_state_event {
-            use super::*;
-
-            mod state_on_git_server_published_in_nostr_state_event {
-
-                use super::*;
-
-                async fn async_run_test() -> Result<()> {
-                    let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
-
-                    let git_repo = prep_git_repo()?;
-                    let main_commit_id = git_repo.get_tip_of_local_branch("main")?.to_string(); // same as example
-
-                    let events = vec![
-                        generate_test_key_1_metadata_event("fred"),
-                        generate_test_key_1_relay_list_event(),
-                        generate_repo_ref_event_with_git_server(vec![
-                            source_git_repo.dir.to_str().unwrap().to_string(),
-                        ]),
-                        state_event.clone(),
-                    ];
-
-                    // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-                    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-                        Relay::new(8051, None, None),
-                        Relay::new(8052, None, None),
-                        Relay::new(8053, None, None),
-                        Relay::new(8055, None, None),
-                        Relay::new(8056, None, None),
-                        Relay::new(8057, None, None),
-                    );
-                    r51.events = events.clone();
-                    r55.events = events;
-
-                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        let mut p = cli_tester_after_fetch(&git_repo)?;
-                        p.send_line("push :refs/heads/example-branch")?;
-                        p.send_line("")?;
-                        p.expect("ok refs/heads/example-branch\r\n")?;
-                        p.expect("\r\n")?;
-                        p.exit()?;
-                        for p in [51, 52, 53, 55, 56, 57] {
-                            relay::shutdown_relay(8000 + p)?;
-                        }
-                        Ok(())
-                    });
-                    // launch relays
-                    let _ = join!(
-                        r51.listen_until_close(),
-                        r52.listen_until_close(),
-                        r53.listen_until_close(),
-                        r55.listen_until_close(),
-                        r56.listen_until_close(),
-                        r57.listen_until_close(),
-                    );
-
-                    cli_tester_handle.join().unwrap()?;
-
-                    let state_event = r56
-                        .events
-                        .iter()
-                        .find(|e| e.kind().eq(&STATE_KIND))
-                        .context("state event not created")?;
-
-                    // println!("{:#?}", state_event);
-                    assert_eq!(
-                        state_event
-                            .tags
-                            .iter()
-                            .filter(|t| t.kind().to_string().as_str().ne("d"))
-                            .map(|t| t.as_vec().to_vec())
-                            .collect::<HashSet<Vec<String>>>(),
-                        HashSet::from([
-                            vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
-                            vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
-                        ]),
-                    );
-                    Ok(())
-                }
-
-                #[tokio::test]
-                #[serial]
-                async fn state_event_reflects_deleted_branch() -> Result<()> {
-                    async_run_test().await
-                }
-            }
-        }
-    }
-
-    mod pushes_to_all_git_servers_listed {
-        use super::*;
-        async fn async_run_test() -> Result<()> {
-            let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
-            let second_source_git_repo = GitTestRepo::duplicate(&source_git_repo)?;
-
-            // uppdate announcement with extra git server
-
+        #[tokio::test]
+        #[serial]
+        async fn updates_branch_on_git_server() -> Result<()> {
             let git_repo = prep_git_repo()?;
+            let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
 
-            std::fs::write(git_repo.dir.join("new.md"), "some content")?;
-            let main_commit_id = git_repo.stage_and_commit("new.md")?;
+            std::fs::write(git_repo.dir.join("commit.md"), "some content")?;
+            let main_commit_id = git_repo.stage_and_commit("commit.md")?;
+
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
+            let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
 
             let events = vec![
                 generate_test_key_1_metadata_event("fred"),
                 generate_test_key_1_relay_list_event(),
                 generate_repo_ref_event_with_git_server(vec![
                     source_git_repo.dir.to_str().unwrap().to_string(),
-                    second_source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+            ];
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                assert_ne!(
+                    source_git_repo.get_tip_of_local_branch("main")?,
+                    main_commit_id
+                );
+
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push refs/heads/main:refs/heads/main")?;
+                p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
+                p.send_line("")?;
+                p.expect_eventually("\r\n\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+
+                assert_eq!(
+                    source_git_repo.get_tip_of_local_branch("main")?,
+                    main_commit_id
+                );
+
+                assert_eq!(
+                    source_git_repo.get_tip_of_local_branch("vnext")?,
+                    vnext_commit_id
+                );
+
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn remote_refs_updated_in_local_git() -> Result<()> {
+            let git_repo = prep_git_repo()?;
+            let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
+
+            std::fs::write(git_repo.dir.join("commit.md"), "some content")?;
+            let main_commit_id = git_repo.stage_and_commit("commit.md")?;
+
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
+            let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+            ];
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                assert_ne!(
+                    source_git_repo.get_tip_of_local_branch("main")?,
+                    main_commit_id
+                );
+
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push refs/heads/main:refs/heads/main")?;
+                p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
+                p.send_line("")?;
+                p.expect_eventually("\r\n\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+
+                assert_eq!(
+                    git_repo
+                        .git_repo
+                        .find_reference("refs/remotes/nostr/main")?
+                        .peel_to_commit()?
+                        .id(),
+                    main_commit_id,
+                );
+
+                assert_eq!(
+                    git_repo
+                        .git_repo
+                        .find_reference("refs/remotes/nostr/vnext")?
+                        .peel_to_commit()?
+                        .id(),
+                    vnext_commit_id
+                );
+
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn prints_git_helper_ok_respose() -> Result<()> {
+            let git_repo = prep_git_repo()?;
+            let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
+
+            std::fs::write(git_repo.dir.join("commit.md"), "some content")?;
+            let main_commit_id = git_repo.stage_and_commit("commit.md")?;
+
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
+            git_repo.stage_and_commit("vnext.md")?;
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+            ];
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                assert_ne!(
+                    source_git_repo.get_tip_of_local_branch("main")?,
+                    main_commit_id
+                );
+
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push refs/heads/main:refs/heads/main")?;
+                p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
+                p.send_line("")?;
+                p.expect("ok refs/heads/main\r\n")?;
+                p.expect("ok refs/heads/vnext\r\n")?;
+                p.expect("\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn when_no_existing_state_event_state_on_git_server_published_in_nostr_state_event()
+        -> Result<()> {
+            let git_repo = prep_git_repo()?;
+            let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
+
+            std::fs::write(git_repo.dir.join("commit.md"), "some content")?;
+            let main_commit_id = git_repo.stage_and_commit("commit.md")?;
+
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
+            let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+            ];
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push refs/heads/main:refs/heads/main")?;
+                p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
+                p.send_line("")?;
+                p.expect_eventually("\r\n\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+
+            let state_event = r56
+                .events
+                .iter()
+                .find(|e| e.kind().eq(&STATE_KIND))
+                .context("state event not created")?;
+
+            assert_eq!(
+                state_event.identifier(),
+                generate_repo_ref_event().identifier(),
+            );
+            // println!("{:#?}", state_event);
+            assert_eq!(
+                state_event
+                    .tags
+                    .iter()
+                    .filter(|t| t.kind().to_string().as_str().ne("d"))
+                    .map(|t| t.as_vec().to_vec())
+                    .collect::<HashSet<Vec<String>>>(),
+                HashSet::from([
+                    vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
+                    vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
+                    vec!["refs/heads/vnext".to_string(), vnext_commit_id.to_string()],
+                ]),
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn existing_state_event_published_in_nostr_state_event() -> Result<()> {
+            let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
+
+            let git_repo = prep_git_repo()?;
+            let example_branch_commit_id = git_repo.get_tip_of_local_branch("main")?.to_string(); // same as example
+
+            std::fs::write(git_repo.dir.join("new.md"), "some content")?;
+            let main_commit_id = git_repo.stage_and_commit("new.md")?;
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("more.md"), "some content")?;
+            let vnext_commit_id = git_repo.stage_and_commit("more.md")?;
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
                 ]),
                 state_event.clone(),
             ];
@@ -1308,13 +948,31 @@ mod push {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("push refs/heads/main:refs/heads/main")?;
+                p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
-                p.expect("ok refs/heads/main\r\n")?;
-                p.expect("\r\n")?;
+                p.expect_eventually("\r\n\r\n")?;
                 p.exit()?;
                 for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
                 }
+                // local refs updated
+                assert_eq!(
+                    git_repo
+                        .git_repo
+                        .find_reference("refs/remotes/nostr/main")?
+                        .peel_to_commit()?
+                        .id(),
+                    main_commit_id,
+                );
+
+                assert_eq!(
+                    git_repo
+                        .git_repo
+                        .find_reference("refs/remotes/nostr/vnext")?
+                        .peel_to_commit()?
+                        .id(),
+                    vnext_commit_id
+                );
                 Ok(())
             });
             // launch relays
@@ -1334,18 +992,396 @@ mod push {
                 source_git_repo.get_tip_of_local_branch("main")?,
                 main_commit_id
             );
+
             assert_eq!(
-                second_source_git_repo.get_tip_of_local_branch("main")?,
-                main_commit_id
+                source_git_repo.get_tip_of_local_branch("vnext")?,
+                vnext_commit_id
             );
 
+            // state annoucement updated
+            let state_event = r56
+                .events
+                .iter()
+                .find(|e| e.kind().eq(&STATE_KIND))
+                .context("state event not created")?;
+
+            // println!("{:#?}", state_event);
+            assert_eq!(
+                state_event
+                    .tags
+                    .iter()
+                    .filter(|t| t.kind().to_string().as_str().ne("d"))
+                    .map(|t| t.as_vec().to_vec())
+                    .collect::<HashSet<Vec<String>>>(),
+                HashSet::from([
+                    vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
+                    vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
+                    vec![
+                        "refs/heads/example-branch".to_string(),
+                        example_branch_commit_id.to_string()
+                    ],
+                    vec!["refs/heads/vnext".to_string(), vnext_commit_id.to_string()],
+                ]),
+            );
+            Ok(())
+        }
+    }
+    mod delete_one_branch {
+
+        use super::*;
+
+        #[tokio::test]
+        #[serial]
+        async fn deletes_branch_on_git_server() -> Result<()> {
+            let git_repo = prep_git_repo()?;
+
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
+            let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
+
+            let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+            ];
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                assert_eq!(
+                    source_git_repo
+                        .git_repo
+                        .find_reference("refs/heads/vnext")?
+                        .peel_to_commit()?
+                        .id(),
+                    vnext_commit_id
+                );
+
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push :refs/heads/vnext")?;
+                p.send_line("")?;
+                p.expect_eventually("\r\n\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+
+                assert!(
+                    source_git_repo
+                        .git_repo
+                        .find_reference("refs/heads/vnext")
+                        .is_err()
+                );
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
             Ok(())
         }
 
         #[tokio::test]
         #[serial]
-        async fn second_git_server_uptodate() -> Result<()> {
-            async_run_test().await
+        async fn remote_refs_updated_in_local_git() -> Result<()> {
+            let git_repo = prep_git_repo()?;
+
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
+            let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
+
+            let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
+
+            git_repo
+                .git_repo
+                .reference("refs/remotes/nostr/vnext", vnext_commit_id, true, "")?;
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+            ];
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                assert_eq!(
+                    git_repo
+                        .git_repo
+                        .find_reference("refs/remotes/nostr/vnext")?
+                        .peel_to_commit()?
+                        .id(),
+                    vnext_commit_id
+                );
+
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push :refs/heads/vnext")?;
+                p.send_line("")?;
+                p.expect_eventually("\r\n\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                assert!(
+                    git_repo
+                        .git_repo
+                        .find_reference("refs/remotes/nostr/vnext")
+                        .is_err()
+                );
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
         }
+
+        #[tokio::test]
+        #[serial]
+        async fn prints_git_helper_ok_respose() -> Result<()> {
+            let git_repo = prep_git_repo()?;
+
+            git_repo.create_branch("vnext")?;
+            git_repo.checkout("vnext")?;
+            std::fs::write(git_repo.dir.join("vnext.md"), "some content")?;
+            let vnext_commit_id = git_repo.stage_and_commit("vnext.md")?;
+
+            let source_git_repo = GitTestRepo::recreate_as_bare(&git_repo)?;
+
+            git_repo
+                .git_repo
+                .reference("refs/remotes/nostr/vnext", vnext_commit_id, true, "")?;
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+            ];
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push :refs/heads/vnext")?;
+                p.send_line("")?;
+                // let res = p.expect_eventually("\r\n\r\n")?;
+                // println!("{res}");
+                p.expect("ok refs/heads/vnext\r\n")?;
+                p.expect("\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+            cli_tester_handle.join().unwrap()?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn existing_state_event_updated_with_branch_deleted_and_ok_printed() -> Result<()> {
+            let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
+
+            let git_repo = prep_git_repo()?;
+            let main_commit_id = git_repo.get_tip_of_local_branch("main")?.to_string(); // same as example
+
+            let events = vec![
+                generate_test_key_1_metadata_event("fred"),
+                generate_test_key_1_relay_list_event(),
+                generate_repo_ref_event_with_git_server(vec![
+                    source_git_repo.dir.to_str().unwrap().to_string(),
+                ]),
+                state_event.clone(),
+            ];
+
+            // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+            let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+                Relay::new(8051, None, None),
+                Relay::new(8052, None, None),
+                Relay::new(8053, None, None),
+                Relay::new(8055, None, None),
+                Relay::new(8056, None, None),
+                Relay::new(8057, None, None),
+            );
+            r51.events = events.clone();
+            r55.events = events;
+
+            let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+                let mut p = cli_tester_after_fetch(&git_repo)?;
+                p.send_line("push :refs/heads/example-branch")?;
+                p.send_line("")?;
+                p.expect("ok refs/heads/example-branch\r\n")?;
+                p.expect("\r\n")?;
+                p.exit()?;
+                for p in [51, 52, 53, 55, 56, 57] {
+                    relay::shutdown_relay(8000 + p)?;
+                }
+                Ok(())
+            });
+            // launch relays
+            let _ = join!(
+                r51.listen_until_close(),
+                r52.listen_until_close(),
+                r53.listen_until_close(),
+                r55.listen_until_close(),
+                r56.listen_until_close(),
+                r57.listen_until_close(),
+            );
+
+            cli_tester_handle.join().unwrap()?;
+
+            let state_event = r56
+                .events
+                .iter()
+                .find(|e| e.kind().eq(&STATE_KIND))
+                .context("state event not created")?;
+
+            // println!("{:#?}", state_event);
+            assert_eq!(
+                state_event
+                    .tags
+                    .iter()
+                    .filter(|t| t.kind().to_string().as_str().ne("d"))
+                    .map(|t| t.as_vec().to_vec())
+                    .collect::<HashSet<Vec<String>>>(),
+                HashSet::from([
+                    vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
+                    vec!["refs/heads/main".to_string(), main_commit_id.to_string()],
+                ]),
+            );
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
+        let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
+        let second_source_git_repo = GitTestRepo::duplicate(&source_git_repo)?;
+
+        // uppdate announcement with extra git server
+
+        let git_repo = prep_git_repo()?;
+
+        std::fs::write(git_repo.dir.join("new.md"), "some content")?;
+        let main_commit_id = git_repo.stage_and_commit("new.md")?;
+
+        let events = vec![
+            generate_test_key_1_metadata_event("fred"),
+            generate_test_key_1_relay_list_event(),
+            generate_repo_ref_event_with_git_server(vec![
+                source_git_repo.dir.to_str().unwrap().to_string(),
+                second_source_git_repo.dir.to_str().unwrap().to_string(),
+            ]),
+            state_event.clone(),
+        ];
+
+        // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
+        let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+            Relay::new(8051, None, None),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
+            Relay::new(8055, None, None),
+            Relay::new(8056, None, None),
+            Relay::new(8057, None, None),
+        );
+        r51.events = events.clone();
+        r55.events = events;
+
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = cli_tester_after_fetch(&git_repo)?;
+            p.send_line("push refs/heads/main:refs/heads/main")?;
+            p.send_line("")?;
+            p.expect("ok refs/heads/main\r\n")?;
+            p.expect("\r\n")?;
+            p.exit()?;
+            for p in [51, 52, 53, 55, 56, 57] {
+                relay::shutdown_relay(8000 + p)?;
+            }
+            Ok(())
+        });
+        // launch relays
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+            r57.listen_until_close(),
+        );
+
+        cli_tester_handle.join().unwrap()?;
+
+        // git_server updated
+        assert_eq!(
+            source_git_repo.get_tip_of_local_branch("main")?,
+            main_commit_id
+        );
+        assert_eq!(
+            second_source_git_repo.get_tip_of_local_branch("main")?,
+            main_commit_id
+        );
+
+        Ok(())
     }
 }
