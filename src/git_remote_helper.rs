@@ -564,7 +564,6 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 refspecs_for_remote.push(format!("+{refspec}"));
                             }
                         }
-                        // TODO do we need to force push to this remote?
                     } else if let Ok(remote_value_tip) =
                         git_repo.get_commit_or_tip_of_reference(remote_value)
                     {
@@ -574,26 +573,36 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 format!("{short_name} {to} already up-to-date").as_str(),
                             )?;
                         }
-                        let nostr_value_tip =
-                            git_repo.get_commit_or_tip_of_reference(nostr_value)?;
-                        let (ahead, behind) = git_repo
-                            .get_commits_ahead_behind(&remote_value_tip, &nostr_value_tip)?;
-                        if behind.is_empty() {
+                        let (ahead_of_local, behind_local) =
+                            git_repo.get_commits_ahead_behind(&from_tip, &remote_value_tip)?;
+                        if ahead_of_local.is_empty() {
                             // can soft push
                             refspecs_for_remote.push(refspec.clone());
                         } else {
                             // cant soft push
-                            rejected_refspecs
-                                .entry(refspec.to_string())
-                                .and_modify(|a| a.push(url.to_string()))
-                                .or_insert(vec![url.to_string()]);
-                            term.write_line(
-                                format!(
-                                    "ERROR: {short_name} {to} conflicts with nostr ({} ahead {} behind). either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
-                                    ahead.len(),
-                                    behind.len(),
-                                ).as_str(),
-                            )?;
+                            let (ahead_of_nostr, behind_nostr) = git_repo
+                                .get_commits_ahead_behind(
+                                    &git_repo.get_commit_or_tip_of_reference(nostr_value)?,
+                                    &remote_value_tip,
+                                )?;
+                            if ahead_of_nostr.is_empty() {
+                                // ancestor of nostr and we are force pushing anyway...
+                                refspecs_for_remote.push(refspec.clone());
+                            } else {
+                                rejected_refspecs
+                                    .entry(refspec.to_string())
+                                    .and_modify(|a| a.push(url.to_string()))
+                                    .or_insert(vec![url.to_string()]);
+                                term.write_line(
+                                    format!(
+                                        "ERROR: {short_name} {to} conflicts with nostr ({} ahead {} behind) and local ({} ahead {} behind). either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
+                                        ahead_of_nostr.len(),
+                                        behind_nostr.len(),
+                                        ahead_of_local.len(),
+                                        behind_local.len(),
+                                    ).as_str(),
+                                )?;
+                            }
                         };
                     } else {
                         // remote_value oid is not present locally
@@ -624,7 +633,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                 if let Ok(remote_value_tip) = git_repo.get_commit_or_tip_of_reference(remote_value)
                 {
                     let (ahead, behind) =
-                        git_repo.get_commits_ahead_behind(&remote_value_tip, &from_tip)?;
+                        git_repo.get_commits_ahead_behind(&from_tip, &remote_value_tip)?;
                     if behind.is_empty() {
                         // can soft push
                         refspecs_for_remote.push(refspec.clone());
