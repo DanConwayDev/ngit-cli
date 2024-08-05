@@ -227,21 +227,7 @@ async fn list(
 
     let term = console::Term::stderr();
 
-    let mut remote_states = HashMap::new();
-    for url in &repo_ref.git_server {
-        term.write_line(format!("fetching refs list: {url}...").as_str())?;
-        match list_from_remote(git_repo, url) {
-            Ok(remote_state) => {
-                remote_states.insert(url.clone(), remote_state);
-            }
-            Err(error) => {
-                term.write_line(
-                    format!("WARNING: failed to list refs from {url} error: {error}").as_str(),
-                )?;
-            }
-        }
-        term.clear_last_lines(1)?;
-    }
+    let remote_states = list_from_remotes(&term, git_repo, &repo_ref.git_server)?;
 
     let state = if let Some(nostr_state) = nostr_state {
         for (name, value) in &nostr_state.state {
@@ -284,6 +270,29 @@ async fn list(
     }
 
     println!();
+    Ok(remote_states)
+}
+
+fn list_from_remotes(
+    term: &console::Term,
+    git_repo: &Repo,
+    git_servers: &Vec<String>,
+) -> Result<HashMap<String, HashMap<String, String>>> {
+    let mut remote_states = HashMap::new();
+    for url in git_servers {
+        term.write_line(format!("fetching refs list: {url}...").as_str())?;
+        match list_from_remote(git_repo, url) {
+            Ok(remote_state) => {
+                remote_states.insert(url.clone(), remote_state);
+            }
+            Err(error) => {
+                term.write_line(
+                    format!("WARNING: failed to list refs from {url} error: {error}").as_str(),
+                )?;
+            }
+        }
+        term.clear_last_lines(1)?;
+    }
     Ok(remote_states)
 }
 
