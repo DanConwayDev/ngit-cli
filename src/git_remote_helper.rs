@@ -21,7 +21,7 @@ use client::{
 use git::RepoActions;
 use git2::{Oid, Repository};
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{EventBuilder, PublicKey, Tag, Url};
+use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, EventBuilder, PublicKey, Tag, Url};
 use nostr_signer::NostrSigner;
 use repo_ref::RepoRef;
 use repo_state::RepoState;
@@ -237,13 +237,22 @@ async fn list(
                 if let Some(remote_value) = remote_state.get(name) {
                     if value.ne(remote_value) {
                         term.write_line(
-                            format!("WARNING: {url} {name} out of sync with nostr ").as_str(),
+                            format!(
+                                "WARNING: {url} {name} is {} nostr ",
+                                if let Ok((ahead, behind)) =
+                                    get_ahead_behind(git_repo, value, remote_value)
+                                {
+                                    format!("{} ahead {} behind", ahead.len(), behind.len())
+                                } else {
+                                    "out of sync with".to_string()
+                                }
+                            )
+                            .as_str(),
                         )?;
                     }
                 } else {
                     term.write_line(
-                        format!("WARNING: {url} is missing {name} which is tracked on nostr")
-                            .as_str(),
+                        format!("WARNING: {url} {name} is missing but tracked on nostr").as_str(),
                     )?;
                 }
             }
@@ -317,6 +326,16 @@ fn list_from_remote(
     }
     git_server_remote.disconnect()?;
     Ok(state)
+}
+
+fn get_ahead_behind(
+    git_repo: &Repo,
+    base_ref_or_oid: &str,
+    latest_ref_or_oid: &str,
+) -> Result<(Vec<Sha1Hash>, Vec<Sha1Hash>)> {
+    let base = git_repo.get_commit_or_tip_of_reference(base_ref_or_oid)?;
+    let latest = git_repo.get_commit_or_tip_of_reference(latest_ref_or_oid)?;
+    git_repo.get_commits_ahead_behind(&base, &latest)
 }
 
 fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, oid: &str) -> Result<()> {
