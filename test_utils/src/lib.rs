@@ -792,6 +792,17 @@ impl CliTester {
         Ok(before)
     }
 
+    pub fn expect_eventually_and_print<S>(&mut self, message: S) -> Result<String>
+    where
+        S: Into<String>,
+    {
+        let message_string = message.into();
+        let message = message_string.as_str();
+        let before = self.exp_string(message).context("exp_string failed")?;
+        println!("{before}");
+        Ok(before)
+    }
+
     pub fn expect_after_whitespace<S>(&mut self, message: S) -> Result<&mut Self>
     where
         S: Into<String>,

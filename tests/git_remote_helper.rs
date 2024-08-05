@@ -596,6 +596,19 @@ mod push {
 
     use super::*;
 
+    /// git runs `list for-push` before `push`. in `push` we use the git server
+    /// remote refs downloaded by `list` to assess how to push to git servers.
+    /// we are therefore running it this way in our tests
+    fn cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(
+        git_repo: &GitTestRepo,
+    ) -> Result<CliTester> {
+        let mut p = cli_tester_after_fetch(git_repo)?;
+
+        p.send_line("list for-push")?;
+        p.expect_eventually_and_print("\r\n\r\n")?;
+        Ok(p)
+    }
+
     mod two_branches_in_batch_one_added_one_updated {
 
         use super::*;
@@ -639,7 +652,9 @@ mod push {
                     main_commit_id
                 );
 
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
+
                 p.send_line("push refs/heads/main:refs/heads/main")?;
                 p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
@@ -713,7 +728,8 @@ mod push {
                     main_commit_id
                 );
 
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push refs/heads/main:refs/heads/main")?;
                 p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
@@ -799,7 +815,9 @@ mod push {
                     main_commit_id
                 );
 
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
+
                 p.send_line("push refs/heads/main:refs/heads/main")?;
                 p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
@@ -860,7 +878,8 @@ mod push {
             r55.events = events;
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push refs/heads/main:refs/heads/main")?;
                 p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
@@ -946,7 +965,8 @@ mod push {
             r55.events = events;
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push refs/heads/main:refs/heads/main")?;
                 p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
                 p.send_line("")?;
@@ -1071,7 +1091,8 @@ mod push {
                     vnext_commit_id
                 );
 
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push :refs/heads/vnext")?;
                 p.send_line("")?;
                 p.expect_eventually("\r\n\r\n")?;
@@ -1146,7 +1167,8 @@ mod push {
                     vnext_commit_id
                 );
 
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push :refs/heads/vnext")?;
                 p.send_line("")?;
                 p.expect_eventually("\r\n\r\n")?;
@@ -1211,7 +1233,8 @@ mod push {
             r55.events = events;
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push :refs/heads/vnext")?;
                 p.send_line("")?;
                 // let res = p.expect_eventually("\r\n\r\n")?;
@@ -1267,7 +1290,8 @@ mod push {
             r55.events = events;
 
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                let mut p = cli_tester_after_fetch(&git_repo)?;
+                let mut p =
+                    cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push :refs/heads/example-branch")?;
                 p.send_line("")?;
                 p.expect("ok refs/heads/example-branch\r\n")?;
@@ -1349,7 +1373,7 @@ mod push {
         r55.events = events;
 
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-            let mut p = cli_tester_after_fetch(&git_repo)?;
+            let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("")?;
             p.expect("ok refs/heads/main\r\n")?;
