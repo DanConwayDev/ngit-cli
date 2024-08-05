@@ -234,11 +234,12 @@ async fn list(
     let state = if let Some(nostr_state) = nostr_state {
         for (name, value) in &nostr_state.state {
             for (url, remote_state) in &remote_states {
+                let remote_name = get_short_git_server_name(git_repo, url);
                 if let Some(remote_value) = remote_state.get(name) {
                     if value.ne(remote_value) {
                         term.write_line(
                             format!(
-                                "WARNING: {url} {name} is {} nostr ",
+                                "WARNING: {remote_name} {name} is {} nostr ",
                                 if let Ok((ahead, behind)) =
                                     get_ahead_behind(git_repo, value, remote_value)
                                 {
@@ -252,7 +253,8 @@ async fn list(
                     }
                 } else {
                     term.write_line(
-                        format!("WARNING: {url} {name} is missing but tracked on nostr").as_str(),
+                        format!("WARNING: {remote_name} {name} is missing but tracked on nostr")
+                            .as_str(),
                     )?;
                 }
             }
@@ -291,14 +293,15 @@ fn list_from_remotes(
 ) -> Result<HashMap<String, HashMap<String, String>>> {
     let mut remote_states = HashMap::new();
     for url in git_servers {
-        term.write_line(format!("fetching refs list: {url}...").as_str())?;
+        let short_name = get_short_git_server_name(git_repo, url);
+        term.write_line(format!("fetching refs list: {short_name}...").as_str())?;
         match list_from_remote(git_repo, url) {
             Ok(remote_state) => {
                 remote_states.insert(url.clone(), remote_state);
             }
             Err(error) => {
                 term.write_line(
-                    format!("WARNING: {url} failed to list refs error: {error}").as_str(),
+                    format!("WARNING: {short_name} failed to list refs error: {error}",).as_str(),
                 )?;
             }
         }
@@ -486,7 +489,8 @@ async fn push(
                     if let Some(error) = error {
                         term.write_line(
                             format!(
-                                "WARNING: {git_server_url} failed to push {name} error: {error}"
+                                "WARNING: {} failed to push {name} error: {error}",
+                                get_short_git_server_name(git_repo, &git_server_url),
                             )
                             .as_str(),
                         )
@@ -519,6 +523,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
     let mut rejected_refspecs: HashMapUrlRefspecs = HashMap::new();
 
     for (url, remote_state) in list_outputs {
+        let short_name = get_short_git_server_name(git_repo, url);
         let mut refspecs_for_remote = vec![];
         for refspec in refspecs {
             let (from, to) = refspec_to_from_to(refspec)?;
@@ -565,7 +570,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                     {
                         if from_tip.eq(&remote_value_tip) {
                             // remote already at correct state
-                            term.write_line(format!("{url} {to} already up-to-date").as_str())?;
+                            term.write_line(
+                                format!("{short_name} {to} already up-to-date").as_str(),
+                            )?;
                         }
                         let nostr_value_tip =
                             git_repo.get_commit_or_tip_of_reference(nostr_value)?;
@@ -582,7 +589,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 .or_insert(vec![url.to_string()]);
                             term.write_line(
                                 format!(
-                                    "ERROR: {url} {to} conflicts with nostr ({} ahead {} behind). either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
+                                    "ERROR: {short_name} {to} conflicts with nostr ({} ahead {} behind). either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
                                     ahead.len(),
                                     behind.len(),
                                 ).as_str(),
@@ -598,15 +605,17 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             .and_modify(|a| a.push(url.to_string()))
                             .or_insert(vec![url.to_string()]);
                         term.write_line(
-                            format!("ERROR: {url} {to} conflicts with nostr and is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                            format!("ERROR: {short_name} {to} conflicts with nostr and is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
                         )?;
                     }
                 } else {
                     // existing nostr branch not on remote
                     // report - creating new branch
                     term.write_line(
-                        format!("{url} {to} doesn't exist and will be added as a new branch")
-                            .as_str(),
+                        format!(
+                            "{short_name} {to} doesn't exist and will be added as a new branch"
+                        )
+                        .as_str(),
                     )?;
                     refspecs_for_remote.push(refspec.clone());
                 }
@@ -627,7 +636,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             .or_insert(vec![url.to_string()]);
                         term.write_line(
                                     format!(
-                                        "ERROR: {url} already contains {to} {} ahead and {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
+                                        "ERROR: {short_name} already contains {to} {} ahead and {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
                                         ahead.len(),
                                         behind.len(),
                                     ).as_str(),
@@ -642,7 +651,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                         .and_modify(|a| a.push(url.to_string()))
                         .or_insert(vec![url.to_string()]);
                     term.write_line(
-                        format!("ERROR: {url} already contains {to} at {remote_value} which is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                        format!("ERROR: {short_name} already contains {to} at {remote_value} which is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
                     )?;
                 }
             } else {
@@ -794,6 +803,18 @@ fn get_remote_name_by_url(git_repo: &Repository, url: &str) -> Result<String> {
         .context("could not find remote with matching url")?
         .context("remote with matching url must be named")?
         .to_string())
+}
+
+fn get_short_git_server_name(git_repo: &Repo, url: &str) -> std::string::String {
+    if let Ok(name) = get_remote_name_by_url(&git_repo.git_repo, url) {
+        return name;
+    }
+    if let Ok(url) = Url::parse(url) {
+        if let Some(domain) = url.domain() {
+            return domain.to_string();
+        }
+    }
+    url.to_string()
 }
 
 fn get_oids_from_fetch_batch(stdin: &Stdin, initial_oid: &str) -> Result<Vec<String>> {
