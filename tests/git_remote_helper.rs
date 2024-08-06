@@ -520,7 +520,7 @@ mod list {
                     FEATURE_BRANCH_NAME_3,
                 ] {
                     pr_refs.push(format!(
-                        "{} {}",
+                        "{} refs/heads/{}",
                         proposal_creation_repo.get_tip_of_local_branch(name)?,
                         get_proposal_branch_name_from_events(&r55.events, name)?,
                     ));

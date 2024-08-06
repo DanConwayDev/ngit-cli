@@ -292,7 +292,7 @@ async fn list(
                     // we will need to check whether the commit id exists in the repo or apply the
                     // proposal and each patch to check
                     if let Ok(commit_id) = get_commit_id_from_patch(patch) {
-                        state.insert(branch_name, commit_id);
+                        state.insert(format!("refs/heads/{branch_name}"), commit_id);
                     }
                 }
             }
