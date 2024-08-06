@@ -440,7 +440,11 @@ fn fetch(
 ) -> Result<()> {
     let fetch_batch = get_oids_from_fetch_batch(stdin, oid, refstr)?;
 
-    let oids_from_git_servers = fetch_batch.values().cloned().collect::<Vec<String>>();
+    let oids_from_git_servers = fetch_batch
+        .iter()
+        .filter(|(refstr, _)| !refstr.contains("refs/heads/prs/"))
+        .map(|(_, oid)| oid.clone())
+        .collect::<Vec<String>>();
 
     let mut errors = HashMap::new();
     let term = console::Term::stderr();
