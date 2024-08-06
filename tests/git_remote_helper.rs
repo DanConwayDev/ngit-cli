@@ -410,7 +410,7 @@ mod list {
                     p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
                     p.expect(
                         format!(
-                            "WARNING: refs/heads/main out of sync with nostr on {}\r\n",
+                            "WARNING: {} refs/heads/main is out of sync with nostr \r\n",
                             source_path
                         )
                         .as_str(),
