@@ -1020,6 +1020,13 @@ pub fn get_proposal_branch_name(
                 .hashtag("root"),
         ],
     ))?;
+    get_proposal_branch_name_from_events(&events, branch_name_in_event)
+}
+
+pub fn get_proposal_branch_name_from_events(
+    events: &Vec<nostr::Event>,
+    branch_name_in_event: &str,
+) -> Result<String> {
     for event in events {
         if event.iter_tags().any(|t| {
             !t.as_vec()[1].eq("revision-root")
@@ -1072,6 +1079,15 @@ pub fn cli_tester_create_proposals() -> Result<GitTestRepo> {
         Some((PROPOSAL_TITLE_3, "proposal c description")),
         None,
     )?;
+    Ok(git_repo)
+}
+
+pub fn cli_tester_create_proposal_branches_ready_to_send() -> Result<GitTestRepo> {
+    let git_repo = GitTestRepo::default();
+    git_repo.populate()?;
+    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
+    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_2, "b", false)?;
+    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_3, "c", false)?;
     Ok(git_repo)
 }
 

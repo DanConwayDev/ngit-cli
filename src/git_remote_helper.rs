@@ -15,17 +15,25 @@ use std::{
 use anyhow::{bail, Context, Result};
 use auth_git2::GitAuthenticator;
 use client::{
-    consolidate_fetch_reports, get_repo_ref_from_cache, get_state_from_cache, sign_event, Connect,
-    STATE_KIND,
+    consolidate_fetch_reports, get_events_from_cache, get_repo_ref_from_cache,
+    get_state_from_cache, sign_event, Connect, STATE_KIND,
 };
 use git::RepoActions;
 use git2::{Oid, Repository};
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{hashes::sha1::Hash as Sha1Hash, EventBuilder, PublicKey, Tag, Url};
+use nostr_sdk::{
+    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, Kind, PublicKey, Tag, Url,
+};
 use nostr_signer::NostrSigner;
 use repo_ref::RepoRef;
 use repo_state::RepoState;
-use sub_commands::send::send_events;
+use sub_commands::{
+    list::{
+        get_all_proposal_patch_events_from_cache, get_commit_id_from_patch,
+        get_most_recent_patch_with_ancestors, get_proposals_and_revisions_from_cache, status_kinds,
+    },
+    send::{event_is_revision_root, event_to_cover_letter, send_events},
+};
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -231,7 +239,7 @@ async fn list(
 
     let remote_states = list_from_remotes(&term, git_repo, &repo_ref.git_server)?;
 
-    let state = if let Some(nostr_state) = nostr_state {
+    let mut state = if let Some(nostr_state) = nostr_state {
         for (name, value) in &nostr_state.state {
             for (url, remote_state) in &remote_states {
                 let remote_name = get_short_git_server_name(git_repo, url);
@@ -272,6 +280,27 @@ async fn list(
             .clone()
     };
 
+    state.retain(|k, _| !k.starts_with("refs/heads/prs/"));
+
+    let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+
+    for (_, (proposal, patches)) in open_proposals {
+        if let Ok(cl) = event_to_cover_letter(&proposal) {
+            if let Ok(branch_name) = cl.get_branch_name() {
+                if let Some(patch) = patches.first() {
+                    // TODO this isn't resilient because the commit id stated may not be correct
+                    // we will need to check whether the commit id exists in the repo or apply the
+                    // proposal and each patch to check
+                    if let Ok(commit_id) = get_commit_id_from_patch(patch) {
+                        state.insert(branch_name, commit_id);
+                    }
+                }
+            }
+        }
+    }
+
+    // TODO 'for push' should we check with the git servers to see if any of them
+    // allow push from the user?
     for (name, value) in state {
         if value.starts_with("ref: ") {
             if !for_push {
@@ -339,6 +368,67 @@ fn get_ahead_behind(
     let base = git_repo.get_commit_or_tip_of_reference(base_ref_or_oid)?;
     let latest = git_repo.get_commit_or_tip_of_reference(latest_ref_or_oid)?;
     git_repo.get_commits_ahead_behind(&base, &latest)
+}
+
+async fn get_open_proposals(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+) -> Result<HashMap<EventId, (Event, Vec<Event>)>> {
+    let git_repo_path = git_repo.get_path()?;
+    let proposals: Vec<nostr::Event> =
+        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
+            .await?
+            .iter()
+            .filter(|e| !event_is_revision_root(e))
+            .cloned()
+            .collect();
+
+    let statuses: Vec<nostr::Event> = {
+        let mut statuses = get_events_from_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .kinds(status_kinds().clone())
+                    .events(proposals.iter().map(nostr::Event::id)),
+            ],
+        )
+        .await?;
+        statuses.sort_by_key(|e| e.created_at);
+        statuses.reverse();
+        statuses
+    };
+    let mut open_proposals = HashMap::new();
+
+    for proposal in proposals {
+        let status = if let Some(e) = statuses
+            .iter()
+            .filter(|e| {
+                status_kinds().contains(&e.kind())
+                    && e.iter_tags()
+                        .any(|t| t.as_vec()[1].eq(&proposal.id.to_string()))
+            })
+            .collect::<Vec<&nostr::Event>>()
+            .first()
+        {
+            e.kind()
+        } else {
+            Kind::GitStatusOpen
+        };
+        if status.eq(&Kind::GitStatusOpen) {
+            if let Ok(commits_events) =
+                get_all_proposal_patch_events_from_cache(git_repo_path, repo_ref, &proposal.id)
+                    .await
+            {
+                if let Ok(most_recent_proposal_patch_chain) =
+                    get_most_recent_patch_with_ancestors(commits_events.clone())
+                {
+                    open_proposals
+                        .insert(proposal.id(), (proposal, most_recent_proposal_patch_chain));
+                }
+            }
+        }
+    }
+    Ok(open_proposals)
 }
 
 fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, oid: &str) -> Result<()> {
