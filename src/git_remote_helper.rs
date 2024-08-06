@@ -103,8 +103,8 @@ async fn main() -> Result<()> {
             ["option", ..] => {
                 println!("unsupported");
             }
-            ["fetch", oid, _refstr] => {
-                fetch(&git_repo.git_repo, &repo_ref, &stdin, oid)?;
+            ["fetch", oid, refstr] => {
+                fetch(&git_repo, &repo_ref, &stdin, oid, refstr)?;
             }
             ["push", refspec] => {
                 push(
@@ -431,18 +431,42 @@ async fn get_open_proposals(
     Ok(open_proposals)
 }
 
-fn fetch(git_repo: &Repository, repo_ref: &RepoRef, stdin: &Stdin, oid: &str) -> Result<()> {
-    let oids = get_oids_from_fetch_batch(stdin, oid)?;
+fn fetch(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    stdin: &Stdin,
+    oid: &str,
+    refstr: &str,
+) -> Result<()> {
+    let fetch_batch = get_oids_from_fetch_batch(stdin, oid, refstr)?;
+
+    let oids_from_git_servers = fetch_batch.values().cloned().collect::<Vec<String>>();
 
     let mut errors = HashMap::new();
+    let term = console::Term::stderr();
+
     for git_server_url in &repo_ref.git_server {
-        if let Err(e) = fetch_from_git_server(git_repo, &oids, git_server_url) {
-            errors.insert(git_server_url.to_string(), e);
+        let term = console::Term::stderr();
+        let short_name = get_short_git_server_name(git_repo, git_server_url);
+        term.write_line(format!("fetching from {short_name}...").as_str())?;
+        let res = fetch_from_git_server(&git_repo.git_repo, &oids_from_git_servers, git_server_url);
+        term.clear_last_lines(1)?;
+        if let Err(e) = res {
+            term.write_line(
+                format!(
+                    "WARNING: failed to fetch from {short_name} error:
+            {e}"
+                )
+                .as_str(),
+            )?;
+            errors.insert(short_name.to_string(), e);
         } else {
+            term.flush()?;
             println!();
             return Ok(());
         }
     }
+    term.flush()?;
     bail!(
         "failed to fetch objects in nostr state event from:\r\n{}",
         errors
@@ -916,14 +940,19 @@ fn get_short_git_server_name(git_repo: &Repo, url: &str) -> std::string::String 
     url.to_string()
 }
 
-fn get_oids_from_fetch_batch(stdin: &Stdin, initial_oid: &str) -> Result<Vec<String>> {
+fn get_oids_from_fetch_batch(
+    stdin: &Stdin,
+    initial_oid: &str,
+    initial_refstr: &str,
+) -> Result<HashMap<String, String>> {
     let mut line = String::new();
-    let mut oids = vec![initial_oid.to_string()];
+    let mut batch = HashMap::new();
+    batch.insert(initial_refstr.to_string(), initial_oid.to_string());
     loop {
         let tokens = read_line(stdin, &mut line)?;
         match tokens.as_slice() {
-            ["fetch", oid, _refstr] => {
-                oids.push((*oid).to_string());
+            ["fetch", oid, refstr] => {
+                batch.insert((*refstr).to_string(), (*oid).to_string());
             }
             [] => break,
             _ => bail!(
@@ -931,7 +960,7 @@ fn get_oids_from_fetch_batch(stdin: &Stdin, initial_oid: &str) -> Result<Vec<Str
             ),
         }
     }
-    Ok(oids)
+    Ok(batch)
 }
 
 fn get_refspecs_from_push_batch(stdin: &Stdin, initial_refspec: &str) -> Result<Vec<String>> {
