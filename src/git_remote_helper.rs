@@ -33,7 +33,7 @@ use sub_commands::{
         get_most_recent_patch_with_ancestors, get_proposals_and_revisions_from_cache, status_kinds,
         tag_value,
     },
-    send::{event_is_revision_root, event_to_cover_letter, send_events},
+    send::{event_is_revision_root, event_to_cover_letter, generate_patch_event, send_events},
 };
 
 #[cfg(not(test))]
@@ -489,17 +489,9 @@ async fn fetch(
     fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/prs/"));
 
     for (refstr, oid) in fetch_batch {
-        if let Some((_, (_, patches))) = open_proposals.iter().find(|(_, (proposal, _))| {
-            if let Ok(cl) = event_to_cover_letter(proposal) {
-                if let Ok(branch_name) = cl.get_branch_name() {
-                    branch_name.eq(&refstr.replace("refs/heads/", ""))
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }) {
+        if let Some((_, (_, patches))) =
+            find_proposal_and_patches_by_branch_name(&refstr, &open_proposals)
+        {
             if !git_repo.does_commit_exist(&oid)? {
                 let mut patches_ancestor_first = patches.clone();
                 patches_ancestor_first.reverse();
@@ -526,6 +518,23 @@ async fn fetch(
     Ok(())
 }
 
+fn find_proposal_and_patches_by_branch_name<'a>(
+    refstr: &'a str,
+    open_proposals: &'a HashMap<EventId, (Event, Vec<Event>)>,
+) -> Option<(&'a EventId, &'a (Event, Vec<Event>))> {
+    open_proposals.iter().find(|(_, (proposal, _))| {
+        if let Ok(cl) = event_to_cover_letter(proposal) {
+            if let Ok(branch_name) = cl.get_branch_name() {
+                branch_name.eq(&refstr.replace("refs/heads/", ""))
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    })
+}
+
 fn fetch_from_git_server(
     git_repo: &Repository,
     oids: &[String],
@@ -549,7 +558,19 @@ async fn push(
     #[cfg(not(test))] client: &Client,
     list_outputs: Option<HashMap<String, HashMap<String, String>>>,
 ) -> Result<()> {
-    let mut refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
+    let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
+
+    let proposal_refspecs = refspecs
+        .iter()
+        .filter(|r| r.contains("refs/heads/prs/"))
+        .cloned()
+        .collect::<Vec<String>>();
+
+    let mut git_server_refspecs = refspecs
+        .iter()
+        .filter(|r| !r.contains("refs/heads/prs/"))
+        .cloned()
+        .collect::<Vec<String>>();
 
     let term = console::Term::stderr();
 
@@ -581,12 +602,12 @@ async fn push(
     let (rejected_refspecs, remote_refspecs) = create_rejected_refspecs_and_remotes_refspecs(
         &term,
         git_repo,
-        &refspecs,
+        &git_server_refspecs,
         &existing_state,
         &list_outputs,
     )?;
 
-    refspecs.retain(|refspec| {
+    git_server_refspecs.retain(|refspec| {
         if let Some(rejected) = rejected_refspecs.get(&refspec.to_string()) {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
             println!("error {to} {} out of sync with nostr", rejected.join(" "));
@@ -596,13 +617,13 @@ async fn push(
         }
     });
 
-    if refspecs.is_empty() {
+    let mut events = vec![];
+
+    if refspecs.is_empty() && proposal_refspecs.is_empty() {
         // all refspecs rejected
         println!();
         return Ok(());
     }
-
-    let new_state = generate_updated_state(git_repo, &existing_state, &refspecs)?;
 
     let (signer, user_ref) = login::launch(
         git_repo,
@@ -616,23 +637,106 @@ async fn push(
     )
     .await?;
 
-    let new_repo_state = RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
+    if !refspecs.is_empty() {
+        let new_state = generate_updated_state(git_repo, &existing_state, &git_server_refspecs)?;
+
+        let new_repo_state =
+            RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
+
+        events.push(new_repo_state.event);
+    }
+
+    let mut rejected_proposal_refspecs = vec![];
+    if !proposal_refspecs.is_empty() {
+        let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+
+        for refspec in &proposal_refspecs {
+            let (from, to) = refspec_to_from_to(refspec).unwrap();
+
+            if let Some((_, (proposal, patches))) =
+                find_proposal_and_patches_by_branch_name(to, &open_proposals)
+            {
+                if to.starts_with('+') {
+                    // TODO do force push - issue as revision
+                } else {
+                    let tip_patch = patches.first().unwrap();
+                    let tip_of_proposal = get_commit_id_from_patch(tip_patch)?;
+                    let tip_of_proposal_commit =
+                        git_repo.get_commit_or_tip_of_reference(&tip_of_proposal)?;
+                    let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
+                    let (ahead, behind) = git_repo
+                        .get_commits_ahead_behind(&tip_of_proposal_commit, &tip_of_pushed_branch)?;
+                    if behind.is_empty() {
+                        let thread_id = if patches.len().eq(&1) {
+                            tip_patch.id()
+                        } else {
+                            get_event_root(tip_patch)?
+                        };
+                        // TODO do I have permission?
+                        let mut parent_patch = tip_patch.clone();
+                        for (i, commit) in ahead.iter().enumerate() {
+                            let new_patch = generate_patch_event(
+                                git_repo,
+                                &git_repo.get_root_commit()?,
+                                commit,
+                                Some(thread_id),
+                                &signer,
+                                repo_ref,
+                                Some(parent_patch.id()),
+                                Some((
+                                    (patches.len() + i + 1).try_into().unwrap(),
+                                    (patches.len() + ahead.len()).try_into().unwrap(),
+                                )),
+                                None,
+                                &None,
+                                &[],
+                            )
+                            .await
+                            .context("cannot make patch event from commit")?;
+                            events.push(new_patch.clone());
+                            parent_patch = new_patch;
+                        }
+                    } else {
+                        // we shouldn't get here
+                        term.write_line(
+                            format!(
+                                "WARNING: failed to push {from} as nostr proposal. Try and force push ",
+                            )
+                            .as_str(),
+                        )
+                        .unwrap();
+                        println!(
+                            "error {to} cannot fastforward as newer patches found on proposal"
+                        );
+                        rejected_proposal_refspecs.push(refspec.to_string());
+                    }
+                }
+            } else {
+                // TODO new proposal / proposal no longeer open
+                // / we couldn't
+            }
+        }
+    }
 
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
+    if !events.is_empty() {
+        send_events(
+            client,
+            git_repo.get_path()?,
+            events,
+            user_ref.relays.write(),
+            repo_ref.relays.clone(),
+            false,
+            true,
+        )
+        .await?;
+    }
 
-    send_events(
-        client,
-        git_repo.get_path()?,
-        vec![new_repo_state.event],
-        user_ref.relays.write(),
-        repo_ref.relays.clone(),
-        false,
-        true,
-    )
-    .await?;
-
-    for refspec in &refspecs {
+    for refspec in &[git_server_refspecs.clone(), proposal_refspecs.clone()].concat() {
+        if rejected_proposal_refspecs.contains(refspec) {
+            continue;
+        }
         let (_, to) = refspec_to_from_to(refspec)?;
         println!("ok {to}");
         update_remote_refs_pushed(&git_repo.git_repo, refspec, nostr_remote_url)
@@ -644,7 +748,7 @@ async fn push(
     for (git_server_url, remote_refspecs) in remote_refspecs {
         let remote_refspecs = remote_refspecs
             .iter()
-            .filter(|refspec| refspecs.contains(refspec))
+            .filter(|refspec| git_server_refspecs.contains(refspec))
             .cloned()
             .collect::<Vec<String>>();
         if !refspecs.is_empty() {
@@ -674,6 +778,19 @@ async fn push(
     }
     println!();
     Ok(())
+}
+
+fn get_event_root(event: &nostr::Event) -> Result<EventId> {
+    Ok(EventId::parse(
+        event
+            .tags()
+            .iter()
+            .find(|t| t.is_root())
+            .context("no thread root in event")?
+            .as_vec()
+            .get(1)
+            .unwrap(),
+    )?)
 }
 
 type HashMapUrlRefspecs = HashMap<String, Vec<String>>;
