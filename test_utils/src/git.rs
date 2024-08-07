@@ -17,6 +17,7 @@ use crate::generate_repo_ref_event;
 pub struct GitTestRepo {
     pub dir: PathBuf,
     pub git_repo: git2::Repository,
+    pub delete_dir_on_drop: bool,
 }
 
 impl Default for GitTestRepo {
@@ -56,10 +57,20 @@ impl GitTestRepo {
         Ok(Self {
             dir: path,
             git_repo,
+            delete_dir_on_drop: true,
         })
     }
     pub fn without_repo_in_git_config() -> Self {
         Self::new("main").unwrap()
+    }
+
+    pub fn open(path: &PathBuf) -> Result<Self> {
+        let git_repo = git2::Repository::open(path)?;
+        Ok(Self {
+            dir: path.clone(),
+            git_repo,
+            delete_dir_on_drop: true,
+        })
     }
 
     pub fn duplicate(existing_repo: &GitTestRepo) -> Result<Self> {
@@ -86,6 +97,7 @@ impl GitTestRepo {
         Ok(Self {
             dir: path,
             git_repo,
+            delete_dir_on_drop: true,
         })
     }
 
@@ -120,6 +132,7 @@ impl GitTestRepo {
         Ok(Self {
             dir: path,
             git_repo,
+            delete_dir_on_drop: true,
         })
     }
 
@@ -129,6 +142,7 @@ impl GitTestRepo {
         Ok(Self {
             dir: path,
             git_repo,
+            delete_dir_on_drop: true,
         })
     }
 
@@ -263,7 +277,9 @@ impl GitTestRepo {
 
 impl Drop for GitTestRepo {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        if self.delete_dir_on_drop {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
     }
 }
 pub fn joe_signature() -> Signature<'static> {
