@@ -75,6 +75,7 @@ pub trait RepoActions {
         branch_name: &str,
         patch_and_ancestors: Vec<nostr::Event>,
     ) -> Result<Vec<nostr::Event>>;
+    fn create_commit_from_patch(&self, patch: &nostr::Event) -> Result<Oid>;
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
     fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool>;
     fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>>;
@@ -534,15 +535,99 @@ impl RepoActions for Repo {
         for patch in &patches_to_apply {
             let commit_id = get_commit_id_from_patch(patch)?;
             // only create new commits - otherwise make them the tip
-            if self.does_commit_exist(&commit_id)? {
-                self.create_branch_at_commit(branch_name, &commit_id)?;
-            } else {
-                apply_patch(self, patch)?;
+            if !self.does_commit_exist(&commit_id)? {
+                self.create_commit_from_patch(patch)?;
             }
+            self.create_branch_at_commit(branch_name, &commit_id)?;
+            self.checkout(branch_name)?;
         }
         Ok(patches_to_apply)
     }
+    fn create_commit_from_patch(&self, patch: &nostr::Event) -> Result<Oid> {
+        let commit_id = get_commit_id_from_patch(patch)?;
+        if self.does_commit_exist(&commit_id)? {
+            return Ok(Oid::from_str(&commit_id)?);
+        }
+        let parent_commit_id = tag_value(patch, "parent-commit")?;
 
+        let parent_commit = self
+            .git_repo
+            .find_commit(Oid::from_str(&parent_commit_id)?)
+            .context("parrent commit doesnt exist")?;
+        let parent_tree = parent_commit.tree()?;
+
+        // let mut apply_opts = git2::ApplyOptions::new();
+        // apply_opts.check(false);
+
+        let mut index = self.git_repo.apply_to_tree(
+            &parent_tree,
+            &git2::Diff::from_buffer(patch.content.as_bytes())?,
+            // Some(&mut apply_opts),
+            None,
+        )?;
+        let tree = self
+            .git_repo
+            .find_tree(index.write_tree_to(&self.git_repo)?)?;
+
+        let pgp_sig = if let Ok(pgp_sig) = tag_value(patch, "commit-pgp-sig") {
+            if pgp_sig.is_empty() {
+                None
+            } else {
+                Some(pgp_sig)
+            }
+        } else {
+            None
+        };
+
+        let mut applied_oid = if let Some(pgp_sig) = pgp_sig {
+            let commit_buff = self.git_repo.commit_create_buffer(
+                &extract_sig_from_patch_tags(&patch.tags, "author")?,
+                &extract_sig_from_patch_tags(&patch.tags, "committer")?,
+                tag_value(patch, "description")?.as_str(),
+                &tree,
+                &[&parent_commit],
+            )?;
+            self.git_repo
+                .commit_signed(commit_buff.as_str().unwrap(), pgp_sig.as_str(), None)
+                .context("failed to create signed commit")?
+        } else {
+            self.git_repo
+                .commit(
+                    Some("HEAD"),
+                    &extract_sig_from_patch_tags(&patch.tags, "author")?,
+                    &extract_sig_from_patch_tags(&patch.tags, "committer")?,
+                    tag_value(patch, "description")?.as_str(),
+                    &tree,
+                    &[&parent_commit],
+                )
+                .context("failed to create unsigned commit")?
+        };
+        // I beleive this was added to address a bug where commit author / committer
+        // were identical when in a scenario when they should be different but I dont
+        // think we have a test case for it. surely we should be using the
+        // extract_sig_from_patch_tags outputs to address this?
+        if !applied_oid.to_string().eq(&commit_id) {
+            let commit = self.git_repo.find_commit(applied_oid)?;
+            applied_oid = commit
+                .amend(
+                    None,
+                    Some(&commit.author()),
+                    Some(&commit.committer()),
+                    None,
+                    None,
+                    None,
+                )
+                .context("cannot amend commit to produce new oid")?;
+        }
+        if !applied_oid.to_string().eq(&commit_id) {
+            bail!(
+                "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
+                applied_oid.to_string(),
+                get_commit_id_from_patch(patch)?,
+            );
+        }
+        Ok(applied_oid)
+    }
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>> {
         let revspec = self
             .git_repo
@@ -724,139 +809,6 @@ fn git_sig_to_tag_vec(sig: &git2::Signature) -> Vec<String> {
         format!("{}", sig.when().seconds()),
         format!("{}", sig.when().offset_minutes()),
     ]
-}
-
-fn apply_patch(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
-    // check parent commit matches head
-    if !git_repo
-        .get_head_commit()?
-        .to_string()
-        .eq(&tag_value(patch, "parent-commit")?)
-    {
-        bail!(
-            "patch parent ({}) doesnt match current head ({})",
-            tag_value(patch, "parent-commit")?,
-            git_repo.get_head_commit()?
-        );
-    }
-
-    let diff_from_patch = git2::Diff::from_buffer(patch.content.as_bytes()).unwrap();
-
-    let mut apply_opts = git2::ApplyOptions::new();
-    apply_opts.check(false);
-
-    git_repo.git_repo.apply(
-        &diff_from_patch,
-        git2::ApplyLocation::WorkDir,
-        Some(&mut apply_opts),
-    )?;
-    // stage and commit
-    let prev_oid = git_repo.git_repo.head().unwrap().peel_to_commit()?;
-
-    let mut index = git_repo.git_repo.index()?;
-    index.add_all(["."], git2::IndexAddOption::DEFAULT, None)?;
-    index.write()?;
-
-    let pgp_sig = if let Ok(pgp_sig) = tag_value(patch, "commit-pgp-sig") {
-        if pgp_sig.is_empty() {
-            None
-        } else {
-            Some(pgp_sig)
-        }
-    } else {
-        None
-    };
-
-    if let Some(pgp_sig) = pgp_sig {
-        let commit_buff = git_repo.git_repo.commit_create_buffer(
-            &extract_sig_from_patch_tags(&patch.tags, "author")?,
-            &extract_sig_from_patch_tags(&patch.tags, "committer")?,
-            tag_value(patch, "description")?.as_str(),
-            &git_repo.git_repo.find_tree(index.write_tree()?)?,
-            &[&prev_oid],
-        )?;
-        let gpg_commit_id = git_repo.git_repo.commit_signed(
-            commit_buff.as_str().unwrap(),
-            pgp_sig.as_str(),
-            None,
-        )?;
-        git_repo.git_repo.reset(
-            &git_repo.git_repo.find_object(gpg_commit_id, None)?,
-            git2::ResetType::Mixed,
-            None,
-        )?;
-        if gpg_commit_id
-            .to_string()
-            .eq(&get_commit_id_from_patch(patch)?)
-        {
-            return Ok(());
-        }
-    } else {
-        git_repo.git_repo.commit(
-            Some("HEAD"),
-            &extract_sig_from_patch_tags(&patch.tags, "author")?,
-            &extract_sig_from_patch_tags(&patch.tags, "committer")?,
-            tag_value(patch, "description")?.as_str(),
-            &git_repo.git_repo.find_tree(index.write_tree()?)?,
-            &[&prev_oid],
-        )?;
-    }
-    validate_patch_applied(git_repo, patch)
-}
-
-fn validate_patch_applied(git_repo: &Repo, patch: &nostr::Event) -> Result<()> {
-    // end of stage and commit
-    // check commit applied
-    if git_repo
-        .get_head_commit()?
-        .to_string()
-        .eq(&tag_value(patch, "parent-commit")?)
-    {
-        bail!("applying patch failed");
-    }
-
-    let mut revwalk = git_repo.git_repo.revwalk().context("revwalk error")?;
-    revwalk.push_head().context("revwalk.push_head")?;
-
-    for (i, oid) in revwalk.enumerate() {
-        if i == 0 {
-            let old_commit = git_repo
-                .git_repo
-                .find_commit(oid.context("cannot get oid in revwalk")?)
-                .context("cannot find newly added commit oid")?;
-            // create commit using amend which relects the original commit id
-            let updated_commit_oid = old_commit
-                .amend(
-                    None,
-                    Some(&old_commit.author()),
-                    Some(&old_commit.committer()),
-                    None,
-                    None,
-                    None,
-                )
-                .context("cannot amend commit to produce new oid")?;
-            // replace the commit with the wrong oid with the newly created one with the
-            // correct oid
-            git_repo
-                .git_repo
-                .head()
-                .context("cannot get head of git_repo")?
-                .set_target(updated_commit_oid, "ref commit with fix committer details")
-                .context("cannot update branch with fixed commit")?;
-
-            if !updated_commit_oid
-                .to_string()
-                .eq(&get_commit_id_from_patch(patch)?)
-            {
-                bail!(
-                    "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
-                    updated_commit_oid.to_string(),
-                    get_commit_id_from_patch(patch)?,
-                )
-            }
-        }
-    }
-    Ok(())
 }
 
 fn extract_sig_from_patch_tags<'a>(
@@ -1674,7 +1626,7 @@ mod tests {
         }
     }
 
-    mod apply_patch {
+    mod create_commit_from_patch {
 
         use test_utils::TEST_KEY_1_SIGNER;
 
@@ -1704,31 +1656,10 @@ mod tests {
             test_repo.populate()?;
             let git_repo = Repo::from_path(&test_repo.dir)?;
             println!("{:?}", &patch_event);
-            apply_patch(&git_repo, &patch_event)?;
+            git_repo.create_commit_from_patch(&patch_event)?;
             let commit_id = tag_value(&patch_event, "commit")?;
             // does commit with id exist?
             assert!(git_repo.does_commit_exist(&commit_id)?);
-            // is commit head
-            assert_eq!(
-                test_repo
-                    .git_repo
-                    .head()?
-                    .peel_to_commit()?
-                    .id()
-                    .to_string(),
-                commit_id,
-            );
-            // applied to current checked branch (head hasn't moved to specific commit)
-            assert_eq!(
-                test_repo
-                    .git_repo
-                    .head()?
-                    .shorthand()
-                    .context("an object without a shorthand is checked out")?
-                    .to_string(),
-                "main",
-            );
-
             Ok(())
         }
 
