@@ -31,6 +31,7 @@ use sub_commands::{
     list::{
         get_all_proposal_patch_events_from_cache, get_commit_id_from_patch,
         get_most_recent_patch_with_ancestors, get_proposals_and_revisions_from_cache, status_kinds,
+        tag_value,
     },
     send::{event_is_revision_root, event_to_cover_letter, send_events},
 };
@@ -104,7 +105,7 @@ async fn main() -> Result<()> {
                 println!("unsupported");
             }
             ["fetch", oid, refstr] => {
-                fetch(&git_repo, &repo_ref, &stdin, oid, refstr)?;
+                fetch(&git_repo, &repo_ref, &stdin, oid, refstr).await?;
             }
             ["push", refspec] => {
                 push(
@@ -431,14 +432,14 @@ async fn get_open_proposals(
     Ok(open_proposals)
 }
 
-fn fetch(
+async fn fetch(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     stdin: &Stdin,
     oid: &str,
     refstr: &str,
 ) -> Result<()> {
-    let fetch_batch = get_oids_from_fetch_batch(stdin, oid, refstr)?;
+    let mut fetch_batch = get_oids_from_fetch_batch(stdin, oid, refstr)?;
 
     let oids_from_git_servers = fetch_batch
         .iter()
@@ -465,20 +466,64 @@ fn fetch(
             )?;
             errors.insert(short_name.to_string(), e);
         } else {
-            term.flush()?;
-            println!();
-            return Ok(());
+            break;
         }
     }
+
+    if oids_from_git_servers
+        .iter()
+        .any(|oid| !git_repo.does_commit_exist(oid).unwrap())
+    {
+        bail!(
+            "failed to fetch objects in nostr state event from:\r\n{}",
+            errors
+                .iter()
+                .map(|(url, error)| format!("{url}: {error}"))
+                .collect::<Vec<String>>()
+                .join("\r\n")
+        );
+    }
+
+    let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+
+    fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/prs/"));
+
+    for (refstr, oid) in fetch_batch {
+        if let Some((_, (_, patches))) = open_proposals.iter().find(|(_, (proposal, _))| {
+            if let Ok(cl) = event_to_cover_letter(proposal) {
+                if let Ok(branch_name) = cl.get_branch_name() {
+                    branch_name.eq(&refstr.replace("refs/heads/", ""))
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }) {
+            if !git_repo.does_commit_exist(&oid)? {
+                let mut patches_ancestor_first = patches.clone();
+                patches_ancestor_first.reverse();
+                if git_repo.does_commit_exist(&tag_value(
+                    patches_ancestor_first.first().unwrap(),
+                    "parent-commit",
+                )?)? {
+                    for patch in &patches_ancestor_first {
+                        git_repo.create_commit_from_patch(patch)?;
+                    }
+                } else {
+                    term.write_line(
+                        format!("WARNING: cannot find parent commit for {refstr}").as_str(),
+                    )?;
+                }
+            }
+        } else {
+            term.write_line(format!("WARNING: cannot find proposal for {refstr}").as_str())?;
+        }
+    }
+
     term.flush()?;
-    bail!(
-        "failed to fetch objects in nostr state event from:\r\n{}",
-        errors
-            .iter()
-            .map(|(url, error)| format!("{url}: {error}"))
-            .collect::<Vec<String>>()
-            .join("\r\n")
-    );
+    println!();
+    Ok(())
 }
 
 fn fetch_from_git_server(
