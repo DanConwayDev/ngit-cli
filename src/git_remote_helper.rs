@@ -667,34 +667,43 @@ async fn push(
                     let (ahead, behind) = git_repo
                         .get_commits_ahead_behind(&tip_of_proposal_commit, &tip_of_pushed_branch)?;
                     if behind.is_empty() {
-                        let thread_id = if patches.len().eq(&1) {
-                            tip_patch.id()
+                        if [repo_ref.maintainers.clone(), vec![proposal.author()]]
+                            .concat()
+                            .contains(&user_ref.public_key)
+                        {
+                            let thread_id = if patches.len().eq(&1) {
+                                tip_patch.id()
+                            } else {
+                                get_event_root(tip_patch)?
+                            };
+                            let mut parent_patch = tip_patch.clone();
+                            for (i, commit) in ahead.iter().enumerate() {
+                                let new_patch = generate_patch_event(
+                                    git_repo,
+                                    &git_repo.get_root_commit()?,
+                                    commit,
+                                    Some(thread_id),
+                                    &signer,
+                                    repo_ref,
+                                    Some(parent_patch.id()),
+                                    Some((
+                                        (patches.len() + i + 1).try_into().unwrap(),
+                                        (patches.len() + ahead.len()).try_into().unwrap(),
+                                    )),
+                                    None,
+                                    &None,
+                                    &[],
+                                )
+                                .await
+                                .context("cannot make patch event from commit")?;
+                                events.push(new_patch.clone());
+                                parent_patch = new_patch;
+                            }
                         } else {
-                            get_event_root(tip_patch)?
-                        };
-                        // TODO do I have permission?
-                        let mut parent_patch = tip_patch.clone();
-                        for (i, commit) in ahead.iter().enumerate() {
-                            let new_patch = generate_patch_event(
-                                git_repo,
-                                &git_repo.get_root_commit()?,
-                                commit,
-                                Some(thread_id),
-                                &signer,
-                                repo_ref,
-                                Some(parent_patch.id()),
-                                Some((
-                                    (patches.len() + i + 1).try_into().unwrap(),
-                                    (patches.len() + ahead.len()).try_into().unwrap(),
-                                )),
-                                None,
-                                &None,
-                                &[],
-                            )
-                            .await
-                            .context("cannot make patch event from commit")?;
-                            events.push(new_patch.clone());
-                            parent_patch = new_patch;
+                            println!(
+                                "error {to} permission denied. you are not the proposal author or a repo maintainer"
+                            );
+                            rejected_proposal_refspecs.push(refspec.to_string());
                         }
                     } else {
                         // we shouldn't get here
@@ -712,7 +721,7 @@ async fn push(
                     }
                 }
             } else {
-                // TODO new proposal / proposal no longeer open
+                // TODO new proposal / proposal no longer open
                 // / we couldn't
             }
         }
