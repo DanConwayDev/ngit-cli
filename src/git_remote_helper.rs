@@ -641,7 +641,12 @@ async fn push(
 
     // TODO make async - check gitlib2 callbacks work async
     let git_config = git_repo.git_repo.config()?;
-    for (git_server_url, refspecs) in remote_refspecs {
+    for (git_server_url, remote_refspecs) in remote_refspecs {
+        let remote_refspecs = remote_refspecs
+            .iter()
+            .filter(|refspec| refspecs.contains(refspec))
+            .cloned()
+            .collect::<Vec<String>>();
         if !refspecs.is_empty() {
             if let Ok(mut git_server_remote) = git_repo.git_repo.remote_anonymous(&git_server_url) {
                 let auth = GitAuthenticator::default();
@@ -662,7 +667,7 @@ async fn push(
                     Ok(())
                 });
                 push_options.remote_callbacks(remote_callbacks);
-                let _ = git_server_remote.push(&refspecs, Some(&mut push_options));
+                let _ = git_server_remote.push(&remote_refspecs, Some(&mut push_options));
                 let _ = git_server_remote.disconnect();
             }
         }
