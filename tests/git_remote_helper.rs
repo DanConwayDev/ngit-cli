@@ -1734,7 +1734,7 @@ mod push {
 
         let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
 
-        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+        let cli_tester_handle = std::thread::spawn(move || -> Result<(String, String)> {
             let branch_name = get_proposal_branch_name_from_events(&events, FEATURE_BRANCH_NAME_1)?;
 
             let git_repo = clone_git_repo_with_nostr_url()?;
@@ -1750,15 +1750,13 @@ mod push {
             cli_expect_nostr_fetch(&mut p)?;
             p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
             p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
-            p.expect_end_with(
-                format!("   eb5d678..7de5e41  {branch_name} -> {branch_name}\r\n").as_str(),
-            )?;
+            let output = p.expect_end_eventually()?;
 
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
             }
 
-            Ok(())
+            Ok((output, branch_name))
         });
         // launch relays
         let _ = join!(
@@ -1770,10 +1768,13 @@ mod push {
             r57.listen_until_close(),
         );
 
-        cli_tester_handle.join().unwrap()?;
+        let (output, branch_name) = cli_tester_handle.join().unwrap()?;
 
-        // TODO source repo doesn't have proposal branch
-        // TODO
+        assert_eq!(
+            output,
+            format!("   eb5d678..7de5e41  {branch_name} -> {branch_name}\r\n").as_str(),
+        );
+
         let new_events = r55
             .events
             .iter()
