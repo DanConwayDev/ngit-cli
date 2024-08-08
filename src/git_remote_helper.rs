@@ -33,7 +33,10 @@ use sub_commands::{
         get_most_recent_patch_with_ancestors, get_proposals_and_revisions_from_cache, status_kinds,
         tag_value,
     },
-    send::{event_is_revision_root, event_to_cover_letter, generate_patch_event, send_events},
+    send::{
+        event_is_revision_root, event_to_cover_letter, generate_cover_letter_and_patch_events,
+        generate_patch_event, send_events,
+    },
 };
 
 #[cfg(not(test))]
@@ -656,21 +659,42 @@ async fn push(
             if let Some((_, (proposal, patches))) =
                 find_proposal_and_patches_by_branch_name(to, &open_proposals)
             {
-                if to.starts_with('+') {
-                    // TODO do force push - issue as revision
-                } else {
-                    let tip_patch = patches.first().unwrap();
-                    let tip_of_proposal = get_commit_id_from_patch(tip_patch)?;
-                    let tip_of_proposal_commit =
-                        git_repo.get_commit_or_tip_of_reference(&tip_of_proposal)?;
+                if [repo_ref.maintainers.clone(), vec![proposal.author()]]
+                    .concat()
+                    .contains(&user_ref.public_key)
+                {
                     let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-                    let (mut ahead, behind) = git_repo
-                        .get_commits_ahead_behind(&tip_of_proposal_commit, &tip_of_pushed_branch)?;
-                    if behind.is_empty() {
-                        if [repo_ref.maintainers.clone(), vec![proposal.author()]]
-                            .concat()
-                            .contains(&user_ref.public_key)
+                    if refspec.starts_with('+') {
+                        // force push
+                        let (_, main_tip) = git_repo.get_main_or_master_branch()?;
+                        let (mut ahead, _) =
+                            git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
+                        ahead.reverse();
+                        for patch in generate_cover_letter_and_patch_events(
+                            None,
+                            git_repo,
+                            &ahead,
+                            &signer,
+                            repo_ref,
+                            &Some(proposal.id().to_string()),
+                            &[],
+                        )
+                        .await?
                         {
+                            events.push(patch);
+                        }
+                    } else {
+                        // fast forward push
+                        let tip_patch = patches.first().unwrap();
+                        let tip_of_proposal = get_commit_id_from_patch(tip_patch)?;
+                        let tip_of_proposal_commit =
+                            git_repo.get_commit_or_tip_of_reference(&tip_of_proposal)?;
+
+                        let (mut ahead, behind) = git_repo.get_commits_ahead_behind(
+                            &tip_of_proposal_commit,
+                            &tip_of_pushed_branch,
+                        )?;
+                        if behind.is_empty() {
                             let thread_id = if let Ok(root_event_id) = get_event_root(tip_patch) {
                                 root_event_id
                             } else {
@@ -702,25 +726,25 @@ async fn push(
                                 parent_patch = new_patch;
                             }
                         } else {
+                            // we shouldn't get here
+                            term.write_line(
+                                format!(
+                                    "WARNING: failed to push {from} as nostr proposal. Try and force push ",
+                                )
+                                .as_str(),
+                            )
+                            .unwrap();
                             println!(
-                                "error {to} permission denied. you are not the proposal author or a repo maintainer"
+                                "error {to} cannot fastforward as newer patches found on proposal"
                             );
                             rejected_proposal_refspecs.push(refspec.to_string());
                         }
-                    } else {
-                        // we shouldn't get here
-                        term.write_line(
-                            format!(
-                                "WARNING: failed to push {from} as nostr proposal. Try and force push ",
-                            )
-                            .as_str(),
-                        )
-                        .unwrap();
-                        println!(
-                            "error {to} cannot fastforward as newer patches found on proposal"
-                        );
-                        rejected_proposal_refspecs.push(refspec.to_string());
                     }
+                } else {
+                    println!(
+                        "error {to} permission denied. you are not the proposal author or a repo maintainer"
+                    );
+                    rejected_proposal_refspecs.push(refspec.to_string());
                 }
             } else {
                 // TODO new proposal / proposal no longer open
@@ -1046,7 +1070,14 @@ fn refspec_to_from_to(refspec: &str) -> Result<(&str, &str)> {
         );
     }
     let parts = refspec.split(':').collect::<Vec<&str>>();
-    Ok((parts.first().unwrap(), parts.get(1).unwrap()))
+    Ok((
+        if parts.first().unwrap().starts_with('+') {
+            &parts.first().unwrap()[1..]
+        } else {
+            parts.first().unwrap()
+        },
+        parts.get(1).unwrap(),
+    ))
 }
 
 fn refspec_remote_ref_name(
@@ -1061,7 +1092,8 @@ fn refspec_remote_ref_name(
     Ok(format!(
         "refs/remotes/{}/{}",
         nostr_remote.name().context("remote should have a name")?,
-        to.replace("refs/heads/", ""), // TODO only replace if it begins with this
+        to.replace("refs/heads/", ""), /* TODO only replace if it begins with this
+                                        * TODO what about tags? */
     ))
 }
 
@@ -1287,6 +1319,16 @@ mod tests {
                 );
                 Ok(())
             }
+        }
+    }
+
+    mod refspec_to_from_to {
+        use super::*;
+
+        #[test]
+        fn trailing_plus_stripped() {
+            let (from, _) = refspec_to_from_to("+testing:testingb").unwrap();
+            assert_eq!(from, "testing");
         }
     }
 }

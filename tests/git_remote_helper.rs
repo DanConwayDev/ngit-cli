@@ -1856,4 +1856,157 @@ mod push {
 
         Ok(())
     }
+
+    #[tokio::test]
+    #[serial]
+    async fn force_push_creates_proposal_revision() -> Result<()> {
+        let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
+        let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+
+        let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+            Relay::new(8051, None, None),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
+            Relay::new(8055, None, None),
+            Relay::new(8056, None, None),
+            Relay::new(8057, None, None),
+        );
+        r51.events = events.clone();
+        r55.events = events.clone();
+
+        let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
+
+        let cli_tester_handle = std::thread::spawn(move || -> Result<(String, String)> {
+            let branch_name = get_proposal_branch_name_from_events(&events, FEATURE_BRANCH_NAME_1)?;
+
+            let git_repo = clone_git_repo_with_nostr_url()?;
+            let oid = git_repo.checkout_remote_branch(&branch_name)?;
+            // remove last commit
+            git_repo.checkout("main")?;
+            git_repo.git_repo.branch(
+                &branch_name,
+                &git_repo.git_repo.find_commit(oid)?.parent(0)?,
+                true,
+            )?;
+            git_repo.checkout(&branch_name)?;
+
+            std::fs::write(git_repo.dir.join("new.md"), "some content")?;
+            git_repo.stage_and_commit("new.md")?;
+
+            std::fs::write(git_repo.dir.join("new2.md"), "some content")?;
+            git_repo.stage_and_commit("new2.md")?;
+
+            let mut p =
+                CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push", "--force"]);
+            cli_expect_nostr_fetch(&mut p)?;
+            p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+            p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+            let output = p.expect_end_eventually()?;
+
+            for p in [51, 52, 53, 55, 56, 57] {
+                relay::shutdown_relay(8000 + p)?;
+            }
+
+            Ok((output, branch_name))
+        });
+        // launch relays
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+            r57.listen_until_close(),
+        );
+
+        let (output, branch_name) = cli_tester_handle.join().unwrap()?;
+
+        assert_eq!(
+            output,
+            format!(" + eb5d678...8a296c8 {branch_name} -> {branch_name} (forced update)\r\n")
+                .as_str(),
+        );
+
+        let new_events = r55
+            .events
+            .iter()
+            .cloned()
+            .collect::<HashSet<Event>>()
+            .difference(&before)
+            .cloned()
+            .collect::<Vec<Event>>();
+        assert_eq!(new_events.len(), 3);
+
+        let proposal = r55
+            .events
+            .iter()
+            .find(|e| {
+                e.iter_tags()
+                    .find(|t| t.as_vec()[0].eq("branch-name"))
+                    .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
+            })
+            .unwrap();
+
+        let revision_root_patch = new_events
+            .iter()
+            .find(|e| e.iter_tags().any(|t| t.as_vec()[1].eq("revision-root")))
+            .unwrap();
+
+        assert_eq!(
+            proposal.id().to_string(),
+            revision_root_patch
+                .tags
+                .iter()
+                .find(|t| t.is_reply())
+                .unwrap()
+                .as_vec()[1],
+            "revision root patch replies to original proposal"
+        );
+
+        assert!(
+            revision_root_patch.content.contains("[PATCH 1/3]"),
+            "revision root labeled with    [PATCH 1/3]"
+        );
+
+        let second_patch = new_events
+            .iter()
+            .find(|e| e.content.contains("new.md"))
+            .unwrap();
+        let third_patch = new_events
+            .iter()
+            .find(|e| e.content.contains("new2.md"))
+            .unwrap();
+        assert!(
+            second_patch.content.contains("[PATCH 2/3]"),
+            "second patch labeled with     [PATCH 2/3]"
+        );
+        assert!(
+            third_patch.content.contains("[PATCH 3/3]"),
+            "third patch labeled with     [PATCH 3/3]"
+        );
+
+        assert_eq!(
+            revision_root_patch.id().to_string(),
+            second_patch
+                .tags
+                .iter()
+                .find(|t| t.is_root())
+                .unwrap()
+                .as_vec()[1],
+            "second patch sets revision id as root"
+        );
+
+        assert_eq!(
+            second_patch.id().to_string(),
+            third_patch
+                .tags
+                .iter()
+                .find(|t| t.is_reply())
+                .unwrap()
+                .as_vec()[1],
+            "third patch replies to the second new patch"
+        );
+
+        Ok(())
+    }
 }

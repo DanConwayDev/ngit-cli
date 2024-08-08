@@ -274,12 +274,11 @@ impl GitTestRepo {
         Ok(())
     }
 
-    pub fn checkout_remote_branch(&self, branch_name: &str) -> Result<()> {
+    pub fn checkout_remote_branch(&self, branch_name: &str) -> Result<Oid> {
         self.checkout(&format!("remotes/origin/{branch_name}"))?;
         let mut branch = self.create_branch(branch_name)?;
         branch.set_upstream(Some(&format!("origin/{branch_name}")))?;
-        self.checkout(branch_name)?;
-        Ok(())
+        self.checkout(branch_name)
     }
 }
 
