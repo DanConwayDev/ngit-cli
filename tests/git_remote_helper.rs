@@ -1965,7 +1965,7 @@ mod push {
 
         assert!(
             revision_root_patch.content.contains("[PATCH 1/3]"),
-            "revision root labeled with    [PATCH 1/3]"
+            "revision root labeled with    [PATCH 1/3] event: {revision_root_patch:?}",
         );
 
         let second_patch = new_events

@@ -675,7 +675,7 @@ pub async fn generate_cover_letter_and_patch_events(
                 signer,
                 repo_ref,
                 events.last().map(nostr::Event::id),
-                if events.is_empty() {
+                if events.is_empty() && commits.len().eq(&1) {
                     None
                 } else {
                     Some(((i + 1).try_into()?, commits.len().try_into()?))
