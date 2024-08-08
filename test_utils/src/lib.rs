@@ -740,6 +740,18 @@ impl CliTester {
         }
     }
 
+    pub fn new_git_with_remote_helper_from_dir<I, S>(dir: &PathBuf, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Self {
+            rexpect_session: git_with_remote_helper_rexpect_with_from_dir(dir, args, 3000)
+                .expect("rexpect to spawn new process"),
+            formatter: ColorfulTheme::default(),
+        }
+    }
+
     pub fn restart_with<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -985,6 +997,55 @@ pub fn remote_helper_rexpect_with_from_dir(
             strip_ansi_escape_codes: true,
         },
     )
+}
+
+pub fn git_with_remote_helper_rexpect_with_from_dir<I, S>(
+    dir: &PathBuf,
+    args: I,
+    timeout_ms: u64,
+) -> Result<PtySession>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let git_exec_dir = dir.parent().unwrap().join("tmpgit-git-exec-path");
+    if !git_exec_dir.exists() {
+        std::fs::create_dir_all(&git_exec_dir)?;
+        let src = PathBuf::from(
+            String::from_utf8_lossy(
+                &std::process::Command::new("git")
+                    .arg("--exec-path")
+                    .output()?
+                    .stdout,
+            )
+            .trim()
+            .to_string(),
+        );
+        for entry in std::fs::read_dir(src)? {
+            let src_path = entry?.path();
+            std::fs::copy(&src_path, &git_exec_dir.join(src_path.file_name().unwrap()))?;
+        }
+    }
+    std::fs::copy(
+        assert_cmd::cargo::cargo_bin("git-remote-nostr"),
+        git_exec_dir.join("git-remote-nostr"),
+    )?;
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.env("GIT_EXEC_PATH", git_exec_dir);
+    cmd.env("NGITTEST", "TRUE");
+    cmd.env("RUST_BACKTRACE", "0");
+    cmd.current_dir(dir);
+    cmd.args(args);
+    // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
+    rexpect::session::spawn_with_options(
+        cmd,
+        Options {
+            timeout_ms: Some(timeout_ms),
+            strip_ansi_escape_codes: true,
+        },
+    )
+    .context("spawning failed")
 }
 
 /** copied from client.rs */
