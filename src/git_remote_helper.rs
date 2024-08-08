@@ -671,10 +671,11 @@ async fn push(
                             .concat()
                             .contains(&user_ref.public_key)
                         {
-                            let thread_id = if patches.len().eq(&1) {
-                                tip_patch.id()
+                            let thread_id = if let Ok(root_event_id) = get_event_root(tip_patch) {
+                                root_event_id
                             } else {
-                                get_event_root(tip_patch)?
+                                // tip patch is the root proposal
+                                tip_patch.id()
                             };
                             let mut parent_patch = tip_patch.clone();
                             ahead.reverse();
