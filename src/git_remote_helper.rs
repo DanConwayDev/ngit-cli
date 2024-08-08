@@ -664,7 +664,7 @@ async fn push(
                     let tip_of_proposal_commit =
                         git_repo.get_commit_or_tip_of_reference(&tip_of_proposal)?;
                     let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-                    let (ahead, behind) = git_repo
+                    let (mut ahead, behind) = git_repo
                         .get_commits_ahead_behind(&tip_of_proposal_commit, &tip_of_pushed_branch)?;
                     if behind.is_empty() {
                         if [repo_ref.maintainers.clone(), vec![proposal.author()]]
@@ -677,6 +677,7 @@ async fn push(
                                 get_event_root(tip_patch)?
                             };
                             let mut parent_patch = tip_patch.clone();
+                            ahead.reverse();
                             for (i, commit) in ahead.iter().enumerate() {
                                 let new_patch = generate_patch_event(
                                     git_repo,
