@@ -558,7 +558,7 @@ impl RepoActions for Repo {
 
         // let mut apply_opts = git2::ApplyOptions::new();
         // apply_opts.check(false);
-
+        let mut existing_index = self.git_repo.index()?;
         let mut index = self.git_repo.apply_to_tree(
             &parent_tree,
             &git2::Diff::from_buffer(patch.content.as_bytes())?,
@@ -579,29 +579,23 @@ impl RepoActions for Repo {
             None
         };
 
-        let mut applied_oid = if let Some(pgp_sig) = pgp_sig {
-            let commit_buff = self.git_repo.commit_create_buffer(
-                &extract_sig_from_patch_tags(&patch.tags, "author")?,
-                &extract_sig_from_patch_tags(&patch.tags, "committer")?,
-                tag_value(patch, "description")?.as_str(),
-                &tree,
-                &[&parent_commit],
-            )?;
-            self.git_repo
-                .commit_signed(commit_buff.as_str().unwrap(), pgp_sig.as_str(), None)
-                .context("failed to create signed commit")?
-        } else {
-            self.git_repo
-                .commit(
-                    Some("HEAD"),
-                    &extract_sig_from_patch_tags(&patch.tags, "author")?,
-                    &extract_sig_from_patch_tags(&patch.tags, "committer")?,
-                    tag_value(patch, "description")?.as_str(),
-                    &tree,
-                    &[&parent_commit],
-                )
-                .context("failed to create unsigned commit")?
-        };
+        let commit_buff = self.git_repo.commit_create_buffer(
+            &extract_sig_from_patch_tags(&patch.tags, "author")?,
+            &extract_sig_from_patch_tags(&patch.tags, "committer")?,
+            tag_value(patch, "description")?.as_str(),
+            &tree,
+            &[&parent_commit],
+        )?;
+
+        let mut applied_oid = self
+            .git_repo
+            .commit_signed(
+                commit_buff.as_str().unwrap(),
+                pgp_sig.unwrap_or(String::new()).as_str(),
+                None,
+            )
+            .context("failed to create signed commit")?;
+
         // I beleive this was added to address a bug where commit author / committer
         // were identical when in a scenario when they should be different but I dont
         // think we have a test case for it. surely we should be using the
@@ -626,6 +620,7 @@ impl RepoActions for Repo {
                 get_commit_id_from_patch(patch)?,
             );
         }
+        self.git_repo.set_index(&mut existing_index)?;
         Ok(applied_oid)
     }
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>> {
