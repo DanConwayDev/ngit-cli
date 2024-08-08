@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, env::current_dir};
 
 use anyhow::{Context, Result};
 use futures::join;
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{Kind, ToBech32};
+use nostr_sdk::{secp256k1::rand, Kind, ToBech32};
 use relay::Relay;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
@@ -39,6 +39,21 @@ fn prep_git_repo() -> Result<GitTestRepo> {
     Ok(test_repo)
 }
 
+fn clone_git_repo_with_nostr_url() -> Result<GitTestRepo> {
+    let path = current_dir()?.join(format!("tmpgit-clone{}", rand::random::<u64>()));
+    std::fs::create_dir(path.clone())?;
+    CliTester::new_git_with_remote_helper_from_dir(&path, ["clone", &get_nostr_remote_url()?, "."])
+        .expect_end_eventually_and_print()?;
+    let test_repo = GitTestRepo::open(&path)?;
+    let mut config = test_repo
+        .git_repo
+        .config()
+        .context("cannot open git config")?;
+    config.set_str("nostr.nsec", TEST_KEY_1_NSEC)?;
+    config.set_str("nostr.npub", TEST_KEY_1_NPUB)?;
+    Ok(test_repo)
+}
+
 fn prep_git_repo_minus_1_commit() -> Result<GitTestRepo> {
     let test_repo = GitTestRepo::without_repo_in_git_config();
     let mut config = test_repo
@@ -58,10 +73,15 @@ fn cli_tester(git_repo: &GitTestRepo) -> CliTester {
 
 fn cli_tester_after_fetch(git_repo: &GitTestRepo) -> Result<CliTester> {
     let mut p = cli_tester(git_repo);
+    cli_expect_nostr_fetch(&mut p)?;
+    Ok(p)
+}
+
+fn cli_expect_nostr_fetch(p: &mut CliTester) -> Result<()> {
     p.expect("nostr: fetching...\r\n")?;
     p.expect_eventually("updates")?; // some updates
     p.expect_eventually("\r\n")?;
-    Ok(p)
+    Ok(())
 }
 
 /// git runs `list for-push` before `push`. in `push` we use the git server
@@ -792,6 +812,8 @@ mod fetch {
 }
 
 mod push {
+
+    use nostr_sdk::Event;
 
     use super::*;
 
@@ -1688,6 +1710,147 @@ mod push {
         assert_eq!(
             second_source_git_repo.get_tip_of_local_branch("main")?,
             main_commit_id
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn push_2_commits_to_existing_proposal() -> Result<()> {
+        let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
+        let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+
+        let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+            Relay::new(8051, None, None),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
+            Relay::new(8055, None, None),
+            Relay::new(8056, None, None),
+            Relay::new(8057, None, None),
+        );
+        r51.events = events.clone();
+        r55.events = events.clone();
+
+        let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
+
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let branch_name = get_proposal_branch_name_from_events(&events, FEATURE_BRANCH_NAME_1)?;
+
+            let git_repo = clone_git_repo_with_nostr_url()?;
+            git_repo.checkout_remote_branch(&branch_name)?;
+
+            std::fs::write(git_repo.dir.join("new.md"), "some content")?;
+            git_repo.stage_and_commit("new.md")?;
+
+            std::fs::write(git_repo.dir.join("new2.md"), "some content")?;
+            git_repo.stage_and_commit("new2.md")?;
+
+            let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
+            cli_expect_nostr_fetch(&mut p)?;
+            p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+            p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+            p.expect_end_with(
+                format!("   eb5d678..7de5e41  {branch_name} -> {branch_name}\r\n").as_str(),
+            )?;
+
+            for p in [51, 52, 53, 55, 56, 57] {
+                relay::shutdown_relay(8000 + p)?;
+            }
+
+            Ok(())
+        });
+        // launch relays
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+            r57.listen_until_close(),
+        );
+
+        cli_tester_handle.join().unwrap()?;
+
+        // TODO source repo doesn't have proposal branch
+        // TODO
+        let new_events = r55
+            .events
+            .iter()
+            .cloned()
+            .collect::<HashSet<Event>>()
+            .difference(&before)
+            .cloned()
+            .collect::<Vec<Event>>();
+        assert_eq!(new_events.len(), 2);
+        let first_new_patch = new_events
+            .iter()
+            .find(|e| e.content.contains("new.md"))
+            .unwrap();
+        let second_new_patch = new_events
+            .iter()
+            .find(|e| e.content.contains("new2.md"))
+            .unwrap();
+        assert!(
+            first_new_patch.content.contains("[PATCH 3/4]"),
+            "first patch labeled with         [PATCH 3/4]"
+        );
+        assert!(
+            second_new_patch.content.contains("[PATCH 4/4]"),
+            "second patch labeled with         [PATCH 4/4]"
+        );
+
+        let proposal = r55
+            .events
+            .iter()
+            .find(|e| {
+                e.iter_tags()
+                    .find(|t| t.as_vec()[0].eq("branch-name"))
+                    .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
+            })
+            .unwrap();
+
+        assert_eq!(
+            proposal.id().to_string(),
+            first_new_patch
+                .tags
+                .iter()
+                .find(|t| t.is_root())
+                .unwrap()
+                .as_vec()[1],
+            "first patch sets proposal id as root"
+        );
+
+        assert_eq!(
+            first_new_patch.id().to_string(),
+            second_new_patch
+                .tags
+                .iter()
+                .find(|t| t.is_reply())
+                .unwrap()
+                .as_vec()[1],
+            "second new patch replies to the first new patch"
+        );
+
+        let previous_proposal_tip_event = r55
+            .events
+            .iter()
+            .find(|e| {
+                e.iter_tags()
+                    .any(|t| t.as_vec()[1].eq(&proposal.id().to_string()))
+                    && e.content.contains("[PATCH 2/2]")
+            })
+            .unwrap();
+
+        assert_eq!(
+            previous_proposal_tip_event.id().to_string(),
+            first_new_patch
+                .tags
+                .iter()
+                .find(|t| t.is_reply())
+                .unwrap()
+                .as_vec()[1],
+            "first patch replies to the previous tip of proposal"
         );
 
         Ok(())

@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use git2::{Oid, RepositoryInitOptions, Signature, Time};
+use git2::{Branch, Oid, RepositoryInitOptions, Signature, Time};
 use nostr::nips::nip01::Coordinate;
 use nostr_sdk::{Kind, ToBech32};
 
@@ -214,10 +214,10 @@ impl GitTestRepo {
         Ok(oid)
     }
 
-    pub fn create_branch(&self, branch_name: &str) -> Result<()> {
+    pub fn create_branch(&self, branch_name: &str) -> Result<Branch> {
         self.git_repo
-            .branch(branch_name, &self.git_repo.head()?.peel_to_commit()?, false)?;
-        Ok(())
+            .branch(branch_name, &self.git_repo.head()?.peel_to_commit()?, false)
+            .context("could not create branch")
     }
 
     pub fn checkout(&self, ref_name: &str) -> Result<Oid> {
@@ -271,6 +271,14 @@ impl GitTestRepo {
 
     pub fn add_remote(&self, name: &str, url: &str) -> Result<()> {
         self.git_repo.remote(name, url)?;
+        Ok(())
+    }
+
+    pub fn checkout_remote_branch(&self, branch_name: &str) -> Result<()> {
+        self.checkout(&format!("remotes/origin/{branch_name}"))?;
+        let mut branch = self.create_branch(branch_name)?;
+        branch.set_upstream(Some(&format!("origin/{branch_name}")))?;
+        self.checkout(branch_name)?;
         Ok(())
     }
 }
