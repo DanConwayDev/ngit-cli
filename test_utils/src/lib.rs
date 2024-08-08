@@ -705,7 +705,7 @@ impl CliTester {
         S: AsRef<OsStr>,
     {
         Self {
-            rexpect_session: rexpect_with(args, 3000).expect("rexpect to spawn new process"),
+            rexpect_session: rexpect_with(args, 4000).expect("rexpect to spawn new process"),
             formatter: ColorfulTheme::default(),
         }
     }
@@ -715,7 +715,7 @@ impl CliTester {
         S: AsRef<OsStr>,
     {
         Self {
-            rexpect_session: rexpect_with_from_dir(dir, args, 3000)
+            rexpect_session: rexpect_with_from_dir(dir, args, 4000)
                 .expect("rexpect to spawn new process"),
             formatter: ColorfulTheme::default(),
         }
@@ -734,7 +734,7 @@ impl CliTester {
 
     pub fn new_remote_helper_from_dir(dir: &PathBuf, nostr_remote_url: &str) -> Self {
         Self {
-            rexpect_session: remote_helper_rexpect_with_from_dir(dir, nostr_remote_url, 3000)
+            rexpect_session: remote_helper_rexpect_with_from_dir(dir, nostr_remote_url, 4000)
                 .expect("rexpect to spawn new process"),
             formatter: ColorfulTheme::default(),
         }
@@ -746,7 +746,7 @@ impl CliTester {
         S: AsRef<OsStr>,
     {
         Self {
-            rexpect_session: git_with_remote_helper_rexpect_with_from_dir(dir, args, 3000)
+            rexpect_session: git_with_remote_helper_rexpect_with_from_dir(dir, args, 4000)
                 .expect("rexpect to spawn new process"),
             formatter: ColorfulTheme::default(),
         }
@@ -761,7 +761,7 @@ impl CliTester {
             .process
             .exit()
             .expect("process to exit");
-        self.rexpect_session = rexpect_with(args, 3000).expect("rexpect to spawn new process");
+        self.rexpect_session = rexpect_with(args, 4000).expect("rexpect to spawn new process");
         self
     }
 
