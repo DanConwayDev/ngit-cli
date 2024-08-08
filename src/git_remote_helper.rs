@@ -619,7 +619,7 @@ async fn push(
 
     let mut events = vec![];
 
-    if refspecs.is_empty() && proposal_refspecs.is_empty() {
+    if git_server_refspecs.is_empty() && proposal_refspecs.is_empty() {
         // all refspecs rejected
         println!();
         return Ok(());
@@ -637,7 +637,7 @@ async fn push(
     )
     .await?;
 
-    if !refspecs.is_empty() {
+    if !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, &git_server_refspecs)?;
 
         let new_repo_state =
