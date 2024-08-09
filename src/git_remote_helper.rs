@@ -458,6 +458,35 @@ fn get_curent_user(git_repo: &Repo) -> Result<Option<PublicKey>> {
     )
 }
 
+async fn get_all_proposals(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+) -> Result<HashMap<EventId, (Event, Vec<Event>)>> {
+    let git_repo_path = git_repo.get_path()?;
+    let proposals: Vec<nostr::Event> =
+        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
+            .await?
+            .iter()
+            .filter(|e| !event_is_revision_root(e))
+            .cloned()
+            .collect();
+
+    let mut all_proposals = HashMap::new();
+
+    for proposal in proposals {
+        if let Ok(commits_events) =
+            get_all_proposal_patch_events_from_cache(git_repo_path, repo_ref, &proposal.id).await
+        {
+            if let Ok(most_recent_proposal_patch_chain) =
+                get_most_recent_patch_with_ancestors(commits_events.clone())
+            {
+                all_proposals.insert(proposal.id(), (proposal, most_recent_proposal_patch_chain));
+            }
+        }
+    }
+    Ok(all_proposals)
+}
+
 async fn fetch(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -688,7 +717,7 @@ async fn push(
 
     let mut rejected_proposal_refspecs = vec![];
     if !proposal_refspecs.is_empty() {
-        let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+        let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
         let current_user = get_curent_user(git_repo)?;
 
         for refspec in &proposal_refspecs {
@@ -696,7 +725,7 @@ async fn push(
             let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
 
             if let Some((_, (proposal, patches))) =
-                find_proposal_and_patches_by_branch_name(to, &open_proposals, &current_user)
+                find_proposal_and_patches_by_branch_name(to, &all_proposals, &current_user)
             {
                 if [repo_ref.maintainers.clone(), vec![proposal.author()]]
                     .concat()
