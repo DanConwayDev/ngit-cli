@@ -287,10 +287,19 @@ async fn list(
     state.retain(|k, _| !k.starts_with("refs/heads/prs/"));
 
     let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
-
+    let current_user = get_curent_user(git_repo)?;
     for (_, (proposal, patches)) in open_proposals {
         if let Ok(cl) = event_to_cover_letter(&proposal) {
-            if let Ok(branch_name) = cl.get_branch_name() {
+            if let Ok(mut branch_name) = cl.get_branch_name() {
+                branch_name = if let Some(public_key) = current_user {
+                    if proposal.author().eq(&public_key) {
+                        cl.branch_name.to_string()
+                    } else {
+                        branch_name
+                    }
+                } else {
+                    branch_name
+                };
                 if let Some(patch) = patches.first() {
                     // TODO this isn't resilient because the commit id stated may not be correct
                     // we will need to check whether the commit id exists in the repo or apply the
@@ -435,6 +444,20 @@ async fn get_open_proposals(
     Ok(open_proposals)
 }
 
+fn get_curent_user(git_repo: &Repo) -> Result<Option<PublicKey>> {
+    Ok(
+        if let Some(npub) = git_repo.get_git_config_item("nostr.npub", None)? {
+            if let Ok(public_key) = PublicKey::parse(npub) {
+                Some(public_key)
+            } else {
+                None
+            }
+        } else {
+            None
+        },
+    )
+}
+
 async fn fetch(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -487,32 +510,36 @@ async fn fetch(
         );
     }
 
-    let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
-
     fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/prs/"));
 
-    for (refstr, oid) in fetch_batch {
-        if let Some((_, (_, patches))) =
-            find_proposal_and_patches_by_branch_name(&refstr, &open_proposals)
-        {
-            if !git_repo.does_commit_exist(&oid)? {
-                let mut patches_ancestor_first = patches.clone();
-                patches_ancestor_first.reverse();
-                if git_repo.does_commit_exist(&tag_value(
-                    patches_ancestor_first.first().unwrap(),
-                    "parent-commit",
-                )?)? {
-                    for patch in &patches_ancestor_first {
-                        git_repo.create_commit_from_patch(patch)?;
+    if !fetch_batch.is_empty() {
+        let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+
+        let current_user = get_curent_user(git_repo)?;
+
+        for (refstr, oid) in fetch_batch {
+            if let Some((_, (_, patches))) =
+                find_proposal_and_patches_by_branch_name(&refstr, &open_proposals, &current_user)
+            {
+                if !git_repo.does_commit_exist(&oid)? {
+                    let mut patches_ancestor_first = patches.clone();
+                    patches_ancestor_first.reverse();
+                    if git_repo.does_commit_exist(&tag_value(
+                        patches_ancestor_first.first().unwrap(),
+                        "parent-commit",
+                    )?)? {
+                        for patch in &patches_ancestor_first {
+                            git_repo.create_commit_from_patch(patch)?;
+                        }
+                    } else {
+                        term.write_line(
+                            format!("WARNING: cannot find parent commit for {refstr}").as_str(),
+                        )?;
                     }
-                } else {
-                    term.write_line(
-                        format!("WARNING: cannot find parent commit for {refstr}").as_str(),
-                    )?;
                 }
+            } else {
+                term.write_line(format!("WARNING: cannot find proposal for {refstr}").as_str())?;
             }
-        } else {
-            term.write_line(format!("WARNING: cannot find proposal for {refstr}").as_str())?;
         }
     }
 
@@ -524,10 +551,20 @@ async fn fetch(
 fn find_proposal_and_patches_by_branch_name<'a>(
     refstr: &'a str,
     open_proposals: &'a HashMap<EventId, (Event, Vec<Event>)>,
+    current_user: &Option<PublicKey>,
 ) -> Option<(&'a EventId, &'a (Event, Vec<Event>))> {
     open_proposals.iter().find(|(_, (proposal, _))| {
         if let Ok(cl) = event_to_cover_letter(proposal) {
-            if let Ok(branch_name) = cl.get_branch_name() {
+            if let Ok(mut branch_name) = cl.get_branch_name() {
+                branch_name = if let Some(public_key) = current_user {
+                    if proposal.author().eq(public_key) {
+                        cl.branch_name.to_string()
+                    } else {
+                        branch_name
+                    }
+                } else {
+                    branch_name
+                };
                 branch_name.eq(&refstr.replace("refs/heads/", ""))
             } else {
                 false
@@ -652,18 +689,19 @@ async fn push(
     let mut rejected_proposal_refspecs = vec![];
     if !proposal_refspecs.is_empty() {
         let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+        let current_user = get_curent_user(git_repo)?;
 
         for refspec in &proposal_refspecs {
             let (from, to) = refspec_to_from_to(refspec).unwrap();
+            let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
 
             if let Some((_, (proposal, patches))) =
-                find_proposal_and_patches_by_branch_name(to, &open_proposals)
+                find_proposal_and_patches_by_branch_name(to, &open_proposals, &current_user)
             {
                 if [repo_ref.maintainers.clone(), vec![proposal.author()]]
                     .concat()
                     .contains(&user_ref.public_key)
                 {
-                    let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
                     if refspec.starts_with('+') {
                         // force push
                         let (_, main_tip) = git_repo.get_main_or_master_branch()?;

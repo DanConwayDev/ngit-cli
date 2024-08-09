@@ -28,15 +28,20 @@ fn get_nostr_remote_url() -> Result<String> {
 
 fn prep_git_repo() -> Result<GitTestRepo> {
     let test_repo = GitTestRepo::without_repo_in_git_config();
+    set_git_nostr_login_config(&test_repo)?;
+    test_repo.add_remote(NOSTR_REMOTE_NAME, &get_nostr_remote_url()?)?;
+    test_repo.populate()?;
+    Ok(test_repo)
+}
+
+fn set_git_nostr_login_config(test_repo: &GitTestRepo) -> Result<()> {
     let mut config = test_repo
         .git_repo
         .config()
         .context("cannot open git config")?;
-    config.set_str("nostr.nsec", TEST_KEY_1_NSEC)?;
-    config.set_str("nostr.npub", TEST_KEY_1_NPUB)?;
-    test_repo.add_remote(NOSTR_REMOTE_NAME, &get_nostr_remote_url()?)?;
-    test_repo.populate()?;
-    Ok(test_repo)
+    config.set_str("nostr.nsec", TEST_KEY_2_NSEC)?;
+    config.set_str("nostr.npub", TEST_KEY_2_NPUB)?;
+    Ok(())
 }
 
 fn clone_git_repo_with_nostr_url() -> Result<GitTestRepo> {
@@ -45,23 +50,13 @@ fn clone_git_repo_with_nostr_url() -> Result<GitTestRepo> {
     CliTester::new_git_with_remote_helper_from_dir(&path, ["clone", &get_nostr_remote_url()?, "."])
         .expect_end_eventually_and_print()?;
     let test_repo = GitTestRepo::open(&path)?;
-    let mut config = test_repo
-        .git_repo
-        .config()
-        .context("cannot open git config")?;
-    config.set_str("nostr.nsec", TEST_KEY_1_NSEC)?;
-    config.set_str("nostr.npub", TEST_KEY_1_NPUB)?;
+    set_git_nostr_login_config(&test_repo)?;
     Ok(test_repo)
 }
 
 fn prep_git_repo_minus_1_commit() -> Result<GitTestRepo> {
     let test_repo = GitTestRepo::without_repo_in_git_config();
-    let mut config = test_repo
-        .git_repo
-        .config()
-        .context("cannot open git config")?;
-    config.set_str("nostr.nsec", TEST_KEY_1_NSEC)?;
-    config.set_str("nostr.npub", TEST_KEY_1_NPUB)?;
+    set_git_nostr_login_config(&test_repo)?;
     test_repo.add_remote(NOSTR_REMOTE_NAME, &get_nostr_remote_url()?)?;
     test_repo.populate_minus_1()?;
     Ok(test_repo)
