@@ -814,8 +814,24 @@ async fn push(
                     rejected_proposal_refspecs.push(refspec.to_string());
                 }
             } else {
-                // TODO new proposal / proposal no longer open
-                // / we couldn't
+                // TODO new proposal / couldn't find exisiting proposal
+                let (_, main_tip) = git_repo.get_main_or_master_branch()?;
+                let (mut ahead, _) =
+                    git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
+                ahead.reverse();
+                for patch in generate_cover_letter_and_patch_events(
+                    None,
+                    git_repo,
+                    &ahead,
+                    &signer,
+                    repo_ref,
+                    &None,
+                    &[],
+                )
+                .await?
+                {
+                    events.push(patch);
+                }
             }
         }
     }

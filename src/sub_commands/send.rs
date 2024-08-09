@@ -648,7 +648,11 @@ pub async fn generate_cover_letter_and_patch_events(
                     vec![
                         Tag::custom(
                             nostr::TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
-                            vec![branch_name],
+                            vec![if let Some(branch_name) = branch_name.strip_prefix("prs/") {
+                                branch_name.to_string()
+                            } else {
+                                branch_name
+                            }],
                         ),
                     ]
                 }
@@ -687,7 +691,13 @@ pub async fn generate_cover_letter_and_patch_events(
                             && !branch_name.eq("origin/main")
                             && !branch_name.eq("origin/master")
                         {
-                            Some(branch_name)
+                            Some(
+                                if let Some(branch_name) = branch_name.strip_prefix("prs/") {
+                                    branch_name.to_string()
+                                } else {
+                                    branch_name
+                                },
+                            )
                         } else {
                             None
                         }
