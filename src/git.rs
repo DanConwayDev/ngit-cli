@@ -787,7 +787,7 @@ pub fn oid_to_sha1(oid: &Oid) -> Sha1Hash {
 }
 
 /// `Sha1Hash` to git2 `Oid` object
-fn sha1_to_oid(hash: &Sha1Hash) -> Result<Oid> {
+pub fn sha1_to_oid(hash: &Sha1Hash) -> Result<Oid> {
     Oid::from_bytes(hash.as_byte_array()).context("Sha1Hash bytes failed to produce a valid Oid")
 }
 

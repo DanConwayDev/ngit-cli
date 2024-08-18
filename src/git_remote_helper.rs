@@ -18,9 +18,9 @@ use client::{
     consolidate_fetch_reports, get_events_from_cache, get_repo_ref_from_cache,
     get_state_from_cache, sign_event, Connect, STATE_KIND,
 };
-use git::RepoActions;
+use git::{sha1_to_oid, RepoActions};
 use git2::{Oid, Repository};
-use nostr::nips::nip01::Coordinate;
+use nostr::nips::{nip01::Coordinate, nip10::Marker};
 use nostr_sdk::{
     hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, Kind, PublicKey, Tag, Url,
 };
@@ -713,6 +713,18 @@ async fn push(
             RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
 
         events.push(new_repo_state.event);
+
+        for event in get_merged_status_events(
+            repo_ref,
+            git_repo,
+            nostr_remote_url,
+            &signer,
+            &git_server_refspecs,
+        )
+        .await?
+        {
+            events.push(event);
+        }
     }
 
     let mut rejected_proposal_refspecs = vec![];
@@ -1113,6 +1125,220 @@ fn generate_updated_state(
         }
     }
     Ok(new_state)
+}
+
+async fn get_merged_status_events(
+    repo_ref: &RepoRef,
+    git_repo: &Repo,
+    remote_nostr_url: &str,
+    signer: &NostrSigner,
+    refspecs_to_git_server: &Vec<String>,
+) -> Result<Vec<Event>> {
+    let mut events = vec![];
+    for refspec in refspecs_to_git_server {
+        let (from, to) = refspec_to_from_to(refspec)?;
+        if to.eq("refs/heads/main") || to.eq("refs/heads/master") {
+            let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
+            let Ok(tip_of_remote_branch) = git_repo.get_commit_or_tip_of_reference(
+                &refspec_remote_ref_name(&git_repo.git_repo, refspec, remote_nostr_url)?,
+            ) else {
+                // branch not on remote
+                continue;
+            };
+            let (ahead, _) =
+                git_repo.get_commits_ahead_behind(&tip_of_remote_branch, &tip_of_pushed_branch)?;
+            for commit_hash in ahead {
+                let commit = git_repo.git_repo.find_commit(sha1_to_oid(&commit_hash)?)?;
+                if commit.parent_count() > 1 {
+                    // merge commit
+                    for parent in commit.parents() {
+                        // lookup parent id
+                        let commit_events = get_events_from_cache(
+                            git_repo.get_path()?,
+                            vec![
+                                nostr::Filter::default()
+                                    .kind(nostr::Kind::GitPatch)
+                                    .reference(parent.id().to_string()),
+                            ],
+                        )
+                        .await?;
+                        if let Some(commit_event) = commit_events.iter().find(|e| {
+                            e.tags.iter().any(|t| {
+                                t.as_vec()[0].eq("commit")
+                                    && t.as_vec()[1].eq(&parent.id().to_string())
+                            })
+                        }) {
+                            let (proposal_id, revision_id) =
+                                get_proposal_and_revision_root_from_patch(git_repo, commit_event)
+                                    .await?;
+                            // TODO: write to terminal to tell user
+                            events.push(
+                                create_merge_status(
+                                    signer,
+                                    repo_ref,
+                                    &get_event_from_cache_by_id(git_repo, &proposal_id).await?,
+                                    &if let Some(revision_id) = revision_id {
+                                        Some(
+                                            get_event_from_cache_by_id(git_repo, &revision_id)
+                                                .await?,
+                                        )
+                                    } else {
+                                        None
+                                    },
+                                    &commit_hash,
+                                    commit_event.id(),
+                                )
+                                .await?,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(events)
+}
+
+async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> Result<Event> {
+    Ok(get_events_from_cache(
+        git_repo.get_path()?,
+        vec![nostr::Filter::default().id(*event_id)],
+    )
+    .await?
+    .first()
+    .context("cannot find event in cache")?
+    .clone())
+}
+
+async fn create_merge_status(
+    signer: &NostrSigner,
+    repo_ref: &RepoRef,
+    proposal: &Event,
+    revision: &Option<Event>,
+    merge_commit: &Sha1Hash,
+    merged_patch: EventId,
+) -> Result<Event> {
+    let mut public_keys = repo_ref
+        .maintainers
+        .iter()
+        .copied()
+        .collect::<HashSet<PublicKey>>();
+    public_keys.insert(proposal.author());
+    if let Some(revision) = revision {
+        public_keys.insert(revision.author());
+    }
+    sign_event(
+        EventBuilder::new(
+            nostr::event::Kind::GitStatusApplied,
+            String::new(),
+            [
+                vec![
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                        vec!["git proposal merged / applied".to_string()],
+                    ),
+                    Tag::from_standardized(nostr::TagStandard::Event {
+                        event_id: proposal.id(),
+                        relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
+                        marker: Some(Marker::Root),
+                        public_key: None,
+                    }),
+                    Tag::from_standardized(nostr::TagStandard::Event {
+                        event_id: merged_patch,
+                        relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
+                        marker: Some(Marker::Mention),
+                        public_key: None,
+                    }),
+                ],
+                if let Some(revision) = revision {
+                    vec![Tag::from_standardized(nostr::TagStandard::Event {
+                        event_id: revision.id(),
+                        relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
+                        marker: Some(Marker::Root),
+                        public_key: None,
+                    })]
+                } else {
+                    vec![]
+                },
+                public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
+                repo_ref
+                    .coordinates()
+                    .iter()
+                    .map(|c| Tag::coordinate(c.clone()))
+                    .collect::<Vec<Tag>>(),
+                vec![
+                    Tag::from_standardized(nostr::TagStandard::Reference(
+                        repo_ref.root_commit.to_string(),
+                    )),
+                    Tag::from_standardized(nostr::TagStandard::Reference(format!(
+                        "{merge_commit}"
+                    ))),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("merge-commit-id")),
+                        vec![format!("{merge_commit}")],
+                    ),
+                ],
+            ]
+            .concat(),
+        ),
+        signer,
+    )
+    .await
+}
+
+async fn get_proposal_and_revision_root_from_patch(
+    git_repo: &Repo,
+    patch: &Event,
+) -> Result<(EventId, Option<EventId>)> {
+    let proposal_or_revision = if patch.tags.iter().any(|t| t.as_vec()[1].eq("root")) {
+        patch.clone()
+    } else {
+        let proposal_or_revision_id = EventId::parse(
+            if let Some(t) = patch.tags.iter().find(|t| t.is_root()) {
+                t.clone()
+            } else if let Some(t) = patch.tags.iter().find(|t| t.is_reply()) {
+                t.clone()
+            } else {
+                Tag::event(patch.id())
+            }
+            .as_vec()[1]
+                .clone(),
+        )?;
+
+        get_events_from_cache(
+            git_repo.get_path()?,
+            vec![nostr::Filter::default().id(proposal_or_revision_id)],
+        )
+        .await?
+        .first()
+        .unwrap()
+        .clone()
+    };
+
+    if !proposal_or_revision.kind().eq(&Kind::GitPatch) {
+        bail!("thread root is not a git patch");
+    }
+
+    if proposal_or_revision
+        .tags
+        .iter()
+        .any(|t| t.as_vec()[1].eq("revision-root"))
+    {
+        Ok((
+            EventId::parse(
+                proposal_or_revision
+                    .tags
+                    .iter()
+                    .find(|t| t.is_reply())
+                    .unwrap()
+                    .as_vec()[1]
+                    .clone(),
+            )?,
+            Some(proposal_or_revision.id()),
+        ))
+    } else {
+        Ok((proposal_or_revision.id(), None))
+    }
 }
 
 fn update_remote_refs_pushed(

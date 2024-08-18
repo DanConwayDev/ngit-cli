@@ -2,8 +2,9 @@ use std::{collections::HashSet, env::current_dir};
 
 use anyhow::{Context, Result};
 use futures::join;
+use git2::Oid;
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{secp256k1::rand, Kind, ToBech32};
+use nostr_sdk::{secp256k1::rand, Event, JsonUtil, Kind, ToBech32};
 use relay::Relay;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
@@ -41,6 +42,9 @@ fn set_git_nostr_login_config(test_repo: &GitTestRepo) -> Result<()> {
         .context("cannot open git config")?;
     config.set_str("nostr.nsec", TEST_KEY_2_NSEC)?;
     config.set_str("nostr.npub", TEST_KEY_2_NPUB)?;
+    config.set_str("user.name", "test name")?;
+    config.set_str("user.email", "test@test.com")?;
+    config.set_bool("commit.gpgSign", false)?;
     Ok(())
 }
 
@@ -807,8 +811,6 @@ mod fetch {
 }
 
 mod push {
-
-    use nostr_sdk::Event;
 
     use super::*;
 
@@ -1705,6 +1707,150 @@ mod push {
         assert_eq!(
             second_source_git_repo.get_tip_of_local_branch("main")?,
             main_commit_id
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> Result<()> {
+        //
+        let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
+        let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+
+        let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+            Relay::new(8051, None, None),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
+            Relay::new(8055, None, None),
+            Relay::new(8056, None, None),
+            Relay::new(8057, None, None),
+        );
+        r51.events = events.clone();
+        r55.events = events.clone();
+
+        let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
+
+        let cli_tester_handle = std::thread::spawn(move || -> Result<(String, Oid)> {
+            let branch_name = get_proposal_branch_name_from_events(&events, FEATURE_BRANCH_NAME_1)?;
+
+            let git_repo = clone_git_repo_with_nostr_url()?;
+            git_repo.checkout_remote_branch(&branch_name)?;
+            git_repo.checkout("refs/heads/main")?;
+
+            std::fs::write(git_repo.dir.join("new.md"), "some content")?;
+            git_repo.stage_and_commit("new.md")?;
+
+            CliTester::new_git_with_remote_helper_from_dir(
+                &git_repo.dir,
+                ["merge", &branch_name, "-m", "proposal merge commit message"],
+            )
+            .expect_end_eventually_and_print()?;
+
+            let oid = git_repo.get_tip_of_local_branch("main")?;
+
+            let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
+            cli_expect_nostr_fetch(&mut p)?;
+            p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+            p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+            let output = p.expect_end_eventually()?;
+
+            for p in [51, 52, 53, 55, 56, 57] {
+                relay::shutdown_relay(8000 + p)?;
+            }
+
+            Ok((output, oid))
+        });
+        // launch relays
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+            r57.listen_until_close(),
+        );
+
+        let (output, oid) = cli_tester_handle.join().unwrap()?;
+
+        assert_eq!(
+            output,
+            format!("   431b84e..{}  main -> main\r\n", &oid.to_string()[..7])
+        );
+
+        let new_events = r55
+            .events
+            .iter()
+            .cloned()
+            .collect::<HashSet<Event>>()
+            .difference(&before)
+            .cloned()
+            .collect::<Vec<Event>>();
+
+        assert_eq!(new_events.len(), 2, "{new_events:?}");
+
+        let proposal = r55
+            .events
+            .iter()
+            .find(|e| {
+                e.iter_tags()
+                    .find(|t| t.as_vec()[0].eq("branch-name"))
+                    .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
+            })
+            .unwrap();
+
+        let merge_status = new_events
+            .iter()
+            .find(|e| e.kind().eq(&Kind::GitStatusApplied))
+            .unwrap();
+
+        assert_eq!(
+            oid.to_string(),
+            merge_status
+                .tags
+                .iter()
+                .find(|t| t.as_vec()[0].eq("merge-commit-id"))
+                .unwrap()
+                .as_vec()[1],
+            "status sets correct merge-commit-id tag"
+        );
+
+        let proposal_tip = r55
+            .events
+            .iter()
+            .filter(|e| {
+                e.iter_tags()
+                    .any(|t| t.as_vec()[1].eq(&proposal.id().to_string()))
+                    && e.kind().eq(&Kind::GitPatch)
+            })
+            .last()
+            .unwrap();
+
+        assert_eq!(
+            proposal_tip.id().to_string(),
+            merge_status
+                .tags
+                .iter()
+                .find(|t| t.as_vec().len().eq(&4) && t.as_vec()[3].eq("mention"))
+                .unwrap()
+                .as_vec()[1],
+            "status mentions proposal tip event \r\nmerge status:\r\n{}\r\nproposal tip:\r\n{}",
+            merge_status.as_json(),
+            proposal_tip.as_json(),
+        );
+
+        assert_eq!(
+            proposal.id().to_string(),
+            merge_status
+                .tags
+                .iter()
+                .find(|t| t.is_root())
+                .unwrap()
+                .as_vec()[1],
+            "status tags proposal id as root \r\nmerge status:\r\n{}\r\nproposal:\r\n{}",
+            merge_status.as_json(),
+            proposal.as_json(),
         );
 
         Ok(())
