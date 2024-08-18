@@ -1753,6 +1753,10 @@ mod push {
             let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
             cli_expect_nostr_fetch(&mut p)?;
             p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+
+            p.expect("merge commit ")?;
+            // shorthand merge commit id appears in this gap
+            p.expect_eventually(": create nostr proposal status event\r\n")?;
             p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
             let output = p.expect_end_eventually()?;
 

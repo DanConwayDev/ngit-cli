@@ -715,6 +715,7 @@ async fn push(
         events.push(new_repo_state.event);
 
         for event in get_merged_status_events(
+            &term,
             repo_ref,
             git_repo,
             nostr_remote_url,
@@ -1128,6 +1129,7 @@ fn generate_updated_state(
 }
 
 async fn get_merged_status_events(
+    term: &console::Term,
     repo_ref: &RepoRef,
     git_repo: &Repo,
     remote_nostr_url: &str,
@@ -1171,7 +1173,14 @@ async fn get_merged_status_events(
                             let (proposal_id, revision_id) =
                                 get_proposal_and_revision_root_from_patch(git_repo, commit_event)
                                     .await?;
-                            // TODO: write to terminal to tell user
+                            term.write_line(
+                                format!(
+                                    "merge commit {}: create nostr proposal status event",
+                                    &commit.id().to_string()[..7],
+                                )
+                                .as_str(),
+                            )?;
+
                             events.push(
                                 create_merge_status(
                                     signer,
