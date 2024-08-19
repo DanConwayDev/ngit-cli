@@ -1021,9 +1021,11 @@ where
             .trim()
             .to_string(),
         );
-        for entry in std::fs::read_dir(src)? {
-            let src_path = entry?.path();
-            std::fs::copy(&src_path, &git_exec_dir.join(src_path.file_name().unwrap()))?;
+        for entry in (std::fs::read_dir(src)?).flatten() {
+            let src_path = entry.path();
+            if let Some(name) = src_path.file_name() {
+                let _ = std::fs::copy(&src_path, &git_exec_dir.join(name));
+            }
         }
     }
     std::fs::copy(
