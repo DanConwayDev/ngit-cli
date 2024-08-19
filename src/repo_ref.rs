@@ -227,8 +227,27 @@ pub async fn try_and_get_repo_coordinates(
     #[cfg(not(test))] client: &Client,
     prompt_user: bool,
 ) -> Result<HashSet<Coordinate>> {
-    let mut repo_coordinates = HashSet::new();
+    let mut repo_coordinates = get_repo_coordinates_from_git_config(git_repo)?;
 
+    // TODO: when nostr remotes functionality is added, iterate on each remote and
+    // extract coordinates
+
+    if repo_coordinates.is_empty() {
+        repo_coordinates = get_repo_coordinates_from_maintainers_yaml(git_repo, client).await?;
+    }
+
+    if repo_coordinates.is_empty() {
+        if prompt_user {
+            repo_coordinates = get_repo_coordinates_from_user_prompt(git_repo)?;
+        } else {
+            bail!("couldn't find repo coordinates in git config nostr.repo or in maintainers.yaml");
+        }
+    }
+    Ok(repo_coordinates)
+}
+
+fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<HashSet<Coordinate>> {
+    let mut repo_coordinates = HashSet::new();
     if let Some(repo_override) = git_repo.get_git_config_item("nostr.repo", Some(false))? {
         for s in repo_override.split(',') {
             if let Ok(c) = Coordinate::parse(s) {
@@ -236,104 +255,103 @@ pub async fn try_and_get_repo_coordinates(
             }
         }
     }
+    Ok(repo_coordinates)
+}
 
-    // TODO: when nostr remotes functionality is added, iterate on each remote and
-    // extract coordinates
-
-    if repo_coordinates.is_empty() {
-        if let Ok(repo_config) = get_repo_config_from_yaml(git_repo) {
-            let maintainers = {
-                let mut maintainers = HashSet::new();
-                for m in &repo_config.maintainers {
-                    if let Ok(maintainer) = PublicKey::parse(m) {
-                        maintainers.insert(maintainer);
+async fn get_repo_coordinates_from_maintainers_yaml(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+) -> Result<HashSet<Coordinate>> {
+    let mut repo_coordinates = HashSet::new();
+    if let Ok(repo_config) = get_repo_config_from_yaml(git_repo) {
+        let maintainers = {
+            let mut maintainers = HashSet::new();
+            for m in &repo_config.maintainers {
+                if let Ok(maintainer) = PublicKey::parse(m) {
+                    maintainers.insert(maintainer);
+                }
+            }
+            maintainers
+        };
+        if let Some(identifier) = repo_config.identifier {
+            for public_key in maintainers {
+                repo_coordinates.insert(Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key,
+                    identifier: identifier.clone(),
+                    relays: vec![],
+                });
+            }
+        } else {
+            // if repo_config.identifier.is_empty() {
+            // this will only apply for a few repositories created before ngit v1.3
+            // that haven't updated their maintainers.yaml
+            if let Ok(Some(current_user_npub)) = git_repo.get_git_config_item("nostr.npub", None) {
+                if let Ok(current_user) = PublicKey::parse(current_user_npub) {
+                    for m in &repo_config.maintainers {
+                        if let Ok(maintainer) = PublicKey::parse(m) {
+                            if current_user.eq(&maintainer) {
+                                println!(
+                                    "please run `ngit init` to add the repo identifier to maintainers.yaml"
+                                );
+                            }
+                        }
                     }
                 }
-                maintainers
-            };
-            if let Some(identifier) = repo_config.identifier {
-                for public_key in maintainers {
-                    repo_coordinates.insert(Coordinate {
-                        kind: Kind::GitRepoAnnouncement,
-                        public_key,
-                        identifier: identifier.clone(),
-                        relays: vec![],
-                    });
+            }
+            // look find all repo refs with root_commit. for identifier
+            let filter = nostr::Filter::default()
+                .kind(nostr::Kind::GitRepoAnnouncement)
+                .reference(git_repo.get_root_commit()?.to_string())
+                .authors(maintainers.clone());
+            let mut events =
+                get_events_from_cache(git_repo.get_path()?, vec![filter.clone()]).await?;
+            if events.is_empty() {
+                events =
+                    get_event_from_global_cache(git_repo.get_path()?, vec![filter.clone()]).await?;
+            }
+            if events.is_empty() {
+                println!(
+                    "finding repository events for this repository for npubs in maintainers.yaml"
+                );
+                events = client
+                    .get_events(client.get_fallback_relays().clone(), vec![filter.clone()])
+                    .await?;
+            }
+            if let Some(e) = events.first() {
+                if let Some(identifier) = e.identifier() {
+                    for m in &repo_config.maintainers {
+                        if let Ok(maintainer) = PublicKey::parse(m) {
+                            repo_coordinates.insert(Coordinate {
+                                kind: Kind::GitRepoAnnouncement,
+                                public_key: maintainer,
+                                identifier: identifier.to_string(),
+                                relays: vec![],
+                            });
+                        }
+                    }
                 }
             } else {
-                // if repo_config.identifier.is_empty() {
-                // this will only apply for a few repositories created before ngit v1.3
-                // that haven't updated their maintainers.yaml
-                if let Ok(Some(current_user_npub)) =
-                    git_repo.get_git_config_item("nostr.npub", None)
-                {
-                    if let Ok(current_user) = PublicKey::parse(current_user_npub) {
-                        for m in &repo_config.maintainers {
-                            if let Ok(maintainer) = PublicKey::parse(m) {
-                                if current_user.eq(&maintainer) {
-                                    println!(
-                                        "please run `ngit init` to add the repo identifier to maintainers.yaml"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                // look find all repo refs with root_commit. for identifier
-                let filter = nostr::Filter::default()
-                    .kind(nostr::Kind::GitRepoAnnouncement)
-                    .reference(git_repo.get_root_commit()?.to_string())
-                    .authors(maintainers.clone());
-                let mut events =
-                    get_events_from_cache(git_repo.get_path()?, vec![filter.clone()]).await?;
-                if events.is_empty() {
-                    events =
-                        get_event_from_global_cache(git_repo.get_path()?, vec![filter.clone()])
-                            .await?;
-                }
-                if events.is_empty() {
-                    println!(
-                        "finding repository events for this repository for npubs in maintainers.yaml"
-                    );
-                    events = client
-                        .get_events(client.get_fallback_relays().clone(), vec![filter.clone()])
-                        .await?;
-                }
-                if let Some(e) = events.first() {
-                    if let Some(identifier) = e.identifier() {
-                        for m in &repo_config.maintainers {
-                            if let Ok(maintainer) = PublicKey::parse(m) {
-                                repo_coordinates.insert(Coordinate {
-                                    kind: Kind::GitRepoAnnouncement,
-                                    public_key: maintainer,
-                                    identifier: identifier.to_string(),
-                                    relays: vec![],
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    let c = ask_for_naddr()?;
-                    git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
-                    repo_coordinates.insert(c);
-                }
+                let c = ask_for_naddr()?;
+                git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
+                repo_coordinates.insert(c);
             }
         }
     }
+    Ok(repo_coordinates)
+}
 
-    if repo_coordinates.is_empty() {
-        if !prompt_user {
-            bail!("couldn't find repo coordinates in git config nostr.repo or in maintainers.yaml");
-        }
-        // TODO: present list of events filter by root_commit
-        // TODO: fallback to search based on identifier
-        let c = ask_for_naddr()?;
-        // PROBLEM: we are saving this before checking whether it actually exists, which
-        // means next time the user won't be prompted and may not know how to
-        // change the selected repo
-        git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
-        repo_coordinates.insert(c);
-    }
+fn get_repo_coordinates_from_user_prompt(git_repo: &Repo) -> Result<HashSet<Coordinate>> {
+    let mut repo_coordinates = HashSet::new();
+    // TODO: present list of events filter by root_commit
+    // TODO: fallback to search based on identifier
+    let c = ask_for_naddr()?;
+    // PROBLEM: we are saving this before checking whether it actually exists, which
+    // means next time the user won't be prompted and may not know how to
+    // change the selected repo
+    git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
+    repo_coordinates.insert(c);
     Ok(repo_coordinates)
 }
 
