@@ -16,7 +16,7 @@ use crate::client::Client;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{get_event_from_global_cache, get_events_from_cache, sign_event, Connect},
-    git::{Repo, RepoActions},
+    git::{nostr_git_url_to_repo_coordinates, Repo, RepoActions},
 };
 
 #[derive(Default)]
@@ -229,8 +229,9 @@ pub async fn try_and_get_repo_coordinates(
 ) -> Result<HashSet<Coordinate>> {
     let mut repo_coordinates = get_repo_coordinates_from_git_config(git_repo)?;
 
-    // TODO: when nostr remotes functionality is added, iterate on each remote and
-    // extract coordinates
+    if repo_coordinates.is_empty() {
+        repo_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo)?;
+    }
 
     if repo_coordinates.is_empty() {
         repo_coordinates = get_repo_coordinates_from_maintainers_yaml(git_repo, client).await?;
@@ -252,6 +253,20 @@ fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<HashSet<Coord
         for s in repo_override.split(',') {
             if let Ok(c) = Coordinate::parse(s) {
                 repo_coordinates.insert(c);
+            }
+        }
+    }
+    Ok(repo_coordinates)
+}
+
+fn get_repo_coordinates_from_nostr_remotes(git_repo: &Repo) -> Result<HashSet<Coordinate>> {
+    let mut repo_coordinates = HashSet::new();
+    for remote_name in git_repo.git_repo.remotes()?.iter().flatten() {
+        if let Some(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
+            if let Ok(coordinates) = nostr_git_url_to_repo_coordinates(remote_url) {
+                for c in coordinates {
+                    repo_coordinates.insert(c);
+                }
             }
         }
     }
