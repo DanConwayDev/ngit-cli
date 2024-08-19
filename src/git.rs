@@ -1,11 +1,16 @@
 use std::{
+    collections::HashSet,
     env::current_dir,
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
 use git2::{DiffOptions, Oid, Revwalk};
-use nostr_sdk::hashes::{sha1::Hash as Sha1Hash, Hash};
+use nostr::nips::nip01::Coordinate;
+use nostr_sdk::{
+    hashes::{sha1::Hash as Sha1Hash, Hash},
+    PublicKey, Url,
+};
 
 use crate::sub_commands::list::{get_commit_id_from_patch, tag_value};
 
@@ -828,6 +833,57 @@ fn extract_sig_from_patch_tags<'a>(
         ),
     )
     .context("failed to create git signature")
+}
+
+pub fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
+    let mut repo_coordinattes = HashSet::new();
+    let url = Url::parse(url)?;
+
+    if url.scheme().ne("nostr") {
+        bail!("nostr git url must start with nostr://")
+    }
+
+    if let Ok(coordinate) = Coordinate::parse(url.domain().context("no naddr")?) {
+        if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
+            repo_coordinattes.insert(coordinate);
+            return Ok(repo_coordinattes);
+        }
+        bail!("naddr doesnt point to a git repository announcement");
+    }
+
+    if let Some(domain) = url.domain() {
+        if let Ok(public_key) = PublicKey::parse(domain) {
+            if url.path().len() < 2 {
+                bail!(
+                    "nostr git url should include the repo identifier eg nostr://npub123/the-repo-identifer"
+                );
+            }
+            let mut relays = vec![];
+            for (name, value) in url.query_pairs() {
+                if name.contains("relay") {
+                    let mut decoded = urlencoding::decode(&value)
+                        .context("could not parse relays in nostr git url")?
+                        .to_string();
+                    if !decoded.starts_with("ws://") && !decoded.starts_with("wss://") {
+                        decoded = format!("wss://{decoded}");
+                    }
+                    let url =
+                        Url::parse(&decoded).context("could not parse relays in nostr git url")?;
+                    relays.push(url.to_string());
+                }
+            }
+            repo_coordinattes.insert(Coordinate {
+                identifier: url.path()[1..].to_string(),
+                public_key,
+                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                relays,
+            });
+            return Ok(repo_coordinattes);
+        }
+    }
+    bail!(
+        "nostr git url must be in format nostr://naddr123 or nostr://npub123/identifer?relay=wss://relay-example.com&relay1=wss://relay-example.org"
+    );
 }
 
 #[cfg(test)]
