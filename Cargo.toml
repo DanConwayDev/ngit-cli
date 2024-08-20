@@ -9,7 +9,7 @@ homepage = "https://gitworkshop.dev/r/naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspz
 repository = "https://codeberg.org/DanConwayDev/ngit-cli"
 license = "MIT"
 keywords = ["nostr", "git"]
-categories = ["command-line-utilities","git"]
+categories = ["command-line-utilities","development-tools"]
 
 [dependencies]
 anyhow = "1.0.75"
