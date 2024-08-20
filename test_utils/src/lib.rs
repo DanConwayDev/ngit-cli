@@ -1098,7 +1098,7 @@ pub fn get_proposal_branch_name_from_events(
                 })
         }) {
             return Ok(format!(
-                "prs/{}({})",
+                "pr/{}({})",
                 branch_name_in_event,
                 &event.id.to_hex().as_str()[..8],
             ));

@@ -2173,7 +2173,7 @@ mod push {
         r55.events = events.clone();
 
         let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
-        let branch_name = "prs/my-new-proposal";
+        let branch_name = "pr/my-new-proposal";
 
         let cli_tester_handle = std::thread::spawn(move || -> Result<String> {
             let mut git_repo = clone_git_repo_with_nostr_url()?;
@@ -2250,7 +2250,7 @@ mod push {
                 .find(|t| t.as_vec()[0].eq("branch-name"))
                 .unwrap()
                 .as_vec()[1],
-            branch_name.replace("prs/", ""),
+            branch_name.replace("pr/", ""),
         );
 
         let second_patch = new_events

@@ -648,7 +648,7 @@ pub async fn generate_cover_letter_and_patch_events(
                     vec![
                         Tag::custom(
                             nostr::TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
-                            vec![if let Some(branch_name) = branch_name.strip_prefix("prs/") {
+                            vec![if let Some(branch_name) = branch_name.strip_prefix("pr/") {
                                 branch_name.to_string()
                             } else {
                                 branch_name
@@ -691,13 +691,11 @@ pub async fn generate_cover_letter_and_patch_events(
                             && !branch_name.eq("origin/main")
                             && !branch_name.eq("origin/master")
                         {
-                            Some(
-                                if let Some(branch_name) = branch_name.strip_prefix("prs/") {
-                                    branch_name.to_string()
-                                } else {
-                                    branch_name
-                                },
-                            )
+                            Some(if let Some(branch_name) = branch_name.strip_prefix("pr/") {
+                                branch_name.to_string()
+                            } else {
+                                branch_name
+                            })
                         } else {
                             None
                         }
@@ -793,7 +791,7 @@ pub struct CoverLetter {
 impl CoverLetter {
     pub fn get_branch_name(&self) -> Result<String> {
         Ok(format!(
-            "prs/{}({})",
+            "pr/{}({})",
             self.branch_name,
             &self
                 .event_id

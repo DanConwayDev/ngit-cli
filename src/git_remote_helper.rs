@@ -233,7 +233,7 @@ async fn list(
             .clone()
     };
 
-    state.retain(|k, _| !k.starts_with("refs/heads/prs/"));
+    state.retain(|k, _| !k.starts_with("refs/heads/pr/"));
 
     let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
     let current_user = get_curent_user(git_repo)?;
@@ -447,7 +447,7 @@ async fn fetch(
 
     let oids_from_git_servers = fetch_batch
         .iter()
-        .filter(|(refstr, _)| !refstr.contains("refs/heads/prs/"))
+        .filter(|(refstr, _)| !refstr.contains("refs/heads/pr/"))
         .map(|(_, oid)| oid.clone())
         .collect::<Vec<String>>();
 
@@ -488,7 +488,7 @@ async fn fetch(
         );
     }
 
-    fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/prs/"));
+    fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/pr/"));
 
     if !fetch_batch.is_empty() {
         let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
@@ -580,13 +580,13 @@ async fn push(
 
     let proposal_refspecs = refspecs
         .iter()
-        .filter(|r| r.contains("refs/heads/prs/"))
+        .filter(|r| r.contains("refs/heads/pr/"))
         .cloned()
         .collect::<Vec<String>>();
 
     let mut git_server_refspecs = refspecs
         .iter()
-        .filter(|r| !r.contains("refs/heads/prs/"))
+        .filter(|r| !r.contains("refs/heads/pr/"))
         .cloned()
         .collect::<Vec<String>>();
 
