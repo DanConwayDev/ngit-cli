@@ -655,6 +655,21 @@ async fn push(
     )
     .await?;
 
+    if !repo_ref.maintainers.contains(&user_ref.public_key) {
+        for refspec in &git_server_refspecs {
+            let (_, to) = refspec_to_from_to(refspec).unwrap();
+            println!(
+                "error {to} your nostr account {} isn't listed as a maintainer of the repo",
+                user_ref.metadata.name
+            );
+        }
+        git_server_refspecs.clear();
+        if proposal_refspecs.is_empty() {
+            println!();
+            return Ok(());
+        }
+    }
+
     if !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, &git_server_refspecs)?;
 
