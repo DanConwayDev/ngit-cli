@@ -1063,6 +1063,28 @@ fn generate_updated_state(
         if from.is_empty() {
             // delete
             new_state.remove(to);
+            if to.contains("refs/tags") {
+                new_state.remove(&format!("{to}{}", "^{}"));
+            }
+        } else if to.contains("refs/tags") {
+            new_state.insert(
+                format!("{to}{}", "^{}"),
+                git_repo
+                    .get_commit_or_tip_of_reference(from)
+                    .unwrap()
+                    .to_string(),
+            );
+            new_state.insert(
+                to.to_string(),
+                git_repo
+                    .git_repo
+                    .find_reference(to)
+                    .unwrap()
+                    .peel(git2::ObjectType::Tag)
+                    .unwrap()
+                    .id()
+                    .to_string(),
+            );
         } else {
             // add or update
             new_state.insert(
