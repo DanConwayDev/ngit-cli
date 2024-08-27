@@ -477,6 +477,7 @@ async fn fetch(
     if oids_from_git_servers
         .iter()
         .any(|oid| !git_repo.does_commit_exist(oid).unwrap())
+        && !errors.is_empty()
     {
         bail!(
             "failed to fetch objects in nostr state event from:\r\n{}",
