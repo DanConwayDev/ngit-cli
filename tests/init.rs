@@ -14,7 +14,7 @@ fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
 fn expect_msgs_after(p: &mut CliTester) -> Result<()> {
     p.expect_after_whitespace("maintainers.yaml created. commit and push.\r\n")?;
     p.expect(
-        "this optional file enables existing contributors to automatically fetch your repo event (instead of one from a pubkey pretending to be the maintainer)\r\n",
+        "this optional file helps in identifying who the maintainers are over time through the commit history\r\n",
     )?;
     Ok(())
 }

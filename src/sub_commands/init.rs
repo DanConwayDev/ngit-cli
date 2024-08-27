@@ -373,7 +373,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         );
         println!(
-            "this optional file enables existing contributors to automatically fetch your repo event (instead of one from a pubkey pretending to be the maintainer)"
+            "this optional file helps in identifying who the maintainers are over time through the commit history"
         );
     }
     Ok(())
