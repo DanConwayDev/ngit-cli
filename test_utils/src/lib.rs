@@ -1091,9 +1091,9 @@ pub fn get_proposal_branch_name_from_events(
     branch_name_in_event: &str,
 ) -> Result<String> {
     for event in events {
-        if event.iter_tags().any(|t| {
+        if event.tags().iter().any(|t| {
             !t.as_vec()[1].eq("revision-root")
-                && event.iter_tags().any(|t| {
+                && event.tags().iter().any(|t| {
                     t.as_vec()[0].eq("branch-name") && t.as_vec()[1].eq(branch_name_in_event)
                 })
         }) {
@@ -1370,7 +1370,7 @@ fn get_first_proposal_event_id() -> Result<nostr::EventId> {
                 vec!["root"],
             ),
     ],
-        Some(Duration::from_millis(500)),
+        nostr_sdk::EventSource::relays(Some(Duration::from_millis(1000))),
     ))?;
     Handle::current().block_on(client.disconnect())?;
 

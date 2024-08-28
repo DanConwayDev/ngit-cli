@@ -78,7 +78,8 @@ pub async fn launch() -> Result<()> {
             .iter()
             .filter(|e| {
                 status_kinds().contains(&e.kind())
-                    && e.iter_tags()
+                    && e.tags()
+                        .iter()
                         .any(|t| t.as_vec()[1].eq(&proposal.id.to_string()))
             })
             .collect::<Vec<&nostr::Event>>()
@@ -873,7 +874,7 @@ pub async fn get_all_proposal_patch_events_from_cache(
     .iter()
     .copied()
     .collect();
-    commit_events.retain(|e| permissioned_users.contains(e.author_ref()));
+    commit_events.retain(|e| permissioned_users.contains(&e.author()));
 
     let revision_roots: HashSet<nostr::EventId> = commit_events
         .iter()
@@ -899,7 +900,7 @@ pub async fn get_all_proposal_patch_events_from_cache(
 
     Ok(commit_events
         .iter()
-        .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(e.author_ref()))
+        .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(&e.author()))
         .cloned()
         .collect())
 }

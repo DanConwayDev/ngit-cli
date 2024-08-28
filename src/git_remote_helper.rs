@@ -366,7 +366,8 @@ async fn get_open_proposals(
             .iter()
             .filter(|e| {
                 status_kinds().contains(&e.kind())
-                    && e.iter_tags()
+                    && e.tags()
+                        .iter()
                         .any(|t| t.as_vec()[1].eq(&proposal.id.to_string()))
             })
             .collect::<Vec<&nostr::Event>>()

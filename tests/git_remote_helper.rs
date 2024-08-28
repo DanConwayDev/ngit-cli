@@ -1730,6 +1730,7 @@ mod push {
         r51.events = events.clone();
         r55.events = events.clone();
 
+        #[allow(clippy::mutable_key_type)]
         let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
 
         let cli_tester_handle = std::thread::spawn(move || -> Result<(String, Oid)> {
@@ -1798,7 +1799,8 @@ mod push {
             .events
             .iter()
             .find(|e| {
-                e.iter_tags()
+                e.tags()
+                    .iter()
                     .find(|t| t.as_vec()[0].eq("branch-name"))
                     .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
             })
@@ -1824,7 +1826,8 @@ mod push {
             .events
             .iter()
             .filter(|e| {
-                e.iter_tags()
+                e.tags()
+                    .iter()
                     .any(|t| t.as_vec()[1].eq(&proposal.id().to_string()))
                     && e.kind().eq(&Kind::GitPatch)
             })
@@ -1877,6 +1880,7 @@ mod push {
         r51.events = events.clone();
         r55.events = events.clone();
 
+        #[allow(clippy::mutable_key_type)]
         let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
 
         let cli_tester_handle = std::thread::spawn(move || -> Result<(String, String)> {
@@ -1950,7 +1954,8 @@ mod push {
             .events
             .iter()
             .find(|e| {
-                e.iter_tags()
+                e.tags()
+                    .iter()
                     .find(|t| t.as_vec()[0].eq("branch-name"))
                     .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
             })
@@ -1982,7 +1987,8 @@ mod push {
             .events
             .iter()
             .find(|e| {
-                e.iter_tags()
+                e.tags()
+                    .iter()
                     .any(|t| t.as_vec()[1].eq(&proposal.id().to_string()))
                     && e.content.contains("[PATCH 2/2]")
             })
@@ -2019,6 +2025,7 @@ mod push {
         r51.events = events.clone();
         r55.events = events.clone();
 
+        #[allow(clippy::mutable_key_type)]
         let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
 
         let cli_tester_handle = std::thread::spawn(move || -> Result<(String, String)> {
@@ -2086,7 +2093,8 @@ mod push {
             .events
             .iter()
             .find(|e| {
-                e.iter_tags()
+                e.tags()
+                    .iter()
                     .find(|t| t.as_vec()[0].eq("branch-name"))
                     .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
             })
@@ -2094,7 +2102,7 @@ mod push {
 
         let revision_root_patch = new_events
             .iter()
-            .find(|e| e.iter_tags().any(|t| t.as_vec()[1].eq("revision-root")))
+            .find(|e| e.tags().iter().any(|t| t.as_vec()[1].eq("revision-root")))
             .unwrap();
 
         assert_eq!(
@@ -2172,6 +2180,7 @@ mod push {
         r51.events = events.clone();
         r55.events = events.clone();
 
+        #[allow(clippy::mutable_key_type)]
         let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
         let branch_name = "pr/my-new-proposal";
 
@@ -2231,7 +2240,7 @@ mod push {
 
         let proposal = new_events
             .iter()
-            .find(|e| e.iter_tags().any(|t| t.as_vec()[1].eq("root")))
+            .find(|e| e.tags().iter().any(|t| t.as_vec()[1].eq("root")))
             .unwrap();
 
         assert!(
@@ -2246,7 +2255,8 @@ mod push {
 
         assert_eq!(
             proposal
-                .iter_tags()
+                .tags()
+                .iter()
                 .find(|t| t.as_vec()[0].eq("branch-name"))
                 .unwrap()
                 .as_vec()[1],

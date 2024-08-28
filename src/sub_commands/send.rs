@@ -806,8 +806,11 @@ pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
     //   [PATCH v1 0/n ] or
     //   [PATCH subsystem v2 0/n ]
     event.kind.eq(&Kind::GitPatch)
-        && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
-        && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+        && event.tags().iter().any(|t| t.as_vec()[1].eq("root"))
+        && event
+            .tags()
+            .iter()
+            .any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
 pub fn commit_msg_from_patch(patch: &nostr::Event) -> Result<String> {
@@ -876,17 +879,22 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
 }
 
 pub fn event_is_patch_set_root(event: &nostr::Event) -> bool {
-    event.kind.eq(&Kind::GitPatch) && event.iter_tags().any(|t| t.as_vec()[1].eq("root"))
+    event.kind.eq(&Kind::GitPatch) && event.tags().iter().any(|t| t.as_vec()[1].eq("root"))
 }
 
 pub fn event_is_revision_root(event: &nostr::Event) -> bool {
-    event.kind.eq(&Kind::GitPatch) && event.iter_tags().any(|t| t.as_vec()[1].eq("revision-root"))
+    event.kind.eq(&Kind::GitPatch)
+        && event
+            .tags()
+            .iter()
+            .any(|t| t.as_vec()[1].eq("revision-root"))
 }
 
 pub fn patch_supports_commit_ids(event: &nostr::Event) -> bool {
     event.kind.eq(&Kind::GitPatch)
         && event
-            .iter_tags()
+            .tags()
+            .iter()
             .any(|t| t.as_vec()[0].eq("commit-pgp-sig"))
 }
 

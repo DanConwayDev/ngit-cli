@@ -85,11 +85,19 @@ mod when_commits_behind_ask_to_proceed {
 }
 
 fn is_cover_letter(event: &nostr::Event) -> bool {
-    event.kind.eq(&Kind::GitPatch) && event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+    event.kind.eq(&Kind::GitPatch)
+        && event
+            .tags()
+            .iter()
+            .any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
 fn is_patch(event: &nostr::Event) -> bool {
-    event.kind.eq(&Kind::GitPatch) && !event.iter_tags().any(|t| t.as_vec()[1].eq("cover-letter"))
+    event.kind.eq(&Kind::GitPatch)
+        && !event
+            .tags()
+            .iter()
+            .any(|t| t.as_vec()[1].eq("cover-letter"))
 }
 
 fn prep_git_repo() -> Result<GitTestRepo> {
@@ -366,7 +374,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
 
                 assert_eq!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .find(|t| t.as_vec()[0].eq("r"))
                         .unwrap()
                         .as_vec()[1],
@@ -383,18 +392,28 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
             for relay in [&r53, &r55, &r56] {
                 let cover_letter_event: &nostr::Event =
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
-                assert!(cover_letter_event.iter_tags().any(|t| t.as_vec()[0].eq("a")
-                    && t.as_vec()[1].eq(&format!(
-                        "{}:{TEST_KEY_1_PUBKEY_HEX}:{}",
-                        Kind::GitRepoAnnouncement,
-                        generate_repo_ref_event().identifier().unwrap()
-                    ))));
-                assert!(cover_letter_event.iter_tags().any(|t| t.as_vec()[0].eq("a")
-                    && t.as_vec()[1].eq(&format!(
-                        "{}:{TEST_KEY_2_PUBKEY_HEX}:{}",
-                        Kind::GitRepoAnnouncement,
-                        generate_repo_ref_event().identifier().unwrap()
-                    ))));
+                assert!(
+                    cover_letter_event
+                        .tags()
+                        .iter()
+                        .any(|t| t.as_vec()[0].eq("a")
+                            && t.as_vec()[1].eq(&format!(
+                                "{}:{TEST_KEY_1_PUBKEY_HEX}:{}",
+                                Kind::GitRepoAnnouncement,
+                                generate_repo_ref_event().identifier().unwrap()
+                            )))
+                );
+                assert!(
+                    cover_letter_event
+                        .tags()
+                        .iter()
+                        .any(|t| t.as_vec()[0].eq("a")
+                            && t.as_vec()[1].eq(&format!(
+                                "{}:{TEST_KEY_2_PUBKEY_HEX}:{}",
+                                Kind::GitRepoAnnouncement,
+                                generate_repo_ref_event().identifier().unwrap()
+                            )))
+                );
             }
             Ok(())
         }
@@ -404,7 +423,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
         async fn p_tags_for_maintainers() -> Result<()> {
             let event = generate_repo_ref_event();
             let maintainers = &event
-                .iter_tags()
+                .tags()
+                .iter()
                 .find(|t| t.as_vec()[0].eq(&"maintainers"))
                 .unwrap()
                 .as_vec()[1..];
@@ -415,7 +435,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
                     assert!(
                         cover_letter_event
-                            .iter_tags()
+                            .tags()
+                            .iter()
                             .any(|t| { t.as_vec()[0].eq("p") && t.as_vec()[1].eq(m) })
                     );
                 }
@@ -432,7 +453,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
                 assert!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .any(|t| { t.as_vec()[0].eq("t") && t.as_vec()[1].eq(&"cover-letter") })
                 );
             }
@@ -448,7 +470,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
                 assert!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .any(|t| { t.as_vec()[0].eq("t") && t.as_vec()[1].eq(&"root") })
                 );
             }
@@ -466,7 +489,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                 // branch-name tag
                 assert_eq!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .find(|t| t.as_vec()[0].eq("branch-name"))
                         .unwrap()
                         .as_vec()[1],
@@ -487,7 +511,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                 // branch-name tag
                 assert_eq!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .find(|t| t.as_vec()[0].eq("alt"))
                         .unwrap()
                         .as_vec()[1],
@@ -557,7 +582,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
         async fn p_tags_for_maintainers() -> Result<()> {
             let event = generate_repo_ref_event();
             let maintainers = &event
-                .iter_tags()
+                .tags()
+                .iter()
                 .find(|t| t.as_vec()[0].eq(&"maintainers"))
                 .unwrap()
                 .as_vec()[1..];
@@ -565,7 +591,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                 assert!(
                     prep()
                         .await?
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .any(|t| { t.as_vec()[0].eq("p") && t.as_vec()[1].eq(m) })
                 );
             }
@@ -697,7 +724,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     .collect::<Vec<&nostr::Event>>();
                 assert_eq!(
                     patch_events[1]
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .find(|t| t.as_vec()[0].eq("e")
                             && t.as_vec().len().eq(&4)
                             && t.as_vec()[3].eq("reply"))
@@ -1086,13 +1114,15 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
             // first patch tagged as root
             assert!(
                 patch_events[0]
-                    .iter_tags()
+                    .tags()
+                    .iter()
                     .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq("root"))
             );
             // second patch not tagged as root
             assert!(
                 !patch_events[1]
-                    .iter_tags()
+                    .tags()
+                    .iter()
                     .any(|t| t.as_vec()[0].eq("t") && t.as_vec()[1].eq("root"))
             );
         }
@@ -1113,7 +1143,8 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
             // branch-name tag
             assert_eq!(
                 patch_events[0]
-                    .iter_tags()
+                    .tags()
+                    .iter()
                     .find(|t| t.as_vec()[0].eq("branch-name"))
                     .unwrap()
                     .as_vec()[1],
@@ -1136,7 +1167,8 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
 
             assert_eq!(
                 patch_events[1]
-                    .iter_tags()
+                    .tags()
+                    .iter()
                     .find(|t| t.as_vec()[0].eq("e")
                         && t.as_vec().len().eq(&4)
                         && t.as_vec()[3].eq("root"))
@@ -1540,7 +1572,8 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
                 assert!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .any(|t| { t.as_vec()[0].eq("t") && t.as_vec()[1].eq(&"root") })
                 );
             }
@@ -1556,7 +1589,8 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
                 assert!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .any(|t| { t.as_vec()[0].eq("t") && t.as_vec()[1].eq(&"revision-root") })
                 );
             }
@@ -1572,7 +1606,8 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
                 assert_eq!(
                     cover_letter_event
-                        .iter_tags()
+                        .tags()
+                        .iter()
                         .find(|t| {
                             t.as_vec()[0].eq("e")
                                 && t.as_vec().len().eq(&4)
@@ -1719,7 +1754,7 @@ mod in_reply_to_mentions_issue {
         for relay in [&r53, &r55, &r56] {
             let cover_letter_event: &nostr::Event =
                 relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
-            assert!(cover_letter_event.iter_tags().any(|t| {
+            assert!(cover_letter_event.tags().iter().any(|t| {
                 t.as_vec()[0].eq("e")
                     && t.as_vec()[1].eq(&get_pretend_issue_event().id.to_hex())
                     && t.as_vec()[3].eq(&"mention")
@@ -1737,7 +1772,8 @@ mod in_reply_to_mentions_issue {
                 relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
             assert!(
                 !cover_letter_event
-                    .iter_tags()
+                    .tags()
+                    .iter()
                     .any(|t| { t.as_vec()[0].eq("t") && t.as_vec()[1].eq(&"revision-root") })
             );
         }
@@ -1841,7 +1877,7 @@ mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root 
         for relay in [&r53, &r55, &r56] {
             let cover_letter_event: &nostr::Event =
                 relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
-            assert!(cover_letter_event.iter_tags().any(|t| {
+            assert!(cover_letter_event.tags().iter().any(|t| {
                 t.as_vec()[0].eq("p")
                     && t.as_vec()[1].eq(&nostr::Keys::parse(
                         "nsec1q3c5xnsm5m4wgsrhwnz04p0d5mevkryyggqgdpa9jwulpq9gldhswgtxvq",
@@ -1850,7 +1886,7 @@ mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root 
                     .public_key()
                     .to_hex())
             }));
-            assert!(cover_letter_event.iter_tags().any(|t| {
+            assert!(cover_letter_event.tags().iter().any(|t| {
                 t.as_vec()[0].eq("p")
                     && t.as_vec()[1].eq(&nostr::Keys::parse(
                         "nsec1nx5ulvcndhcuu8k6q8fenw50l6y75sec7pj8vr0r68l6a44w3lqspvj02k",

@@ -1182,12 +1182,12 @@ async fn process_fetched_events(
             } else if [Kind::RelayList, Kind::Metadata].contains(&event.kind()) {
                 if request
                     .missing_contributor_profiles
-                    .contains(event.author_ref())
+                    .contains(&event.author())
                 {
                     report.contributor_profiles.insert(event.author());
                 } else if let Some((_, (metadata_timestamp, relay_list_timestamp))) = request
                     .profiles_to_fetch_from_user_relays
-                    .get_key_value(event.author_ref())
+                    .get_key_value(&event.author())
                 {
                     if (Kind::Metadata.eq(&event.kind())
                         && event.created_at().gt(metadata_timestamp))
