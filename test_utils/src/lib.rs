@@ -1370,7 +1370,7 @@ fn get_first_proposal_event_id() -> Result<nostr::EventId> {
                 vec!["root"],
             ),
     ],
-        nostr_sdk::EventSource::relays(Some(Duration::from_millis(1000))),
+        nostr_sdk::EventSource::relays(Some(Duration::from_millis(500))),
     ))?;
     Handle::current().block_on(client.disconnect())?;
 
