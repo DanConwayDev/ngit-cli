@@ -1,0 +1,9 @@
+[general]
+regex-style-search=true
+
+# this ignore all body rules if there is a nostr link rather than just this line
+# until https://github.com/jorisroovers/gitlint/issues/255#issuecomment-1040868243
+# is implemented with [ignore-body-lines] this skips validation of other body line lengths
+[ignore-by-body]
+regex = ^(nostr:[^\s]*|https://[^\s]*)$
+ignore = body-max-line-length
