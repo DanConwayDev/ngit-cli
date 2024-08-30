@@ -1063,7 +1063,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                 refspecs_for_remote.push(refspec.clone());
             }
         }
-        refspecs_for_remotes.insert(url.to_string(), refspecs_for_remote);
+        if !refspecs_for_remote.is_empty() {
+            refspecs_for_remotes.insert(url.to_string(), refspecs_for_remote);
+        }
     }
 
     // remove rejected refspecs so they dont get pushed to some remotes
