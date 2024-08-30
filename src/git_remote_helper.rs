@@ -12,12 +12,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use auth_git2::GitAuthenticator;
 use client::{
     consolidate_fetch_reports, get_events_from_cache, get_repo_ref_from_cache,
     get_state_from_cache, sign_event, Connect, STATE_KIND,
 };
+use console::Term;
 use git::{nostr_git_url_to_repo_coordinates, sha1_to_oid, RepoActions};
 use git2::{Oid, Repository};
 use nostr::nips::{nip01::Coordinate, nip10::Marker};
@@ -290,15 +291,70 @@ fn list_from_remotes(
             Ok(remote_state) => {
                 remote_states.insert(url.clone(), remote_state);
             }
-            Err(error) => {
-                term.write_line(
-                    format!("WARNING: {short_name} failed to list refs error: {error}",).as_str(),
-                )?;
+            Err(error1) => {
+                if let Ok(alternative_url) = switch_clone_url_between_ssh_and_https(url) {
+                    match list_from_remote(git_repo, &alternative_url) {
+                        Ok(remote_state) => {
+                            remote_states.insert(url.clone(), remote_state);
+                        }
+                        Err(error2) => {
+                            term.write_line(
+                                format!("WARNING: {short_name} failed to list refs error: {error1}\r\nand alternative protocol {alternative_url}: {error2}").as_str(),
+                            )?;
+                        }
+                    }
+                } else {
+                    term.write_line(
+                        format!("WARNING: {short_name} failed to list refs error: {error1}",)
+                            .as_str(),
+                    )?;
+                }
             }
         }
         term.clear_last_lines(1)?;
     }
     Ok(remote_states)
+}
+
+fn switch_clone_url_between_ssh_and_https(url: &str) -> Result<String> {
+    if url.starts_with("https://") {
+        // Convert HTTPS to git@ syntax
+        let parts: Vec<&str> = url.trim_start_matches("https://").split('/').collect();
+        if parts.len() >= 2 {
+            // Construct the git@ URL
+            Ok(format!("git@{}:{}", parts[0], parts[1..].join("/")))
+        } else {
+            // If the format is unexpected, return an error
+            bail!("Invalid HTTPS URL format: {}", url);
+        }
+    } else if url.starts_with("ssh://") {
+        // Convert SSH to git@ syntax
+        let parts: Vec<&str> = url.trim_start_matches("ssh://").split('/').collect();
+        if parts.len() >= 2 {
+            // Construct the git@ URL
+            Ok(format!("git@{}:{}", parts[0], parts[1..].join("/")))
+        } else {
+            // If the format is unexpected, return an error
+            bail!("Invalid SSH URL format: {}", url);
+        }
+    } else if url.starts_with("git@") {
+        // Convert git@ syntax to HTTPS
+        let parts: Vec<&str> = url.split(':').collect();
+        if parts.len() == 2 {
+            // Construct the HTTPS URL
+            Ok(format!(
+                "https://{}/{}",
+                parts[0].trim_end_matches('@'),
+                parts[1]
+            ))
+        } else {
+            // If the format is unexpected, return an error
+            bail!("Invalid git@ URL format: {}", url);
+        }
+    } else {
+        // If the URL is neither HTTPS, SSH, nor git@, return an error
+        bail!("Unsupported URL protocol: {}", url);
+    }
 }
 
 fn list_from_remote(
@@ -467,15 +523,34 @@ async fn fetch(
         term.write_line(format!("fetching from {short_name}...").as_str())?;
         let res = fetch_from_git_server(&git_repo.git_repo, &oids_from_git_servers, git_server_url);
         term.clear_last_lines(1)?;
-        if let Err(e) = res {
-            term.write_line(
-                format!(
-                    "WARNING: failed to fetch from {short_name} error:
-            {e}"
-                )
-                .as_str(),
-            )?;
-            errors.insert(short_name.to_string(), e);
+        if let Err(error1) = res {
+            if let Ok(alternative_url) = switch_clone_url_between_ssh_and_https(git_server_url) {
+                let res2 = fetch_from_git_server(
+                    &git_repo.git_repo,
+                    &oids_from_git_servers,
+                    &alternative_url,
+                );
+                if let Err(error2) = res2 {
+                    term.write_line(
+                        format!(
+                            "WARNING: failed to fetch from {short_name} error:{error1}\r\nand using alternative protocol {alternative_url}: {error2}"
+                        ).as_str()
+                    )?;
+                    errors.insert(
+                        short_name.to_string(),
+                        anyhow!(
+                            "{error1} and using alternative protocol {alternative_url}: {error2}"
+                        ),
+                    );
+                } else {
+                    break;
+                }
+            } else {
+                term.write_line(
+                    format!("WARNING: failed to fetch from {short_name} error:{error1}").as_str(),
+                )?;
+                errors.insert(short_name.to_string(), error1);
+            }
         } else {
             break;
         }
@@ -854,39 +929,61 @@ async fn push(
     }
 
     // TODO make async - check gitlib2 callbacks work async
-    let git_config = git_repo.git_repo.config()?;
     for (git_server_url, remote_refspecs) in remote_refspecs {
         let remote_refspecs = remote_refspecs
             .iter()
             .filter(|refspec| git_server_refspecs.contains(refspec))
             .cloned()
             .collect::<Vec<String>>();
-        if !refspecs.is_empty() {
-            if let Ok(mut git_server_remote) = git_repo.git_repo.remote_anonymous(&git_server_url) {
-                let auth = GitAuthenticator::default();
-                let mut push_options = git2::PushOptions::new();
-                let mut remote_callbacks = git2::RemoteCallbacks::new();
-                remote_callbacks.credentials(auth.credentials(&git_config));
-                remote_callbacks.push_update_reference(|name, error| {
-                    if let Some(error) = error {
-                        term.write_line(
-                            format!(
-                                "WARNING: {} failed to push {name} error: {error}",
-                                get_short_git_server_name(git_repo, &git_server_url),
-                            )
+        if !refspecs.is_empty()
+            && push_to_remote(git_repo, &git_server_url, &remote_refspecs, &term).is_err()
+        {
+            if let Ok(alternative_url) = switch_clone_url_between_ssh_and_https(&git_server_url) {
+                if push_to_remote(git_repo, &alternative_url, &remote_refspecs, &term).is_err() {
+                    // errors get printed as part of callback
+                    // TODO prevent 2 warning messages and instead use one
+                    // to say it didnt work over either https or ssh
+                } else {
+                    term.write_line(
+                        format!("but succeed over alterantive protocol {alternative_url}",)
                             .as_str(),
-                        )
-                        .unwrap();
-                    }
-                    Ok(())
-                });
-                push_options.remote_callbacks(remote_callbacks);
-                let _ = git_server_remote.push(&remote_refspecs, Some(&mut push_options));
-                let _ = git_server_remote.disconnect();
+                    )?;
+                }
             }
         }
     }
     println!();
+    Ok(())
+}
+
+fn push_to_remote(
+    git_repo: &Repo,
+    git_server_url: &str,
+    remote_refspecs: &[String],
+    term: &Term,
+) -> Result<()> {
+    let git_config = git_repo.git_repo.config()?;
+    let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
+    let auth = GitAuthenticator::default();
+    let mut push_options = git2::PushOptions::new();
+    let mut remote_callbacks = git2::RemoteCallbacks::new();
+    remote_callbacks.credentials(auth.credentials(&git_config));
+    remote_callbacks.push_update_reference(|name, error| {
+        if let Some(error) = error {
+            term.write_line(
+                format!(
+                    "WARNING: {} failed to push {name} error: {error}",
+                    get_short_git_server_name(git_repo, git_server_url),
+                )
+                .as_str(),
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    push_options.remote_callbacks(remote_callbacks);
+    git_server_remote.push(remote_refspecs, Some(&mut push_options))?;
+    let _ = git_server_remote.disconnect();
     Ok(())
 }
 
