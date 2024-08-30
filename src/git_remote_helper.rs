@@ -305,8 +305,14 @@ fn list_from_remote(
     git_repo: &Repo,
     git_server_remote_url: &str,
 ) -> Result<HashMap<String, String>> {
+    let git_config = git_repo.git_repo.config()?;
+
     let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_remote_url)?;
-    git_server_remote.connect(git2::Direction::Fetch)?;
+    // authentication may be required
+    let auth = GitAuthenticator::default();
+    let mut remote_callbacks = git2::RemoteCallbacks::new();
+    remote_callbacks.credentials(auth.credentials(&git_config));
+    git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), None)?;
     let mut state = HashMap::new();
     for head in git_server_remote.list()? {
         if let Some(symbolic_reference) = head.symref_target() {
@@ -560,9 +566,16 @@ fn fetch_from_git_server(
     oids: &[String],
     git_server_url: &str,
 ) -> Result<()> {
+    let git_config = git_repo.config()?;
+
     let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;
-    git_server_remote.connect(git2::Direction::Fetch)?;
-    git_server_remote.download(oids, None)?;
+    // authentication may be required (and will be requird if clone url is ssh)
+    let auth = GitAuthenticator::default();
+    let mut fetch_options = git2::FetchOptions::new();
+    let mut remote_callbacks = git2::RemoteCallbacks::new();
+    remote_callbacks.credentials(auth.credentials(&git_config));
+    fetch_options.remote_callbacks(remote_callbacks);
+    git_server_remote.download(oids, Some(&mut fetch_options))?;
     git_server_remote.disconnect()?;
     Ok(())
 }
