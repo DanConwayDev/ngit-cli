@@ -16,7 +16,7 @@ use crate::client::Client;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{get_event_from_global_cache, get_events_from_cache, sign_event, Connect},
-    git::{nostr_git_url_to_repo_coordinates, Repo, RepoActions},
+    git::{NostrUrlDecoded, Repo, RepoActions},
 };
 
 #[derive(Default)]
@@ -263,8 +263,8 @@ fn get_repo_coordinates_from_nostr_remotes(git_repo: &Repo) -> Result<HashSet<Co
     let mut repo_coordinates = HashSet::new();
     for remote_name in git_repo.git_repo.remotes()?.iter().flatten() {
         if let Some(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
-            if let Ok(coordinates) = nostr_git_url_to_repo_coordinates(remote_url) {
-                for c in coordinates {
+            if let Ok(nostr_url_decoded) = NostrUrlDecoded::from_str(remote_url) {
+                for c in nostr_url_decoded.coordinates {
                     repo_coordinates.insert(c);
                 }
             }

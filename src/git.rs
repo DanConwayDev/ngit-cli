@@ -835,55 +835,128 @@ fn extract_sig_from_patch_tags<'a>(
     .context("failed to create git signature")
 }
 
-pub fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate>> {
-    let mut repo_coordinattes = HashSet::new();
-    let url = Url::parse(url)?;
+#[derive(Debug, PartialEq)]
+pub enum ServerProtocol {
+    Ssh,
+    Https,
+    Http,
+    Git,
+}
 
-    if url.scheme().ne("nostr") {
-        bail!("nostr git url must start with nostr://")
-    }
+#[derive(Debug, PartialEq)]
+pub struct NostrUrlDecoded {
+    pub coordinates: HashSet<Coordinate>,
+    pub protocol: Option<ServerProtocol>,
+    pub user: Option<String>,
+}
 
-    if let Ok(coordinate) = Coordinate::parse(url.domain().context("no naddr")?) {
-        if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
-            repo_coordinattes.insert(coordinate);
-            return Ok(repo_coordinattes);
+static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format. try nostr://naddr123 or nostr://npub123/my-repo or nostr://ssh/npub123/relay.damus.io/my-repo";
+
+impl NostrUrlDecoded {
+    pub fn from_str(url: &str) -> Result<Self> {
+        let mut coordinates = HashSet::new();
+        let mut protocol = None;
+        let mut user = None;
+        let mut relays = vec![];
+
+        if !url.starts_with("nostr://") {
+            bail!("nostr git url must start with nostr://");
         }
-        bail!("naddr doesnt point to a git repository announcement");
-    }
-
-    if let Some(domain) = url.domain() {
-        if let Ok(public_key) = PublicKey::parse(domain) {
-            if url.path().len() < 2 {
-                bail!(
-                    "nostr git url should include the repo identifier eg nostr://npub123/the-repo-identifer"
-                );
-            }
-            let mut relays = vec![];
-            for (name, value) in url.query_pairs() {
-                if name.contains("relay") {
-                    let mut decoded = urlencoding::decode(&value)
-                        .context("could not parse relays in nostr git url")?
-                        .to_string();
-                    if !decoded.starts_with("ws://") && !decoded.starts_with("wss://") {
-                        decoded = format!("wss://{decoded}");
-                    }
-                    let url =
-                        Url::parse(&decoded).context("could not parse relays in nostr git url")?;
-                    relays.push(url.to_string());
+        // process get url parameters if present
+        for (name, value) in Url::parse(url)?.query_pairs() {
+            if name.contains("relay") {
+                let mut decoded = urlencoding::decode(&value)
+                    .context("could not parse relays in nostr git url")?
+                    .to_string();
+                if !decoded.starts_with("ws://") && !decoded.starts_with("wss://") {
+                    decoded = format!("wss://{decoded}");
                 }
+                let url =
+                    Url::parse(&decoded).context("could not parse relays in nostr git url")?;
+                relays.push(url.to_string());
+            } else if name == "protocol" {
+                protocol = match value.as_ref() {
+                    "ssh" => Some(ServerProtocol::Ssh),
+                    "https" => Some(ServerProtocol::Https),
+                    "http" => Some(ServerProtocol::Http),
+                    "git" => Some(ServerProtocol::Git),
+                    _ => None,
+                };
+            } else if name == "user" {
+                user = Some(value.to_string());
             }
-            repo_coordinattes.insert(Coordinate {
-                identifier: url.path()[1..].to_string(),
+        }
+
+        let mut parts: Vec<&str> = url[8..]
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .split('/')
+            .collect();
+
+        // extract optional protocol
+        if protocol.is_none() {
+            let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
+            let protocol_str = if let Some(at_index) = part.find('@') {
+                user = Some(part[..at_index].to_string());
+                &part[at_index + 1..]
+            } else {
+                part
+            };
+            protocol = match protocol_str {
+                "ssh" => Some(ServerProtocol::Ssh),
+                "https" => Some(ServerProtocol::Https),
+                "http" => Some(ServerProtocol::Http),
+                "git" => Some(ServerProtocol::Git),
+                _ => protocol,
+            };
+            if protocol.is_some() {
+                parts.remove(0);
+            }
+        }
+        // extract naddr npub/<optional-relays>/identifer
+        let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
+        // naddr used
+        if let Ok(coordinate) = Coordinate::parse(part) {
+            if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
+                coordinates.insert(coordinate);
+            } else {
+                bail!("naddr doesnt point to a git repository announcement");
+            }
+        // npub/<optional-relays>/identifer used
+        } else if let Ok(public_key) = PublicKey::parse(part) {
+            parts.remove(0);
+            let identifier = parts
+                .pop()
+                .context("nostr url must have an identifier eg. nostr://npub123/repo-identifier")?
+                .to_string();
+            for relay in parts {
+                let mut decoded = urlencoding::decode(relay)
+                    .context("could not parse relays in nostr git url")?
+                    .to_string();
+                if !decoded.starts_with("ws://") && !decoded.starts_with("wss://") {
+                    decoded = format!("wss://{decoded}");
+                }
+                let url =
+                    Url::parse(&decoded).context("could not parse relays in nostr git url")?;
+                relays.push(url.to_string());
+            }
+            coordinates.insert(Coordinate {
+                identifier,
                 public_key,
                 kind: nostr_sdk::Kind::GitRepoAnnouncement,
                 relays,
             });
-            return Ok(repo_coordinattes);
+        } else {
+            bail!(INCORRECT_NOSTR_URL_FORMAT_ERROR);
         }
+
+        Ok(Self {
+            coordinates,
+            protocol,
+            user,
+        })
     }
-    bail!(
-        "nostr git url must be in format nostr://naddr123 or nostr://npub123/identifer?relay=wss://relay-example.com&relay1=wss://relay-example.org"
-    );
 }
 
 /** produce error when using local repo or custom protocols */
