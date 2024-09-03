@@ -13,7 +13,7 @@ use crate::{
     cli::Cli,
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{fetching_with_report, get_repo_ref_from_cache, Connect},
-    git::{Repo, RepoActions},
+    git::{convert_clone_url_to_https, Repo, RepoActions},
     login,
     repo_ref::{
         extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
@@ -159,11 +159,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         Interactor::default()
             .input(
                 PromptInputParms::default()
-                    .with_prompt("clone url")
+                    .with_prompt("clone url (for fetch)")
                     .with_default(if let Some(repo_ref) = &repo_ref {
                         repo_ref.git_server.clone().join(" ")
-                    } else if let Ok(git_repo) = git_repo.get_origin_url() {
-                        git_repo
+                    } else if let Ok(url) = git_repo.get_origin_url() {
+                        if let Ok(fetch_url) = convert_clone_url_to_https(&url) {
+                            fetch_url
+                        } else {
+                            // local repo or custom protocol
+                            url
+                        }
                     } else {
                         String::new()
                     }),

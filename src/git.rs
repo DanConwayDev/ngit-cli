@@ -886,6 +886,64 @@ pub fn nostr_git_url_to_repo_coordinates(url: &str) -> Result<HashSet<Coordinate
     );
 }
 
+/** produce error when using local repo or custom protocols */
+pub fn convert_clone_url_to_https(url: &str) -> Result<String> {
+    // Strip credentials if present
+    let stripped_url = strip_credentials(url);
+
+    // Check if the URL is already in HTTPS format
+    if stripped_url.starts_with("https://") {
+        return Ok(stripped_url);
+    }
+    // Convert http:// to https://
+    else if stripped_url.starts_with("http://") {
+        return Ok(stripped_url.replace("http://", "https://"));
+    }
+    // Check if the URL starts with SSH
+    else if stripped_url.starts_with("ssh://") {
+        // Convert SSH to HTTPS
+        let parts: Vec<&str> = stripped_url
+            .trim_start_matches("ssh://")
+            .split('/')
+            .collect();
+        if parts.len() >= 2 {
+            // Construct the HTTPS URL
+            return Ok(format!("https://{}/{}", parts[0], parts[1..].join("/")));
+        }
+        bail!("Invalid SSH URL format: {}", url);
+    }
+    // Convert ftp:// to https://
+    else if stripped_url.starts_with("ftp://") {
+        return Ok(stripped_url.replace("ftp://", "https://"));
+    }
+    // Convert git:// to https://
+    else if stripped_url.starts_with("git://") {
+        return Ok(stripped_url.replace("git://", "https://"));
+    }
+
+    // If the URL is neither HTTPS, SSH, nor git@, return an error
+    bail!("Unsupported URL protocol: {}", url);
+}
+
+// Function to strip username and password from the URL
+fn strip_credentials(url: &str) -> String {
+    if let Some(pos) = url.find("://") {
+        let (protocol, rest) = url.split_at(pos + 3); // Split at "://"
+        let rest_parts: Vec<&str> = rest.split('@').collect();
+        if rest_parts.len() > 1 {
+            // If there are credentials, return the URL without them
+            return format!("{}{}", protocol, rest_parts[1]);
+        }
+    } else if let Some(at_pos) = url.find('@') {
+        // Handle user@host:path format
+        let (_, rest) = url.split_at(at_pos);
+        // This is a git@ syntax
+        let host_and_repo = &rest[1..]; // Skip the ':'
+        return format!("ssh://{}", host_and_repo.replace(':', "/"));
+    }
+    url.to_string() // Return the original URL if no credentials are found
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2364,6 +2422,72 @@ mod tests {
                 &oid_to_sha1(&on_main_after_feature)
             )?);
             Ok(())
+        }
+    }
+    mod convert_clone_url_to_https {
+        use super::*;
+
+        #[test]
+        fn test_https_url() {
+            let url = "https://github.com/user/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://github.com/user/repo.git");
+        }
+
+        #[test]
+        fn test_http_url() {
+            let url = "http://github.com/user/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://github.com/user/repo.git");
+        }
+
+        #[test]
+        fn test_http_url_with_credentials() {
+            let url = "http://username:password@github.com/user/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://github.com/user/repo.git");
+        }
+
+        #[test]
+        fn test_git_at_url() {
+            let url = "git@github.com:user/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://github.com/user/repo.git");
+        }
+
+        #[test]
+        fn test_user_at_url() {
+            let url = "user1@github.com:user/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://github.com/user/repo.git");
+        }
+
+        #[test]
+        fn test_ssh_url() {
+            let url = "ssh://github.com/user/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://github.com/user/repo.git");
+        }
+
+        #[test]
+        fn test_ftp_url() {
+            let url = "ftp://example.com/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://example.com/repo.git");
+        }
+
+        #[test]
+        fn test_git_protocol_url() {
+            let url = "git://example.com/repo.git";
+            let result = convert_clone_url_to_https(url).unwrap();
+            assert_eq!(result, "https://example.com/repo.git");
+        }
+
+        #[test]
+        fn test_invalid_url() {
+            let url = "unsupported://example.com/repo.git";
+            let result = convert_clone_url_to_https(url);
+            assert!(result.is_err());
         }
     }
 }
