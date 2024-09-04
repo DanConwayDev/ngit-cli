@@ -16,7 +16,7 @@ use crate::client::Client;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{get_event_from_global_cache, get_events_from_cache, sign_event, Connect},
-    git::{NostrUrlDecoded, Repo, RepoActions},
+    git::{nostr_url::NostrUrlDecoded, Repo, RepoActions},
 };
 
 #[derive(Default)]

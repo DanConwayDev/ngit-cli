@@ -7,7 +7,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 mod cli;
-use ngit::*;
+use ngit::{cli_interactor, client, git, git_events, login, repo_ref};
 
 mod sub_commands;
 

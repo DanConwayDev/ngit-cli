@@ -1,27 +1,20 @@
 use anyhow::{bail, Context, Result};
+use ngit::{client::send_events, git_events::tag_value};
 
-#[cfg(not(test))]
-use crate::client::Client;
-#[cfg(test)]
-use crate::client::MockConnect;
 use crate::{
     cli::Cli,
-    client::{fetching_with_report, get_repo_ref_from_cache, Connect},
-    git::{str_to_sha1, Repo, RepoActions},
+    client::{
+        fetching_with_report, get_all_proposal_patch_events_from_cache,
+        get_proposals_and_revisions_from_cache, get_repo_ref_from_cache, Client, Connect,
+    },
+    git::{identify_ahead_behind, str_to_sha1, Repo, RepoActions},
+    git_events::{
+        event_is_revision_root, event_to_cover_letter, generate_patch_event,
+        get_commit_id_from_patch, get_most_recent_patch_with_ancestors,
+    },
     login,
     repo_ref::get_repo_coordinates,
-    sub_commands::{
-        self,
-        list::{
-            get_all_proposal_patch_events_from_cache, get_commit_id_from_patch,
-            get_most_recent_patch_with_ancestors, get_proposals_and_revisions_from_cache,
-            tag_value,
-        },
-        send::{
-            event_is_revision_root, event_to_cover_letter, generate_patch_event,
-            identify_ahead_behind, send_events,
-        },
-    },
+    sub_commands,
 };
 
 #[derive(Debug, clap::Args)]
@@ -51,10 +44,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     if branch_name == main_or_master_branch_name {
         bail!("checkout a branch associated with a proposal first")
     }
-    #[cfg(not(test))]
     let mut client = Client::default();
-    #[cfg(test)]
-    let mut client = <MockConnect as std::default::Default>::default();
 
     let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
 

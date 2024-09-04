@@ -21,8 +21,11 @@ use std::{
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use console::Style;
-use futures::stream::{self, StreamExt};
-use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
+use futures::{
+    future::join_all,
+    stream::{self, StreamExt},
+};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
 use nostr::{nips::nip01::Coordinate, Event};
@@ -34,14 +37,13 @@ use nostr_sdk::{
 use nostr_sqlite::SQLiteDatabase;
 
 use crate::{
-    config::get_dirs,
+    get_dirs,
+    git_events::{
+        event_is_cover_letter, event_is_patch_set_root, event_is_revision_root, status_kinds,
+    },
     login::{get_logged_in_user, get_user_ref_from_cache},
     repo_ref::RepoRef,
     repo_state::RepoState,
-    sub_commands::{
-        list::status_kinds,
-        send::{event_is_patch_set_root, event_is_revision_root},
-    },
 };
 
 #[allow(clippy::struct_field_names)]
@@ -1477,4 +1479,261 @@ pub async fn fetching_with_report(
         println!("updates: {report}");
     }
     Ok(report)
+}
+
+pub async fn get_proposals_and_revisions_from_cache(
+    git_repo_path: &Path,
+    repo_coordinates: HashSet<Coordinate>,
+) -> Result<Vec<nostr::Event>> {
+    let mut proposals = get_events_from_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .kind(nostr::Kind::GitPatch)
+                .custom_tag(
+                    nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                    repo_coordinates
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<String>>(),
+                ),
+        ],
+    )
+    .await?
+    .iter()
+    .filter(|e| event_is_patch_set_root(e))
+    .cloned()
+    .collect::<Vec<nostr::Event>>();
+    proposals.sort_by_key(|e| e.created_at);
+    proposals.reverse();
+    Ok(proposals)
+}
+
+pub async fn get_all_proposal_patch_events_from_cache(
+    git_repo_path: &Path,
+    repo_ref: &RepoRef,
+    proposal_id: &nostr::EventId,
+) -> Result<Vec<nostr::Event>> {
+    let mut commit_events = get_events_from_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .kind(nostr::Kind::GitPatch)
+                .event(*proposal_id),
+            nostr::Filter::default()
+                .kind(nostr::Kind::GitPatch)
+                .id(*proposal_id),
+        ],
+    )
+    .await?;
+
+    let permissioned_users: HashSet<PublicKey> = [
+        repo_ref.maintainers.clone(),
+        vec![
+            commit_events
+                .iter()
+                .find(|e| e.id().eq(proposal_id))
+                .context("proposal not in cache")?
+                .author(),
+        ],
+    ]
+    .concat()
+    .iter()
+    .copied()
+    .collect();
+    commit_events.retain(|e| permissioned_users.contains(&e.author()));
+
+    let revision_roots: HashSet<nostr::EventId> = commit_events
+        .iter()
+        .filter(|e| event_is_revision_root(e))
+        .map(nostr::Event::id)
+        .collect();
+
+    if !revision_roots.is_empty() {
+        for event in get_events_from_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .kind(nostr::Kind::GitPatch)
+                    .events(revision_roots)
+                    .authors(permissioned_users.clone()),
+            ],
+        )
+        .await?
+        {
+            commit_events.push(event);
+        }
+    }
+
+    Ok(commit_events
+        .iter()
+        .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(&e.author()))
+        .cloned()
+        .collect())
+}
+
+#[allow(clippy::module_name_repetitions)]
+#[allow(clippy::too_many_lines)]
+pub async fn send_events(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: &Path,
+    events: Vec<nostr::Event>,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<String>,
+    animate: bool,
+    silent: bool,
+) -> Result<()> {
+    let fallback = [
+        client.get_fallback_relays().clone(),
+        if events
+            .iter()
+            .any(|e| e.kind().eq(&Kind::GitRepoAnnouncement))
+        {
+            client.get_blaster_relays().clone()
+        } else {
+            vec![]
+        },
+    ]
+    .concat();
+    let mut relays: Vec<&String> = vec![];
+
+    let all = &[
+        repo_read_relays.clone(),
+        my_write_relays.clone(),
+        fallback.clone(),
+    ]
+    .concat();
+    // add duplicates first
+    for r in &repo_read_relays {
+        let r_clean = remove_trailing_slash(r);
+        if !my_write_relays
+            .iter()
+            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
+            .count()
+            > 1
+            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
+        {
+            relays.push(r);
+        }
+    }
+
+    for r in all {
+        let r_clean = remove_trailing_slash(r);
+        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
+            relays.push(r);
+        }
+    }
+
+    let m = if silent {
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    };
+    let pb_style = ProgressStyle::with_template(if animate {
+        " {spinner} {prefix} {bar} {pos}/{len} {msg}"
+    } else {
+        " - {prefix} {bar} {pos}/{len} {msg}"
+    })?
+    .progress_chars("##-");
+
+    let pb_after_style =
+        |symbol| ProgressStyle::with_template(format!(" {symbol} {}", "{prefix} {msg}",).as_str());
+    let pb_after_style_succeeded = pb_after_style(if animate {
+        console::style("✔".to_string())
+            .for_stderr()
+            .green()
+            .to_string()
+    } else {
+        "y".to_string()
+    })?;
+
+    let pb_after_style_failed = pb_after_style(if animate {
+        console::style("✘".to_string())
+            .for_stderr()
+            .red()
+            .to_string()
+    } else {
+        "x".to_string()
+    })?;
+
+    #[allow(clippy::borrow_deref_ref)]
+    join_all(relays.iter().map(|&relay| async {
+        let relay_clean = remove_trailing_slash(&*relay);
+        let details = format!(
+            "{}{}{} {}",
+            if my_write_relays
+                .iter()
+                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+            {
+                " [my-relay]"
+            } else {
+                ""
+            },
+            if repo_read_relays
+                .iter()
+                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+            {
+                " [repo-relay]"
+            } else {
+                ""
+            },
+            if fallback
+                .iter()
+                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+            {
+                " [default]"
+            } else {
+                ""
+            },
+            relay_clean,
+        );
+        let pb = m.add(
+            ProgressBar::new(events.len() as u64)
+                .with_prefix(details.to_string())
+                .with_style(pb_style.clone()),
+        );
+        if animate {
+            pb.enable_steady_tick(Duration::from_millis(300));
+        }
+        pb.inc(0); // need to make pb display intially
+        let mut failed = false;
+        for event in &events {
+            match client
+                .send_event_to(git_repo_path, relay.as_str(), event.clone())
+                .await
+            {
+                Ok(_) => pb.inc(1),
+                Err(e) => {
+                    pb.set_style(pb_after_style_failed.clone());
+                    pb.finish_with_message(
+                        console::style(
+                            e.to_string()
+                                .replace("relay pool error:", "error:")
+                                .replace("event not published: ", "error: "),
+                        )
+                        .for_stderr()
+                        .red()
+                        .to_string(),
+                    );
+                    failed = true;
+                    break;
+                }
+            };
+        }
+        if !failed {
+            pb.set_style(pb_after_style_succeeded.clone());
+            pb.finish_with_message("");
+        }
+    }))
+    .await;
+    Ok(())
+}
+
+fn remove_trailing_slash(s: &String) -> String {
+    match s.as_str().strip_suffix('/') {
+        Some(s) => s,
+        None => s,
+    }
+    .to_string()
 }

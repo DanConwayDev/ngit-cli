@@ -1,14 +1,6 @@
-use anyhow::{anyhow, Result};
-use directories::ProjectDirs;
 use nostr::PublicKey;
 use nostr_sdk::Timestamp;
 use serde::{self, Deserialize, Serialize};
-
-pub fn get_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("", "", "ngit").ok_or(anyhow!(
-        "should find operating system home directories with rust-directories crate"
-    ))
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRef {

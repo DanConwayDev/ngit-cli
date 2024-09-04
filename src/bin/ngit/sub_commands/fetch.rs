@@ -4,13 +4,9 @@ use anyhow::{Context, Result};
 use clap;
 use nostr::nips::nip01::Coordinate;
 
-#[cfg(not(test))]
-use crate::client::Client;
-#[cfg(test)]
-use crate::client::MockConnect;
 use crate::{
     cli::Cli,
-    client::{fetching_with_report, Connect},
+    client::{fetching_with_report, Client, Connect},
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates,
 };
@@ -25,10 +21,7 @@ pub struct SubCommandArgs {
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     let _ = args;
     let git_repo = Repo::discover().context("cannot find a git repository")?;
-    #[cfg(not(test))]
     let client = Client::default();
-    #[cfg(test)]
-    let client = <MockConnect as std::default::Default>::default();
     let repo_coordinates = if command_args.repo.is_empty() {
         get_repo_coordinates(&git_repo, &client).await?
     } else {

@@ -1,21 +1,16 @@
 use anyhow::{bail, Context, Result};
 
-use super::{
-    list::{
-        get_all_proposal_patch_events_from_cache, get_commit_id_from_patch,
-        get_proposals_and_revisions_from_cache, tag_value,
-    },
-    send::event_to_cover_letter,
-};
-#[cfg(test)]
-use crate::client::MockConnect;
-#[cfg(not(test))]
-use crate::client::{Client, Connect};
 use crate::{
-    client::{fetching_with_report, get_repo_ref_from_cache},
+    client::{
+        fetching_with_report, get_all_proposal_patch_events_from_cache,
+        get_proposals_and_revisions_from_cache, get_repo_ref_from_cache, Client, Connect,
+    },
     git::{str_to_sha1, Repo, RepoActions},
+    git_events::{
+        event_is_revision_root, event_to_cover_letter, get_commit_id_from_patch,
+        get_most_recent_patch_with_ancestors, tag_value,
+    },
     repo_ref::get_repo_coordinates,
-    sub_commands::{list::get_most_recent_patch_with_ancestors, send::event_is_revision_root},
 };
 
 #[allow(clippy::too_many_lines)]
@@ -34,10 +29,7 @@ pub async fn launch() -> Result<()> {
     if branch_name == main_or_master_branch_name {
         bail!("checkout a branch associated with a proposal first")
     }
-    #[cfg(not(test))]
     let client = Client::default();
-    #[cfg(test)]
-    let client = <MockConnect as std::default::Default>::default();
 
     let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
 

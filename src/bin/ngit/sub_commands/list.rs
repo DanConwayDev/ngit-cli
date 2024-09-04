@@ -1,23 +1,25 @@
-use std::{collections::HashSet, io::Write, ops::Add, path::Path};
+use std::{io::Write, ops::Add};
 
 use anyhow::{bail, Context, Result};
-use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{Kind, PublicKey};
+use ngit::{
+    client::{get_all_proposal_patch_events_from_cache, get_proposals_and_revisions_from_cache},
+    git_events::{
+        get_commit_id_from_patch, get_most_recent_patch_with_ancestors, status_kinds, tag_value,
+    },
+};
+use nostr_sdk::Kind;
 
-use super::send::event_is_patch_set_root;
-#[cfg(test)]
-use crate::client::MockConnect;
-#[cfg(not(test))]
-use crate::client::{Client, Connect};
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
-    client::{fetching_with_report, get_events_from_cache, get_repo_ref_from_cache},
-    git::{str_to_sha1, Repo, RepoActions},
-    repo_ref::{get_repo_coordinates, RepoRef},
-    sub_commands::send::{
-        commit_msg_from_patch_oneliner, event_is_cover_letter, event_is_revision_root,
-        event_to_cover_letter, patch_supports_commit_ids,
+    client::{
+        fetching_with_report, get_events_from_cache, get_repo_ref_from_cache, Client, Connect,
     },
+    git::{str_to_sha1, Repo, RepoActions},
+    git_events::{
+        commit_msg_from_patch_oneliner, event_is_revision_root, event_to_cover_letter,
+        patch_supports_commit_ids,
+    },
+    repo_ref::get_repo_coordinates,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -29,10 +31,7 @@ pub async fn launch() -> Result<()> {
     // TODO: check for existing maintaiers file
     // TODO: check for other claims
 
-    #[cfg(not(test))]
     let client = Client::default();
-    #[cfg(test)]
-    let client = <MockConnect as std::default::Default>::default();
 
     let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
 
@@ -720,187 +719,4 @@ fn check_clean(git_repo: &Repo) -> Result<()> {
         );
     }
     Ok(())
-}
-
-pub fn tag_value(event: &nostr::Event, tag_name: &str) -> Result<String> {
-    Ok(event
-        .tags
-        .iter()
-        .find(|t| t.as_vec()[0].eq(tag_name))
-        .context(format!("tag '{tag_name}'not present"))?
-        .as_vec()[1]
-        .clone())
-}
-
-pub fn get_commit_id_from_patch(event: &nostr::Event) -> Result<String> {
-    let value = tag_value(event, "commit");
-
-    if value.is_ok() {
-        value
-    } else if event.content.starts_with("From ") && event.content.len().gt(&45) {
-        Ok(event.content[5..45].to_string())
-    } else {
-        bail!("event is not a patch")
-    }
-}
-
-fn get_event_parent_id(event: &nostr::Event) -> Result<String> {
-    Ok(if let Some(reply_tag) = event
-        .tags
-        .iter()
-        .find(|t| t.as_vec().len().gt(&3) && t.as_vec()[3].eq("reply"))
-    {
-        reply_tag
-    } else {
-        event
-            .tags
-            .iter()
-            .find(|t| t.as_vec().len().gt(&3) && t.as_vec()[3].eq("root"))
-            .context("no reply or root e tag present".to_string())?
-    }
-    .as_vec()[1]
-        .clone())
-}
-
-pub fn get_most_recent_patch_with_ancestors(
-    mut patches: Vec<nostr::Event>,
-) -> Result<Vec<nostr::Event>> {
-    patches.sort_by_key(|e| e.created_at);
-
-    let youngest_patch = patches.last().context("no patches found")?;
-
-    let patches_with_youngest_created_at: Vec<&nostr::Event> = patches
-        .iter()
-        .filter(|p| p.created_at.eq(&youngest_patch.created_at))
-        .collect();
-
-    let mut res = vec![];
-
-    let mut event_id_to_search = patches_with_youngest_created_at
-        .clone()
-        .iter()
-        .find(|p| {
-            !patches_with_youngest_created_at.iter().any(|p2| {
-                if let Ok(reply_to) = get_event_parent_id(p2) {
-                    reply_to.eq(&p.id.to_string())
-                } else {
-                    false
-                }
-            })
-        })
-        .context("cannot find patches_with_youngest_created_at")?
-        .id
-        .to_string();
-
-    while let Some(event) = patches
-        .iter()
-        .find(|e| e.id.to_string().eq(&event_id_to_search))
-    {
-        res.push(event.clone());
-        if event_is_patch_set_root(event) {
-            break;
-        }
-        event_id_to_search = get_event_parent_id(event).unwrap_or_default();
-    }
-    Ok(res)
-}
-
-pub fn status_kinds() -> Vec<nostr::Kind> {
-    vec![
-        nostr::Kind::GitStatusOpen,
-        nostr::Kind::GitStatusApplied,
-        nostr::Kind::GitStatusClosed,
-        nostr::Kind::GitStatusDraft,
-    ]
-}
-
-pub async fn get_proposals_and_revisions_from_cache(
-    git_repo_path: &Path,
-    repo_coordinates: HashSet<Coordinate>,
-) -> Result<Vec<nostr::Event>> {
-    let mut proposals = get_events_from_cache(
-        git_repo_path,
-        vec![
-            nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
-                .custom_tag(
-                    nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
-                    repo_coordinates
-                        .iter()
-                        .map(std::string::ToString::to_string)
-                        .collect::<Vec<String>>(),
-                ),
-        ],
-    )
-    .await?
-    .iter()
-    .filter(|e| event_is_patch_set_root(e))
-    .cloned()
-    .collect::<Vec<nostr::Event>>();
-    proposals.sort_by_key(|e| e.created_at);
-    proposals.reverse();
-    Ok(proposals)
-}
-
-pub async fn get_all_proposal_patch_events_from_cache(
-    git_repo_path: &Path,
-    repo_ref: &RepoRef,
-    proposal_id: &nostr::EventId,
-) -> Result<Vec<nostr::Event>> {
-    let mut commit_events = get_events_from_cache(
-        git_repo_path,
-        vec![
-            nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
-                .event(*proposal_id),
-            nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
-                .id(*proposal_id),
-        ],
-    )
-    .await?;
-
-    let permissioned_users: HashSet<PublicKey> = [
-        repo_ref.maintainers.clone(),
-        vec![
-            commit_events
-                .iter()
-                .find(|e| e.id().eq(proposal_id))
-                .context("proposal not in cache")?
-                .author(),
-        ],
-    ]
-    .concat()
-    .iter()
-    .copied()
-    .collect();
-    commit_events.retain(|e| permissioned_users.contains(&e.author()));
-
-    let revision_roots: HashSet<nostr::EventId> = commit_events
-        .iter()
-        .filter(|e| event_is_revision_root(e))
-        .map(nostr::Event::id)
-        .collect();
-
-    if !revision_roots.is_empty() {
-        for event in get_events_from_cache(
-            git_repo_path,
-            vec![
-                nostr::Filter::default()
-                    .kind(nostr::Kind::GitPatch)
-                    .events(revision_roots)
-                    .authors(permissioned_users.clone()),
-            ],
-        )
-        .await?
-        {
-            commit_events.push(event);
-        }
-    }
-
-    Ok(commit_events
-        .iter()
-        .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(&e.author()))
-        .cloned()
-        .collect())
 }

@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use clap;
 
-#[cfg(not(test))]
-use crate::client::Client;
-#[cfg(test)]
-use crate::client::MockConnect;
-use crate::{cli::Cli, client::Connect, git::Repo, login};
+use crate::{
+    cli::Cli,
+    client::{Client, Connect},
+    git::Repo,
+    login,
+};
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
@@ -30,10 +31,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         .await?;
         Ok(())
     } else {
-        #[cfg(not(test))]
         let client = Client::default();
-        #[cfg(test)]
-        let client = <MockConnect as std::default::Default>::default();
 
         login::launch(
             &git_repo,

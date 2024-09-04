@@ -4,16 +4,11 @@ use anyhow::{Context, Result};
 use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
 use nostr_sdk::Kind;
 
-use super::send::send_events;
-#[cfg(not(test))]
-use crate::client::Client;
-#[cfg(test)]
-use crate::client::MockConnect;
 use crate::{
     cli::Cli,
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::{fetching_with_report, get_repo_ref_from_cache, Connect},
-    git::{convert_clone_url_to_https, Repo, RepoActions},
+    client::{fetching_with_report, get_repo_ref_from_cache, send_events, Client, Connect},
+    git::{nostr_url::convert_clone_url_to_https, Repo, RepoActions},
     login,
     repo_ref::{
         extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
@@ -61,10 +56,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     // TODO: check for empty repo
     // TODO: check for existing maintaiers file
 
-    #[cfg(not(test))]
     let mut client = Client::default();
-    #[cfg(test)]
-    let mut client = <MockConnect as std::default::Default>::default();
 
     let repo_coordinates = if let Ok(repo_coordinates) =
         try_and_get_repo_coordinates(&git_repo, &client, false).await

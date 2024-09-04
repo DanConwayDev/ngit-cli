@@ -19,10 +19,13 @@ use crate::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptPasswordParms,
     },
     client::{fetch_public_key, get_event_from_global_cache, Connect},
-    config::{UserMetadata, UserRef, UserRelayRef, UserRelays},
     git::{Repo, RepoActions},
-    key_handling::encryption::{decrypt_key, encrypt_key},
 };
+
+mod key_encryption;
+use key_encryption::{decrypt_key, encrypt_key};
+mod user;
+use user::{UserMetadata, UserRef, UserRelayRef, UserRelays};
 
 /// handles the encrpytion and storage of key material
 #[allow(clippy::too_many_arguments)]
