@@ -21,8 +21,10 @@ pub struct NostrUrlDecoded {
 
 static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format. try nostr://naddr123 or nostr://npub123/my-repo or nostr://ssh/npub123/relay.damus.io/my-repo";
 
-impl NostrUrlDecoded {
-    pub fn from_str(url: &str) -> Result<Self> {
+impl std::str::FromStr for NostrUrlDecoded {
+    type Err = anyhow::Error;
+
+    fn from_str(url: &str) -> Result<Self> {
         let mut coordinates = HashSet::new();
         let mut protocol = None;
         let mut user = None;
@@ -257,6 +259,8 @@ mod tests {
     }
 
     mod nostr_git_url_paramemters_from_str {
+        use std::str::FromStr;
+
         use super::*;
 
         fn get_model_coordinate(relays: bool) -> Coordinate {

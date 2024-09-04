@@ -10,6 +10,7 @@ use std::{
     env,
     io::{self, Stdin},
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
