@@ -38,6 +38,7 @@ use nostr_sqlite::SQLiteDatabase;
 
 use crate::{
     get_dirs,
+    git::{Repo, RepoActions},
     git_events::{
         event_is_cover_letter, event_is_patch_set_root, event_is_revision_root, status_kinds,
     },
@@ -1570,6 +1571,17 @@ pub async fn get_all_proposal_patch_events_from_cache(
         .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(&e.author()))
         .cloned()
         .collect())
+}
+
+pub async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> Result<Event> {
+    Ok(get_events_from_cache(
+        git_repo.get_path()?,
+        vec![nostr::Filter::default().id(*event_id)],
+    )
+    .await?
+    .first()
+    .context("cannot find event in cache")?
+    .clone())
 }
 
 #[allow(clippy::module_name_repetitions)]

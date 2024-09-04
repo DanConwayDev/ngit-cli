@@ -3,7 +3,7 @@ use std::str::FromStr;
 use anyhow::{bail, Context, Result};
 use nostr::nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19};
 use nostr_sdk::{
-    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, FromBech32, Kind, Tag, TagKind,
+    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, FromBech32, Kind, Tag, TagKind,
     TagStandard, UncheckedUrl,
 };
 use nostr_signer::NostrSigner;
@@ -35,6 +35,19 @@ pub fn get_commit_id_from_patch(event: &Event) -> Result<String> {
     } else {
         bail!("event is not a patch")
     }
+}
+
+pub fn get_event_root(event: &nostr::Event) -> Result<EventId> {
+    Ok(EventId::parse(
+        event
+            .tags()
+            .iter()
+            .find(|t| t.is_root())
+            .context("no thread root in event")?
+            .as_vec()
+            .get(1)
+            .unwrap(),
+    )?)
 }
 
 pub fn status_kinds() -> Vec<Kind> {

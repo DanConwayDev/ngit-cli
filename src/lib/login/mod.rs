@@ -696,3 +696,17 @@ pub async fn get_user_ref_from_cache(
         relays: extract_user_relays(public_key, &events),
     })
 }
+
+pub fn get_curent_user(git_repo: &Repo) -> Result<Option<PublicKey>> {
+    Ok(
+        if let Some(npub) = git_repo.get_git_config_item("nostr.npub", None)? {
+            if let Ok(public_key) = PublicKey::parse(npub) {
+                Some(public_key)
+            } else {
+                None
+            }
+        } else {
+            None
+        },
+    )
+}
