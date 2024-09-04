@@ -52,10 +52,14 @@ members = [
     "test_utils",
 ]
 
+[lib]
+name = "ngit"
+path = "src/lib/mod.rs"
+
 [[bin]]
 name = "ngit"
-path = "src/main.rs"
+path = "src/bin/ngit/main.rs"
 
 [[bin]]
 name = "git-remote-nostr"
-path = "src/git_remote_helper.rs"
+path = "src/bin/git_remote_nostr/main.rs"

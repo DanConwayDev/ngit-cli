@@ -7,14 +7,8 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 mod cli;
-mod cli_interactor;
-mod client;
-mod config;
-mod git;
-mod key_handling;
-mod login;
-mod repo_ref;
-mod repo_state;
+use ngit::*;
+
 mod sub_commands;
 
 #[tokio::main]
