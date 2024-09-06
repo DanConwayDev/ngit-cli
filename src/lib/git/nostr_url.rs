@@ -12,9 +12,11 @@ pub enum ServerProtocol {
     Http,
     Git,
     Ftp,
-    Local,
+    Filesystem,
     #[default]
     Unspecified,
+    UnauthHttps, // used for read to enable non-interactive failures over https
+    UnauthHttp,  // used for read to enable non-interactive failures over https
 }
 impl fmt::Display for ServerProtocol {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -24,8 +26,10 @@ impl fmt::Display for ServerProtocol {
             ServerProtocol::Ftp => write!(f, "ftp"),
             ServerProtocol::Ssh => write!(f, "ssh"),
             ServerProtocol::Git => write!(f, "git"),
-            ServerProtocol::Local => write!(f, "local"),
+            ServerProtocol::Filesystem => write!(f, "filesystem"),
             ServerProtocol::Unspecified => write!(f, "unsepcified"),
+            ServerProtocol::UnauthHttps => write!(f, "unauthenticated https"),
+            ServerProtocol::UnauthHttp => write!(f, "unauthenticated http"),
         }
     }
 }
@@ -168,7 +172,7 @@ impl FromStr for CloneUrl {
         if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
             return Ok(Self {
                 original_string: s.to_string(),
-                protocol: ServerProtocol::Local,
+                protocol: ServerProtocol::Filesystem,
                 ..CloneUrl::default()
             });
         }
@@ -248,13 +252,16 @@ fn contains_port(s: &str) -> bool {
 impl CloneUrl {
     pub fn format_as(&self, protocol: &ServerProtocol, user: &Option<String>) -> Result<String> {
         // Check for incompatible protocol conversions
-        if *protocol == ServerProtocol::Local {
-            if self.protocol == ServerProtocol::Local {
-                // If converting from Local to Local, return the original string
+        if *protocol == ServerProtocol::Filesystem {
+            if self.protocol == ServerProtocol::Filesystem {
+                // If converting from Filesystem to Filesystem, return the original string
                 return Ok(self.original_string.clone());
             } else {
-                // If converting to Local from any other protocol, return an error
-                bail!("Cannot convert to Local protocol from {:?}", self.protocol);
+                // If converting to Filesystem from any other protocol, return an error
+                bail!(
+                    "Cannot convert to Filesystem protocol from {:?}",
+                    self.protocol
+                );
             }
         }
 
@@ -262,7 +269,9 @@ impl CloneUrl {
             "{}{}",
             match protocol {
                 ServerProtocol::Https => "https://",
+                ServerProtocol::UnauthHttps => "https://",
                 ServerProtocol::Http => "http://",
+                ServerProtocol::UnauthHttp => "http://",
                 ServerProtocol::Git => "git://",
                 ServerProtocol::Ftp => "ftp://",
                 ServerProtocol::Ssh => "ssh://",

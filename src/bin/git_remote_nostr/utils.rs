@@ -10,7 +10,10 @@ use ngit::{
         get_all_proposal_patch_events_from_cache, get_events_from_cache,
         get_proposals_and_revisions_from_cache,
     },
-    git::{Repo, RepoActions},
+    git::{
+        nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
+        Repo, RepoActions,
+    },
     git_events::{
         event_is_revision_root, event_to_cover_letter, get_most_recent_patch_with_ancestors,
         status_kinds,
@@ -245,4 +248,92 @@ pub fn find_proposal_and_patches_by_branch_name<'a>(
             false
         }
     })
+}
+
+pub fn join_with_and<T: ToString>(items: &[T]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].to_string(),
+        _ => {
+            let last_item = items.last().unwrap().to_string();
+            let rest = &items[..items.len() - 1];
+            format!(
+                "{} and {}",
+                rest.iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                last_item
+            )
+        }
+    }
+}
+
+/// get an ordered vector of server protocols to attempt
+pub fn get_read_protocols_to_try(
+    server_url: &CloneUrl,
+    decoded_nostr_url: &NostrUrlDecoded,
+) -> Vec<ServerProtocol> {
+    if server_url.protocol() == ServerProtocol::Filesystem {
+        vec![(ServerProtocol::Filesystem)]
+    } else if let Some(protocol) = &decoded_nostr_url.protocol {
+        vec![protocol.clone()]
+    } else if server_url.protocol() == ServerProtocol::Http {
+        vec![
+            ServerProtocol::UnauthHttp,
+            ServerProtocol::Ssh,
+            ServerProtocol::Http,
+        ]
+    } else if server_url.protocol() == ServerProtocol::Ftp {
+        vec![ServerProtocol::Ftp, ServerProtocol::Ssh]
+    } else {
+        vec![
+            ServerProtocol::UnauthHttps,
+            ServerProtocol::Ssh,
+            ServerProtocol::Https,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    mod join_with_and {
+        use super::*;
+        #[test]
+        fn test_empty() {
+            let items: Vec<&str> = vec![];
+            assert_eq!(join_with_and(&items), "");
+        }
+
+        #[test]
+        fn test_single_item() {
+            let items = vec!["apple"];
+            assert_eq!(join_with_and(&items), "apple");
+        }
+
+        #[test]
+        fn test_two_items() {
+            let items = vec!["apple", "banana"];
+            assert_eq!(join_with_and(&items), "apple and banana");
+        }
+
+        #[test]
+        fn test_three_items() {
+            let items = vec!["apple", "banana", "cherry"];
+            assert_eq!(join_with_and(&items), "apple, banana and cherry");
+        }
+
+        #[test]
+        fn test_four_items() {
+            let items = vec!["apple", "banana", "cherry", "date"];
+            assert_eq!(join_with_and(&items), "apple, banana, cherry and date");
+        }
+
+        #[test]
+        fn test_multiple_items() {
+            let items = vec!["one", "two", "three", "four", "five"];
+            assert_eq!(join_with_and(&items), "one, two, three, four and five");
+        }
+    }
 }

@@ -1,6 +1,6 @@
 use std::io::Stdin;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Result};
 use auth_git2::GitAuthenticator;
 use git2::Repository;
 use ngit::{
@@ -16,6 +16,7 @@ use ngit::{
 
 use crate::utils::{
     find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch, get_open_proposals,
+    get_read_protocols_to_try, join_with_and,
 };
 
 pub async fn run_fetch(
@@ -58,10 +59,10 @@ pub async fn run_fetch(
         && !errors.is_empty()
     {
         bail!(
-            "failed to fetch objects in nostr state event from:\r\n{}",
+            "fetch: failed to fetch objects in nostr state event from:\r\n{}",
             errors
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(|e| format!(" - {e}"))
                 .collect::<Vec<String>>()
                 .join("\r\n")
         );
@@ -114,97 +115,45 @@ fn fetch_from_git_server(
 ) -> Result<()> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
 
-    // if protocol is local - just try local
-    if server_url.protocol() == ServerProtocol::Local {
-        let formatted_url = server_url.format_as(&ServerProtocol::Local, &None)?;
-        term.write_line(format!("fetching from {formatted_url}...").as_str())?;
-        if let Err(error) = fetch_from_git_server_url(git_repo, oids, &formatted_url) {
-            term.write_line(
-                format!("WARNING: failed to fetch from {formatted_url} error:{error}").as_str(),
-            )?;
-            return Err(error).context(format!("{formatted_url}: failed to fetch"));
-        }
-        return Ok(());
-    }
+    let protocols_to_attempt = get_read_protocols_to_try(&server_url, decoded_nostr_url);
 
-    term.write_line(format!("fetching from {}...", server_url.domain()).as_str())?;
+    let mut failed_protocols = vec![];
+    let mut success = false;
+    for protocol in &protocols_to_attempt {
+        term.write_line(
+            format!("fetching from {} over {protocol}...", server_url.domain(),).as_str(),
+        )?;
 
-    // use overide protocol if specified
-    if let Some(protocol) = &decoded_nostr_url.protocol {
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
-        let res = fetch_from_git_server_url(git_repo, oids, &formatted_url);
+        let res = if [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol) {
+            fetch_from_git_server_url_unauthenticated(git_repo, oids, &formatted_url)
+        } else {
+            fetch_from_git_server_url(git_repo, oids, &formatted_url)
+        };
         term.clear_last_lines(1)?;
         if let Err(error) = res {
             term.write_line(
-                format!(
-                    "WARNING: {formatted_url} failed to fetch over {protocol}{} as specified in nostr url. error:{error}",
-                    if let Some(user) = &decoded_nostr_url.user {
-                        format!(" with user '{user}'")
-                    } else {
-                        String::new()
-                    }
-                ).as_str(),
+                format!("fetch: {formatted_url} failed over {protocol}: {error}").as_str(),
             )?;
-            return Err(error).context(format!("{formatted_url}: failed to fetch"));
-        }
-        return Ok(());
-    }
-
-    // Try https unauthenticated
-    let formatted_url = server_url.format_as(&ServerProtocol::Https, &None)?;
-    let res = fetch_from_git_server_url_unauthenticated(git_repo, oids, &formatted_url);
-    term.clear_last_lines(1)?;
-    if let Err(unauth_error) = res {
-        term.write_line(
-            format!(
-                "WARNING: {formatted_url} failed to fetch over unauthenticated https. {unauth_error}",
-            ).as_str(),
-        )?;
-        // TODO what about timeout errors?
-        // try over ssh
-        let mut ssh_error = None;
-        if check_ssh_keys() {
-            term.write_line(format!("fetching from {} over ssh...", server_url.domain()).as_str())?;
-            let formatted_url = server_url.format_as(&ServerProtocol::Ssh, &None)?;
-            let res = fetch_from_git_server_url(git_repo, oids, &formatted_url);
-            term.clear_last_lines(1)?;
-            if let Err(error) = res {
-                term.write_line(
-                    format!("WARNING: {formatted_url} failed to fetch over ssh. error:{error}")
-                        .as_str(),
-                )?;
-                term.write_line(
-                    format!("fetching from {} over ssh...", server_url.domain()).as_str(),
-                )?;
-                ssh_error = Some(error);
-            } else {
-                return Ok(());
+            failed_protocols.push(protocol);
+        } else {
+            success = true;
+            if !failed_protocols.is_empty() {
+                term.write_line(format!("fetch: succeeded over {protocol}").as_str())?;
             }
         }
-        // try over https authenticated
-        term.write_line(
-            format!(
-                "fetching from {} over authenticated https...",
-                server_url.domain()
-            )
-            .as_str(),
-        )?;
-        let formatted_url = server_url.format_as(&ServerProtocol::Ssh, &None)?;
-        let res = fetch_from_git_server_url(git_repo, oids, &formatted_url);
-        term.clear_last_lines(1)?;
-        if let Err(auth_https_error) = res {
+    }
+    if !success {
+        if decoded_nostr_url.protocol.is_some() {
             term.write_line(
-                format!("WARNING: {formatted_url} failed to fetch over authenticated https. error:{auth_https_error}",)
-                    .as_str(),
+                "fetch: protocol override in nostr url so not attempting with any other protocols",
             )?;
-            let error_message = format!(
-                "{} failed to fetch over unauthenticated https ({unauth_error}), ssh ({}) and authenticated https ({auth_https_error})",
-                server_url.format_as(&ServerProtocol::Unspecified, &None)?,
-                ssh_error.unwrap_or(anyhow!("no keys found"))
-            );
-
-            bail!(error_message)
         }
+        bail!(
+            "{} failed over {}",
+            server_url.domain(),
+            join_with_and(&failed_protocols)
+        );
     }
     Ok(())
 }
@@ -214,6 +163,9 @@ fn fetch_from_git_server_url(
     oids: &[String],
     git_server_url: &str,
 ) -> Result<()> {
+    if git_server_url.parse::<CloneUrl>()?.protocol() == ServerProtocol::Ssh && !check_ssh_keys() {
+        bail!("no ssh keys found");
+    }
     let git_config = git_repo.config()?;
     let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;
     let auth = GitAuthenticator::default();
