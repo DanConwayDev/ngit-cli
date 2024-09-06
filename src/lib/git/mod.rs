@@ -11,6 +11,7 @@ use nostr_sdk::hashes::{sha1::Hash as Sha1Hash, Hash};
 use crate::git_events::{get_commit_id_from_patch, tag_value};
 pub mod identify_ahead_behind;
 pub mod nostr_url;
+pub mod utils;
 
 pub struct Repo {
     pub git_repo: git2::Repository,

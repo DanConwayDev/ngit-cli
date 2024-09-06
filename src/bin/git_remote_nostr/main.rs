@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
                 println!("unsupported");
             }
             ["fetch", oid, refstr] => {
-                fetch::run_fetch(&git_repo, &repo_ref, &stdin, oid, refstr).await?;
+                fetch::run_fetch(&git_repo, &repo_ref, &decoded_nostr_url, &stdin, oid, refstr).await?;
             }
             ["push", refspec] => {
                 push::run_push(
