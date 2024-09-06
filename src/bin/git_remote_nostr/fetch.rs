@@ -1,6 +1,6 @@
 use std::io::Stdin;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use auth_git2::GitAuthenticator;
 use git2::Repository;
 use ngit::{
@@ -15,8 +15,8 @@ use ngit::{
 };
 
 use crate::utils::{
-    find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch, get_open_proposals,
-    get_read_protocols_to_try, join_with_and,
+    error_is_not_authentication_failure, find_proposal_and_patches_by_branch_name,
+    get_oids_from_fetch_batch, get_open_proposals, get_read_protocols_to_try, join_with_and,
 };
 
 pub async fn run_fetch(
@@ -136,6 +136,10 @@ fn fetch_from_git_server(
                 format!("fetch: {formatted_url} failed over {protocol}: {error}").as_str(),
             )?;
             failed_protocols.push(protocol);
+            if protocol == &ServerProtocol::Ssh && error_is_not_authentication_failure(&error) {
+                // authenticated by failed to complete request
+                break;
+            }
         } else {
             success = true;
             if !failed_protocols.is_empty() {
@@ -143,19 +147,22 @@ fn fetch_from_git_server(
             }
         }
     }
-    if !success {
-        if decoded_nostr_url.protocol.is_some() {
-            term.write_line(
-                "fetch: protocol override in nostr url so not attempting with any other protocols",
-            )?;
-        }
-        bail!(
-            "{} failed over {}",
+    if success {
+        Ok(())
+    } else {
+        let error = anyhow!(
+            "{} failed over {}{}",
             server_url.domain(),
-            join_with_and(&failed_protocols)
+            join_with_and(&failed_protocols),
+            if decoded_nostr_url.protocol.is_some() {
+                " and nostr url contains protocol override so no other protocols were attempted"
+            } else {
+                ""
+            },
         );
+        term.write_line(format!("fetch: {error}").as_str())?;
+        Err(error)
     }
-    Ok(())
 }
 
 fn fetch_from_git_server_url(

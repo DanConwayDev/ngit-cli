@@ -282,6 +282,7 @@ pub fn get_read_protocols_to_try(
         vec![
             ServerProtocol::UnauthHttp,
             ServerProtocol::Ssh,
+            // note: list and fetch stop here if ssh was authenticated
             ServerProtocol::Http,
         ]
     } else if server_url.protocol() == ServerProtocol::Ftp {
@@ -290,9 +291,15 @@ pub fn get_read_protocols_to_try(
         vec![
             ServerProtocol::UnauthHttps,
             ServerProtocol::Ssh,
+            // note: list and fetch stop here if ssh was authenticated
             ServerProtocol::Https,
         ]
     }
+}
+
+pub fn error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
+    let error_str = error.to_string();
+    error_str.contains("Permission to") || error_str.contains("Repository not found")
 }
 
 #[cfg(test)]
