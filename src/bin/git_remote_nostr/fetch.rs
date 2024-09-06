@@ -121,7 +121,11 @@ fn fetch_from_git_server(
     let mut success = false;
     for protocol in &protocols_to_attempt {
         term.write_line(
-            format!("fetching from {} over {protocol}...", server_url.domain(),).as_str(),
+            format!(
+                "fetching over {protocol} from {}...",
+                server_url.short_name(),
+            )
+            .as_str(),
         )?;
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
@@ -152,7 +156,7 @@ fn fetch_from_git_server(
     } else {
         let error = anyhow!(
             "{} failed over {}{}",
-            server_url.domain(),
+            server_url.short_name(),
             join_with_and(&failed_protocols),
             if decoded_nostr_url.protocol.is_some() {
                 " and nostr url contains protocol override so no other protocols were attempted"

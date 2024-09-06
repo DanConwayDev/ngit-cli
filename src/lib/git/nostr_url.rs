@@ -324,6 +324,15 @@ impl CloneUrl {
     pub fn protocol(&self) -> ServerProtocol {
         self.protocol.clone()
     }
+
+    pub fn short_name(&self) -> String {
+        let domain = self.domain();
+        if domain.is_empty() {
+            self.original_string.to_string()
+        } else {
+            domain
+        }
+    }
 }
 
 fn replace_first_occurrence(s: &str, target: char, replacement: char) -> String {

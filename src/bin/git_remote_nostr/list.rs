@@ -165,8 +165,8 @@ pub fn list_from_remote(
     for protocol in &protocols_to_attempt {
         term.write_line(
             format!(
-                "fetching ref list from {} over {protocol}...",
-                server_url.domain(),
+                "fetching ref list over {protocol} from {}...",
+                server_url.short_name(),
             )
             .as_str(),
         )?;
@@ -184,8 +184,8 @@ pub fn list_from_remote(
                 if !failed_protocols.is_empty() {
                     term.write_line(
                         format!(
-                            "list: succeeded over {protocol} for {}",
-                            server_url.domain(),
+                            "list: succeeded over {protocol} from {}",
+                            server_url.short_name(),
                         )
                         .as_str(),
                     )?;
@@ -210,7 +210,7 @@ pub fn list_from_remote(
     } else {
         let error = anyhow!(
             "{} failed over {}{}",
-            server_url.domain(),
+            server_url.short_name(),
             join_with_and(&failed_protocols),
             if decoded_nostr_url.protocol.is_some() {
                 " and nostr url contains protocol override so no other protocols were attempted"

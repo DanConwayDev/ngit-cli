@@ -314,7 +314,13 @@ mod list {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
-                p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+                p.expect(
+                    format!(
+                        "fetching ref list over filesystem from {}...\r\n",
+                        source_path
+                    )
+                    .as_str(),
+                )?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;
                 p.exit()?;
@@ -388,7 +394,13 @@ mod list {
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_after_fetch(&git_repo)?;
                     p.send_line("list")?;
-                    p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+                    p.expect(
+                        format!(
+                            "fetching ref list over filesystem from {}...\r\n",
+                            source_path
+                        )
+                        .as_str(),
+                    )?;
                     // println!("{}", p.expect_eventually("\r\n\r\n")?);
                     let res = p.expect_eventually("\r\n\r\n")?;
                     p.exit()?;
@@ -470,7 +482,13 @@ mod list {
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_after_fetch(&git_repo)?;
                     p.send_line("list")?;
-                    p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+                    p.expect(
+                        format!(
+                            "fetching ref list over filesystem from {}...\r\n",
+                            source_path
+                        )
+                        .as_str(),
+                    )?;
                     p.expect(
                         format!(
                             "WARNING: {} refs/heads/main is out of sync with nostr \r\n",
@@ -552,7 +570,13 @@ mod list {
 
                     let mut p = cli_tester_after_fetch(&git_repo)?;
                     p.send_line("list")?;
-                    p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+                    p.expect(
+                        format!(
+                            "fetching ref list over filesystem from {}...\r\n",
+                            source_path
+                        )
+                        .as_str(),
+                    )?;
                     // println!("{}", p.expect_eventually("\r\n\r\n")?);
                     let res = p.expect_eventually("\r\n\r\n")?;
 
@@ -659,7 +683,7 @@ mod fetch {
             p.send_line(format!("fetch {main_commit_id} main").as_str())?;
             p.send_line(format!("fetch {vnext_commit_id} vnext").as_str())?;
             p.send_line("")?;
-            p.expect(format!("fetching from {source_path}...\r\n").as_str())?;
+            p.expect(format!("fetching over filesystem from {source_path}...\r\n").as_str())?;
             p.expect_eventually_and_print("\r\n")?;
 
             assert!(git_repo.git_repo.find_commit(main_commit_id).is_ok());
@@ -725,9 +749,10 @@ mod fetch {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line(format!("fetch {main_commit_id} main").as_str())?;
                 p.send_line("")?;
-                p.expect(format!("fetching from {error_path}...\r\n").as_str())?;
+                p.expect(format!("fetching over filesystem from {error_path}...\r\n").as_str())?;
                 // not sure why the below isn't appearing
-                // p.expect(format!("fetching from {source_path}...\r\n").as_str())?;
+                // p.expect(format!("fetching over filesystem from
+                // {source_path}...\r\n").as_str())?;
                 p.expect_eventually_and_print("\r\n")?;
                 // p.expect("\r\n")?;
 
@@ -782,7 +807,7 @@ mod fetch {
             let mut p = cli_tester_after_fetch(&git_repo)?;
             p.send_line(format!("fetch {proposal_tip} refs/heads/{branch_name}").as_str())?;
             p.send_line("")?;
-            p.expect(format!("fetching from {source_path}...\r\n").as_str())?;
+            p.expect(format!("fetching over filesystem from {source_path}...\r\n").as_str())?;
             // expect no errors
             p.expect_after_whitespace("\r\n")?;
             p.exit()?;
@@ -1753,7 +1778,13 @@ mod push {
 
             let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
             cli_expect_nostr_fetch(&mut p)?;
-            p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+            p.expect(
+                format!(
+                    "fetching ref list over filesystem from {}...\r\n",
+                    source_path
+                )
+                .as_str(),
+            )?;
 
             p.expect("merge commit ")?;
             // shorthand merge commit id appears in this gap
@@ -1897,7 +1928,13 @@ mod push {
 
             let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
             cli_expect_nostr_fetch(&mut p)?;
-            p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+            p.expect(
+                format!(
+                    "fetching ref list over filesystem from {}...\r\n",
+                    source_path
+                )
+                .as_str(),
+            )?;
             p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
             let output = p.expect_end_eventually()?;
 
@@ -2051,7 +2088,13 @@ mod push {
             let mut p =
                 CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push", "--force"]);
             cli_expect_nostr_fetch(&mut p)?;
-            p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+            p.expect(
+                format!(
+                    "fetching ref list over filesystem from {}...\r\n",
+                    source_path
+                )
+                .as_str(),
+            )?;
             p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
             let output = p.expect_end_eventually()?;
 
@@ -2201,7 +2244,13 @@ mod push {
                 ["push", "-u", "origin", branch_name],
             );
             cli_expect_nostr_fetch(&mut p)?;
-            p.expect(format!("fetching refs list: {}...\r\n\r", source_path).as_str())?;
+            p.expect(
+                format!(
+                    "fetching ref list over filesystem from {}...\r\n",
+                    source_path
+                )
+                .as_str(),
+            )?;
             p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
             let output = p.expect_end_eventually()?;
 
