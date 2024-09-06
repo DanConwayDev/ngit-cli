@@ -19,13 +19,13 @@ pub enum ServerProtocol {
 impl fmt::Display for ServerProtocol {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ServerProtocol::Http => write!(f, "HTTP"),
-            ServerProtocol::Https => write!(f, "HTTPS"),
-            ServerProtocol::Ftp => write!(f, "FTP"),
-            ServerProtocol::Ssh => write!(f, "SSH"),
-            ServerProtocol::Git => write!(f, "GIT"),
-            ServerProtocol::Local => write!(f, "LOCAL"),
-            ServerProtocol::Unspecified => write!(f, "Unsepcified"),
+            ServerProtocol::Http => write!(f, "http"),
+            ServerProtocol::Https => write!(f, "https"),
+            ServerProtocol::Ftp => write!(f, "ftp"),
+            ServerProtocol::Ssh => write!(f, "ssh"),
+            ServerProtocol::Git => write!(f, "git"),
+            ServerProtocol::Local => write!(f, "local"),
+            ServerProtocol::Unspecified => write!(f, "unsepcified"),
         }
     }
 }
