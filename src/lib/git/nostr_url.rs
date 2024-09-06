@@ -1,15 +1,33 @@
-use std::collections::HashSet;
+use core::fmt;
+use std::{collections::HashSet, str::FromStr};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use nostr::nips::nip01::Coordinate;
 use nostr_sdk::{PublicKey, Url};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default, Clone)]
 pub enum ServerProtocol {
     Ssh,
     Https,
     Http,
     Git,
+    Ftp,
+    Local,
+    #[default]
+    Unspecified,
+}
+impl fmt::Display for ServerProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ServerProtocol::Http => write!(f, "HTTP"),
+            ServerProtocol::Https => write!(f, "HTTPS"),
+            ServerProtocol::Ftp => write!(f, "FTP"),
+            ServerProtocol::Ssh => write!(f, "SSH"),
+            ServerProtocol::Git => write!(f, "GIT"),
+            ServerProtocol::Local => write!(f, "LOCAL"),
+            ServerProtocol::Unspecified => write!(f, "Unsepcified"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -130,6 +148,185 @@ impl std::str::FromStr for NostrUrlDecoded {
     }
 }
 
+#[derive(Debug, PartialEq, Default)]
+pub struct CloneUrl {
+    original_string: String,
+    host: String,
+    path: String,
+    parameters: Option<String>,
+    protocol: ServerProtocol,
+    user: Option<String>,
+    port: Option<u16>,
+    fragment: Option<String>,
+}
+
+impl FromStr for CloneUrl {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // Check if the input is a local path
+        if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
+            return Ok(Self {
+                original_string: s.to_string(),
+                protocol: ServerProtocol::Local,
+                ..CloneUrl::default()
+            });
+        }
+        let url_str = if s.contains("://") {
+            s.to_string() // Use the original string
+        } else {
+            let protocol = // Check for the SSH format user@host:path and convert to ssh://
+                if s.contains('@') && s
+                .split('@')
+                .nth(0)
+                .map_or(false, |part| !part.contains('/')) {
+                    "ssh"
+                }
+                // otherwise assume unspecified
+                else {
+                    "unspecified"
+                };
+            format!(
+                "{protocol}://{}",
+                if contains_port(s) {
+                    s.to_string()
+                } else {
+                    s.replace(":/", "/").replace(':', "/")
+                }
+            )
+        };
+
+        let url = Url::parse(&url_str).context("Failed to parse URL")?;
+
+        let protocol = match url.scheme() {
+            "ssh" => ServerProtocol::Ssh,
+            "https" => ServerProtocol::Https,
+            "http" => ServerProtocol::Http,
+            "git" => ServerProtocol::Git,
+            "ftp" => ServerProtocol::Ftp,
+            "unspecified" => ServerProtocol::Unspecified,
+            _ => return Err(anyhow::anyhow!("Unsupported protocol: {}", url.scheme())),
+        };
+
+        let host = url.host_str().context("Missing host")?.to_string();
+        let path = url.path().to_string();
+        let parameters = url.query().map(|s| s.to_string());
+        let port = url.port();
+
+        let fragment = url.fragment().map(|s| s.to_string());
+
+        let user = if url.username().is_empty() {
+            None
+        } else {
+            Some(url.username().to_string())
+        };
+
+        Ok(CloneUrl {
+            original_string: s.to_string(),
+            host,
+            path,
+            parameters,
+            protocol,
+            user,
+            port,
+            fragment,
+        })
+    }
+}
+
+fn contains_port(s: &str) -> bool {
+    if let Some(after_host) = s.split('@').nth(1).unwrap_or(s).split(':').nth(1) {
+        if let Some(port) = after_host.split('/').next() {
+            if port.parse::<u16>().is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+impl CloneUrl {
+    pub fn format_as(&self, protocol: &ServerProtocol, user: &Option<String>) -> Result<String> {
+        // Check for incompatible protocol conversions
+        if *protocol == ServerProtocol::Local {
+            if self.protocol == ServerProtocol::Local {
+                // If converting from Local to Local, return the original string
+                return Ok(self.original_string.clone());
+            } else {
+                // If converting to Local from any other protocol, return an error
+                bail!("Cannot convert to Local protocol from {:?}", self.protocol);
+            }
+        }
+
+        let mut url = Url::parse(&format!(
+            "{}{}",
+            match protocol {
+                ServerProtocol::Https => "https://",
+                ServerProtocol::Http => "http://",
+                ServerProtocol::Git => "git://",
+                ServerProtocol::Ftp => "ftp://",
+                ServerProtocol::Ssh => "ssh://",
+                ServerProtocol::Unspecified => "https://",
+                _ => bail!("unsupported protocol"),
+            },
+            &self.host
+        ))
+        .context("Failed to parse base URL")?; // Start with the specified scheme
+
+        url.set_path(&self.path);
+
+        // Set the port if present
+        if let Some(port) = self.port {
+            url.set_port(Some(port))
+                .map_err(|_| anyhow!("cannot add port"))?;
+        }
+
+        // Set the query parameters if present
+        if let Some(ref parameters) = self.parameters {
+            url.set_query(Some(parameters));
+        }
+
+        // Set the fragment if present
+        if let Some(ref fragment) = self.fragment {
+            url.set_fragment(Some(fragment));
+        }
+
+        let mut formatted_url = url.to_string();
+
+        if *protocol == ServerProtocol::Ssh {
+            formatted_url = formatted_url.replace(
+                "ssh://",
+                format!("{}@", user.as_deref().unwrap_or("git")).as_str(),
+            );
+            if !contains_port(&formatted_url) {
+                formatted_url = replace_first_occurrence(&formatted_url, '/', ':');
+            }
+        } else if *protocol == ServerProtocol::Unspecified {
+            formatted_url = formatted_url.replace("https://", "");
+        }
+
+        Ok(strip_trailing_slash(&formatted_url))
+    }
+    pub fn domain(&self) -> String {
+        self.host.to_string()
+    }
+    pub fn protocol(&self) -> ServerProtocol {
+        self.protocol.clone()
+    }
+}
+
+fn replace_first_occurrence(s: &str, target: char, replacement: char) -> String {
+    let mut result = s.to_string();
+    if let Some(index) = result.find(target) {
+        result.replace_range(index..index + 1, &replacement.to_string());
+    }
+    result
+}
+
+fn strip_trailing_slash(s: &str) -> String {
+    s.strip_suffix('/').unwrap_or(s).to_string()
+}
+
 /** produce error when using local repo or custom protocols */
 pub fn convert_clone_url_to_https(url: &str) -> Result<String> {
     // Strip credentials if present
@@ -191,6 +388,350 @@ fn strip_credentials(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod clone_url_from_str_format_as {
+        use super::*;
+
+        mod when_user_specified {
+            use super::*;
+
+            mod but_not_in_original_url {
+                use super::*;
+
+                #[test]
+                fn https_to_https_ignores_user() {
+                    let result = "https://github.com/user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &Some("user1".to_string()))
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git");
+                }
+                #[test]
+                fn https_to_ssh_uses_specified_user() {
+                    let result = "https://github.com/user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Ssh, &Some("user1".to_string()))
+                        .unwrap();
+                    assert_eq!(result, "user1@github.com:user/repo.git");
+                }
+            }
+            mod and_a_different_user_in_original_url {
+                use super::*;
+
+                #[test]
+                fn ssh_uses_specified_user() {
+                    let result = "user2@github.com/user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Ssh, &Some("user1".to_string()))
+                        .unwrap();
+                    assert_eq!(result, "user1@github.com:user/repo.git");
+                }
+            }
+        }
+
+        #[test]
+        fn format_as_ssh_defaults_to_git_user() {
+            let result = "https://github.com/user/repo.git"
+                .parse::<CloneUrl>()
+                .unwrap()
+                .format_as(&ServerProtocol::Ssh, &None)
+                .unwrap();
+            assert_eq!(result, "git@github.com:user/repo.git");
+        }
+
+        #[test]
+        fn format_as_ssh_includes_port() {
+            let result = "https://github.com:1000/user/repo.git"
+                .parse::<CloneUrl>()
+                .unwrap()
+                .format_as(&ServerProtocol::Ssh, &None)
+                .unwrap();
+            assert_eq!(result, "git@github.com:1000/user/repo.git");
+        }
+
+        #[test]
+        fn format_as_unspecified_ommits_prefix() {
+            let result = "https://github.com/user/repo.git"
+                .parse::<CloneUrl>()
+                .unwrap()
+                .format_as(&ServerProtocol::Unspecified, &None)
+                .unwrap();
+            assert_eq!(result, "github.com/user/repo.git");
+        }
+
+        mod input_all_formats_to_from_str_and_correctly_format_as_https {
+            use super::*;
+
+            #[test]
+            fn test_https_url() {
+                let result = "https://github.com/user/repo.git"
+                    .parse::<CloneUrl>()
+                    .unwrap()
+                    .format_as(&ServerProtocol::Https, &None)
+                    .unwrap();
+                assert_eq!(result, "https://github.com/user/repo.git");
+            }
+
+            mod with_unspecified_and_additional_features {
+                use super::*;
+
+                #[test]
+                fn port() {
+                    let result = "github.com:1000/user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com:1000/user/repo.git");
+                }
+
+                #[test]
+                fn colon() {
+                    let result = "github.com:user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git");
+                }
+
+                #[test]
+                fn path_with_fragment() {
+                    let result = "github.com/user/repo.git#readme"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git#readme");
+                }
+
+                #[test]
+                fn path_with_parameters() {
+                    let result = "github.com/user/repo.git?ref=main"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git?ref=main");
+                }
+
+                #[test]
+                fn port_with_parameters_and_fragment() {
+                    let result = "github.com:2222/repo.git?version=1.0#section1"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(
+                        result,
+                        "https://github.com:2222/repo.git?version=1.0#section1"
+                    );
+                }
+            }
+
+            mod with_https_and_additional_features {
+                use super::*;
+
+                #[test]
+                fn credentials_and_they_are_stripped() {
+                    let result = "https://username:password@github.com/user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git");
+                }
+
+                #[test]
+                fn port() {
+                    let result = "https://github.com:1000/user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com:1000/user/repo.git");
+                }
+
+                #[test]
+                fn path_with_fragment() {
+                    let result = "https://github.com/user/repo.git#readme"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git#readme");
+                }
+
+                #[test]
+                fn path_with_parameters() {
+                    let result = "https://github.com/user/repo.git?ref=main"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git?ref=main");
+                }
+
+                #[test]
+                fn port_with_parameters_and_fragment() {
+                    let result = "https://github.com:2222/repo.git?version=1.0#section1"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(
+                        result,
+                        "https://github.com:2222/repo.git?version=1.0#section1"
+                    );
+                }
+            }
+
+            #[test]
+            fn test_http_url() {
+                let result = "http://github.com/user/repo.git"
+                    .parse::<CloneUrl>()
+                    .unwrap()
+                    .format_as(&ServerProtocol::Https, &None)
+                    .unwrap();
+                assert_eq!(result, "https://github.com/user/repo.git");
+            }
+
+            mod ssh_input {
+                use super::*;
+
+                #[test]
+                fn test_git_at_url() {
+                    let result = "git@github.com:user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git");
+                }
+
+                #[test]
+                fn test_user_at_url() {
+                    let result = "user1@github.com:user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git");
+                }
+                #[test]
+                fn path_has_colon_slash_prefix() {
+                    let result = "user1@github.com:/user/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git");
+                }
+
+                #[test]
+                fn port_specified_with_path() {
+                    let result = "user@github.com:2222/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com:2222/repo.git");
+                }
+
+                #[test]
+                fn port_specified_without_path() {
+                    let result = "user@github.com:2222"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com:2222");
+                }
+
+                #[test]
+                fn path_with_fragment() {
+                    let result = "user1@github.com:/user/repo.git#readme"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git#readme");
+                }
+
+                #[test]
+                fn path_with_parameters() {
+                    let result = "user@github.com:/user/repo.git?ref=main"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(result, "https://github.com/user/repo.git?ref=main");
+                }
+
+                #[test]
+                fn port_with_parameters_and_fragment() {
+                    let result = "user@github.com:2222/repo.git?version=1.0#section1"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None)
+                        .unwrap();
+                    assert_eq!(
+                        result,
+                        "https://github.com:2222/repo.git?version=1.0#section1"
+                    );
+                }
+            }
+
+            #[test]
+            fn test_ftp_url() {
+                let result = "ftp://example.com/repo.git"
+                    .parse::<CloneUrl>()
+                    .unwrap()
+                    .format_as(&ServerProtocol::Https, &None)
+                    .unwrap();
+                assert_eq!(result, "https://example.com/repo.git");
+            }
+
+            #[test]
+            fn test_git_protocol_url() {
+                let result = "git://example.com/repo.git"
+                    .parse::<CloneUrl>()
+                    .unwrap()
+                    .format_as(&ServerProtocol::Https, &None)
+                    .unwrap();
+                assert_eq!(result, "https://example.com/repo.git");
+            }
+
+            #[test]
+            fn test_invalid_url() {
+                let clone_url_result = "unsupported://example.com/repo.git".parse::<CloneUrl>();
+                assert!(clone_url_result.is_err());
+            }
+            mod local_addresses_should_return_error {
+                use super::*;
+                #[test]
+                fn test_absolute_local_path() {
+                    let result = "/path/to/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None);
+                    assert!(result.is_err()); // Expecting an error when converting to HTTPS
+                }
+
+                #[test]
+                fn test_relative_local_path() {
+                    let result = "./path/to/repo.git"
+                        .parse::<CloneUrl>()
+                        .unwrap()
+                        .format_as(&ServerProtocol::Https, &None);
+                    assert!(result.is_err()); // Expecting an error when converting to HTTPS
+                }
+            }
+        }
+    }
     mod convert_clone_url_to_https {
         use super::*;
 
