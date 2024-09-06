@@ -15,7 +15,7 @@ use git_events::{
 };
 use ngit::{
     client::{self, get_event_from_cache_by_id},
-    git,
+    git::{self, nostr_url::NostrUrlDecoded},
     git_events::{self, get_event_root},
     login::{self, get_curent_user},
     repo_ref, repo_state,
@@ -42,7 +42,7 @@ use crate::{
 pub async fn run_push(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    nostr_remote_url: &str,
+    decoded_nostr_url: &NostrUrlDecoded,
     stdin: &Stdin,
     initial_refspec: &str,
     client: &Client,
@@ -66,7 +66,7 @@ pub async fn run_push(
 
     let list_outputs = match list_outputs {
         Some(outputs) => outputs,
-        _ => list_from_remotes(&term, git_repo, &repo_ref.git_server)?,
+        _ => list_from_remotes(&term, git_repo, &repo_ref.git_server, decoded_nostr_url),
     };
 
     let nostr_state = get_state_from_cache(git_repo.get_path()?, repo_ref).await;
@@ -154,7 +154,7 @@ pub async fn run_push(
             &term,
             repo_ref,
             git_repo,
-            nostr_remote_url,
+            &decoded_nostr_url.original_string,
             &signer,
             &git_server_refspecs,
         )
@@ -306,8 +306,12 @@ pub async fn run_push(
         }
         let (_, to) = refspec_to_from_to(refspec)?;
         println!("ok {to}");
-        update_remote_refs_pushed(&git_repo.git_repo, refspec, nostr_remote_url)
-            .context("could not update remote_ref locally")?;
+        update_remote_refs_pushed(
+            &git_repo.git_repo,
+            refspec,
+            &decoded_nostr_url.original_string,
+        )
+        .context("could not update remote_ref locally")?;
     }
 
     // TODO make async - check gitlib2 callbacks work async

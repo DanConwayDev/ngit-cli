@@ -36,6 +36,7 @@ impl fmt::Display for ServerProtocol {
 
 #[derive(Debug, PartialEq)]
 pub struct NostrUrlDecoded {
+    pub original_string: String,
     pub coordinates: HashSet<Coordinate>,
     pub protocol: Option<ServerProtocol>,
     pub user: Option<String>,
@@ -145,6 +146,7 @@ impl std::str::FromStr for NostrUrlDecoded {
         }
 
         Ok(Self {
+            original_string: url.to_string(),
             coordinates,
             protocol,
             user,
@@ -831,11 +833,11 @@ mod tests {
 
         #[test]
         fn from_naddr() -> Result<()> {
+            let url = "nostr://naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqvzqqqrhnym0k2qj".to_string();
             assert_eq!(
-                NostrUrlDecoded::from_str(
-                    "nostr://naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqvzqqqrhnym0k2qj"
-                )?,
+                NostrUrlDecoded::from_str(&url)?,
                 NostrUrlDecoded {
+                    original_string: url.clone(),
                     coordinates: HashSet::from([Coordinate {
                         identifier: "ngit".to_string(),
                         public_key: PublicKey::parse(
@@ -851,16 +853,19 @@ mod tests {
             );
             Ok(())
         }
+
         mod from_npub_slash_identifier {
             use super::*;
 
             #[test]
             fn without_relay() -> Result<()> {
+                let url =
+                    "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit"
+                        .to_string();
                 assert_eq!(
-                    NostrUrlDecoded::from_str(
-                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit"
-                    )?,
+                    NostrUrlDecoded::from_str(&url)?,
                     NostrUrlDecoded {
+                        original_string: url.clone(),
                         coordinates: HashSet::from([get_model_coordinate(false)]),
                         protocol: None,
                         user: None,
@@ -870,16 +875,15 @@ mod tests {
             }
 
             mod with_url_parameters {
-
                 use super::*;
 
                 #[test]
                 fn with_relay_without_scheme_defaults_to_wss() -> Result<()> {
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay=nos.lol".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay=nos.lol"
-                        )?,
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
+                            original_string: url.clone(),
                             coordinates: HashSet::from([get_model_coordinate(true)]),
                             protocol: None,
                             user: None,
@@ -890,40 +894,15 @@ mod tests {
 
                 #[test]
                 fn with_encoded_relay() -> Result<()> {
-                    assert_eq!(
-                        NostrUrlDecoded::from_str(&format!(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}",
-                            urlencoding::encode("wss://nos.lol")
-                        ))?,
-                        NostrUrlDecoded {
-                            coordinates: HashSet::from([get_model_coordinate(true)]),
-                            protocol: None,
-                            user: None,
-                        },
+                    let url = format!(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}",
+                        urlencoding::encode("wss://nos.lol")
                     );
-                    Ok(())
-                }
-                #[test]
-                fn with_multiple_encoded_relays() -> Result<()> {
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&format!(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}&relay1={}",
-                            urlencoding::encode("wss://nos.lol"),
-                            urlencoding::encode("wss://relay.damus.io"),
-                        ))?,
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
-                            coordinates: HashSet::from([Coordinate {
-                                identifier: "ngit".to_string(),
-                                public_key: PublicKey::parse(
-                                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                                )
-                                .unwrap(),
-                                kind: nostr_sdk::Kind::GitRepoAnnouncement,
-                                relays: vec![
-                                    "wss://nos.lol/".to_string(),
-                                    "wss://relay.damus.io/".to_string(),
-                                ],
-                            }]),
+                            original_string: url.clone(),
+                            coordinates: HashSet::from([get_model_coordinate(true)]),
                             protocol: None,
                             user: None,
                         },
@@ -932,12 +911,42 @@ mod tests {
                 }
 
                 #[test]
-                fn with_server_protocol() -> Result<()> {
+                fn with_multiple_encoded_relays() -> Result<()> {
+                    let url = format!(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}&relay1={}",
+                        urlencoding::encode("wss://nos.lol"),
+                        urlencoding::encode("wss://relay.damus.io"),
+                    );
                     assert_eq!(
-                        NostrUrlDecoded::from_str(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh"
-                        )?,
+                    NostrUrlDecoded::from_str(&url)?,
+                    NostrUrlDecoded {
+                        original_string: url.clone(),
+                        coordinates: HashSet::from([Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            relays: vec![
+                                "wss://nos.lol/".to_string(),
+                                "wss://relay.damus.io/".to_string(),
+                            ],
+                        }]),
+                        protocol: None,
+                        user: None,
+                    },
+                );
+                    Ok(())
+                }
+
+                #[test]
+                fn with_server_protocol() -> Result<()> {
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh".to_string();
+                    assert_eq!(
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
+                            original_string: url.clone(),
                             coordinates: HashSet::from([get_model_coordinate(false)]),
                             protocol: Some(ServerProtocol::Ssh),
                             user: None,
@@ -945,13 +954,14 @@ mod tests {
                     );
                     Ok(())
                 }
+
                 #[test]
                 fn with_server_protocol_and_user() -> Result<()> {
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh&user=fred".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh&user=fred"
-                        )?,
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
+                            original_string: url.clone(),
                             coordinates: HashSet::from([get_model_coordinate(false)]),
                             protocol: Some(ServerProtocol::Ssh),
                             user: Some("fred".to_string()),
@@ -960,16 +970,17 @@ mod tests {
                     Ok(())
                 }
             }
+
             mod with_parameters_embedded_with_slashes {
                 use super::*;
 
                 #[test]
                 fn with_relay_without_scheme_defaults_to_wss() -> Result<()> {
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit"
-                        )?,
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
+                            original_string: url.clone(),
                             coordinates: HashSet::from([get_model_coordinate(true)]),
                             protocol: None,
                             user: None,
@@ -980,40 +991,15 @@ mod tests {
 
                 #[test]
                 fn with_encoded_relay() -> Result<()> {
-                    assert_eq!(
-                        NostrUrlDecoded::from_str(&format!(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/{}/ngit",
-                            urlencoding::encode("wss://nos.lol")
-                        ))?,
-                        NostrUrlDecoded {
-                            coordinates: HashSet::from([get_model_coordinate(true)]),
-                            protocol: None,
-                            user: None,
-                        },
+                    let url = format!(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/{}/ngit",
+                        urlencoding::encode("wss://nos.lol")
                     );
-                    Ok(())
-                }
-                #[test]
-                fn with_multiple_encoded_relays() -> Result<()> {
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&format!(
-                            "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/{}/{}/ngit",
-                            urlencoding::encode("wss://nos.lol"),
-                            urlencoding::encode("wss://relay.damus.io"),
-                        ))?,
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
-                            coordinates: HashSet::from([Coordinate {
-                                identifier: "ngit".to_string(),
-                                public_key: PublicKey::parse(
-                                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                                )
-                                .unwrap(),
-                                kind: nostr_sdk::Kind::GitRepoAnnouncement,
-                                relays: vec![
-                                    "wss://nos.lol/".to_string(),
-                                    "wss://relay.damus.io/".to_string(),
-                                ],
-                            }]),
+                            original_string: url.clone(),
+                            coordinates: HashSet::from([get_model_coordinate(true)]),
                             protocol: None,
                             user: None,
                         },
@@ -1022,12 +1008,42 @@ mod tests {
                 }
 
                 #[test]
-                fn with_server_protocol() -> Result<()> {
+                fn with_multiple_encoded_relays() -> Result<()> {
+                    let url = format!(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/{}/{}/ngit",
+                        urlencoding::encode("wss://nos.lol"),
+                        urlencoding::encode("wss://relay.damus.io"),
+                    );
                     assert_eq!(
-                        NostrUrlDecoded::from_str(
-                            "nostr://ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit"
-                        )?,
+                    NostrUrlDecoded::from_str(&url)?,
+                    NostrUrlDecoded {
+                        original_string: url.clone(),
+                        coordinates: HashSet::from([Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            relays: vec![
+                                "wss://nos.lol/".to_string(),
+                                "wss://relay.damus.io/".to_string(),
+                            ],
+                        }]),
+                        protocol: None,
+                        user: None,
+                    },
+                );
+                    Ok(())
+                }
+
+                #[test]
+                fn with_server_protocol() -> Result<()> {
+                    let url = "nostr://ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit".to_string();
+                    assert_eq!(
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
+                            original_string: url.clone(),
                             coordinates: HashSet::from([get_model_coordinate(false)]),
                             protocol: Some(ServerProtocol::Ssh),
                             user: None,
@@ -1035,13 +1051,14 @@ mod tests {
                     );
                     Ok(())
                 }
+
                 #[test]
                 fn with_server_protocol_and_user() -> Result<()> {
+                    let url = "nostr://fred@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(
-                            "nostr://fred@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit"
-                        )?,
+                        NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
+                            original_string: url.clone(),
                             coordinates: HashSet::from([get_model_coordinate(false)]),
                             protocol: Some(ServerProtocol::Ssh),
                             user: Some("fred".to_string()),

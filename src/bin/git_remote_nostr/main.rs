@@ -75,13 +75,21 @@ async fn main() -> Result<()> {
                 println!("unsupported");
             }
             ["fetch", oid, refstr] => {
-                fetch::run_fetch(&git_repo, &repo_ref, &decoded_nostr_url, &stdin, oid, refstr).await?;
+                fetch::run_fetch(
+                    &git_repo,
+                    &repo_ref,
+                    &decoded_nostr_url,
+                    &stdin,
+                    oid,
+                    refstr,
+                )
+                .await?;
             }
             ["push", refspec] => {
                 push::run_push(
                     &git_repo,
                     &repo_ref,
-                    nostr_remote_url,
+                    &decoded_nostr_url,
                     &stdin,
                     refspec,
                     &client,
@@ -90,10 +98,12 @@ async fn main() -> Result<()> {
                 .await?;
             }
             ["list"] => {
-                list_outputs = Some(list::run_list(&git_repo, &repo_ref, false).await?);
+                list_outputs =
+                    Some(list::run_list(&git_repo, &repo_ref, &decoded_nostr_url, false).await?);
             }
             ["list", "for-push"] => {
-                list_outputs = Some(list::run_list(&git_repo, &repo_ref, true).await?);
+                list_outputs =
+                    Some(list::run_list(&git_repo, &repo_ref, &decoded_nostr_url, true).await?);
             }
             [] => {
                 return Ok(());

@@ -1,25 +1,35 @@
 use core::str;
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use auth_git2::GitAuthenticator;
 use client::get_state_from_cache;
 use git::RepoActions;
 use git_events::{event_to_cover_letter, get_commit_id_from_patch};
-use ngit::{client, git, git_events, login::get_curent_user, repo_ref};
+use ngit::{
+    client,
+    git::{
+        self,
+        nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
+    },
+    git_events,
+    login::get_curent_user,
+    repo_ref,
+};
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use repo_ref::RepoRef;
 
 use crate::{
     git::Repo,
     utils::{
-        get_open_proposals, get_short_git_server_name, switch_clone_url_between_ssh_and_https,
+        get_open_proposals, get_read_protocols_to_try, get_short_git_server_name, join_with_and,
     },
 };
 
 pub async fn run_list(
     git_repo: &Repo,
     repo_ref: &RepoRef,
+    decoded_nostr_url: &NostrUrlDecoded,
     for_push: bool,
 ) -> Result<HashMap<String, HashMap<String, String>>> {
     let nostr_state =
@@ -31,7 +41,7 @@ pub async fn run_list(
 
     let term = console::Term::stderr();
 
-    let remote_states = list_from_remotes(&term, git_repo, &repo_ref.git_server)?;
+    let remote_states = list_from_remotes(&term, git_repo, &repo_ref.git_server, decoded_nostr_url);
 
     let mut state = if let Some(nostr_state) = nostr_state {
         for (name, value) in &nostr_state.state {
@@ -122,41 +132,115 @@ pub fn list_from_remotes(
     term: &console::Term,
     git_repo: &Repo,
     git_servers: &Vec<String>,
-) -> Result<HashMap<String, HashMap<String, String>>> {
+    decoded_nostr_url: &NostrUrlDecoded, // Add this parameter
+) -> HashMap<String, HashMap<String, String>> {
     let mut remote_states = HashMap::new();
+    let mut errors = HashMap::new();
     for url in git_servers {
-        let short_name = get_short_git_server_name(git_repo, url);
-        term.write_line(format!("fetching refs list: {short_name}...").as_str())?;
-        match list_from_remote(git_repo, url) {
-            Ok(remote_state) => {
-                remote_states.insert(url.clone(), remote_state);
+        match list_from_remote(term, git_repo, url, decoded_nostr_url) {
+            Err(error) => {
+                errors.insert(url, error);
             }
-            Err(error1) => {
-                if let Ok(alternative_url) = switch_clone_url_between_ssh_and_https(url) {
-                    match list_from_remote(git_repo, &alternative_url) {
-                        Ok(remote_state) => {
-                            remote_states.insert(url.clone(), remote_state);
-                        }
-                        Err(error2) => {
-                            term.write_line(
-                                format!("WARNING: {short_name} failed to list refs error: {error1}\r\nand alternative protocol {alternative_url}: {error2}").as_str(),
-                            )?;
-                        }
-                    }
-                } else {
+            Ok(state) => {
+                remote_states.insert(url.to_string(), state);
+            }
+        }
+    }
+    remote_states
+}
+
+pub fn list_from_remote(
+    term: &console::Term,
+    git_repo: &Repo,
+    git_server_url: &str,
+    decoded_nostr_url: &NostrUrlDecoded, // Add this parameter
+) -> Result<HashMap<String, String>> {
+    let server_url = git_server_url.parse::<CloneUrl>()?;
+    let protocols_to_attempt = get_read_protocols_to_try(&server_url, decoded_nostr_url);
+
+    let mut failed_protocols = vec![];
+    let mut remote_state: Option<HashMap<String, String>> = None;
+
+    for protocol in &protocols_to_attempt {
+        term.write_line(
+            format!(
+                "fetching ref list from {} over {protocol}...",
+                server_url.domain(),
+            )
+            .as_str(),
+        )?;
+
+        let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
+        let res = if [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol) {
+            list_from_remote_url_unauthenticated(git_repo, &formatted_url)
+        } else {
+            list_from_remote_url(git_repo, &formatted_url)
+        };
+
+        match res {
+            Ok(state) => {
+                remote_state = Some(state);
+                if !failed_protocols.is_empty() {
                     term.write_line(
-                        format!("WARNING: {short_name} failed to list refs error: {error1}",)
-                            .as_str(),
+                        format!(
+                            "list: succeeded over {protocol} for {}",
+                            server_url.domain(),
+                        )
+                        .as_str(),
                     )?;
                 }
+                break;
+            }
+            Err(error) => {
+                term.write_line(
+                    format!("list: {formatted_url} failed over {protocol}: {error}").as_str(),
+                )?;
+                failed_protocols.push(protocol);
             }
         }
         term.clear_last_lines(1)?;
     }
-    Ok(remote_states)
+    if let Some(remote_state) = remote_state {
+        Ok(remote_state)
+    } else {
+        let error = anyhow!(
+            "{} failed over {}{}",
+            server_url.domain(),
+            join_with_and(&failed_protocols),
+            if decoded_nostr_url.protocol.is_some() {
+                " and nostr url contains protocol override so no other protocols were attempted"
+            } else {
+                ""
+            },
+        );
+        term.write_line(format!("list: {error}").as_str())?;
+        Err(error)
+    }
 }
 
-fn list_from_remote(
+fn list_from_remote_url_unauthenticated(
+    git_repo: &Repo,
+    git_server_remote_url: &str,
+) -> Result<HashMap<String, String>> {
+    let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_remote_url)?;
+    let remote_callbacks = git2::RemoteCallbacks::new();
+    git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), None)?;
+    let mut state = HashMap::new();
+    for head in git_server_remote.list()? {
+        if let Some(symbolic_reference) = head.symref_target() {
+            state.insert(
+                head.name().to_string(),
+                format!("ref: {symbolic_reference}"),
+            );
+        } else {
+            state.insert(head.name().to_string(), head.oid().to_string());
+        }
+    }
+    git_server_remote.disconnect()?;
+    Ok(state)
+}
+
+fn list_from_remote_url(
     git_repo: &Repo,
     git_server_remote_url: &str,
 ) -> Result<HashMap<String, String>> {
