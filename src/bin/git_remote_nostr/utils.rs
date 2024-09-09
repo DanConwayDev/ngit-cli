@@ -91,47 +91,6 @@ pub fn read_line<'a>(stdin: &io::Stdin, line: &'a mut String) -> io::Result<Vec<
     Ok(tokens)
 }
 
-pub fn switch_clone_url_between_ssh_and_https(url: &str) -> Result<String> {
-    if url.starts_with("https://") {
-        // Convert HTTPS to git@ syntax
-        let parts: Vec<&str> = url.trim_start_matches("https://").split('/').collect();
-        if parts.len() >= 2 {
-            // Construct the git@ URL
-            Ok(format!("git@{}:{}", parts[0], parts[1..].join("/")))
-        } else {
-            // If the format is unexpected, return an error
-            bail!("Invalid HTTPS URL format: {}", url);
-        }
-    } else if url.starts_with("ssh://") {
-        // Convert SSH to git@ syntax
-        let parts: Vec<&str> = url.trim_start_matches("ssh://").split('/').collect();
-        if parts.len() >= 2 {
-            // Construct the git@ URL
-            Ok(format!("git@{}:{}", parts[0], parts[1..].join("/")))
-        } else {
-            // If the format is unexpected, return an error
-            bail!("Invalid SSH URL format: {}", url);
-        }
-    } else if url.starts_with("git@") {
-        // Convert git@ syntax to HTTPS
-        let parts: Vec<&str> = url.split(':').collect();
-        if parts.len() == 2 {
-            // Construct the HTTPS URL
-            Ok(format!(
-                "https://{}/{}",
-                parts[0].trim_end_matches('@'),
-                parts[1]
-            ))
-        } else {
-            // If the format is unexpected, return an error
-            bail!("Invalid git@ URL format: {}", url);
-        }
-    } else {
-        // If the URL is neither HTTPS, SSH, nor git@, return an error
-        bail!("Unsupported URL protocol: {}", url);
-    }
-}
-
 pub async fn get_open_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -297,7 +256,40 @@ pub fn get_read_protocols_to_try(
     }
 }
 
-pub fn error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
+/// get an ordered vector of server protocols to attempt
+pub fn get_write_protocols_to_try(
+    server_url: &CloneUrl,
+    decoded_nostr_url: &NostrUrlDecoded,
+) -> Vec<ServerProtocol> {
+    if server_url.protocol() == ServerProtocol::Filesystem {
+        vec![(ServerProtocol::Filesystem)]
+    } else if let Some(protocol) = &decoded_nostr_url.protocol {
+        vec![protocol.clone()]
+    } else if server_url.protocol() == ServerProtocol::Http {
+        vec![
+            ServerProtocol::Ssh,
+            // note: list and fetch stop here if ssh was authenticated
+            ServerProtocol::Http,
+        ]
+    } else if server_url.protocol() == ServerProtocol::Ftp {
+        vec![ServerProtocol::Ssh, ServerProtocol::Ftp]
+    } else {
+        vec![
+            ServerProtocol::Ssh,
+            // note: list and fetch stop here if ssh was authenticated
+            ServerProtocol::Https,
+        ]
+    }
+}
+
+/// to understand whether to try over another protocol
+pub fn fetch_or_list_error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
+    let error_str = error.to_string();
+    error_str.contains("Permission to") || error_str.contains("Repository not found")
+}
+
+/// to understand whether to try over another protocol
+pub fn push_error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
     let error_str = error.to_string();
     error_str.contains("Permission to") || error_str.contains("Repository not found")
 }

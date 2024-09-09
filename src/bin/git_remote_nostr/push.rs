@@ -4,7 +4,7 @@ use std::{
     io::Stdin,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use auth_git2::GitAuthenticator;
 use client::{get_events_from_cache, get_state_from_cache, send_events, sign_event, STATE_KIND};
 use console::Term;
@@ -15,7 +15,10 @@ use git_events::{
 };
 use ngit::{
     client::{self, get_event_from_cache_by_id},
-    git::{self, nostr_url::NostrUrlDecoded},
+    git::{
+        self,
+        nostr_url::{CloneUrl, NostrUrlDecoded},
+    },
     git_events::{self, get_event_root},
     login::{self, get_curent_user},
     repo_ref, repo_state,
@@ -34,7 +37,8 @@ use crate::{
     list::list_from_remotes,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
-        get_short_git_server_name, read_line, switch_clone_url_between_ssh_and_https,
+        get_short_git_server_name, get_write_protocols_to_try, join_with_and,
+        push_error_is_not_authentication_failure, read_line,
     },
 };
 
@@ -315,27 +319,21 @@ pub async fn run_push(
     }
 
     // TODO make async - check gitlib2 callbacks work async
+
     for (git_server_url, remote_refspecs) in remote_refspecs {
         let remote_refspecs = remote_refspecs
             .iter()
             .filter(|refspec| git_server_refspecs.contains(refspec))
             .cloned()
             .collect::<Vec<String>>();
-        if !refspecs.is_empty()
-            && push_to_remote(git_repo, &git_server_url, &remote_refspecs, &term).is_err()
-        {
-            if let Ok(alternative_url) = switch_clone_url_between_ssh_and_https(&git_server_url) {
-                if push_to_remote(git_repo, &alternative_url, &remote_refspecs, &term).is_err() {
-                    // errors get printed as part of callback
-                    // TODO prevent 2 warning messages and instead use one
-                    // to say it didnt work over either https or ssh
-                } else {
-                    term.write_line(
-                        format!("but succeed over alterantive protocol {alternative_url}",)
-                            .as_str(),
-                    )?;
-                }
-            }
+        if !refspecs.is_empty() {
+            let _ = push_to_remote(
+                git_repo,
+                &git_server_url,
+                decoded_nostr_url,
+                &remote_refspecs,
+                &term,
+            );
         }
     }
     println!();
@@ -343,6 +341,64 @@ pub async fn run_push(
 }
 
 fn push_to_remote(
+    git_repo: &Repo,
+    git_server_url: &str,
+    decoded_nostr_url: &NostrUrlDecoded,
+    remote_refspecs: &[String],
+    term: &Term,
+) -> Result<()> {
+    let server_url = git_server_url.parse::<CloneUrl>()?;
+    let protocols_to_attempt = get_write_protocols_to_try(&server_url, decoded_nostr_url);
+
+    let mut failed_protocols = vec![];
+    let mut success = false;
+
+    for protocol in &protocols_to_attempt {
+        term.write_line(
+            format!(
+                "fetching ref list over {protocol} from {}...",
+                server_url.short_name(),
+            )
+            .as_str(),
+        )?;
+
+        let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
+
+        if let Err(error) = push_to_remote_url(git_repo, &formatted_url, remote_refspecs, term) {
+            term.write_line(
+                format!("push: {formatted_url} failed over {protocol}: {error}").as_str(),
+            )?;
+            failed_protocols.push(protocol);
+            if push_error_is_not_authentication_failure(&error) {
+                break;
+            }
+        } else {
+            success = true;
+            if !failed_protocols.is_empty() {
+                term.write_line(format!("fetch: succeeded over {protocol}").as_str())?;
+            }
+        }
+        term.clear_last_lines(1)?;
+    }
+    if success {
+        Ok(())
+    } else {
+        let error = anyhow!(
+            "{} failed over {}{}",
+            server_url.short_name(),
+            join_with_and(&failed_protocols),
+            if decoded_nostr_url.protocol.is_some() {
+                " and nostr url contains protocol override so no other protocols were attempted"
+            } else {
+                ""
+            },
+        );
+        term.write_line(format!("fetch: {error}").as_str())?;
+        Err(error)
+    }
+}
+
+fn push_to_remote_url(
     git_repo: &Repo,
     git_server_url: &str,
     remote_refspecs: &[String],

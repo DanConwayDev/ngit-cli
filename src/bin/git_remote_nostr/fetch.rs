@@ -15,7 +15,7 @@ use ngit::{
 };
 
 use crate::utils::{
-    error_is_not_authentication_failure, find_proposal_and_patches_by_branch_name,
+    fetch_or_list_error_is_not_authentication_failure, find_proposal_and_patches_by_branch_name,
     get_oids_from_fetch_batch, get_open_proposals, get_read_protocols_to_try, join_with_and,
 };
 
@@ -140,7 +140,9 @@ fn fetch_from_git_server(
                 format!("fetch: {formatted_url} failed over {protocol}: {error}").as_str(),
             )?;
             failed_protocols.push(protocol);
-            if protocol == &ServerProtocol::Ssh && error_is_not_authentication_failure(&error) {
+            if protocol == &ServerProtocol::Ssh
+                && fetch_or_list_error_is_not_authentication_failure(&error)
+            {
                 // authenticated by failed to complete request
                 break;
             }
