@@ -12,6 +12,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
+        manifest = pkgs.lib.importTOML ./Cargo.toml;
       in
       with pkgs;
       {
@@ -42,6 +43,22 @@
             export RUST_SRC_PATH=${pkgs.rustPlatform.rustLibSrc}
           '';
         };
+        # Create packages for each binary defined in Cargo.toml
+        packages = lib.listToAttrs (map (bin: {
+          inherit (bin) name;
+          value = pkgs.rustPlatform.buildRustPackage {
+            pname = bin.name;
+            version = manifest.package.version;
+            src = bin.path;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+            };
+            buildInputs = [
+              pkgs.pkg-config
+              pkgs.openssl
+            ];
+          };
+        }) manifest.bin);
       }
     );
 }
