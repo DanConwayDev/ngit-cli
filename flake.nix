@@ -44,12 +44,10 @@
           '';
         };
         # Create packages for each binary defined in Cargo.toml
-        packages = lib.listToAttrs (map (bin: {
-          inherit (bin) name;
-          value = pkgs.rustPlatform.buildRustPackage {
-            pname = bin.name;
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+            pname = manifest.package.name;
             version = manifest.package.version;
-            src = bin.path;
+            src = ./.;
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
@@ -58,11 +56,17 @@
               };
             };
             buildInputs = [
-              pkgs.pkg-config
-              pkgs.openssl
+              pkg-config # required by git2
+              openssl
             ];
+            nativeBuildInputs = [
+              pkg-config # required by git2
+              openssl
+            ];
+            shellHook = ''
+              export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
+            '';
           };
-        }) manifest.bin);
       }
     );
 }
