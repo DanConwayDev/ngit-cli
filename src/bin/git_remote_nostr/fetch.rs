@@ -147,6 +147,7 @@ fn fetch_from_git_server(
             if !failed_protocols.is_empty() {
                 term.write_line(format!("fetch: succeeded over {protocol}").as_str())?;
             }
+            break;
         }
     }
     if success {
