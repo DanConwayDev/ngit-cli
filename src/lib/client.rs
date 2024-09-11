@@ -145,7 +145,7 @@ impl Connect for Client {
         Client {
             client: nostr_sdk::ClientBuilder::new()
                 .opts(Options::new().relay_limits(RelayLimits::disable()))
-                .signer(&opts.keys.unwrap_or(nostr::Keys::generate()))
+                .signer(opts.keys.unwrap_or(nostr::Keys::generate()))
                 // .database(
                 //     SQLiteDatabase::open(get_dirs()?.cache_dir().join("nostr-cache.sqlite")).
                 // await?, )

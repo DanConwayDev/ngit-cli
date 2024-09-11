@@ -196,7 +196,7 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, false, None)?;
-                            p.expect(&format!(
+                            p.expect(format!(
                                 "checked out proposal as 'pr/{}(",
                                 FEATURE_BRANCH_NAME_1,
                             ))?;
@@ -318,7 +318,7 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, false, Some(0))?;
-                            p.expect(&format!(
+                            p.expect(format!(
                                 "checked out proposal as 'pr/{}(",
                                 FEATURE_BRANCH_NAME_3,
                             ))?;
@@ -525,7 +525,7 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, false, Some(0))?;
-                            p.expect(&format!(
+                            p.expect(format!(
                                 "checked out proposal as 'pr/{}(",
                                 FEATURE_BRANCH_NAME_4,
                             ))?;
@@ -772,7 +772,7 @@ mod when_main_branch_is_uptodate {
                                 ],
                             )?;
                             c.succeeds_with(0, false, Some(0))?;
-                            p.expect(&format!(
+                            p.expect(format!(
                                 "checked out proposal as 'pr/{}(",
                                 FEATURE_BRANCH_NAME_1,
                             ))?;

@@ -249,7 +249,7 @@ pub fn event_tag_from_nip19_or_hex(
     loop {
         if bech32.is_empty() {
             bech32 = Interactor::default().input(
-                PromptInputParms::default().with_prompt(&format!("{reference_name} reference")),
+                PromptInputParms::default().with_prompt(format!("{reference_name} reference")),
             )?;
         }
         if let Ok(nip19) = Nip19::from_bech32(bech32.clone()) {

@@ -685,11 +685,7 @@ impl RepoActions for Repo {
     /// setting global to None will suppliment local config with global items
     /// not in local
     fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>> {
-        let just_global = if let Some(just_global) = global {
-            just_global
-        } else {
-            false
-        };
+        let just_global = global.unwrap_or(false);
         match if just_global {
             self.git_repo
                 .config()

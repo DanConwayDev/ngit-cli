@@ -1,4 +1,3 @@
-
 use super::*;
 
 mod without_state_announcement {
