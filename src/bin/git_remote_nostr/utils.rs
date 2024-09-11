@@ -284,14 +284,27 @@ pub fn get_write_protocols_to_try(
 
 /// to understand whether to try over another protocol
 pub fn fetch_or_list_error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
-    let error_str = error.to_string();
-    error_str.contains("Permission to") || error_str.contains("Repository not found")
+    !error_might_be_authentication_related(error)
 }
 
 /// to understand whether to try over another protocol
 pub fn push_error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
+    !error_might_be_authentication_related(error)
+}
+
+pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     let error_str = error.to_string();
-    error_str.contains("Permission to") || error_str.contains("Repository not found")
+    for s in [
+        "no ssh keys found",
+        "invalid or unknown remote ssh",
+        "Permission to",
+        "Repository not found",
+    ] {
+        if error_str.contains(s) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
