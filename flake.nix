@@ -64,6 +64,14 @@
               openssl
             ];
           };
+        # Create a tarball for the built package
+        packages.tarball = stdenv.mkDerivation {
+          name = "${manifest.package.name}-${manifest.package.version}-${system}.tar.gz";
+          buildInputs = [ coreutils ];
+          buildPhase = ''
+            tar -czf $out/${manifest.package.name}-${manifest.package.version}-${system}.tar.gz -C $out .
+          '';
+        };
       }
     );
 }
