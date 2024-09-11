@@ -1,3 +1,4 @@
+use core::str;
 use std::io::Stdin;
 
 use anyhow::{anyhow, bail, Result};
@@ -125,11 +126,13 @@ fn fetch_from_git_server(
         )?;
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
-        let res = if [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol) {
-            fetch_from_git_server_url_unauthenticated(git_repo, oids, &formatted_url)
-        } else {
-            fetch_from_git_server_url(git_repo, oids, &formatted_url)
-        };
+        let res = fetch_from_git_server_url(
+            git_repo,
+            oids,
+            &formatted_url,
+            [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol),
+            term,
+        );
         term.clear_last_lines(1)?;
         if let Err(error) = res {
             term.write_line(
@@ -172,6 +175,8 @@ fn fetch_from_git_server_url(
     git_repo: &Repository,
     oids: &[String],
     git_server_url: &str,
+    dont_authenticate: bool,
+    term: &console::Term,
 ) -> Result<()> {
     if git_server_url.parse::<CloneUrl>()?.protocol() == ServerProtocol::Ssh && !check_ssh_keys() {
         bail!("no ssh keys found");
@@ -181,10 +186,67 @@ fn fetch_from_git_server_url(
     let auth = GitAuthenticator::default();
     let mut fetch_options = git2::FetchOptions::new();
     let mut remote_callbacks = git2::RemoteCallbacks::new();
-    // TODO status update callback
-    remote_callbacks.credentials(auth.credentials(&git_config));
+    remote_callbacks.sideband_progress(|data| {
+        let _ = term.clear_last_lines(1);
+        let _ = term.write_line(format!("remote: {}", str::from_utf8(data).unwrap()).as_str());
+        true
+    });
+    remote_callbacks.transfer_progress(|stats| {
+        let _ = term.clear_last_lines(1);
+        if stats.received_objects() == stats.total_objects() {
+            let _ = term.write_line(
+                format!(
+                    "Resolving deltas {}/{}\r",
+                    stats.indexed_deltas(),
+                    stats.total_deltas()
+                )
+                .as_str(),
+            );
+        } else if stats.total_objects() > 0 {
+            let _ = term.write_line(
+                format!(
+                    "Received {}/{} objects ({}) in {} bytes\r",
+                    stats.received_objects(),
+                    stats.total_objects(),
+                    stats.indexed_objects(),
+                    stats.received_bytes()
+                )
+                .as_str(),
+            );
+        }
+        true
+    });
+    if !dont_authenticate {
+        remote_callbacks.credentials(auth.credentials(&git_config));
+    }
     fetch_options.remote_callbacks(remote_callbacks);
     git_server_remote.download(oids, Some(&mut fetch_options))?;
+    {
+        let stats = git_server_remote.stats();
+        if stats.local_objects() > 0 {
+            term.write_line(
+                format!(
+                    "\rReceived {}/{} objects in {} bytes (used {} local \
+                 objects)",
+                    stats.indexed_objects(),
+                    stats.total_objects(),
+                    stats.received_bytes(),
+                    stats.local_objects()
+                )
+                .as_str(),
+            )?;
+        } else {
+            term.write_line(
+                format!(
+                    "\rReceived {}/{} objects in {} bytes",
+                    stats.indexed_objects(),
+                    stats.total_objects(),
+                    stats.received_bytes()
+                )
+                .as_str(),
+            )?;
+        }
+    }
     git_server_remote.disconnect()?;
     Ok(())
 }
