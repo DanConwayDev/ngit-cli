@@ -930,13 +930,7 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(
-            format!(
-                "fetching ref list over filesystem from {}...\r\n",
-                source_path
-            )
-            .as_str(),
-        )?;
+        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
 
         p.expect("merge commit ")?;
         // shorthand merge commit id appears in this gap
@@ -1080,13 +1074,7 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(
-            format!(
-                "fetching ref list over filesystem from {}...\r\n",
-                source_path
-            )
-            .as_str(),
-        )?;
+        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
         p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
@@ -1240,13 +1228,7 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
         let mut p =
             CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push", "--force"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(
-            format!(
-                "fetching ref list over filesystem from {}...\r\n",
-                source_path
-            )
-            .as_str(),
-        )?;
+        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
         p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
@@ -1395,13 +1377,7 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
             ["push", "-u", "origin", branch_name],
         );
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(
-            format!(
-                "fetching ref list over filesystem from {}...\r\n",
-                source_path
-            )
-            .as_str(),
-        )?;
+        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
         p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 

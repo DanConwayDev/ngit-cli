@@ -28,8 +28,8 @@ impl fmt::Display for ServerProtocol {
             ServerProtocol::Git => write!(f, "git"),
             ServerProtocol::Filesystem => write!(f, "filesystem"),
             ServerProtocol::Unspecified => write!(f, "unsepcified"),
-            ServerProtocol::UnauthHttps => write!(f, "unauthenticated https"),
-            ServerProtocol::UnauthHttp => write!(f, "unauthenticated http"),
+            ServerProtocol::UnauthHttps => write!(f, "https (unauthenticated)"),
+            ServerProtocol::UnauthHttp => write!(f, "http (unauthenticated)"),
         }
     }
 }
@@ -330,7 +330,7 @@ impl CloneUrl {
         if domain.is_empty() {
             self.original_string.to_string()
         } else {
-            domain
+            format!("{domain}{}", self.path)
         }
     }
 }

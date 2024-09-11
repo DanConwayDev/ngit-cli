@@ -355,11 +355,7 @@ fn push_to_remote(
 
     for protocol in &protocols_to_attempt {
         term.write_line(
-            format!(
-                "fetching ref list over {protocol} from {}...",
-                server_url.short_name(),
-            )
-            .as_str(),
+            format!("fetching {} ref list over {protocol}...", server_url.short_name(),).as_str(),
         )?;
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;

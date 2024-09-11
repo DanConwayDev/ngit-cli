@@ -41,13 +41,7 @@ mod without_state_announcement {
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = cli_tester_after_fetch(&git_repo)?;
             p.send_line("list")?;
-            p.expect(
-                format!(
-                    "fetching ref list over filesystem from {}...\r\n",
-                    source_path
-                )
-                .as_str(),
-            )?;
+            p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
             // println!("{}", p.expect_eventually("\r\n\r\n")?);
             let res = p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
@@ -121,11 +115,7 @@ mod with_state_announcement {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
                 p.expect(
-                    format!(
-                        "fetching ref list over filesystem from {}...\r\n",
-                        source_path
-                    )
-                    .as_str(),
+                    format!("fetching {} ref list over filesystem...\r\n", source_path).as_str(),
                 )?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;
@@ -208,11 +198,7 @@ mod with_state_announcement {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
                 p.expect(
-                    format!(
-                        "fetching ref list over filesystem from {}...\r\n",
-                        source_path
-                    )
-                    .as_str(),
+                    format!("fetching {} ref list over filesystem...\r\n", source_path).as_str(),
                 )?;
                 p.expect(
                     format!(
@@ -295,11 +281,7 @@ mod with_state_announcement {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
                 p.expect(
-                    format!(
-                        "fetching ref list over filesystem from {}...\r\n",
-                        source_path
-                    )
-                    .as_str(),
+                    format!("fetching {} ref list over filesystem...\r\n", source_path).as_str(),
                 )?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;

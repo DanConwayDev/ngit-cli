@@ -121,11 +121,7 @@ fn fetch_from_git_server(
     let mut success = false;
     for protocol in &protocols_to_attempt {
         term.write_line(
-            format!(
-                "fetching over {protocol} from {}...",
-                server_url.short_name(),
-            )
-            .as_str(),
+            format!("fetching {} over {protocol}...", server_url.short_name(),).as_str(),
         )?;
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;

@@ -42,7 +42,7 @@ async fn fetch_downloads_speficied_commits_from_git_server() -> Result<()> {
         p.send_line(format!("fetch {main_commit_id} main").as_str())?;
         p.send_line(format!("fetch {vnext_commit_id} vnext").as_str())?;
         p.send_line("")?;
-        p.expect(format!("fetching over filesystem from {source_path}...\r\n").as_str())?;
+        p.expect(format!("fetching {source_path} over filesystem...\r\n").as_str())?;
         p.expect_eventually_and_print("\r\n")?;
 
         assert!(git_repo.git_repo.find_commit(main_commit_id).is_ok());
@@ -108,7 +108,7 @@ mod when_first_git_server_fails_ {
             let mut p = cli_tester_after_fetch(&git_repo)?;
             p.send_line(format!("fetch {main_commit_id} main").as_str())?;
             p.send_line("")?;
-            p.expect(format!("fetching over filesystem from {error_path}...\r\n").as_str())?;
+            p.expect(format!("fetching {error_path} over filesystem...\r\n").as_str())?;
             // not sure why the below isn't appearing
             // p.expect(format!("fetching over filesystem from
             // {source_path}...\r\n").as_str())?;
@@ -166,7 +166,7 @@ async fn creates_commits_from_open_proposal_with_no_warngins_printed() -> Result
         let mut p = cli_tester_after_fetch(&git_repo)?;
         p.send_line(format!("fetch {proposal_tip} refs/heads/{branch_name}").as_str())?;
         p.send_line("")?;
-        p.expect(format!("fetching over filesystem from {source_path}...\r\n").as_str())?;
+        p.expect(format!("fetching {source_path} over filesystem...\r\n").as_str())?;
         // expect no errors
         p.expect_after_whitespace("\r\n")?;
         p.exit()?;
