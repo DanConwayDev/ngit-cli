@@ -38,7 +38,8 @@ use crate::{
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
         get_short_git_server_name, get_write_protocols_to_try, join_with_and,
-        push_error_is_not_authentication_failure, read_line,
+        push_error_is_not_authentication_failure, read_line, report_on_sideband_progress,
+        report_on_transfer_progress, ProgressStatus, TransferDirection,
     },
 };
 
@@ -355,7 +356,11 @@ fn push_to_remote(
 
     for protocol in &protocols_to_attempt {
         term.write_line(
-            format!("fetching {} ref list over {protocol}...", server_url.short_name(),).as_str(),
+            format!(
+                "fetching {} ref list over {protocol}...",
+                server_url.short_name(),
+            )
+            .as_str(),
         )?;
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
@@ -418,6 +423,20 @@ fn push_to_remote_url(
             .unwrap();
         }
         Ok(())
+    });
+    remote_callbacks.transfer_progress(|stats| {
+        let _ = term.clear_last_lines(1);
+        report_on_transfer_progress(
+            &stats,
+            term,
+            TransferDirection::Push,
+            ProgressStatus::InProgress,
+        );
+        true
+    });
+    remote_callbacks.sideband_progress(|data| {
+        report_on_sideband_progress(data, term);
+        true
     });
     push_options.remote_callbacks(remote_callbacks);
     git_server_remote.push(remote_refspecs, Some(&mut push_options))?;

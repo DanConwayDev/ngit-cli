@@ -1,3 +1,4 @@
+use core::str;
 use std::{
     collections::HashMap,
     io::{self, Stdin},
@@ -305,6 +306,87 @@ pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
         }
     }
     false
+}
+
+pub enum TransferDirection {
+    Fetch,
+    Push,
+}
+
+pub enum ProgressStatus {
+    InProgress,
+    Complete,
+}
+
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::float_cmp)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn report_on_transfer_progress(
+    progress_stats: &git2::Progress<'_>,
+    term: &console::Term,
+    direction: TransferDirection,
+    status: ProgressStatus,
+) {
+    let total = progress_stats.total_objects() as f64;
+    if total == 0.0 {
+        return;
+    }
+    let received = progress_stats.received_objects() as f64;
+    let percentage = (received / total) * 100.0;
+
+    // Get the total received bytes
+    let received_bytes = progress_stats.received_bytes() as f64;
+
+    // Determine whether to use KiB or MiB
+    let (size, unit) = if received_bytes >= (1024.0 * 1024.0) {
+        // Convert to MiB
+        (received_bytes / (1024.0 * 1024.0), "MiB")
+    } else {
+        // Convert to KiB
+        (received_bytes / 1024.0, "KiB")
+    };
+
+    // Format the output for receiving objects
+    if received < total || matches!(status, ProgressStatus::Complete) {
+        let _ = term.write_line(
+            format!(
+                "{} objects: {percentage:.0}% ({received}/{total}) {size:.2} {unit}, done.\r",
+                if matches!(direction, TransferDirection::Fetch) {
+                    "Receiving"
+                } else {
+                    "Writing"
+                },
+            )
+            .as_str(),
+        );
+    }
+    if received == total || matches!(status, ProgressStatus::Complete) {
+        let indexed_deltas = progress_stats.indexed_deltas() as f64;
+        let total_deltas = progress_stats.total_deltas() as f64;
+        let percentage = (indexed_deltas / total_deltas) * 100.0;
+        let _ = term.write_line(
+            format!("Resolving deltas: {percentage:.0}% ({indexed_deltas}/{total_deltas}) done.\r")
+                .as_str(),
+        );
+    }
+}
+
+pub fn report_on_sideband_progress(data: &[u8], term: &console::Term) {
+    if let Ok(data) = str::from_utf8(data) {
+        let data = data
+            .split(['\n', '\r'])
+            .find(|line| !line.is_empty())
+            .unwrap_or("");
+        if !data.is_empty() {
+            let s = format!("remote: {data}");
+            let _ = term.clear_last_lines(1);
+            let _ = term.write_line(s.as_str());
+            if !s.contains('%') || s.contains("100%") {
+                // print it twice so the next sideband_progress doesn't delete it
+                let _ = term.write_line(s.as_str());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
