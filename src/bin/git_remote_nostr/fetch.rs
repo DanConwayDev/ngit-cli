@@ -18,7 +18,7 @@ use ngit::{
 use crate::utils::{
     fetch_or_list_error_is_not_authentication_failure, find_proposal_and_patches_by_branch_name,
     get_oids_from_fetch_batch, get_open_proposals, get_read_protocols_to_try, join_with_and,
-    report_on_sideband_progress, report_on_transfer_progress, ProgressStatus, TransferDirection,
+    report_on_sideband_progress,
 };
 
 pub async fn run_fetch(
@@ -172,6 +172,58 @@ fn fetch_from_git_server(
     }
 }
 
+enum ProgressStatus {
+    InProgress,
+    Complete,
+}
+
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::float_cmp)]
+#[allow(clippy::needless_pass_by_value)]
+fn report_on_transfer_progress(
+    progress_stats: &git2::Progress<'_>,
+    term: &console::Term,
+    status: ProgressStatus,
+) {
+    let total = progress_stats.total_objects() as f64;
+    if total == 0.0 {
+        return;
+    }
+    let received = progress_stats.received_objects() as f64;
+    let percentage = (received / total) * 100.0;
+
+    // Get the total received bytes
+    let received_bytes = progress_stats.received_bytes() as f64;
+
+    // Determine whether to use KiB or MiB
+    let (size, unit) = if received_bytes >= (1024.0 * 1024.0) {
+        // Convert to MiB
+        (received_bytes / (1024.0 * 1024.0), "MiB")
+    } else {
+        // Convert to KiB
+        (received_bytes / 1024.0, "KiB")
+    };
+
+    // Format the output for receiving objects
+    if received < total || matches!(status, ProgressStatus::Complete) {
+        let _ = term.write_line(
+            format!(
+                "Receiving objects: {percentage:.0}% ({received}/{total}) {size:.2} {unit}, done.",
+            )
+            .as_str(),
+        );
+    }
+    if received == total || matches!(status, ProgressStatus::Complete) {
+        let indexed_deltas = progress_stats.indexed_deltas() as f64;
+        let total_deltas = progress_stats.total_deltas() as f64;
+        let percentage = (indexed_deltas / total_deltas) * 100.0;
+        let _ = term.write_line(
+            format!("Resolving deltas: {percentage:.0}% ({indexed_deltas}/{total_deltas}) done.")
+                .as_str(),
+        );
+    }
+}
+
 fn fetch_from_git_server_url(
     git_repo: &Repository,
     oids: &[String],
@@ -193,12 +245,7 @@ fn fetch_from_git_server_url(
     });
     remote_callbacks.transfer_progress(|stats| {
         let _ = term.clear_last_lines(1);
-        report_on_transfer_progress(
-            &stats,
-            term,
-            TransferDirection::Fetch,
-            ProgressStatus::InProgress,
-        );
+        report_on_transfer_progress(&stats, term, ProgressStatus::InProgress);
         true
     });
 
@@ -209,12 +256,7 @@ fn fetch_from_git_server_url(
     term.write_line("")?;
     git_server_remote.download(oids, Some(&mut fetch_options))?;
 
-    report_on_transfer_progress(
-        &git_server_remote.stats(),
-        term,
-        TransferDirection::Fetch,
-        ProgressStatus::Complete,
-    );
+    report_on_transfer_progress(&git_server_remote.stats(), term, ProgressStatus::Complete);
 
     git_server_remote.disconnect()?;
     Ok(())

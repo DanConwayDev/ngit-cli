@@ -765,12 +765,12 @@ fn oid_to_u8_20_bytes(oid: &Oid) -> [u8; 20] {
     ]
 }
 
-// fn oid_to_shorthand_string(oid: Oid) -> Result<String> {
-//     let binding = oid.to_string();
-//     let b = binding.as_bytes();
-//     String::from_utf8(vec![b[0], b[1], b[2], b[3], b[4], b[5], b[6]])
-//         .context("oid should always start with 7 u8 btyes of utf8")
-// }
+pub fn oid_to_shorthand_string(oid: Oid) -> Result<String> {
+    let binding = oid.to_string();
+    let b = binding.as_bytes();
+    String::from_utf8(vec![b[0], b[1], b[2], b[3], b[4], b[5], b[6]])
+        .context("oid should always start with 7 u8 btyes of utf8")
+}
 
 // fn oid_to_sha1_string(oid: Oid) -> Result<String> {
 //     let b = oid.as_bytes();

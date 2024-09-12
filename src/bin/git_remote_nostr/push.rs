@@ -18,6 +18,7 @@ use ngit::{
     git::{
         self,
         nostr_url::{CloneUrl, NostrUrlDecoded},
+        oid_to_shorthand_string,
     },
     git_events::{self, get_event_root},
     login::{self, get_curent_user},
@@ -39,7 +40,6 @@ use crate::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
         get_short_git_server_name, get_write_protocols_to_try, join_with_and,
         push_error_is_not_authentication_failure, read_line, report_on_sideband_progress,
-        report_on_transfer_progress, ProgressStatus, TransferDirection,
     },
 };
 
@@ -355,13 +355,7 @@ fn push_to_remote(
     let mut success = false;
 
     for protocol in &protocols_to_attempt {
-        term.write_line(
-            format!(
-                "fetching {} ref list over {protocol}...",
-                server_url.short_name(),
-            )
-            .as_str(),
-        )?;
+        term.write_line(format!("push: {} over {protocol}...", server_url.short_name(),).as_str())?;
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
 
@@ -424,16 +418,50 @@ fn push_to_remote_url(
         }
         Ok(())
     });
-    remote_callbacks.transfer_progress(|stats| {
-        let _ = term.clear_last_lines(1);
-        report_on_transfer_progress(
-            &stats,
-            term,
-            TransferDirection::Push,
-            ProgressStatus::InProgress,
-        );
-        true
+    remote_callbacks.push_negotiation(|updates| {
+        for update in updates {
+            let _ = term.write_line(
+                format!(
+                    "   {}..{}  {} -> {}",
+                    oid_to_shorthand_string(update.dst()).unwrap(),
+                    oid_to_shorthand_string(update.src()).unwrap(),
+                    update
+                        .src_refname()
+                        .unwrap_or("")
+                        .replace("refs/heads/", "")
+                        .replace("refs/tags/", "tags/"),
+                    update
+                        .dst_refname()
+                        .unwrap_or("")
+                        .replace("refs/heads/", "")
+                        .replace("refs/tags/", "tags/"),
+                )
+                .as_str(),
+            );
+            // now a blank line for transfer progress to delete
+            let _ = term.write_line("");
+        }
+        Ok(())
     });
+    remote_callbacks.push_transfer_progress(
+        #[allow(clippy::cast_precision_loss)]
+        |current, total, bytes| {
+            let _ = term.clear_last_lines(1);
+            let percentage = (current as f64 / total as f64) * 100.0;
+            let (size, unit) = if bytes >= (1024 * 1024) {
+                (bytes as f64 / (1024.0 * 1024.0), "MiB")
+            } else {
+                (bytes as f64 / 1024.0, "KiB")
+            };
+            let _ = term.write_line(
+                format!(
+                    "Writing objects: {percentage:.0}% ({current}/{total}) {size:.2} {unit}, done."
+                )
+                .as_str(),
+            );
+        },
+    );
+
     remote_callbacks.sideband_progress(|data| {
         report_on_sideband_progress(data, term);
         true
