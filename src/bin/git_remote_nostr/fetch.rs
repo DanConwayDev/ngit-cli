@@ -187,81 +187,83 @@ fn fetch_from_git_server_url(
     let mut fetch_options = git2::FetchOptions::new();
     let mut remote_callbacks = git2::RemoteCallbacks::new();
     remote_callbacks.sideband_progress(|data| {
-        let _ = term.clear_last_lines(1);
-        let _ = term.write_line(format!("remote: {}", str::from_utf8(data).unwrap()).as_str());
-        true
-    });
-    remote_callbacks.transfer_progress(|stats| {
-        let _ = term.clear_last_lines(1);
-        if stats.received_objects() == stats.total_objects() {
-            let _ = term.write_line(
-                format!(
-                    "Resolving deltas {}/{}\r",
-                    stats.indexed_deltas(),
-                    stats.total_deltas()
-                )
-                .as_str(),
-            );
-        } else if stats.total_objects() > 0 {
-            let _ = term.write_line(
-                format!(
-                    "Received {}/{} objects ({}) in {} bytes\r",
-                    stats.received_objects(),
-                    stats.total_objects(),
-                    stats.indexed_objects(),
-                    stats.received_bytes()
-                )
-                .as_str(),
-            );
+        if let Ok(data) = str::from_utf8(data) {
+            let data = data
+                .split(['\n', '\r'])
+                .find(|line| !line.is_empty())
+                .unwrap_or("");
+            if !data.is_empty() {
+                let s = format!("remote: {data}");
+                let _ = term.clear_last_lines(1);
+                let _ = term.write_line(s.as_str());
+                if !s.contains('%') || s.contains("100%") {
+                    // print it twice so the next sideband_progress doesn't delete it
+                    let _ = term.write_line(s.as_str());
+                }
+            }
         }
         true
     });
+    remote_callbacks.transfer_progress(
+        #[allow(clippy::cast_precision_loss)]
+        |stats| {
+            let _ = term.clear_last_lines(1);
+            report_on_transfer_progress(&stats, term, false);
+            true
+        },
+    );
+
     if !dont_authenticate {
         remote_callbacks.credentials(auth.credentials(&git_config));
     }
     fetch_options.remote_callbacks(remote_callbacks);
+    term.write_line("")?;
     git_server_remote.download(oids, Some(&mut fetch_options))?;
-    {
-        let stats = git_server_remote.stats();
-        if stats.local_objects() > 0 {
-            term.write_line(
-                format!(
-                    "\rReceived {}/{} objects in {} bytes (used {} local \
-                 objects)",
-                    stats.indexed_objects(),
-                    stats.total_objects(),
-                    stats.received_bytes(),
-                    stats.local_objects()
-                )
-                .as_str(),
-            )?;
-        } else {
-            term.write_line(
-                format!(
-                    "\rReceived {}/{} objects in {} bytes",
-                    stats.indexed_objects(),
-                    stats.total_objects(),
-                    stats.received_bytes()
-                )
-                .as_str(),
-            )?;
-        }
-    }
+
+    report_on_transfer_progress(&git_server_remote.stats(), term, true);
+
     git_server_remote.disconnect()?;
     Ok(())
 }
 
-fn fetch_from_git_server_url_unauthenticated(
-    git_repo: &Repository,
-    oids: &[String],
-    git_server_url: &str,
-) -> Result<()> {
-    let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;
-    let mut fetch_options = git2::FetchOptions::new();
-    let remote_callbacks = git2::RemoteCallbacks::new();
-    // TODO status update callback
-    fetch_options.remote_callbacks(remote_callbacks);
-    git_server_remote.download(oids, Some(&mut fetch_options))?;
-    git_server_remote.disconnect()?;
-    Ok(())
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::float_cmp)]
+fn report_on_transfer_progress(stats: &git2::Progress<'_>, term: &console::Term, complete: bool) {
+    let total = stats.total_objects() as f64;
+    if total == 0.0 {
+        return;
+    }
+    let received = stats.received_objects() as f64;
+    let percentage = (received / total) * 100.0;
+
+    // Get the total received bytes
+    let received_bytes = stats.received_bytes() as f64;
+
+    // Determine whether to use KiB or MiB
+    let (size, unit) = if received_bytes >= (1024.0 * 1024.0) {
+        // Convert to MiB
+        (received_bytes / (1024.0 * 1024.0), "MiB")
+    } else {
+        // Convert to KiB
+        (received_bytes / 1024.0, "KiB")
+    };
+
+    // Format the output for receiving objects
+    if received < total || complete {
+        let _ = term.write_line(
+            format!(
+                "Receiving objects: {percentage:.0}% ({received}/{total}) {size:.2} {unit}, done.\r"
+            )
+            .as_str(),
+        );
+    }
+    if received == total || complete {
+        let indexed_deltas = stats.indexed_deltas() as f64;
+        let total_deltas = stats.total_deltas() as f64;
+        let percentage = (indexed_deltas / total_deltas) * 100.0;
+        let _ = term.write_line(
+            format!("Resolving deltas: {percentage:.0}% ({indexed_deltas}/{total_deltas}) done.\r")
+                .as_str(),
+        );
+    }
 }

@@ -164,19 +164,25 @@ pub fn list_from_remote(
 
     for protocol in &protocols_to_attempt {
         term.write_line(
-            format!("fetching {} ref list over {protocol}...", server_url.short_name(),).as_str(),
+            format!(
+                "fetching {} ref list over {protocol}...",
+                server_url.short_name(),
+            )
+            .as_str(),
         )?;
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
-        let res = if [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol) {
-            list_from_remote_url_unauthenticated(git_repo, &formatted_url)
-        } else {
-            list_from_remote_url(git_repo, &formatted_url)
-        };
+        let res = list_from_remote_url(
+            git_repo,
+            &formatted_url,
+            [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol),
+            term,
+        );
 
         match res {
             Ok(state) => {
                 remote_state = Some(state);
+                term.clear_last_lines(1)?;
                 if !failed_protocols.is_empty() {
                     term.write_line(
                         format!(
@@ -189,6 +195,7 @@ pub fn list_from_remote(
                 break;
             }
             Err(error) => {
+                term.clear_last_lines(1)?;
                 term.write_line(
                     format!("list: {formatted_url} failed over {protocol}: {error}").as_str(),
                 )?;
@@ -201,7 +208,6 @@ pub fn list_from_remote(
                 }
             }
         }
-        term.clear_last_lines(1)?;
     }
     if let Some(remote_state) = remote_state {
         Ok(remote_state)
@@ -221,31 +227,11 @@ pub fn list_from_remote(
     }
 }
 
-fn list_from_remote_url_unauthenticated(
-    git_repo: &Repo,
-    git_server_remote_url: &str,
-) -> Result<HashMap<String, String>> {
-    let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_remote_url)?;
-    let remote_callbacks = git2::RemoteCallbacks::new();
-    git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), None)?;
-    let mut state = HashMap::new();
-    for head in git_server_remote.list()? {
-        if let Some(symbolic_reference) = head.symref_target() {
-            state.insert(
-                head.name().to_string(),
-                format!("ref: {symbolic_reference}"),
-            );
-        } else {
-            state.insert(head.name().to_string(), head.oid().to_string());
-        }
-    }
-    git_server_remote.disconnect()?;
-    Ok(state)
-}
-
 fn list_from_remote_url(
     git_repo: &Repo,
     git_server_remote_url: &str,
+    dont_authenticate: bool,
+    term: &console::Term,
 ) -> Result<HashMap<String, String>> {
     let git_config = git_repo.git_repo.config()?;
 
@@ -253,8 +239,12 @@ fn list_from_remote_url(
     // authentication may be required
     let auth = GitAuthenticator::default();
     let mut remote_callbacks = git2::RemoteCallbacks::new();
-    remote_callbacks.credentials(auth.credentials(&git_config));
+    if !dont_authenticate {
+        remote_callbacks.credentials(auth.credentials(&git_config));
+    }
+    term.write_line("list: connecting...")?;
     git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), None)?;
+    term.clear_last_lines(1)?;
     let mut state = HashMap::new();
     for head in git_server_remote.list()? {
         if let Some(symbolic_reference) = head.symref_target() {
