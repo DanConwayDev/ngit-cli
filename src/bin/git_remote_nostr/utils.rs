@@ -297,7 +297,8 @@ pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     let error_str = error.to_string();
     for s in [
         "no ssh keys found",
-        "invalid or unknown remote ssh",
+        "invalid or unknown remote ssh hostkey",
+        "all authentication attempts failed",
         "Permission to",
         "Repository not found",
     ] {
