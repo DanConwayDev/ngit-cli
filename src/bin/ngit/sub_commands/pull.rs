@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use nostr_sdk::PublicKey;
 
 use crate::{
     client::{
@@ -32,19 +33,29 @@ pub async fn launch() -> Result<()> {
     let client = Client::default();
 
     let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
-
     fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 
     let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
+
+    let public_key_if_known =
+        if let Ok(Some(npub)) = git_repo.get_git_config_item("nostr.npub", None) {
+            PublicKey::parse(npub).ok()
+        } else {
+            None
+        };
 
     let proposal_root_event =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()
             .find(|e| {
-                event_to_cover_letter(e)
-                    .is_ok_and(|cl| cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name)))
-                    && !event_is_revision_root(e)
+                event_to_cover_letter(e).is_ok_and(|cl| {
+                    cl.branch_name.eq(&branch_name)
+                        || (public_key_if_known
+                            .is_some_and(|public_key| e.author().eq(&public_key))
+                            && branch_name.eq(&format!("pr/{}", cl.branch_name)))
+                        || cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name))
+                }) && !event_is_revision_root(e)
             })
             .context("cannot find proposal that matches the current branch name")?
             .clone();
