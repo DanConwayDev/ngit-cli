@@ -2,6 +2,8 @@ use core::str;
 use std::{
     collections::{HashMap, HashSet},
     io::Stdin,
+    sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -39,7 +41,7 @@ use crate::{
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
         get_short_git_server_name, get_write_protocols_to_try, join_with_and,
-        push_error_is_not_authentication_failure, read_line, report_on_sideband_progress,
+        push_error_is_not_authentication_failure, read_line,
     },
 };
 
@@ -404,25 +406,35 @@ fn push_to_remote_url(
     let auth = GitAuthenticator::default();
     let mut push_options = git2::PushOptions::new();
     let mut remote_callbacks = git2::RemoteCallbacks::new();
+    let push_reporter = Arc::new(Mutex::new(PushReporter::new(term)));
+
     remote_callbacks.credentials(auth.credentials(&git_config));
-    remote_callbacks.push_update_reference(|name, error| {
-        if let Some(error) = error {
-            term.write_line(
-                format!(
+
+    remote_callbacks.push_update_reference({
+        let push_reporter = Arc::clone(&push_reporter);
+        move |name, error| {
+            let mut reporter = push_reporter.lock().unwrap();
+            if let Some(error) = error {
+                let existing_lines = reporter.count_all_existing_lines();
+                reporter.update_reference_errors.push(format!(
                     "WARNING: {} failed to push {name} error: {error}",
                     get_short_git_server_name(git_repo, git_server_url),
-                )
-                .as_str(),
-            )
-            .unwrap();
+                ));
+                reporter.write_all(existing_lines);
+            }
+            Ok(())
         }
-        Ok(())
     });
-    remote_callbacks.push_negotiation(|updates| {
-        for update in updates {
-            let _ = term.write_line(
-                format!(
-                    "   {}..{}  {} -> {}",
+
+    remote_callbacks.push_negotiation({
+        let push_reporter = Arc::clone(&push_reporter);
+        move |updates| {
+            let mut reporter = push_reporter.lock().unwrap();
+            let existing_lines = reporter.count_all_existing_lines();
+
+            for update in updates {
+                let msg = format!(
+                    "push:   {}..{}  {} -> {}",
                     oid_to_shorthand_string(update.dst()).unwrap(),
                     oid_to_shorthand_string(update.src()).unwrap(),
                     update
@@ -435,41 +447,159 @@ fn push_to_remote_url(
                         .unwrap_or("")
                         .replace("refs/heads/", "")
                         .replace("refs/tags/", "tags/"),
-                )
-                .as_str(),
-            );
-            // now a blank line for transfer progress to delete
-            let _ = term.write_line("");
+                );
+                reporter.negotiation.push(msg);
+            }
+            reporter.write_all(existing_lines);
+            Ok(())
         }
-        Ok(())
     });
-    remote_callbacks.push_transfer_progress(
-        #[allow(clippy::cast_precision_loss)]
-        |current, total, bytes| {
-            let _ = term.clear_last_lines(1);
-            let percentage = (current as f64 / total as f64) * 100.0;
-            let (size, unit) = if bytes >= (1024 * 1024) {
-                (bytes as f64 / (1024.0 * 1024.0), "MiB")
-            } else {
-                (bytes as f64 / 1024.0, "KiB")
-            };
-            let _ = term.write_line(
-                format!(
-                    "Writing objects: {percentage:.0}% ({current}/{total}) {size:.2} {unit}, done."
-                )
-                .as_str(),
-            );
-        },
-    );
 
-    remote_callbacks.sideband_progress(|data| {
-        report_on_sideband_progress(data, term);
-        true
+    remote_callbacks.push_transfer_progress({
+        let push_reporter = Arc::clone(&push_reporter);
+        #[allow(clippy::cast_precision_loss)]
+        move |current, total, bytes| {
+            let mut reporter = push_reporter.lock().unwrap();
+            reporter.process_transfer_progress_update(current, total, bytes);
+        }
+    });
+
+    remote_callbacks.sideband_progress({
+        let push_reporter = Arc::clone(&push_reporter);
+        move |data| {
+            let mut reporter = push_reporter.lock().unwrap();
+            reporter.process_remote_msg(data);
+            true
+        }
     });
     push_options.remote_callbacks(remote_callbacks);
     git_server_remote.push(remote_refspecs, Some(&mut push_options))?;
     let _ = git_server_remote.disconnect();
     Ok(())
+}
+
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::float_cmp)]
+#[allow(clippy::needless_pass_by_value)]
+fn report_on_transfer_progress(
+    current: usize,
+    total: usize,
+    bytes: usize,
+    start_time: &Instant,
+    end_time: &Option<Instant>,
+) -> String {
+    let percentage = ((current as f64 / total as f64) * 100.0)
+        // always round down because 100% complete is misleading when its not complete
+        .floor();
+    let (size, unit) = if bytes as f64 >= (1024.0 * 1024.0) {
+        (bytes as f64 / (1024.0 * 1024.0), "MiB")
+    } else {
+        (bytes as f64 / 1024.0, "KiB")
+    };
+    let speed = {
+        let duration = if let Some(end_time) = end_time {
+            (*end_time - *start_time).as_millis() as f64
+        } else {
+            start_time.elapsed().as_millis() as f64
+        };
+
+        if duration > 0.0 {
+            (bytes as f64 / (1024.0 * 1024.0)) / (duration / 1000.0) // Convert bytes to MiB and milliseconds to seconds
+        } else {
+            0.0
+        }
+    };
+
+    format!(
+        "push: Writing objects: {percentage}% ({current}/{total}) {size:.2} {unit}  | {speed:.2} MiB/s{}",
+        if current == total { ", done." } else { "" },
+    )
+}
+
+struct PushReporter<'a> {
+    remote_msgs: Vec<String>,
+    negotiation: Vec<String>,
+    transfer_progress_msgs: Vec<String>,
+    update_reference_errors: Vec<String>,
+    term: &'a console::Term,
+    start_time: Option<Instant>,
+    end_time: Option<Instant>,
+}
+impl<'a> PushReporter<'a> {
+    fn new(term: &'a console::Term) -> Self {
+        Self {
+            remote_msgs: vec![],
+            negotiation: vec![],
+            transfer_progress_msgs: vec![],
+            update_reference_errors: vec![],
+            term,
+            start_time: None,
+            end_time: None,
+        }
+    }
+    fn write_all(&self, lines_to_clear: usize) {
+        let _ = self.term.clear_last_lines(lines_to_clear);
+        for msg in &self.remote_msgs {
+            let _ = self.term.write_line(msg);
+        }
+        for msg in &self.negotiation {
+            let _ = self.term.write_line(msg);
+        }
+        for msg in &self.transfer_progress_msgs {
+            let _ = self.term.write_line(msg);
+        }
+        for msg in &self.update_reference_errors {
+            let _ = self.term.write_line(msg);
+        }
+    }
+
+    fn count_all_existing_lines(&self) -> usize {
+        self.remote_msgs.len()
+            + self.negotiation.len()
+            + self.transfer_progress_msgs.len()
+            + self.update_reference_errors.len()
+    }
+    fn process_remote_msg(&mut self, data: &[u8]) {
+        let existing_lines = self.count_all_existing_lines();
+        if let Ok(data) = str::from_utf8(data) {
+            let data = data
+                .split(['\n', '\r'])
+                .find(|line| !line.is_empty())
+                .unwrap_or("")
+                .trim();
+            if !data.is_empty() {
+                let msg = format!("remote: {data}");
+                if let Some(last) = self.remote_msgs.last() {
+                    if (last.contains('%') && !last.contains("100%"))
+                        || last == &msg.replace(", done.", "")
+                    {
+                        self.remote_msgs.pop();
+                    }
+                }
+                self.remote_msgs.push(msg);
+                self.write_all(existing_lines);
+            }
+        }
+    }
+    fn process_transfer_progress_update(&mut self, current: usize, total: usize, bytes: usize) {
+        if self.start_time.is_none() {
+            self.start_time = Some(Instant::now());
+        }
+        let existing_lines = self.count_all_existing_lines();
+
+        let report = report_on_transfer_progress(
+            current,
+            total,
+            bytes,
+            &self.start_time.unwrap(),
+            &self.end_time,
+        );
+        if report.contains("100%") {
+            self.end_time = Some(Instant::now());
+        }
+        self.transfer_progress_msgs = vec![report];
+        self.write_all(existing_lines);
+    }
 }
 
 type HashMapUrlRefspecs = HashMap<String, Vec<String>>;

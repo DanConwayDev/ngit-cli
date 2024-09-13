@@ -293,24 +293,6 @@ pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     false
 }
 
-pub fn report_on_sideband_progress(data: &[u8], term: &console::Term) {
-    if let Ok(data) = str::from_utf8(data) {
-        let data = data
-            .split(['\n', '\r'])
-            .find(|line| !line.is_empty())
-            .unwrap_or("");
-        if !data.is_empty() {
-            let s = format!("remote: {data}");
-            let _ = term.clear_last_lines(1);
-            let _ = term.write_line(s.as_str());
-            if !s.contains('%') || s.contains("100%") {
-                // print it twice so the next sideband_progress doesn't delete it
-                let _ = term.write_line(s.as_str());
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
