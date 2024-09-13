@@ -16,8 +16,8 @@ use ngit::{
         Repo, RepoActions,
     },
     git_events::{
-        event_is_revision_root, event_to_cover_letter, get_most_recent_patch_with_ancestors,
-        status_kinds,
+        event_is_revision_root, get_most_recent_patch_with_ancestors,
+        is_event_proposal_root_for_branch, status_kinds,
     },
     repo_ref::RepoRef,
 };
@@ -189,24 +189,7 @@ pub fn find_proposal_and_patches_by_branch_name<'a>(
     current_user: &Option<PublicKey>,
 ) -> Option<(&'a EventId, &'a (Event, Vec<Event>))> {
     open_proposals.iter().find(|(_, (proposal, _))| {
-        if let Ok(cl) = event_to_cover_letter(proposal) {
-            if let Ok(mut branch_name) = cl.get_branch_name() {
-                branch_name = if let Some(public_key) = current_user {
-                    if proposal.author().eq(public_key) {
-                        cl.branch_name.to_string()
-                    } else {
-                        branch_name
-                    }
-                } else {
-                    branch_name
-                };
-                branch_name.eq(&refstr.replace("refs/heads/", ""))
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+        is_event_proposal_root_for_branch(proposal, refstr, current_user).unwrap_or(false)
     })
 }
 

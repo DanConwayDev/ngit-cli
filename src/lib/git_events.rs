@@ -3,8 +3,8 @@ use std::str::FromStr;
 use anyhow::{bail, Context, Result};
 use nostr::nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19};
 use nostr_sdk::{
-    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, FromBech32, Kind, Tag, TagKind,
-    TagStandard, UncheckedUrl,
+    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
+    TagKind, TagStandard, UncheckedUrl,
 };
 use nostr_signer::NostrSigner;
 
@@ -592,6 +592,20 @@ fn get_event_parent_id(event: &nostr::Event) -> Result<String> {
     }
     .as_vec()[1]
         .clone())
+}
+
+pub fn is_event_proposal_root_for_branch(
+    e: &Event,
+    branch_name_or_refstr: &str,
+    logged_in_user: &Option<PublicKey>,
+) -> Result<bool> {
+    let branch_name = branch_name_or_refstr.replace("refs/heads/", "");
+    Ok(event_to_cover_letter(e).is_ok_and(|cl| {
+        (logged_in_user.is_some_and(|public_key| e.author().eq(&public_key))
+            && (branch_name.eq(&format!("pr/{}", cl.branch_name))
+                || cl.branch_name.eq(&branch_name)))
+            || cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name))
+    }) && !event_is_revision_root(e))
 }
 
 #[cfg(test)]

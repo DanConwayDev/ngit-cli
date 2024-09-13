@@ -1,5 +1,8 @@
 use anyhow::{bail, Context, Result};
-use ngit::{client::send_events, git_events::tag_value};
+use ngit::{
+    client::send_events,
+    git_events::{is_event_proposal_root_for_branch, tag_value},
+};
 use nostr_sdk::PublicKey;
 
 use crate::{
@@ -10,8 +13,7 @@ use crate::{
     },
     git::{identify_ahead_behind, str_to_sha1, Repo, RepoActions},
     git_events::{
-        event_is_revision_root, event_to_cover_letter, generate_patch_event,
-        get_commit_id_from_patch, get_most_recent_patch_with_ancestors,
+        generate_patch_event, get_commit_id_from_patch, get_most_recent_patch_with_ancestors,
     },
     login,
     repo_ref::get_repo_coordinates,
@@ -53,7 +55,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
 
-    let public_key_if_known =
+    let logged_in_public_key =
         if let Ok(Some(npub)) = git_repo.get_git_config_item("nostr.npub", None) {
             PublicKey::parse(npub).ok()
         } else {
@@ -65,12 +67,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             .await?
             .iter()
             .find(|e| {
-                event_to_cover_letter(e).is_ok_and(|cl| {
-                    (public_key_if_known.is_some_and(|public_key| e.author().eq(&public_key))
-                        && (branch_name.eq(&format!("pr/{}", cl.branch_name))
-                            || cl.branch_name.eq(&branch_name)))
-                        || cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name))
-                }) && !event_is_revision_root(e)
+                is_event_proposal_root_for_branch(e, &branch_name, &logged_in_public_key)
+                    .unwrap_or(false)
             })
             .context("cannot find proposal that matches the current branch name")?
             .clone();
