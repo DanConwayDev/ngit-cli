@@ -265,14 +265,17 @@ impl<'a> FetchReporter<'a> {
             let _ = self.term.write_line(msg);
         }
     }
-    fn write_transfer_progress(&self, lines_to_clear: usize) {
+    fn count_all_existing_lines(&self) -> usize {
+        self.remote_msgs.len() + self.transfer_progress_msgs.len()
+    }
+    fn just_write_transfer_progress(&self, lines_to_clear: usize) {
         let _ = self.term.clear_last_lines(lines_to_clear);
         for msg in &self.transfer_progress_msgs {
             let _ = self.term.write_line(msg);
         }
     }
-    fn count_all_existing_lines(&self) -> usize {
-        self.remote_msgs.len() + self.transfer_progress_msgs.len()
+    fn just_count_transfer_progress(&self) -> usize {
+        self.transfer_progress_msgs.len()
     }
     fn process_remote_msg(&mut self, data: &[u8]) {
         let existing_lines = self.count_all_existing_lines();
@@ -300,7 +303,7 @@ impl<'a> FetchReporter<'a> {
         if self.start_time.is_none() {
             self.start_time = Some(Instant::now());
         }
-        let existing_lines = self.count_all_existing_lines();
+        let existing_lines = self.just_count_transfer_progress();
         let updated =
             report_on_transfer_progress(progress_stats, &self.start_time.unwrap(), &self.end_time);
         if self.transfer_progress_msgs.len() <= updated.len() {
@@ -311,7 +314,7 @@ impl<'a> FetchReporter<'a> {
             // reporting on it so we want to keep the old report
             self.transfer_progress_msgs = updated;
         }
-        self.write_all(existing_lines);
+        self.just_write_transfer_progress(existing_lines);
     }
 }
 
