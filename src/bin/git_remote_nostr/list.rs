@@ -210,6 +210,9 @@ pub fn list_from_remote(
         }
     }
     if let Some(remote_state) = remote_state {
+        if failed_protocols.is_empty() {
+            term.clear_last_lines(1)?;
+        }
         Ok(remote_state)
     } else {
         let error = anyhow!(
