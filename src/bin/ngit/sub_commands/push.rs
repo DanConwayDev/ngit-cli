@@ -66,10 +66,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             .iter()
             .find(|e| {
                 event_to_cover_letter(e).is_ok_and(|cl| {
-                    cl.branch_name.eq(&branch_name)
-                        || (public_key_if_known
-                            .is_some_and(|public_key| e.author().eq(&public_key))
-                            && branch_name.eq(&format!("pr/{}", cl.branch_name)))
+                    (public_key_if_known.is_some_and(|public_key| e.author().eq(&public_key))
+                        && (branch_name.eq(&format!("pr/{}", cl.branch_name))
+                            || cl.branch_name.eq(&branch_name)))
                         || cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name))
                 }) && !event_is_revision_root(e)
             })
