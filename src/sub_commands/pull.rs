@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use nostr_sdk::{Event, PublicKey};
 
 use super::{
     list::{
@@ -45,17 +46,21 @@ pub async fn launch() -> Result<()> {
 
     let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
 
+    let logged_in_public_key =
+        if let Ok(Some(npub)) = git_repo.get_git_config_item("nostr.npub", None) {
+            PublicKey::parse(npub).ok()
+        } else {
+            None
+        };
+
     let proposal_root_event =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()
-            .find(|e| {
-                event_to_cover_letter(e)
-                    .is_ok_and(|cl| cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name)))
-                    && !event_is_revision_root(e)
-            })
+            .find(|e| is_event_proposal_root_for_branch(e, &branch_name, &logged_in_public_key))
             .context("cannot find proposal that matches the current branch name")?
             .clone();
+
     let commit_events = get_all_proposal_patch_events_from_cache(
         git_repo_path,
         &repo_ref,
@@ -206,4 +211,18 @@ fn check_clean(git_repo: &Repo) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub fn is_event_proposal_root_for_branch(
+    e: &Event,
+    branch_name_or_refstr: &str,
+    logged_in_user: &Option<PublicKey>,
+) -> bool {
+    let branch_name = branch_name_or_refstr.replace("refs/heads/", "");
+    event_to_cover_letter(e).is_ok_and(|cl| {
+        (logged_in_user.is_some_and(|public_key| e.author().eq(&public_key))
+            && (branch_name.eq(&format!("pr/{}", cl.branch_name))
+                || cl.branch_name.eq(&branch_name)))
+            || cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name))
+    }) && !event_is_revision_root(e)
 }
