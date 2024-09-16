@@ -288,13 +288,28 @@ impl<'a> FetchReporter<'a> {
                 let existing_lines = self.count_all_existing_lines();
                 let msg = data.to_string();
                 if let Some(last) = self.remote_msgs.last() {
-                    if (last.contains('%') && !last.contains("100%"))
+                    // if previous line begins with x but doesnt finish with y then its part of the
+                    // same msg
+                    if (last.starts_with("Enume") && !last.ends_with(", done."))
+                        || ((last.starts_with("Compre") || last.starts_with("Count"))
+                            && !last.contains(')'))
+                    {
+                        let last = self.remote_msgs.pop().unwrap();
+                        self.remote_msgs.push(format!("{last}{msg}"));
+                    // if previous msg contains % and its not 100% then it
+                    // should be overwritten
+                    } else if (last.contains('%') && !last.contains("100%"))
+                        // but also if the next message is identical with "", done." appended
                         || last == &msg.replace(", done.", "")
                     {
                         self.remote_msgs.pop();
+                        self.remote_msgs.push(msg);
+                    } else {
+                        self.remote_msgs.push(msg);
                     }
+                } else {
+                    self.remote_msgs.push(msg);
                 }
-                self.remote_msgs.push(msg);
                 self.write_all(existing_lines);
             }
         }
@@ -449,6 +464,56 @@ mod tests {
                     "Enumerating objects: 23716, done.",
                     "Counting objects:   0% (1/2195)",
                 ]
+            );
+        }
+    }
+
+    mod joins_lines_sent_over_multiple_msgs {
+        use super::*;
+
+        #[test]
+        fn enumerating() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Enumerat",
+                    "ing objec",
+                    "ts: 23716, done.",
+                    "Counting objects:   0% (1/2195)",
+                ]),
+                vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects:   0% (1/2195)",
+                ]
+            );
+        }
+        #[test]
+        fn counting() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting obj",
+                    "ects:   0% (1/2195)",
+                    "Count",
+                    "ing objects:   1% (22/",
+                    "2195)",
+                ]),
+                vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects:   1% (22/2195)",
+                ]
+            );
+        }
+        #[test]
+        fn compressing() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Compress",
+                    "ing obj",
+                    "ect",
+                    "s:   0% (1/56",
+                    "0)"
+                ]),
+                vec!["Compressing objects:   0% (1/560)"]
             );
         }
     }
