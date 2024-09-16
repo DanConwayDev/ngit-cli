@@ -259,7 +259,7 @@ impl<'a> FetchReporter<'a> {
     fn write_all(&self, lines_to_clear: usize) {
         let _ = self.term.clear_last_lines(lines_to_clear);
         for msg in &self.remote_msgs {
-            let _ = self.term.write_line(msg);
+            let _ = self.term.write_line(format!("remote: {msg}").as_str());
         }
         for msg in &self.transfer_progress_msgs {
             let _ = self.term.write_line(msg);
@@ -278,15 +278,15 @@ impl<'a> FetchReporter<'a> {
         self.transfer_progress_msgs.len()
     }
     fn process_remote_msg(&mut self, data: &[u8]) {
-        let existing_lines = self.count_all_existing_lines();
         if let Ok(data) = str::from_utf8(data) {
             let data = data
                 .split(['\n', '\r'])
-                .find(|line| !line.is_empty())
-                .unwrap_or("")
-                .trim();
-            if !data.is_empty() {
-                let msg = format!("remote: {data}");
+                .map(str::trim)
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<&str>>();
+            for data in data {
+                let existing_lines = self.count_all_existing_lines();
+                let msg = data.to_string();
                 if let Some(last) = self.remote_msgs.last() {
                     if (last.contains('%') && !last.contains("100%"))
                         || last == &msg.replace(", done.", "")
@@ -359,4 +359,150 @@ fn fetch_from_git_server_url(
 
     git_server_remote.disconnect()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    fn pass_through_fetch_reporter_proces_remote_msg(msgs: Vec<&str>) -> Vec<String> {
+        let term = console::Term::stdout();
+        let mut reporter = FetchReporter::new(&term);
+        for msg in msgs {
+            reporter.process_remote_msg(msg.as_bytes());
+        }
+        reporter.remote_msgs
+    }
+
+    #[test]
+    fn logs_single_msg() {
+        assert_eq!(
+            pass_through_fetch_reporter_proces_remote_msg(vec![
+                "Enumerating objects: 23716, done.",
+            ]),
+            vec!["Enumerating objects: 23716, done."]
+        );
+    }
+
+    #[test]
+    fn logs_multiple_msgs() {
+        assert_eq!(
+            pass_through_fetch_reporter_proces_remote_msg(vec![
+                "Enumerating objects: 23716, done.",
+                "Counting objects:   0% (1/2195)",
+            ]),
+            vec![
+                "Enumerating objects: 23716, done.",
+                "Counting objects:   0% (1/2195)",
+            ]
+        );
+    }
+
+    mod ignores {
+        use super::*;
+
+        #[test]
+        fn empty_msgs() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Enumerating objects: 23716, done.",
+                    "",
+                    "Counting objects:   0% (1/2195)",
+                    "",
+                ]),
+                vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects:   0% (1/2195)",
+                ]
+            );
+        }
+
+        #[test]
+        fn whitespace_msgs() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Enumerating objects: 23716, done.",
+                    "   ",
+                    "Counting objects:   0% (1/2195)",
+                    "  \r\n  \r",
+                ]),
+                vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects:   0% (1/2195)",
+                ]
+            );
+        }
+    }
+
+    mod splits {
+        use super::*;
+
+        #[test]
+        fn multiple_lines_in_single_msg() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Enumerating objects: 23716, done.\r\nCounting objects:   0% (1/2195)",
+                    "",
+                ]),
+                vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects:   0% (1/2195)",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn msgs_with_pc_and_not_100pc_are_replaced() {
+        assert_eq!(
+            pass_through_fetch_reporter_proces_remote_msg(vec![
+                "Enumerating objects: 23716, done.",
+                "Counting objects:   0% (1/2195)",
+                "Counting objects:   1% (22/2195)",
+            ]),
+            vec![
+                "Enumerating objects: 23716, done.",
+                "Counting objects:   1% (22/2195)",
+            ]
+        );
+    }
+    mod msgs_with_pc_100pc_are_not_replaced {
+        use super::*;
+
+        #[test]
+        fn when_next_msg_is_not_identical_but_with_done() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects:   0% (1/2195)",
+                    "Counting objects:   1% (22/2195)",
+                    "Counting objects: 100% (2195/2195)",
+                    "Compressing objects:   0% (1/560)"
+                ]),
+                vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects: 100% (2195/2195)",
+                    "Compressing objects:   0% (1/560)"
+                ]
+            );
+        }
+
+        #[test]
+        fn but_is_when_next_msg_is_identical_but_with_done_appended() {
+            assert_eq!(
+                pass_through_fetch_reporter_proces_remote_msg(vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects:   0% (1/2195)",
+                    "Counting objects:   1% (22/2195)",
+                    "Counting objects: 100% (2195/2195)",
+                    "Counting objects: 100% (2195/2195), done.",
+                ]),
+                vec![
+                    "Enumerating objects: 23716, done.",
+                    "Counting objects: 100% (2195/2195), done.",
+                ]
+            );
+        }
+    }
 }
