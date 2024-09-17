@@ -133,7 +133,7 @@ async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)>
         p.send_line("push refs/heads/main:refs/heads/main")?;
         p.send_line("")?;
         // p.expect("ok refs/heads/main\r\n")?;
-        p.expect_eventually_and_print("\r\n\r\n")?;
+        p.expect_eventually("\r\n\r\r\n")?;
         p.exit()?;
         for p in [51, 52, 53, 55, 56, 57] {
             relay::shutdown_relay(8000 + p)?;
