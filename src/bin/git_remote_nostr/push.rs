@@ -540,7 +540,7 @@ impl<'a> PushReporter<'a> {
     fn write_all(&self, lines_to_clear: usize) {
         let _ = self.term.clear_last_lines(lines_to_clear);
         for msg in &self.remote_msgs {
-            let _ = self.term.write_line(msg);
+            let _ = self.term.write_line(format!("remote: {msg}").as_str());
         }
         for msg in &self.negotiation {
             let _ = self.term.write_line(msg);
@@ -560,23 +560,27 @@ impl<'a> PushReporter<'a> {
             + self.update_reference_errors.len()
     }
     fn process_remote_msg(&mut self, data: &[u8]) {
-        let existing_lines = self.count_all_existing_lines();
         if let Ok(data) = str::from_utf8(data) {
             let data = data
                 .split(['\n', '\r'])
-                .find(|line| !line.is_empty())
-                .unwrap_or("")
-                .trim();
-            if !data.is_empty() {
-                let msg = format!("remote: {data}");
+                .map(str::trim)
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<&str>>();
+            for data in data {
+                let existing_lines = self.count_all_existing_lines();
+                let msg = data.to_string();
                 if let Some(last) = self.remote_msgs.last() {
                     if (last.contains('%') && !last.contains("100%"))
                         || last == &msg.replace(", done.", "")
                     {
                         self.remote_msgs.pop();
+                        self.remote_msgs.push(msg);
+                    } else {
+                        self.remote_msgs.push(msg);
                     }
+                } else {
+                    self.remote_msgs.push(msg);
                 }
-                self.remote_msgs.push(msg);
                 self.write_all(existing_lines);
             }
         }
