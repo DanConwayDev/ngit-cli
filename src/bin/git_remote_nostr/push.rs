@@ -436,8 +436,8 @@ fn push_to_remote_url(
             for update in updates {
                 let msg = format!(
                     "push:   {}..{}  {} -> {}",
-                    oid_to_shorthand_string(update.dst()).unwrap(),
                     oid_to_shorthand_string(update.src()).unwrap(),
+                    oid_to_shorthand_string(update.dst()).unwrap(),
                     update
                         .src_refname()
                         .unwrap_or("")
