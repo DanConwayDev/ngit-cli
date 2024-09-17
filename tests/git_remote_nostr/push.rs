@@ -54,7 +54,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually("\r\n\r\n")?;
+            p.expect_eventually("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -128,7 +128,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually("\r\n\r\n")?;
+            p.expect_eventually("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -217,7 +217,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("")?;
             p.expect("ok refs/heads/main\r\n")?;
             p.expect("ok refs/heads/vnext\r\n")?;
-            p.expect("\r\n")?;
+            p.expect_eventually("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -276,7 +276,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually_and_print("\r\n\r\n")?;
+            p.expect_eventually_and_print("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -362,7 +362,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually_and_print("\r\n\r\n")?;
+            p.expect_eventually_and_print("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -486,7 +486,7 @@ mod delete_one_branch {
             let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
             p.send_line("push :refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually_and_print("\r\n\r\n")?;
+            p.expect_eventually_and_print("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -561,7 +561,7 @@ mod delete_one_branch {
             let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
             p.send_line("push :refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually("\r\n\r\n")?;
+            p.expect_eventually("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -626,10 +626,8 @@ mod delete_one_branch {
             let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
             p.send_line("push :refs/heads/vnext")?;
             p.send_line("")?;
-            // let res = p.expect_eventually("\r\n\r\n")?;
-            // println!("{res}");
             p.expect("ok refs/heads/vnext\r\n")?;
-            p.expect("\r\n")?;
+            p.expect_eventually("\r\n\r\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -687,7 +685,7 @@ mod delete_one_branch {
                 p.send_line("push :refs/heads/example-branch")?;
                 p.send_line("")?;
                 p.expect("ok refs/heads/example-branch\r\n")?;
-                p.expect("\r\n")?;
+                p.expect_eventually("\r\n\r\r\n")?;
                 p.exit()?;
                 for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
@@ -773,7 +771,7 @@ mod delete_one_branch {
                     p.send_line("push :refs/heads/example-branch")?;
                     p.send_line("")?;
                     p.expect("ok refs/heads/example-branch\r\n")?;
-                    p.expect("\r\n")?;
+                    p.expect_eventually("\r\n")?;
                     p.exit()?;
                     for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
@@ -857,7 +855,7 @@ async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
         p.send_line("push refs/heads/main:refs/heads/main")?;
         p.send_line("")?;
         p.expect("ok refs/heads/main\r\n")?;
-        p.expect("\r\n")?;
+        p.expect_eventually("\r\n\r\r\n")?;
         p.exit()?;
         for p in [51, 52, 53, 55, 56, 57] {
             relay::shutdown_relay(8000 + p)?;
@@ -931,11 +929,12 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
-
-        p.expect("merge commit ")?;
+        p.expect("list: connecting...\r\n")?;
+        p.expect_after_whitespace("merge commit ")?;
         // shorthand merge commit id appears in this gap
         p.expect_eventually(": create nostr proposal status event\r\n")?;
-        p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        // status updates printed here
+        p.expect_eventually(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
         for p in [51, 52, 53, 55, 56, 57] {
@@ -1075,6 +1074,7 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect("list: connecting...\r\n\r\r\r")?;
         p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
@@ -1229,7 +1229,8 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
             CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push", "--force"]);
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
-        p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        p.expect("list: connecting...\r\n")?;
+        p.expect_after_whitespace(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
         for p in [51, 52, 53, 55, 56, 57] {
@@ -1378,6 +1379,7 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
         );
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect("list: connecting...\r\n\r\r\r")?;
         p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
