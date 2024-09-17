@@ -227,14 +227,16 @@ fn report_on_transfer_progress(
         let percentage = ((indexed_deltas / total_deltas) * 100.0)
             // always round down because 100% complete is misleading when its not complete
             .floor();
-        report.push(format!(
-            "Resolving deltas: {percentage}% ({indexed_deltas}/{total_deltas}){}",
-            if indexed_deltas == total_deltas {
-                ", done."
-            } else {
-                ""
-            },
-        ));
+        if total_deltas > 0.0 {
+            report.push(format!(
+                "Resolving deltas: {percentage}% ({indexed_deltas}/{total_deltas}){}",
+                if indexed_deltas == total_deltas {
+                    ", done."
+                } else {
+                    ""
+                },
+            ));
+        }
     }
     report
 }
