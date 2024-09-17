@@ -41,7 +41,7 @@ use crate::{
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
         get_short_git_server_name, get_write_protocols_to_try, join_with_and,
-        push_error_is_not_authentication_failure, read_line,
+        push_error_is_not_authentication_failure, read_line, set_protocol_preference, Direction,
     },
 };
 
@@ -351,7 +351,7 @@ fn push_to_remote(
     term: &Term,
 ) -> Result<()> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
-    let protocols_to_attempt = get_write_protocols_to_try(&server_url, decoded_nostr_url);
+    let protocols_to_attempt = get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url);
 
     let mut failed_protocols = vec![];
     let mut success = false;
@@ -373,6 +373,7 @@ fn push_to_remote(
             success = true;
             if !failed_protocols.is_empty() {
                 term.write_line(format!("fetch: succeeded over {protocol}").as_str())?;
+                let _ = set_protocol_preference(git_repo, protocol, &server_url, &Direction::Push);
             }
         }
         term.clear_last_lines(1)?;

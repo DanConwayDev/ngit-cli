@@ -24,6 +24,7 @@ use crate::{
     utils::{
         fetch_or_list_error_is_not_authentication_failure, get_open_proposals,
         get_read_protocols_to_try, get_short_git_server_name, join_with_and,
+        set_protocol_preference, Direction,
     },
 };
 
@@ -157,7 +158,7 @@ pub fn list_from_remote(
     decoded_nostr_url: &NostrUrlDecoded, // Add this parameter
 ) -> Result<HashMap<String, String>> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
-    let protocols_to_attempt = get_read_protocols_to_try(&server_url, decoded_nostr_url);
+    let protocols_to_attempt = get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url);
 
     let mut failed_protocols = vec![];
     let mut remote_state: Option<HashMap<String, String>> = None;
@@ -191,6 +192,8 @@ pub fn list_from_remote(
                         )
                         .as_str(),
                     )?;
+                    let _ =
+                        set_protocol_preference(git_repo, protocol, &server_url, &Direction::Fetch);
                 }
                 break;
             }

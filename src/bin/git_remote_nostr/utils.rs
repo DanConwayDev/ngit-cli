@@ -1,7 +1,9 @@
 use core::str;
 use std::{
     collections::HashMap,
+    fmt,
     io::{self, Stdin},
+    str::FromStr,
 };
 
 use anyhow::{bail, Context, Result};
@@ -214,6 +216,7 @@ pub fn join_with_and<T: ToString>(items: &[T]) -> String {
 
 /// get an ordered vector of server protocols to attempt
 pub fn get_read_protocols_to_try(
+    git_repo: &Repo,
     server_url: &CloneUrl,
     decoded_nostr_url: &NostrUrlDecoded,
 ) -> Vec<ServerProtocol> {
@@ -221,27 +224,37 @@ pub fn get_read_protocols_to_try(
         vec![(ServerProtocol::Filesystem)]
     } else if let Some(protocol) = &decoded_nostr_url.protocol {
         vec![protocol.clone()]
-    } else if server_url.protocol() == ServerProtocol::Http {
-        vec![
-            ServerProtocol::UnauthHttp,
-            ServerProtocol::Ssh,
-            // note: list and fetch stop here if ssh was authenticated
-            ServerProtocol::Http,
-        ]
-    } else if server_url.protocol() == ServerProtocol::Ftp {
-        vec![ServerProtocol::Ftp, ServerProtocol::Ssh]
     } else {
-        vec![
-            ServerProtocol::UnauthHttps,
-            ServerProtocol::Ssh,
-            // note: list and fetch stop here if ssh was authenticated
-            ServerProtocol::Https,
-        ]
+        let mut list = if server_url.protocol() == ServerProtocol::Http {
+            vec![
+                ServerProtocol::UnauthHttp,
+                ServerProtocol::Ssh,
+                // note: list and fetch stop here if ssh was authenticated
+                ServerProtocol::Http,
+            ]
+        } else if server_url.protocol() == ServerProtocol::Ftp {
+            vec![ServerProtocol::Ftp, ServerProtocol::Ssh]
+        } else {
+            vec![
+                ServerProtocol::UnauthHttps,
+                ServerProtocol::Ssh,
+                // note: list and fetch stop here if ssh was authenticated
+                ServerProtocol::Https,
+            ]
+        };
+        if let Some(protocol) = get_protocol_preference(git_repo, server_url, &Direction::Fetch) {
+            if let Some(pos) = list.iter().position(|p| *p == protocol) {
+                list.remove(pos);
+                list.insert(0, protocol);
+            }
+        }
+        list
     }
 }
 
 /// get an ordered vector of server protocols to attempt
 pub fn get_write_protocols_to_try(
+    git_repo: &Repo,
     server_url: &CloneUrl,
     decoded_nostr_url: &NostrUrlDecoded,
 ) -> Vec<ServerProtocol> {
@@ -249,21 +262,99 @@ pub fn get_write_protocols_to_try(
         vec![(ServerProtocol::Filesystem)]
     } else if let Some(protocol) = &decoded_nostr_url.protocol {
         vec![protocol.clone()]
-    } else if server_url.protocol() == ServerProtocol::Http {
-        vec![
-            ServerProtocol::Ssh,
-            // note: list and fetch stop here if ssh was authenticated
-            ServerProtocol::Http,
-        ]
-    } else if server_url.protocol() == ServerProtocol::Ftp {
-        vec![ServerProtocol::Ssh, ServerProtocol::Ftp]
     } else {
-        vec![
-            ServerProtocol::Ssh,
-            // note: list and fetch stop here if ssh was authenticated
-            ServerProtocol::Https,
-        ]
+        let mut list = if server_url.protocol() == ServerProtocol::Http {
+            vec![
+                ServerProtocol::Ssh,
+                // note: list and fetch stop here if ssh was authenticated
+                ServerProtocol::Http,
+            ]
+        } else if server_url.protocol() == ServerProtocol::Ftp {
+            vec![ServerProtocol::Ssh, ServerProtocol::Ftp]
+        } else {
+            vec![
+                ServerProtocol::Ssh,
+                // note: list and fetch stop here if ssh was authenticated
+                ServerProtocol::Https,
+            ]
+        };
+        if let Some(protocol) = get_protocol_preference(git_repo, server_url, &Direction::Push) {
+            if let Some(pos) = list.iter().position(|p| *p == protocol) {
+                list.remove(pos);
+                list.insert(0, protocol);
+            }
+        }
+
+        list
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Direction {
+    Push,
+    Fetch,
+}
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Direction::Push => write!(f, "push"),
+            Direction::Fetch => write!(f, "fetch"),
+        }
+    }
+}
+
+pub fn get_protocol_preference(
+    git_repo: &Repo,
+    server_url: &CloneUrl,
+    direction: &Direction,
+) -> Option<ServerProtocol> {
+    let server_short_name = server_url.short_name();
+    if let Ok(Some(list)) =
+        git_repo.get_git_config_item(format!("nostr.protocol-{direction}").as_str(), Some(false))
+    {
+        for item in list.split(';') {
+            let pair = item.split(',').collect::<Vec<&str>>();
+            if let Some(url) = pair.get(1) {
+                if *url == server_short_name {
+                    if let Some(protocol) = pair.first() {
+                        if let Ok(protocol) = ServerProtocol::from_str(protocol) {
+                            return Some(protocol);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn set_protocol_preference(
+    git_repo: &Repo,
+    protocol: &ServerProtocol,
+    server_url: &CloneUrl,
+    direction: &Direction,
+) -> Result<()> {
+    let server_short_name = server_url.short_name();
+    let mut new = String::new();
+    if let Some(list) =
+        git_repo.get_git_config_item(format!("nostr.protocol-{direction}").as_str(), Some(false))?
+    {
+        for item in list.split(';') {
+            let pair = item.split(',').collect::<Vec<&str>>();
+            if let Some(url) = pair.get(1) {
+                if *url != server_short_name && !item.is_empty() {
+                    new.push_str(format!("{item};").as_str());
+                }
+            }
+        }
+    }
+    new.push_str(format!("{protocol},{server_short_name};").as_str());
+
+    git_repo.save_git_config_item(
+        format!("nostr.protocol-{direction}").as_str(),
+        new.as_str(),
+        false,
+    )
 }
 
 /// to understand whether to try over another protocol

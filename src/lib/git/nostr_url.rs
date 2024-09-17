@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{collections::HashSet, str::FromStr};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 use nostr::nips::nip01::Coordinate;
 use nostr_sdk::{PublicKey, Url};
 
@@ -30,6 +30,25 @@ impl fmt::Display for ServerProtocol {
             ServerProtocol::Unspecified => write!(f, "unsepcified"),
             ServerProtocol::UnauthHttps => write!(f, "https (unauthenticated)"),
             ServerProtocol::UnauthHttp => write!(f, "http (unauthenticated)"),
+        }
+    }
+}
+
+impl FromStr for ServerProtocol {
+    type Err = Error;
+
+    // Method to convert a string to a ServerProtocol variant
+    fn from_str(s: &str) -> Result<ServerProtocol> {
+        match s {
+            "http" => Ok(ServerProtocol::Http),
+            "https" => Ok(ServerProtocol::Https),
+            "ftp" => Ok(ServerProtocol::Ftp),
+            "ssh" => Ok(ServerProtocol::Ssh),
+            "git" => Ok(ServerProtocol::Git),
+            "filesystem" => Ok(ServerProtocol::Filesystem),
+            "http (unauthenticated)" => Ok(ServerProtocol::UnauthHttp),
+            "https (unauthenticated)" => Ok(ServerProtocol::UnauthHttps),
+            _ => bail!("not listed as a server protocol"),
         }
     }
 }

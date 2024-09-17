@@ -22,6 +22,7 @@ use ngit::{
 use crate::utils::{
     fetch_or_list_error_is_not_authentication_failure, find_proposal_and_patches_by_branch_name,
     get_oids_from_fetch_batch, get_open_proposals, get_read_protocols_to_try, join_with_and,
+    set_protocol_preference, Direction,
 };
 
 pub async fn run_fetch(
@@ -46,7 +47,7 @@ pub async fn run_fetch(
     for git_server_url in &repo_ref.git_server {
         let term = console::Term::stderr();
         if let Err(error) = fetch_from_git_server(
-            &git_repo.git_repo,
+            git_repo,
             &oids_from_git_servers,
             git_server_url,
             decoded_nostr_url,
@@ -112,7 +113,7 @@ pub async fn run_fetch(
 }
 
 fn fetch_from_git_server(
-    git_repo: &Repository,
+    git_repo: &Repo,
     oids: &[String],
     git_server_url: &str,
     decoded_nostr_url: &NostrUrlDecoded,
@@ -120,7 +121,7 @@ fn fetch_from_git_server(
 ) -> Result<()> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
 
-    let protocols_to_attempt = get_read_protocols_to_try(&server_url, decoded_nostr_url);
+    let protocols_to_attempt = get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url);
 
     let mut failed_protocols = vec![];
     let mut success = false;
@@ -131,7 +132,7 @@ fn fetch_from_git_server(
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
         let res = fetch_from_git_server_url(
-            git_repo,
+            &git_repo.git_repo,
             oids,
             &formatted_url,
             [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol),
@@ -152,6 +153,7 @@ fn fetch_from_git_server(
             success = true;
             if !failed_protocols.is_empty() {
                 term.write_line(format!("fetch: succeeded over {protocol}").as_str())?;
+                let _ = set_protocol_preference(git_repo, protocol, &server_url, &Direction::Push);
             }
             break;
         }
