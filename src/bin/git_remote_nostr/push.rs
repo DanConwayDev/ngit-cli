@@ -488,7 +488,10 @@ fn report_on_transfer_progress(
     bytes: usize,
     start_time: &Instant,
     end_time: &Option<Instant>,
-) -> String {
+) -> Option<String> {
+    if total == 0 {
+        return None;
+    }
     let percentage = ((current as f64 / total as f64) * 100.0)
         // always round down because 100% complete is misleading when its not complete
         .floor();
@@ -511,10 +514,10 @@ fn report_on_transfer_progress(
         }
     };
 
-    format!(
+    Some(format!(
         "push: Writing objects: {percentage}% ({current}/{total}) {size:.2} {unit}  | {speed:.2} MiB/s{}",
         if current == total { ", done." } else { "" },
-    )
+    ))
 }
 
 struct PushReporter<'a> {
@@ -590,20 +593,20 @@ impl<'a> PushReporter<'a> {
         if self.start_time.is_none() {
             self.start_time = Some(Instant::now());
         }
-        let existing_lines = self.count_all_existing_lines();
-
-        let report = report_on_transfer_progress(
+        if let Some(report) = report_on_transfer_progress(
             current,
             total,
             bytes,
             &self.start_time.unwrap(),
             &self.end_time,
-        );
-        if report.contains("100%") {
-            self.end_time = Some(Instant::now());
+        ) {
+            let existing_lines = self.count_all_existing_lines();
+            if report.contains("100%") {
+                self.end_time = Some(Instant::now());
+            }
+            self.transfer_progress_msgs = vec![report];
+            self.write_all(existing_lines);
         }
-        self.transfer_progress_msgs = vec![report];
-        self.write_all(existing_lines);
     }
 }
 
