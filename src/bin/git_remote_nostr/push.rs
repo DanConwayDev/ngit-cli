@@ -372,11 +372,11 @@ fn push_to_remote(
         } else {
             success = true;
             if !failed_protocols.is_empty() {
-                term.write_line(format!("fetch: succeeded over {protocol}").as_str())?;
+                term.write_line(format!("push: succeeded over {protocol}").as_str())?;
                 let _ = set_protocol_preference(git_repo, protocol, &server_url, &Direction::Push);
             }
+            break;
         }
-        term.clear_last_lines(1)?;
     }
     if success {
         Ok(())
@@ -391,7 +391,7 @@ fn push_to_remote(
                 ""
             },
         );
-        term.write_line(format!("fetch: {error}").as_str())?;
+        term.write_line(format!("push: {error}").as_str())?;
         Err(error)
     }
 }
