@@ -18,6 +18,8 @@ use ngit::{
     login::get_curent_user,
     repo_ref::RepoRef,
 };
+use nostr::nips::nip19;
+use nostr_sdk::ToBech32;
 
 use crate::utils::{
     count_lines_per_msg_vec, fetch_or_list_error_is_not_authentication_failure,
@@ -93,7 +95,23 @@ pub async fn run_fetch(
                         "parent-commit",
                     )?)? {
                         for patch in &patches_ancestor_first {
-                            git_repo.create_commit_from_patch(patch)?;
+                            if let Err(error) = git_repo.create_commit_from_patch(patch) {
+                                term.write_line(
+                                    format!(
+                                        "WARNING: cannot create branch for {refstr}, error: {error} for patch {}",
+                                        nip19::Nip19Event {
+                                            event_id: patch.id(),
+                                            author: Some(patch.author()),
+                                            kind: Some(patch.kind()),
+                                            relays: if let Some(relay) = repo_ref.relays.first() {
+                                                vec![relay.to_string()]
+                                            } else { vec![]},
+                                        }.to_bech32().unwrap_or_default()
+                                    )
+                                    .as_str(),
+                                )?;
+                                break;
+                            }
                         }
                     } else {
                         term.write_line(
