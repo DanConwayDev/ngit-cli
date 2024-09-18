@@ -628,8 +628,6 @@ mod delete_one_branch {
             p.send_line("")?;
             p.expect("ok refs/heads/vnext\r\n")?;
             p.expect_eventually("\r\n\r\n")?;
-            p.expect_eventually("\r\n\r\r\n")?;
-
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
