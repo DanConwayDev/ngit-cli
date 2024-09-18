@@ -39,9 +39,10 @@ use crate::{
     git::Repo,
     list::list_from_remotes,
     utils::{
-        find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
-        get_short_git_server_name, get_write_protocols_to_try, join_with_and,
-        push_error_is_not_authentication_failure, read_line, set_protocol_preference, Direction,
+        count_lines_per_msg_vec, find_proposal_and_patches_by_branch_name, get_all_proposals,
+        get_remote_name_by_url, get_short_git_server_name, get_write_protocols_to_try,
+        join_with_and, push_error_is_not_authentication_failure, read_line,
+        set_protocol_preference, Direction,
     },
 };
 
@@ -580,10 +581,11 @@ impl<'a> PushReporter<'a> {
     }
 
     fn count_all_existing_lines(&self) -> usize {
-        self.remote_msgs.len()
-            + self.negotiation.len()
-            + self.transfer_progress_msgs.len()
-            + self.update_reference_errors.len()
+        let width = self.term.size().1;
+        count_lines_per_msg_vec(width, &self.remote_msgs, "remote: ".len())
+            + count_lines_per_msg_vec(width, &self.negotiation, 0)
+            + count_lines_per_msg_vec(width, &self.transfer_progress_msgs, 0)
+            + count_lines_per_msg_vec(width, &self.update_reference_errors, 0)
     }
     fn process_remote_msg(&mut self, data: &[u8]) {
         if let Ok(data) = str::from_utf8(data) {

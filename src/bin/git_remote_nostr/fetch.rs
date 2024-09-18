@@ -20,9 +20,9 @@ use ngit::{
 };
 
 use crate::utils::{
-    fetch_or_list_error_is_not_authentication_failure, find_proposal_and_patches_by_branch_name,
-    get_oids_from_fetch_batch, get_open_proposals, get_read_protocols_to_try, join_with_and,
-    set_protocol_preference, Direction,
+    count_lines_per_msg_vec, fetch_or_list_error_is_not_authentication_failure,
+    find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch, get_open_proposals,
+    get_read_protocols_to_try, join_with_and, set_protocol_preference, Direction,
 };
 
 pub async fn run_fetch(
@@ -270,7 +270,9 @@ impl<'a> FetchReporter<'a> {
         }
     }
     fn count_all_existing_lines(&self) -> usize {
-        self.remote_msgs.len() + self.transfer_progress_msgs.len()
+        let width = self.term.size().1;
+        count_lines_per_msg_vec(width, &self.remote_msgs, "remote: ".len())
+            + count_lines_per_msg_vec(width, &self.transfer_progress_msgs, 0)
     }
     fn just_write_transfer_progress(&self, lines_to_clear: usize) {
         let _ = self.term.clear_last_lines(lines_to_clear);
@@ -279,7 +281,8 @@ impl<'a> FetchReporter<'a> {
         }
     }
     fn just_count_transfer_progress(&self) -> usize {
-        self.transfer_progress_msgs.len()
+        let width = self.term.size().1;
+        count_lines_per_msg_vec(width, &self.transfer_progress_msgs, 0)
     }
     fn process_remote_msg(&mut self, data: &[u8]) {
         if let Ok(data) = str::from_utf8(data) {
