@@ -1192,7 +1192,7 @@ mod tests {
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.7.2\n\
+                libgit2 1.8.1\n\
                 \n\
                 ",
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &None)?,
@@ -1228,7 +1228,7 @@ mod tests {
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.7.2\n\
+                libgit2 1.8.1\n\
                 \n\
                 ",
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &Some((3, 5)))?,

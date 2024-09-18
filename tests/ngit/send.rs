@@ -327,7 +327,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     +some content\n\\ \
                     No newline at end of file\n\
                     --\n\
-                    libgit2 1.7.2\n\
+                    libgit2 1.8.1\n\
                     \n\
                     ",
             );
@@ -353,7 +353,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     +some content\n\\ \
                     No newline at end of file\n\
                     --\n\
-                    libgit2 1.7.2\n\
+                    libgit2 1.8.1\n\
                     \n\
                     ",
             );
