@@ -434,21 +434,43 @@ fn push_to_remote_url(
             let existing_lines = reporter.count_all_existing_lines();
 
             for update in updates {
-                let msg = format!(
-                    "push:   {}..{}  {} -> {}",
-                    oid_to_shorthand_string(update.src()).unwrap(),
-                    oid_to_shorthand_string(update.dst()).unwrap(),
-                    update
-                        .src_refname()
-                        .unwrap_or("")
-                        .replace("refs/heads/", "")
-                        .replace("refs/tags/", "tags/"),
-                    update
-                        .dst_refname()
-                        .unwrap_or("")
-                        .replace("refs/heads/", "")
-                        .replace("refs/tags/", "tags/"),
-                );
+                let dst_refname = update
+                    .dst_refname()
+                    .unwrap_or("")
+                    .replace("refs/heads/", "")
+                    .replace("refs/tags/", "tags/");
+                let msg = if update.dst().is_zero() {
+                    format!("push: - [delete]          {dst_refname}")
+                } else if update.src().is_zero() {
+                    if update.dst_refname().unwrap_or("").contains("refs/tags") {
+                        format!("push: * [new tag]         {dst_refname}")
+                    } else {
+                        format!("push: * [new branch]      {dst_refname}")
+                    }
+                } else {
+                    let force = remote_refspecs
+                        .iter()
+                        .any(|r| r.contains(&dst_refname) && r.contains('+'));
+                    format!(
+                        "push: {} {}..{}  {} -> {dst_refname}",
+                        if force { "+" } else { " " },
+                        oid_to_shorthand_string(update.src()).unwrap(),
+                        oid_to_shorthand_string(update.dst()).unwrap(),
+                        update
+                            .src_refname()
+                            .unwrap_or("")
+                            .replace("refs/heads/", "")
+                            .replace("refs/tags/", "tags/"),
+                    )
+                };
+                // other possibilities will result in push to fail but better reporting is
+                // needed:
+                // deleting a non-existant branch:
+                // ! [remote rejected] <old-branch-name> -> <old-branch-name> (not found)
+                // adding a branch that already exists:
+                // ! [remote rejected] <new-branch-name> -> <new-branch-name> (already exists)
+                // pushing without non-fast-forward without force:
+                // ! [rejected]        <branch-name> -> <branch-name> (non-fast-forward)
                 reporter.negotiation.push(msg);
             }
             reporter.write_all(existing_lines);
