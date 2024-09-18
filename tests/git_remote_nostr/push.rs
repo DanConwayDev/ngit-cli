@@ -54,7 +54,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually("\r\n\r\r\n")?;
+            p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -128,7 +128,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually("\r\n\r\r\n")?;
+            p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -217,7 +217,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("")?;
             p.expect("ok refs/heads/main\r\n")?;
             p.expect("ok refs/heads/vnext\r\n")?;
-            p.expect_eventually("\r\n\r\r\n")?;
+            p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -276,7 +276,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually_and_print("\r\n\r\r\n")?;
+            p.expect_eventually_and_print("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -362,7 +362,7 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually_and_print("\r\n\r\r\n")?;
+            p.expect_eventually_and_print("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -486,7 +486,7 @@ mod delete_one_branch {
             let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
             p.send_line("push :refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually_and_print("\r\n\r\r\n")?;
+            p.expect_eventually_and_print("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -561,7 +561,7 @@ mod delete_one_branch {
             let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
             p.send_line("push :refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect_eventually("\r\n\r\r\n")?;
+            p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -627,7 +627,9 @@ mod delete_one_branch {
             p.send_line("push :refs/heads/vnext")?;
             p.send_line("")?;
             p.expect("ok refs/heads/vnext\r\n")?;
+            p.expect_eventually("\r\n\r\n")?;
             p.expect_eventually("\r\n\r\r\n")?;
+
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
                 relay::shutdown_relay(8000 + p)?;
@@ -685,7 +687,7 @@ mod delete_one_branch {
                 p.send_line("push :refs/heads/example-branch")?;
                 p.send_line("")?;
                 p.expect("ok refs/heads/example-branch\r\n")?;
-                p.expect_eventually("\r\n\r\r\n")?;
+                p.expect_eventually("\r\n\r\n")?;
                 p.exit()?;
                 for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
@@ -855,7 +857,7 @@ async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
         p.send_line("push refs/heads/main:refs/heads/main")?;
         p.send_line("")?;
         p.expect("ok refs/heads/main\r\n")?;
-        p.expect_eventually("\r\n\r\r\n")?;
+        p.expect_eventually("\r\n\r\n")?;
         p.exit()?;
         for p in [51, 52, 53, 55, 56, 57] {
             relay::shutdown_relay(8000 + p)?;
