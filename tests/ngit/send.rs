@@ -1654,9 +1654,10 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
 }
 
 mod in_reply_to_mentions_issue {
-    use nostr::ToBech32;
+    use nostr::{serde_json, ToBech32};
 
     use super::*;
+
     pub fn get_pretend_issue_event() -> nostr::Event {
         serde_json::from_str(r#"{"created_at":1709286372,"content":"please provide feedback\nthis is an example ngit issue to demonstrate gitworkshop.dev.\n\nplease provide feedback with in reply to this issue or by creating a new issue.","tags":[["r","26689f97810fc656c7134c76e2a37d33b2e40ce7"],["a","30617:a008def15796fba9a0d6fab04e8fd57089285d9fd505da5a83fe8aad57a3564d:ngit","wss://relay.damus.io","root"],["p","a008def15796fba9a0d6fab04e8fd57089285d9fd505da5a83fe8aad57a3564d"]],"kind":1621,"pubkey":"a008def15796fba9a0d6fab04e8fd57089285d9fd505da5a83fe8aad57a3564d","id":"e944765d625ae7323d080da0df069c726a0e5490a17b452f854d85e18f781588","sig":"a1af9e89a35f1f7ef93e3de33986bd86cb7c4d7d9abb233c0c6405f32b5788171e47f84551afe8515b3107d12f03472721ea784b8791ff3f25e66a3169a54c20"}"#).unwrap()
     }
