@@ -282,16 +282,18 @@ pub async fn launch() -> Result<()> {
         if !git_repo.does_commit_exist(&proposal_base_commit.to_string())? {
             println!("your '{main_branch_name}' branch may not be up-to-date.");
             println!("the proposal parent commit doesnt exist in your local repository.");
-            return match Interactor::default().choice(PromptChoiceParms::default().with_default(0).with_choices(
-                vec![
-                    format!(
+            return match Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
+                        format!(
                         "manually run `git pull` on '{main_branch_name}' and select proposal again"
                     ),
-                    format!("apply to current branch with `git am`"),
-                    format!("download to ./patches"),
-                    "back".to_string(),
-                ],
-            ))? {
+                        format!("apply to current branch with `git am`"),
+                        format!("download to ./patches"),
+                        "back".to_string(),
+                    ]),
+            )? {
                 0 | 3 => continue,
                 1 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
                 2 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
@@ -314,17 +316,20 @@ pub async fn launch() -> Result<()> {
 
         // branch doesnt exist
         if !branch_exists {
-            return match Interactor::default()
-                .choice(PromptChoiceParms::default().with_default(0).with_choices(vec![
-                format!(
+            return match Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
+                        format!(
                     "create and checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
                     most_recent_proposal_patch_chain.len(),
                     proposal_behind_main.len(),
                 ),
-                format!("apply to current branch with `git am`"),
-                format!("download to ./patches"),
-                "back".to_string(),
-            ]))? {
+                        format!("apply to current branch with `git am`"),
+                        format!("download to ./patches"),
+                        "back".to_string(),
+                    ]),
+            )? {
                 0 => {
                     check_clean(&git_repo)?;
                     let _ = git_repo
