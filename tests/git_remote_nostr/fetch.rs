@@ -139,7 +139,7 @@ mod when_first_git_server_fails_ {
 
 #[tokio::test]
 #[serial]
-async fn creates_commits_from_open_proposal_with_no_warngins_printed() -> Result<()> {
+async fn creates_commits_from_open_proposal_with_no_warnings_printed() -> Result<()> {
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
     let source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
