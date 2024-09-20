@@ -132,7 +132,9 @@ async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)>
         let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
         p.send_line("push refs/heads/main:refs/heads/main")?;
         p.send_line("")?;
-        p.expect("ok refs/heads/main\r\n")?;
+
+        p.expect_eventually("ok ")?;
+        p.expect("refs/heads/main\r\n")?;
         p.expect_eventually("\r\n\r\n")?;
         p.exit()?;
         for p in [51, 52, 53, 55, 56, 57] {

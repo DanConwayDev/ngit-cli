@@ -296,14 +296,15 @@ pub async fn run_push(
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
     if !events.is_empty() {
+        term.write_line("broadcast to nostr relays:")?;
         send_events(
             client,
             git_repo.get_path()?,
             events,
             user_ref.relays.write(),
             repo_ref.relays.clone(),
-            false,
             true,
+            false,
         )
         .await?;
     }

@@ -215,7 +215,8 @@ mod two_branches_in_batch_one_added_one_updated {
             p.send_line("push refs/heads/main:refs/heads/main")?;
             p.send_line("push refs/heads/vnext:refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect("ok refs/heads/main\r\n")?;
+            p.expect_eventually("ok ")?;
+            p.expect("refs/heads/main\r\n")?;
             p.expect("ok refs/heads/vnext\r\n")?;
             p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
@@ -626,7 +627,8 @@ mod delete_one_branch {
             let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
             p.send_line("push :refs/heads/vnext")?;
             p.send_line("")?;
-            p.expect("ok refs/heads/vnext\r\n")?;
+            p.expect_eventually("ok ")?;
+            p.expect("refs/heads/vnext\r\n")?;
             p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
             for p in [51, 52, 53, 55, 56, 57] {
@@ -684,7 +686,8 @@ mod delete_one_branch {
                     cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                 p.send_line("push :refs/heads/example-branch")?;
                 p.send_line("")?;
-                p.expect("ok refs/heads/example-branch\r\n")?;
+                p.expect_eventually("ok ")?;
+                p.expect("refs/heads/example-branch\r\n")?;
                 p.expect_eventually("\r\n\r\n")?;
                 p.exit()?;
                 for p in [51, 52, 53, 55, 56, 57] {
@@ -770,7 +773,8 @@ mod delete_one_branch {
                         cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
                     p.send_line("push :refs/heads/example-branch")?;
                     p.send_line("")?;
-                    p.expect("ok refs/heads/example-branch\r\n")?;
+                    p.expect_eventually("ok ")?;
+                    p.expect("refs/heads/example-branch\r\n")?;
                     p.expect_eventually("\r\n")?;
                     p.exit()?;
                     for p in [51, 52, 53, 55, 56, 57] {
@@ -854,7 +858,8 @@ async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
         let mut p = cli_tester_after_nostr_fetch_and_sent_list_for_push_responds(&git_repo)?;
         p.send_line("push refs/heads/main:refs/heads/main")?;
         p.send_line("")?;
-        p.expect("ok refs/heads/main\r\n")?;
+        p.expect_eventually("ok ")?;
+        p.expect("refs/heads/main\r\n")?;
         p.expect_eventually("\r\n\r\n")?;
         p.exit()?;
         for p in [51, 52, 53, 55, 56, 57] {
@@ -1075,7 +1080,7 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
         p.expect("list: connecting...\r\n\r\r\r")?;
-        p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
         for p in [51, 52, 53, 55, 56, 57] {
@@ -1230,7 +1235,7 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
         p.expect("list: connecting...\r\n")?;
-        p.expect_after_whitespace(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
         for p in [51, 52, 53, 55, 56, 57] {
@@ -1380,7 +1385,7 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
         p.expect("list: connecting...\r\n\r\r\r")?;
-        p.expect(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
         for p in [51, 52, 53, 55, 56, 57] {
