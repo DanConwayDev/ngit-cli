@@ -5,14 +5,13 @@ use anyhow::{anyhow, Context, Result};
 use auth_git2::GitAuthenticator;
 use client::get_state_from_cache;
 use git::RepoActions;
-use git_events::{event_to_cover_letter, get_commit_id_from_patch};
 use ngit::{
     client,
     git::{
         self,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
-    git_events,
+    git_events::event_to_cover_letter,
     login::get_curent_user,
     repo_ref,
 };
@@ -20,6 +19,7 @@ use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use repo_ref::RepoRef;
 
 use crate::{
+    fetch::{fetch_from_git_server, make_commits_for_proposal},
     git::Repo,
     utils::{
         fetch_or_list_error_is_not_authentication_failure, get_open_proposals,
@@ -88,31 +88,11 @@ pub async fn run_list(
 
     state.retain(|k, _| !k.starts_with("refs/heads/pr/"));
 
-    let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
-    let current_user = get_curent_user(git_repo)?;
-    for (_, (proposal, patches)) in open_proposals {
-        if let Ok(cl) = event_to_cover_letter(&proposal) {
-            if let Ok(mut branch_name) = cl.get_branch_name() {
-                branch_name = if let Some(public_key) = current_user {
-                    if proposal.author().eq(&public_key) {
-                        cl.branch_name.to_string()
-                    } else {
-                        branch_name
-                    }
-                } else {
-                    branch_name
-                };
-                if let Some(patch) = patches.first() {
-                    // TODO this isn't resilient because the commit id stated may not be correct
-                    // we will need to check whether the commit id exists in the repo or apply the
-                    // proposal and each patch to check
-                    if let Ok(commit_id) = get_commit_id_from_patch(patch) {
-                        state.insert(format!("refs/heads/{branch_name}"), commit_id);
-                    }
-                }
-            }
-        }
-    }
+    let proposals_state =
+        get_open_proposals_state(&term, git_repo, repo_ref, decoded_nostr_url, &remote_states)
+            .await?;
+
+    state.extend(proposals_state);
 
     // TODO 'for push' should we check with the git servers to see if any of them
     // allow push from the user?
@@ -128,6 +108,70 @@ pub async fn run_list(
 
     println!();
     Ok(remote_states)
+}
+
+async fn get_open_proposals_state(
+    term: &console::Term,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    decoded_nostr_url: &NostrUrlDecoded,
+    remote_states: &HashMap<String, HashMap<String, String>>,
+) -> Result<HashMap<String, String>> {
+    // we cannot use commit_id in the latest patch in a proposal because:
+    // 1) the `commit` tag is optional
+    // 2) if the commit tag is wrong, it will cause errors which stop clone from
+    //    working
+
+    // without trusting commit_id we must apply each patch which requires the oid of
+    // the parent so we much do a fetch
+    for (git_server_url, oids_from_git_servers) in remote_states {
+        if fetch_from_git_server(
+            git_repo,
+            &oids_from_git_servers
+                .values()
+                .filter(|v| !v.starts_with("ref: "))
+                .cloned()
+                .collect::<Vec<String>>(),
+            git_server_url,
+            decoded_nostr_url,
+            term,
+        )
+        .is_ok()
+        {
+            break;
+        }
+    }
+
+    let mut state = HashMap::new();
+    let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+    let current_user = get_curent_user(git_repo)?;
+    for (_, (proposal, patches)) in open_proposals {
+        if let Ok(cl) = event_to_cover_letter(&proposal) {
+            if let Ok(mut branch_name) = cl.get_branch_name() {
+                branch_name = if let Some(public_key) = current_user {
+                    if proposal.author().eq(&public_key) {
+                        cl.branch_name.to_string()
+                    } else {
+                        branch_name
+                    }
+                } else {
+                    branch_name
+                };
+                match make_commits_for_proposal(git_repo, repo_ref, &patches) {
+                    Ok(tip) => {
+                        state.insert(format!("refs/heads/{branch_name}"), tip);
+                    }
+                    Err(error) => {
+                        let _ = term.write_line(
+                            format!("WARNING: cannot fetch branch {branch_name} error: {error}")
+                                .as_str(),
+                        );
+                    }
+                };
+            }
+        }
+    }
+    Ok(state)
 }
 
 pub fn list_from_remotes(

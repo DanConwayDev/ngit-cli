@@ -52,6 +52,10 @@ mod without_state_announcement {
             assert_eq!(
                 res.split("\r\n")
                     .map(|e| e.to_string())
+                    .filter(|s| !s.contains("remote: ")
+                        && !s.contains("Receiving objects")
+                        && !s.contains("Resolving deltas")
+                        && !s.contains("fetching /"))
                     .collect::<HashSet<String>>(),
                 HashSet::from([
                     "@refs/heads/main HEAD".to_string(),
@@ -220,6 +224,10 @@ mod with_state_announcement {
                 assert_eq!(
                     res.split("\r\n")
                         .map(|e| e.to_string())
+                        .filter(|s| !s.contains("remote: ")
+                            && !s.contains("Receiving objects")
+                            && !s.contains("Resolving deltas")
+                            && !s.contains("fetching /"))
                         .collect::<HashSet<String>>(),
                     HashSet::from([
                         "@refs/heads/main HEAD".to_string(),

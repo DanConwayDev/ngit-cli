@@ -1,11 +1,12 @@
 use core::str;
 use std::{
+    collections::HashMap,
     io::Stdin,
     sync::{Arc, Mutex},
     time::Instant,
 };
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use auth_git2::GitAuthenticator;
 use git2::{Progress, Repository};
 use ngit::{
@@ -19,7 +20,7 @@ use ngit::{
     repo_ref::RepoRef,
 };
 use nostr::nips::nip19;
-use nostr_sdk::ToBech32;
+use nostr_sdk::{Event, ToBech32};
 
 use crate::utils::{
     count_lines_per_msg_vec, fetch_or_list_error_is_not_authentication_failure,
@@ -78,65 +79,97 @@ pub async fn run_fetch(
 
     fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/pr/"));
 
-    if !fetch_batch.is_empty() {
-        let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
-
-        let current_user = get_curent_user(git_repo)?;
-
-        for (refstr, oid) in fetch_batch {
-            if let Some((_, (_, patches))) =
-                find_proposal_and_patches_by_branch_name(&refstr, &open_proposals, &current_user)
-            {
-                if !git_repo.does_commit_exist(&oid)? {
-                    let mut patches_ancestor_first = patches.clone();
-                    patches_ancestor_first.reverse();
-                    if git_repo.does_commit_exist(&tag_value(
-                        patches_ancestor_first.first().unwrap(),
-                        "parent-commit",
-                    )?)? {
-                        for patch in &patches_ancestor_first {
-                            if let Err(error) = git_repo.create_commit_from_patch(patch) {
-                                term.write_line(
-                                    format!(
-                                        "WARNING: cannot create branch for {refstr}, error: {error} for patch {}",
-                                        nip19::Nip19Event {
-                                            event_id: patch.id(),
-                                            author: Some(patch.author()),
-                                            kind: Some(patch.kind()),
-                                            relays: if let Some(relay) = repo_ref.relays.first() {
-                                                vec![relay.to_string()]
-                                            } else { vec![]},
-                                        }.to_bech32().unwrap_or_default()
-                                    )
-                                    .as_str(),
-                                )?;
-                                break;
-                            }
-                        }
-                    } else {
-                        term.write_line(
-                            format!("WARNING: cannot find parent commit for {refstr}").as_str(),
-                        )?;
-                    }
-                }
-            } else {
-                term.write_line(format!("WARNING: cannot find proposal for {refstr}").as_str())?;
-            }
-        }
-    }
-
+    fetch_proposals(git_repo, &term, repo_ref, &fetch_batch).await?;
     term.flush()?;
     println!();
     Ok(())
 }
 
-fn fetch_from_git_server(
+pub fn make_commits_for_proposal(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    patches_ancestor_last: &[Event],
+) -> Result<String> {
+    let patches_ancestor_first: Vec<&Event> = patches_ancestor_last.iter().rev().collect();
+    let mut tip_commit_id = if let Ok(parent_commit) = tag_value(
+        patches_ancestor_first
+            .first()
+            .context("proposal should have at least one patch")?,
+        "parent-commit",
+    ) {
+        parent_commit
+    } else {
+        // TODO choose most recent commit on master before patch timestamp so it doesnt
+        // constantly get rebased
+        let (_, hash) = git_repo.get_main_or_master_branch()?;
+        hash.to_string()
+    };
+
+    for patch in &patches_ancestor_first {
+        let commit_id = git_repo
+            .create_commit_from_patch(patch, Some(tip_commit_id.clone()))
+            .context(format!(
+                "cannot create commit for patch {}",
+                nip19::Nip19Event {
+                    event_id: patch.id(),
+                    author: Some(patch.author()),
+                    kind: Some(patch.kind()),
+                    relays: if let Some(relay) = repo_ref.relays.first() {
+                        vec![relay.to_string()]
+                    } else {
+                        vec![]
+                    },
+                }
+                .to_bech32()
+                .unwrap_or_default()
+            ))?;
+        tip_commit_id = commit_id.to_string();
+    }
+    Ok(tip_commit_id)
+}
+
+async fn fetch_proposals(
+    git_repo: &Repo,
+    term: &console::Term,
+    repo_ref: &RepoRef,
+    proposal_refs: &HashMap<String, String>,
+) -> Result<()> {
+    if !proposal_refs.is_empty() {
+        let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+
+        let current_user = get_curent_user(git_repo)?;
+
+        for refstr in proposal_refs.keys() {
+            if let Some((_, (_, patches))) =
+                find_proposal_and_patches_by_branch_name(refstr, &open_proposals, &current_user)
+            {
+                if let Err(error) = make_commits_for_proposal(git_repo, repo_ref, patches) {
+                    term.write_line(
+                        format!("WARNING: cannot create branch for {refstr}, error: {error}",)
+                            .as_str(),
+                    )?;
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn fetch_from_git_server(
     git_repo: &Repo,
     oids: &[String],
     git_server_url: &str,
     decoded_nostr_url: &NostrUrlDecoded,
     term: &console::Term,
 ) -> Result<()> {
+    let already_have_oids = oids
+        .iter()
+        .all(|oid| git_repo.does_commit_exist(oid).is_ok_and(|outcome| outcome));
+    if already_have_oids {
+        return Ok(());
+    }
+
     let server_url = git_server_url.parse::<CloneUrl>()?;
 
     let protocols_to_attempt = get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url);

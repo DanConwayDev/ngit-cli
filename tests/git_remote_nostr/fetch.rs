@@ -140,8 +140,7 @@ mod when_first_git_server_fails_ {
 #[tokio::test]
 #[serial]
 async fn creates_commits_from_open_proposal_with_no_warnings_printed() -> Result<()> {
-    let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
-    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let (events, _) = prep_source_repo_and_events_including_proposals().await?;
 
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
         Relay::new(8051, None, None),
@@ -166,7 +165,6 @@ async fn creates_commits_from_open_proposal_with_no_warnings_printed() -> Result
         let mut p = cli_tester_after_fetch(&git_repo)?;
         p.send_line(format!("fetch {proposal_tip} refs/heads/{branch_name}").as_str())?;
         p.send_line("")?;
-        p.expect(format!("fetching {source_path} over filesystem...\r\n").as_str())?;
         // expect no errors
         p.expect_after_whitespace("\r\n")?;
         p.exit()?;

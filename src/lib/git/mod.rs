@@ -79,7 +79,11 @@ pub trait RepoActions {
         branch_name: &str,
         patch_and_ancestors: Vec<nostr::Event>,
     ) -> Result<Vec<nostr::Event>>;
-    fn create_commit_from_patch(&self, patch: &nostr::Event) -> Result<Oid>;
+    fn create_commit_from_patch(
+        &self,
+        patch: &nostr::Event,
+        parent_commit_id_override: Option<String>,
+    ) -> Result<Oid>;
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
     fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool>;
     fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>>;
@@ -540,19 +544,30 @@ impl RepoActions for Repo {
             let commit_id = get_commit_id_from_patch(patch)?;
             // only create new commits - otherwise make them the tip
             if !self.does_commit_exist(&commit_id)? {
-                self.create_commit_from_patch(patch)?;
+                self.create_commit_from_patch(patch, None)?;
             }
             self.create_branch_at_commit(branch_name, &commit_id)?;
             self.checkout(branch_name)?;
         }
         Ok(patches_to_apply)
     }
-    fn create_commit_from_patch(&self, patch: &nostr::Event) -> Result<Oid> {
-        let commit_id = get_commit_id_from_patch(patch)?;
-        if self.does_commit_exist(&commit_id)? {
-            return Ok(Oid::from_str(&commit_id)?);
+    fn create_commit_from_patch(
+        &self,
+        patch: &nostr::Event,
+        parent_commit_id_override: Option<String>,
+    ) -> Result<Oid> {
+        let commit_id = get_commit_id_from_patch(patch);
+        if let Ok(commit_id) = &commit_id {
+            if self.does_commit_exist(commit_id).unwrap_or(false) {
+                return Ok(Oid::from_str(commit_id)?);
+            }
         }
-        let parent_commit_id = tag_value(patch, "parent-commit")?;
+
+        let parent_commit_id = if let Some(commit_id) = parent_commit_id_override.clone() {
+            commit_id
+        } else {
+            tag_value(patch, "parent-commit")?
+        };
 
         let parent_commit = self
             .git_repo
@@ -604,25 +619,38 @@ impl RepoActions for Repo {
         // were identical when in a scenario when they should be different but I dont
         // think we have a test case for it. surely we should be using the
         // extract_sig_from_patch_tags outputs to address this?
-        if !applied_oid.to_string().eq(&commit_id) {
-            let commit = self.git_repo.find_commit(applied_oid)?;
-            applied_oid = commit
-                .amend(
-                    None,
-                    Some(&commit.author()),
-                    Some(&commit.committer()),
-                    None,
-                    None,
-                    None,
-                )
-                .context("cannot amend commit to produce new oid")?;
-        }
-        if !applied_oid.to_string().eq(&commit_id) {
-            bail!(
-                "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
-                applied_oid.to_string(),
-                get_commit_id_from_patch(patch)?,
-            );
+        let custom_parent = if let Some(ovderride_parent) = parent_commit_id_override {
+            if let Ok(tag_parent) = tag_value(patch, "parent-commit") {
+                ovderride_parent != tag_parent
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        if !custom_parent {
+            if let Ok(commit_id) = &commit_id {
+                if !applied_oid.to_string().eq(commit_id) {
+                    let commit = self.git_repo.find_commit(applied_oid)?;
+                    applied_oid = commit
+                        .amend(
+                            None,
+                            Some(&commit.author()),
+                            Some(&commit.committer()),
+                            None,
+                            None,
+                            None,
+                        )
+                        .context("cannot amend commit to produce new oid")?;
+                }
+                if !applied_oid.to_string().eq(commit_id) {
+                    bail!(
+                        "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
+                        applied_oid.to_string(),
+                        get_commit_id_from_patch(patch)?,
+                    );
+                }
+            }
         }
         self.git_repo.set_index(&mut existing_index)?;
         Ok(applied_oid)
@@ -1651,7 +1679,7 @@ mod tests {
             test_repo.populate()?;
             let git_repo = Repo::from_path(&test_repo.dir)?;
             println!("{:?}", &patch_event);
-            git_repo.create_commit_from_patch(&patch_event)?;
+            git_repo.create_commit_from_patch(&patch_event, None)?;
             let commit_id = tag_value(&patch_event, "commit")?;
             // does commit with id exist?
             assert!(git_repo.does_commit_exist(&commit_id)?);
