@@ -290,7 +290,7 @@ async fn get_nip46_signer_from_uri_and_key(uri: &str, app_key: &str) -> Result<N
         Nip46Signer::new(
             uri,
             nostr::Keys::from_str(app_key).context("invalid app key")?,
-            Duration::from_secs(30),
+            Duration::from_secs(10 * 60),
             None,
         )
         .await?,
