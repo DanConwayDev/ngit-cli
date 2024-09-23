@@ -935,7 +935,7 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
         p.expect("list: connecting...\r\n")?;
-        p.expect_after_whitespace("merge commit ")?;
+        p.expect_eventually("merge commit ")?;
         // shorthand merge commit id appears in this gap
         p.expect_eventually(": create nostr proposal status event\r\n")?;
         // status updates printed here

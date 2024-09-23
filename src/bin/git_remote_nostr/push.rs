@@ -131,7 +131,7 @@ pub async fn run_push(
         &None,
         Some(client),
         false,
-        true,
+        false,
     )
     .await?;
 

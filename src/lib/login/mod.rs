@@ -56,7 +56,7 @@ pub async fn launch(
                 .to_string()
                 .eq("git config item nostr.nsec is an ncryptsec")
             {
-                println!(
+                eprintln!(
                     "login as {}",
                     if let Ok(public_key) = PublicKey::from_bech32(
                         get_config_item(git_repo, "nostr.npub")
@@ -82,7 +82,7 @@ pub async fn launch(
                     if let Ok(keys) = get_keys_with_password(git_repo, &password) {
                         break Ok(NostrSigner::Keys(keys));
                     }
-                    println!("incorrect password");
+                    eprintln!("incorrect password");
                 }
             } else {
                 if nsec.is_some() {
@@ -107,8 +107,6 @@ pub async fn launch(
             print_logged_in_as(&user_ref, client.is_none())?;
         }
         Ok((signer, user_ref))
-    } else if silent {
-        bail!("TODO: enable interactive login in nostr git remote helper");
     } else {
         fresh_login(git_repo, client, change_user).await
     }
@@ -116,15 +114,15 @@ pub async fn launch(
 
 fn print_logged_in_as(user_ref: &UserRef, offline_mode: bool) -> Result<()> {
     if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
-        println!("cannot find profile...");
+        eprintln!("cannot find profile...");
     } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
-        println!("cannot extract account name from account metadata...");
+        eprintln!("cannot extract account name from account metadata...");
     } else if !offline_mode && user_ref.relays.created_at.eq(&Timestamp::from(0)) {
-        println!(
+        eprintln!(
             "cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience."
         );
     }
-    println!("logged in as {}", user_ref.metadata.name);
+    eprintln!("logged in as {}", user_ref.metadata.name);
     Ok(())
 }
 
@@ -219,25 +217,25 @@ fn save_to_git_config(
     global: bool,
 ) -> Result<()> {
     if let Err(error) = silently_save_to_git_config(git_repo, npub, nsec, bunker, global) {
-        println!(
+        eprintln!(
             "failed to save login details to {} git config",
             if global { "global" } else { "local" }
         );
         if let Some(nsec) = nsec {
             if nsec.contains("ncryptsec") {
-                println!("manually set git config nostr.nsec to: {nsec}");
+                eprintln!("manually set git config nostr.nsec to: {nsec}");
             } else {
-                println!("manually set git config nostr.nsec");
+                eprintln!("manually set git config nostr.nsec");
             }
         }
         if let Some(bunker) = bunker {
-            println!("manually set git config as follows:");
-            println!("nostr.bunker-uri: {}", bunker.0);
-            println!("nostr.bunker-app-key: {}", bunker.1);
+            eprintln!("manually set git config as follows:");
+            eprintln!("nostr.bunker-uri: {}", bunker.0);
+            eprintln!("nostr.bunker-app-key: {}", bunker.1);
         }
         Err(error)
     } else {
-        println!(
+        eprintln!(
             "saved login details to {} git config",
             if global { "global" } else { "local" }
         );
@@ -367,7 +365,7 @@ async fn fresh_login(
             .context("failed to get nsec input from interactor")?;
         if let Ok(keys) = nostr::Keys::from_str(&input) {
             if let Err(error) = save_keys(git_repo, &keys, always_save) {
-                println!("{error}");
+                eprintln!("{error}");
             }
             break NostrSigner::Keys(keys);
         }
@@ -391,7 +389,7 @@ async fn fresh_login(
                 if let Err(error) =
                     save_bunker(git_repo, &pub_key, &uri.to_string(), &app_key, always_save)
                 {
-                    println!("{error}");
+                    eprintln!("{error}");
                 }
                 public_key = Some(pub_key);
                 break signer;
@@ -420,7 +418,7 @@ pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> 
     match res {
         Ok(profile) => {
             if profile.nip46.is_empty() {
-                println!("nip05 provider isn't configured for remote login");
+                eprintln!("nip05 provider isn't configured for remote login");
                 bail!("nip05 provider isn't configured for remote login")
             }
             Ok(NostrConnectURI::Bunker {
@@ -430,7 +428,7 @@ pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> 
             })
         }
         Err(error) => {
-            println!("error contacting login service provider: {error}");
+            eprintln!("error contacting login service provider: {error}");
             Err(error).context("error contacting login service provider")
         }
     }
