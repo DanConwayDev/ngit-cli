@@ -729,10 +729,12 @@ impl RepoActions for Repo {
                 if let Some(global) = global {
                     if item.level().eq(&git2::ConfigLevel::Local) {
                         if global {
-                            bail!("only local repository login available")
+                            // bail!("only local repository login available")
+                            return Ok(None);
                         }
                     } else if !global {
-                        bail!("only global repository login available")
+                        // bail!("only global repository login available")
+                        return Ok(None);
                     }
                 }
                 Ok(Some(
