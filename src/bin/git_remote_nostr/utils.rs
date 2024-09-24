@@ -384,20 +384,6 @@ pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     false
 }
 
-fn count_lines_per_msg(width: u16, msg: &str, prefix_len: usize) -> usize {
-    if width == 0 {
-        return 1;
-    }
-    // ((msg_len+prefix) / width).ceil() implemented using Integer Arithmetic
-    ((msg.chars().count() + prefix_len) + (width - 1) as usize) / width as usize
-}
-
-pub fn count_lines_per_msg_vec(width: u16, msgs: &[String], prefix_len: usize) -> usize {
-    msgs.iter()
-        .map(|msg| count_lines_per_msg(width, msg, prefix_len))
-        .sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

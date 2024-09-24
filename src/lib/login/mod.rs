@@ -1,14 +1,19 @@
-use std::{collections::HashSet, path::Path, str::FromStr, time::Duration};
+use std::{collections::HashSet, path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
+use console::Style;
+use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::{
     nips::{nip05, nip46::NostrConnectURI},
     PublicKey,
 };
 use nostr_sdk::{
     Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrSigner, SingleLetterTag, Timestamp, ToBech32,
+    Url,
 };
 use nostr_signer::Nip46Signer;
+use qrcode::QrCode;
+use tokio::sync::{oneshot, Mutex};
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -16,7 +21,8 @@ use crate::client::Client;
 use crate::client::MockConnect;
 use crate::{
     cli_interactor::{
-        Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptPasswordParms,
+        Interactor, InteractorPrompt, Printer, PromptConfirmParms, PromptInputParms,
+        PromptPasswordParms,
     },
     client::{fetch_public_key, get_event_from_global_cache, Connect},
     git::{Repo, RepoActions},
@@ -356,58 +362,196 @@ async fn fresh_login(
     #[cfg(not(test))] client: Option<&Client>,
     always_save: bool,
 ) -> Result<(NostrSigner, UserRef)> {
-    let mut public_key: Option<PublicKey> = None;
-    // prompt for nsec
-    let mut prompt = "login with nostr address / nsec";
-    let signer = loop {
-        let input = Interactor::default()
-            .input(PromptInputParms::default().with_prompt(prompt))
-            .context("failed to get nsec input from interactor")?;
-        if let Ok(keys) = nostr::Keys::from_str(&input) {
-            if let Err(error) = save_keys(git_repo, &keys, always_save) {
+    let app_key = Keys::generate();
+    let app_key_secret = app_key.secret_key()?.to_secret_hex();
+    let relays = if let Some(client) = client {
+        client
+            .get_fallback_signer_relays()
+            .iter()
+            .flat_map(|s| Url::parse(s))
+            .collect::<Vec<Url>>()
+    } else {
+        vec![]
+    };
+    let offline = client.is_none();
+    let nostr_connect_url = NostrConnectURI::client(app_key.public_key(), relays.clone(), "ngit");
+    let qr = generate_qr(&nostr_connect_url.to_string())?;
+
+    let printer = Arc::new(Mutex::new(Printer::default()));
+    if !offline {
+        let printer_clone = Arc::clone(&printer);
+        let mut printer_locked = printer_clone.lock().await;
+        printer_locked.printlns(qr);
+        printer_locked.println(format!(
+            "scan QR or paste into remote signer: {nostr_connect_url}"
+        ));
+        printer_locked.println_with_custom_formatting(
+            {
+                let mut s = String::new();
+                let _ = ColorfulTheme::default().format_confirm_prompt(
+                    &mut s,
+                    "login with nsec / bunker url / nostr address instead",
+                    Some(true),
+                );
+                s
+            },
+            "? login with nsec / bunker url / nostr address instead? (y/n) › yes".to_string(),
+        );
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let printer_clone = Arc::clone(&printer);
+
+    let qr_listener = tokio::spawn(async move {
+        if offline {
+            return;
+        }
+        if let Ok(nip46_signer) = Nip46Signer::new(
+            nostr_connect_url.clone(),
+            app_key.clone(),
+            Duration::from_secs(10 * 60),
+            None,
+        )
+        .await
+        {
+            let signer = NostrSigner::nip46(nip46_signer);
+            if let Ok(pub_key) = fetch_public_key(&signer).await {
+                let mut printer_locked = printer_clone.lock().await;
+                printer_locked.clear_all();
+
+                printer_locked.println_with_custom_formatting(
+                    format!(
+                        "{}",
+                        Style::new().bold().apply_to("connected to remote signer"),
+                    ),
+                    "connected to remote signer".to_string(),
+                );
+                printer_locked.println("press any key to continue...".to_string());
+                let _ = tx.send(Some((signer, pub_key)));
+            }
+        }
+    });
+    if !offline {
+        let _ = console::Term::stderr().read_char();
+    }
+    qr_listener.abort();
+    let printer_clone = Arc::clone(&printer);
+    let mut printer = printer_clone.lock().await;
+    printer.clear_all();
+
+    let (signer, public_key) = {
+        if let Ok(Some((signer, public_key))) = rx.await {
+            let bunker_url = NostrConnectURI::Bunker {
+                signer_public_key: public_key,
+                relays: relays.clone(),
+                secret: None,
+            };
+            if let Err(error) = save_bunker(
+                git_repo,
+                &public_key,
+                &bunker_url.to_string(),
+                &app_key_secret,
+                always_save,
+            ) {
                 eprintln!("{error}");
             }
-            break NostrSigner::Keys(keys);
-        }
-        let uri = if let Ok(uri) = NostrConnectURI::parse(&input) {
-            uri
-        } else if input.contains('@') {
-            if let Ok(uri) = fetch_nip46_uri_from_nip05(&input).await {
-                uri
-            } else {
-                prompt = "failed. try again with nostr address / bunker uri / nsec";
-                continue;
-            }
+            (signer, public_key)
         } else {
-            prompt = "invalid. try again with nostr address / bunker uri / nsec";
-            continue;
-        };
-        let app_key = Keys::generate().secret_key()?.to_secret_hex();
-        match get_nip46_signer_from_uri_and_key(&uri.to_string(), &app_key).await {
-            Ok(signer) => {
-                let pub_key = fetch_public_key(&signer).await?;
-                if let Err(error) =
-                    save_bunker(git_repo, &pub_key, &uri.to_string(), &app_key, always_save)
-                {
-                    eprintln!("{error}");
+            let mut public_key: Option<PublicKey> = None;
+            // prompt for nsec
+            let mut prompt = "login with nsec / bunker url / nostr address";
+            let signer = loop {
+                let input = Interactor::default()
+                    .input(PromptInputParms::default().with_prompt(prompt))
+                    .context("failed to get nsec input from interactor")?;
+                if let Ok(keys) = nostr::Keys::from_str(&input) {
+                    if let Err(error) = save_keys(git_repo, &keys, always_save) {
+                        eprintln!("{error}");
+                    }
+                    break NostrSigner::Keys(keys);
                 }
-                public_key = Some(pub_key);
-                break signer;
-            }
-            Err(_) => {
-                prompt = "failed. try again with nostr address / bunker uri / nsec";
-            }
+                let uri = if let Ok(uri) = NostrConnectURI::parse(&input) {
+                    uri
+                } else if input.contains('@') {
+                    if let Ok(uri) = fetch_nip46_uri_from_nip05(&input).await {
+                        uri
+                    } else {
+                        prompt = "failed. try again with nostr address / bunker uri / nsec";
+                        continue;
+                    }
+                } else {
+                    prompt = "invalid. try again with nostr address / bunker uri / nsec";
+                    continue;
+                };
+                match get_nip46_signer_from_uri_and_key(&uri.to_string(), &app_key_secret).await {
+                    Ok(signer) => {
+                        let pub_key = fetch_public_key(&signer).await?;
+                        if let Err(error) = save_bunker(
+                            git_repo,
+                            &pub_key,
+                            &uri.to_string(),
+                            &app_key_secret,
+                            always_save,
+                        ) {
+                            eprintln!("{error}");
+                        }
+                        public_key = Some(pub_key);
+                        break signer;
+                    }
+                    Err(_) => {
+                        prompt = "failed. try again with nostr address / bunker uri / nsec";
+                    }
+                }
+            };
+            let public_key = if let Some(public_key) = public_key {
+                public_key
+            } else {
+                signer.public_key().await?
+            };
+            (signer, public_key)
         }
-    };
-    let public_key = if let Some(public_key) = public_key {
-        public_key
-    } else {
-        signer.public_key().await?
     };
     // lookup profile
     let user_ref = get_user_details(&public_key, client, git_repo.get_path()?, false).await?;
     print_logged_in_as(&user_ref, client.is_none())?;
     Ok((signer, user_ref))
+}
+
+fn generate_qr(data: &str) -> Result<Vec<String>> {
+    let mut lines = vec![];
+    let qr =
+        QrCode::new(data.as_bytes()).context("failed to create QR of nostrconnect login url")?;
+    let colors = qr.to_colors();
+    let rows: Vec<&[qrcode::Color]> = colors.chunks(qr.width()).collect();
+    for (row, data) in rows.iter().enumerate() {
+        let odd = row % 2 != 0;
+        if odd {
+            continue;
+        }
+        let mut line = String::new();
+        for (col, color) in data.iter().enumerate() {
+            let top = color;
+            let mut bottom = qrcode::Color::Light;
+            if let Some(next_row_data) = rows.get(row + 1) {
+                if let Some(color) = next_row_data.get(col) {
+                    bottom = *color;
+                }
+            }
+            line.push(if *top == qrcode::Color::Dark {
+                if bottom == qrcode::Color::Dark {
+                    '█'
+                } else {
+                    '▀'
+                }
+            } else if bottom == qrcode::Color::Dark {
+                '▄'
+            } else {
+                ' '
+            });
+        }
+        lines.push(line);
+    }
+    Ok(lines)
 }
 
 pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
@@ -447,7 +591,7 @@ fn save_bunker(
     {
         let global = !Interactor::default().confirm(
             PromptConfirmParms::default()
-                .with_prompt("just for this repository?")
+                .with_prompt("save login just for this repository?")
                 .with_default(false),
         )?;
         let npub = public_key.to_bech32()?;
@@ -523,6 +667,7 @@ fn save_keys(git_repo: &Repo, keys: &nostr::Keys, always_save: bool) -> Result<(
                     save_to_git_config(git_repo, &npub, &Some(nsec_string.clone()), &None, false)?;
                 }
             } else {
+                eprintln!("{error}");
                 Err(error)?;
             }
         };

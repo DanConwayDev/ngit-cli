@@ -1723,6 +1723,7 @@ dependencies = [
  "nostr-sqlite",
  "once_cell",
  "passwords",
+ "qrcode",
  "scrypt",
  "serde",
  "serde_json",
@@ -2293,6 +2294,12 @@ checksum = "5e719e8df665df0d1c8fbfd238015744736151d4445ec0836b8e628aae103b77"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quinn"

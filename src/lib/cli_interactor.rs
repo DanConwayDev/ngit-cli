@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
+use indicatif::TermLike;
 #[cfg(test)]
 use mockall::*;
 
@@ -183,4 +184,51 @@ impl PromptMultiChoiceParms {
         self.defaults = Some(defaults);
         self
     }
+}
+
+#[derive(Debug, Default)]
+pub struct Printer {
+    printed_lines: Vec<String>,
+}
+impl Printer {
+    pub fn println(&mut self, line: String) {
+        eprintln!("{line}");
+        self.printed_lines.push(line);
+    }
+    pub fn println_with_custom_formatting(
+        &mut self,
+        line: String,
+        line_without_formatting: String,
+    ) {
+        eprintln!("{line}");
+        self.printed_lines.push(line_without_formatting);
+    }
+    pub fn printlns(&mut self, lines: Vec<String>) {
+        for line in lines {
+            self.println(line);
+        }
+    }
+    pub fn clear_all(&mut self) {
+        let term = console::Term::stderr();
+        let _ = term.clear_last_lines(count_lines_per_msg_vec(
+            term.width(),
+            &self.printed_lines,
+            0,
+        ));
+        self.printed_lines.drain(..);
+    }
+}
+
+pub fn count_lines_per_msg(width: u16, msg: &str, prefix_len: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    // ((msg_len+prefix) / width).ceil() implemented using Integer Arithmetic
+    ((msg.chars().count() + prefix_len) + (width - 1) as usize) / width as usize
+}
+
+pub fn count_lines_per_msg_vec(width: u16, msgs: &[String], prefix_len: usize) -> usize {
+    msgs.iter()
+        .map(|msg| count_lines_per_msg(width, msg, prefix_len))
+        .sum()
 }

@@ -3,7 +3,7 @@ use git::GitTestRepo;
 use serial_test::serial;
 use test_utils::*;
 
-static EXPECTED_NSEC_PROMPT: &str = "login with nostr address / nsec";
+static EXPECTED_NSEC_PROMPT: &str = "login with nsec / bunker url / nostr address";
 static EXPECTED_LOCAL_REPOSITORY_PROMPT: &str = "just for this repository?";
 static EXPECTED_REQUIRE_PASSWORD_PROMPT: &str = "require password?";
 static EXPECTED_SET_PASSWORD_PROMPT: &str = "encrypt with password";
@@ -28,6 +28,18 @@ fn standard_first_time_login_encrypting_nsec() -> Result<CliTester> {
 
     p.expect_end_eventually()?;
     Ok(p)
+}
+
+fn expect_qr_prompt_opt_for_other_methods(p: &mut CliTester) -> Result<()> {
+    p.expect_eventually("scan QR or paste into remote signer")?;
+    p.expect_eventually("\r\n")?;
+    p.expect_eventually("login with nsec / bunker url / nostr address instead")?;
+    p.expect_eventually("\r\n")?;
+    p.send_line("")?;
+    // p.expect_eventually("\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r")?;
+    // p.expect_eventually("\r\r\r\r\r\r\r\r\r\r\r\r\r")?;
+
+    Ok(())
 }
 mod with_relays {
     use anyhow::Ok;
@@ -61,8 +73,8 @@ mod with_relays {
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
-
-                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
+                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
                             .succeeds_with(TEST_KEY_1_NSEC)?;
 
                         p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
@@ -102,7 +114,8 @@ mod with_relays {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
+                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
                             .succeeds_with(TEST_KEY_1_NSEC)?;
 
                         p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
@@ -591,7 +604,8 @@ mod with_relays {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
+                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
                             .succeeds_with(TEST_KEY_1_NSEC)?;
 
                         p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
@@ -654,7 +668,8 @@ mod with_relays {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                        p.expect_input(EXPECTED_NSEC_PROMPT)?
+                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
+                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
                             .succeeds_with(TEST_KEY_1_NSEC)?;
 
                         p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
@@ -777,7 +792,8 @@ mod with_relays {
                     let test_repo = GitTestRepo::default();
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                    p.expect_input(EXPECTED_NSEC_PROMPT)?
+                    expect_qr_prompt_opt_for_other_methods(&mut p)?;
+                    p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
                         .succeeds_with(TEST_KEY_1_NSEC)?;
 
                     p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
@@ -1124,12 +1140,14 @@ mod with_offline_flag {
         use super::*;
 
         #[test]
+        #[serial]
         // combined into a single test as it is computationally expensive to run
         fn warns_it_might_take_a_few_seconds_then_succeeds_then_second_login_prompts_for_password_then_warns_again_then_succeeds()
         -> Result<()> {
             let test_repo = GitTestRepo::default();
             let mut p =
                 CliTester::new_with_timeout_from_dir(15000, &test_repo.dir, ["login", "--offline"]);
+
             p.expect_input(EXPECTED_NSEC_PROMPT)?
                 .succeeds_with(TEST_KEY_1_NSEC)?;
 

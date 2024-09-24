@@ -53,6 +53,7 @@ pub struct Client {
     fallback_relays: Vec<String>,
     more_fallback_relays: Vec<String>,
     blaster_relays: Vec<String>,
+    fallback_signer_relays: Vec<String>,
 }
 
 #[cfg_attr(test, automock)]
@@ -66,6 +67,7 @@ pub trait Connect {
     fn get_fallback_relays(&self) -> &Vec<String>;
     fn get_more_fallback_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
+    fn get_fallback_signer_relays(&self) -> &Vec<String>;
     async fn send_event_to(
         &self,
         git_repo_path: &Path,
@@ -132,6 +134,13 @@ impl Connect for Client {
         } else {
             vec!["wss://nostr.mutinywallet.com".to_string()]
         };
+
+        let fallback_signer_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
+            vec!["ws://localhost:8051".to_string()]
+        } else {
+            vec!["wss://relay.nsec.app".to_string()]
+        };
+
         Client {
             client: nostr_sdk::ClientBuilder::new()
                 .opts(Options::new().relay_limits(RelayLimits::disable()))
@@ -139,6 +148,7 @@ impl Connect for Client {
             fallback_relays,
             more_fallback_relays,
             blaster_relays,
+            fallback_signer_relays,
         }
     }
     fn new(opts: Params) -> Self {
@@ -153,6 +163,7 @@ impl Connect for Client {
             fallback_relays: opts.fallback_relays,
             more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
+            fallback_signer_relays: opts.fallback_signer_relays,
         }
     }
 
@@ -196,6 +207,10 @@ impl Connect for Client {
 
     fn get_blaster_relays(&self) -> &Vec<String> {
         &self.blaster_relays
+    }
+
+    fn get_fallback_signer_relays(&self) -> &Vec<String> {
+        &self.fallback_signer_relays
     }
 
     async fn send_event_to(
@@ -629,6 +644,7 @@ pub struct Params {
     pub fallback_relays: Vec<String>,
     pub more_fallback_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
+    pub fallback_signer_relays: Vec<String>,
 }
 
 fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event> {
