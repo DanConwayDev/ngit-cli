@@ -112,9 +112,9 @@ pub fn make_commits_for_proposal(
             .context(format!(
                 "cannot create commit for patch {}",
                 nip19::Nip19Event {
-                    event_id: patch.id(),
-                    author: Some(patch.author()),
-                    kind: Some(patch.kind()),
+                    event_id: patch.id,
+                    author: Some(patch.pubkey),
+                    kind: Some(patch.kind),
                     relays: if let Some(relay) = repo_ref.relays.first() {
                         vec![relay.to_string()]
                     } else {

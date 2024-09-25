@@ -464,11 +464,9 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
-                    assert!(
-                        event.tags.iter().any(
-                            |t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq("example-identifier")
-                        )
-                    );
+                    assert!(event.tags.iter().any(
+                        |t| t.as_slice()[0].eq("d") && t.as_slice()[1].eq("example-identifier")
+                    ));
                 }
                 Ok(())
             }
@@ -484,9 +482,9 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
-                    assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("r")
-                        && t.as_vec()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")
-                        && t.as_vec()[2].eq("euc")));
+                    assert!(event.tags.iter().any(|t| t.as_slice()[0].eq("r")
+                        && t.as_slice()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")
+                        && t.as_slice()[2].eq("euc")));
                 }
                 Ok(())
             }
@@ -506,7 +504,8 @@ mod when_repo_not_previously_claimed {
                         event
                             .tags
                             .iter()
-                            .any(|t| t.as_vec()[0].eq("name") && t.as_vec()[1].eq("example-name"))
+                            .any(|t| t.as_slice()[0].eq("name")
+                                && t.as_slice()[1].eq("example-name"))
                     );
                 }
                 Ok(())
@@ -523,8 +522,8 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
-                    assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("alt")
-                        && t.as_vec()[1].eq("git repository: example-name")));
+                    assert!(event.tags.iter().any(|t| t.as_slice()[0].eq("alt")
+                        && t.as_slice()[1].eq("git repository: example-name")));
                 }
                 Ok(())
             }
@@ -540,8 +539,8 @@ mod when_repo_not_previously_claimed {
                         .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
                         .unwrap();
 
-                    assert!(event.tags.iter().any(|t| t.as_vec()[0].eq("description")
-                        && t.as_vec()[1].eq("example-description")));
+                    assert!(event.tags.iter().any(|t| t.as_slice()[0].eq("description")
+                        && t.as_slice()[1].eq("example-description")));
                 }
                 Ok(())
             }
@@ -558,8 +557,8 @@ mod when_repo_not_previously_claimed {
                         .unwrap();
 
                     assert!(
-                        event.tags.iter().any(|t| t.as_vec()[0].eq("clone")
-                            && t.as_vec()[1].eq("https://git.myhosting.com/my-repo.git")) /* todo check it defaults to origin */
+                        event.tags.iter().any(|t| t.as_slice()[0].eq("clone")
+                            && t.as_slice()[1].eq("https://git.myhosting.com/my-repo.git")) /* todo check it defaults to origin */
                     );
                 }
                 Ok(())
@@ -578,9 +577,9 @@ mod when_repo_not_previously_claimed {
                     let relays_tag = event
                         .tags
                         .iter()
-                        .find(|t| t.as_vec()[0].eq("relays"))
+                        .find(|t| t.as_slice()[0].eq("relays"))
                         .unwrap()
-                        .as_vec();
+                        .as_slice();
                     assert_eq!(relays_tag[1], "ws://localhost:8055",);
                     assert_eq!(relays_tag[2], "ws://localhost:8056",);
                 }
@@ -600,9 +599,9 @@ mod when_repo_not_previously_claimed {
                     let web_tag = event
                         .tags
                         .iter()
-                        .find(|t| t.as_vec()[0].eq("web"))
+                        .find(|t| t.as_slice()[0].eq("web"))
                         .unwrap()
-                        .as_vec();
+                        .as_slice();
                     assert_eq!(web_tag[1], "https://exampleproject.xyz",);
                     assert_eq!(web_tag[2], "https://gitworkshop.dev/123",);
                 }
@@ -622,9 +621,9 @@ mod when_repo_not_previously_claimed {
                     let maintainers_tag = event
                         .tags
                         .iter()
-                        .find(|t| t.as_vec()[0].eq("maintainers"))
+                        .find(|t| t.as_slice()[0].eq("maintainers"))
                         .unwrap()
-                        .as_vec();
+                        .as_slice();
                     assert_eq!(maintainers_tag[1], TEST_KEY_1_KEYS.public_key().to_string());
                 }
                 Ok(())

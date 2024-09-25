@@ -20,7 +20,7 @@ fn get_nostr_remote_url() -> Result<String> {
     let repo_event = generate_repo_ref_event();
     let naddr = Coordinate {
         kind: Kind::GitRepoAnnouncement,
-        public_key: repo_event.author(),
+        public_key: repo_event.pubkey,
         identifier: repo_event.identifier().unwrap().to_string(),
         relays: vec![
             "ws://localhost:8055".to_string(),
@@ -156,7 +156,7 @@ async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)>
     let state_event = r56
         .events
         .iter()
-        .find(|e| e.kind().eq(&STATE_KIND))
+        .find(|e| e.kind.eq(&STATE_KIND))
         .context("state event not created")?;
 
     assert_eq!(
@@ -164,7 +164,7 @@ async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)>
             .tags
             .iter()
             .filter(|t| t.kind().to_string().as_str().ne("d"))
-            .map(|t| t.as_vec().to_vec())
+            .map(|t| t.as_slice().to_vec())
             .collect::<HashSet<Vec<String>>>(),
         HashSet::from([
             vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],

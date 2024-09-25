@@ -359,7 +359,7 @@ mod when_branch_is_checked_out {
             assert!(r55_events.iter().any(|e| {
                 e.tags
                     .iter()
-                    .any(|t| t.as_vec()[0].eq("commit") && t.as_vec()[1].eq(&commit_id))
+                    .any(|t| t.as_slice()[0].eq("commit") && t.as_slice()[1].eq(&commit_id))
             }));
             Ok(())
         }

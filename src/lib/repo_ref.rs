@@ -42,42 +42,50 @@ impl TryFrom<nostr::Event> for RepoRef {
         }
         let mut r = Self::default();
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("d")) {
-            r.identifier = t.as_vec()[1].clone();
+        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("d")) {
+            r.identifier = t.as_slice()[1].clone();
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("name")) {
-            r.name = t.as_vec()[1].clone();
+        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("name")) {
+            r.name = t.as_slice()[1].clone();
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("description")) {
-            r.description = t.as_vec()[1].clone();
+        if let Some(t) = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice()[0].eq("description"))
+        {
+            r.description = t.as_slice()[1].clone();
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("clone")) {
+        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("clone")) {
             r.git_server = t.clone().to_vec();
             r.git_server.remove(0);
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("web")) {
+        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("web")) {
             r.web = t.clone().to_vec();
             r.web.remove(0);
         }
 
         if let Some(t) = event.tags.iter().find(|t| {
-            t.as_vec()[0].eq("r")
-                && t.as_vec()[1].len().eq(&40)
-                && git2::Oid::from_str(t.as_vec()[1].as_str()).is_ok()
+            t.as_slice()[0].eq("r")
+                && t.as_slice()[1].len().eq(&40)
+                && git2::Oid::from_str(t.as_slice()[1].as_str()).is_ok()
         }) {
-            r.root_commit = t.as_vec()[1].clone();
+            r.root_commit = t.as_slice()[1].clone();
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("relays")) {
+        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("relays")) {
             r.relays = t.clone().to_vec();
             r.relays.remove(0);
         }
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_vec()[0].eq("maintainers")) {
+        if let Some(t) = event
+            .tags
+            .iter()
+            .find(|t| t.as_slice()[0].eq("maintainers"))
+        {
             let mut maintainers = t.clone().to_vec();
             maintainers.remove(0);
             if !maintainers.contains(&event.pubkey.to_string()) {
@@ -98,7 +106,7 @@ impl TryFrom<nostr::Event> for RepoRef {
             Coordinate {
                 kind: event.kind,
                 identifier: event.identifier().unwrap().to_string(),
-                public_key: event.author(),
+                public_key: event.pubkey,
                 relays: vec![],
             },
             event,
@@ -606,7 +614,7 @@ mod tests {
                         .await
                         .tags
                         .iter()
-                        .any(|t| t.as_vec()[0].eq("d") && t.as_vec()[1].eq("123412341"))
+                        .any(|t| t.as_slice()[0].eq("d") && t.as_slice()[1].eq("123412341"))
                 )
             }
 
@@ -617,36 +625,44 @@ mod tests {
                         .await
                         .tags
                         .iter()
-                        .any(|t| t.as_vec()[0].eq("name") && t.as_vec()[1].eq("test name"))
+                        .any(|t| t.as_slice()[0].eq("name") && t.as_slice()[1].eq("test name"))
                 )
             }
 
             #[tokio::test]
             async fn alt() {
-                assert!(
-                    create().await.tags.iter().any(|t| t.as_vec()[0].eq("alt")
-                        && t.as_vec()[1].eq("git repository: test name"))
-                )
+                assert!(create().await.tags.iter().any(|t| t.as_slice()[0].eq("alt")
+                    && t.as_slice()[1].eq("git repository: test name")))
             }
 
             #[tokio::test]
             async fn description() {
-                assert!(create().await.tags.iter().any(
-                    |t| t.as_vec()[0].eq("description") && t.as_vec()[1].eq("test description")
-                ))
+                assert!(
+                    create()
+                        .await
+                        .tags
+                        .iter()
+                        .any(|t| t.as_slice()[0].eq("description")
+                            && t.as_slice()[1].eq("test description"))
+                )
             }
 
             #[tokio::test]
             async fn root_commit_as_reference() {
-                assert!(create().await.tags.iter().any(|t| t.as_vec()[0].eq("r")
-                    && t.as_vec()[1].eq("5e664e5a7845cd1373c79f580ca4fe29ab5b34d2")))
+                assert!(create().await.tags.iter().any(|t| t.as_slice()[0].eq("r")
+                    && t.as_slice()[1].eq("5e664e5a7845cd1373c79f580ca4fe29ab5b34d2")))
             }
 
             #[tokio::test]
             async fn git_server() {
-                assert!(create().await.tags.iter().any(
-                    |t| t.as_vec()[0].eq("clone") && t.as_vec()[1].eq("https://localhost:1000")
-                ))
+                assert!(
+                    create()
+                        .await
+                        .tags
+                        .iter()
+                        .any(|t| t.as_slice()[0].eq("clone")
+                            && t.as_slice()[1].eq("https://localhost:1000"))
+                )
             }
 
             #[tokio::test]
@@ -655,21 +671,24 @@ mod tests {
                 let relays_tag: &nostr::Tag = event
                     .tags
                     .iter()
-                    .find(|t| t.as_vec()[0].eq("relays"))
+                    .find(|t| t.as_slice()[0].eq("relays"))
                     .unwrap();
-                assert_eq!(relays_tag.as_vec().len(), 3);
-                assert_eq!(relays_tag.as_vec()[1], "ws://relay1.io");
-                assert_eq!(relays_tag.as_vec()[2], "ws://relay2.io");
+                assert_eq!(relays_tag.as_slice().len(), 3);
+                assert_eq!(relays_tag.as_slice()[1], "ws://relay1.io");
+                assert_eq!(relays_tag.as_slice()[2], "ws://relay2.io");
             }
 
             #[tokio::test]
             async fn web() {
                 let event = create().await;
-                let web_tag: &nostr::Tag =
-                    event.tags.iter().find(|t| t.as_vec()[0].eq("web")).unwrap();
-                assert_eq!(web_tag.as_vec().len(), 3);
-                assert_eq!(web_tag.as_vec()[1], "https://exampleproject.xyz");
-                assert_eq!(web_tag.as_vec()[2], "https://gitworkshop.dev/123");
+                let web_tag: &nostr::Tag = event
+                    .tags
+                    .iter()
+                    .find(|t| t.as_slice()[0].eq("web"))
+                    .unwrap();
+                assert_eq!(web_tag.as_slice().len(), 3);
+                assert_eq!(web_tag.as_slice()[1], "https://exampleproject.xyz");
+                assert_eq!(web_tag.as_slice()[2], "https://gitworkshop.dev/123");
             }
 
             #[tokio::test]
@@ -678,15 +697,15 @@ mod tests {
                 let maintainers_tag: &nostr::Tag = event
                     .tags
                     .iter()
-                    .find(|t| t.as_vec()[0].eq("maintainers"))
+                    .find(|t| t.as_slice()[0].eq("maintainers"))
                     .unwrap();
-                assert_eq!(maintainers_tag.as_vec().len(), 3);
+                assert_eq!(maintainers_tag.as_slice().len(), 3);
                 assert_eq!(
-                    maintainers_tag.as_vec()[1],
+                    maintainers_tag.as_slice()[1],
                     TEST_KEY_1_KEYS.public_key().to_string()
                 );
                 assert_eq!(
-                    maintainers_tag.as_vec()[2],
+                    maintainers_tag.as_slice()[2],
                     TEST_KEY_2_KEYS.public_key().to_string()
                 );
             }

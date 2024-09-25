@@ -25,7 +25,7 @@ impl Default for GitTestRepo {
         let repo_event = generate_repo_ref_event();
         let coordinate = Coordinate {
             kind: Kind::GitRepoAnnouncement,
-            public_key: repo_event.author(),
+            public_key: repo_event.pubkey,
             identifier: repo_event.identifier().unwrap().to_string(),
             relays: vec![
                 "ws://localhost:8055".to_string(),

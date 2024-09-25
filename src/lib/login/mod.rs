@@ -363,7 +363,7 @@ async fn fresh_login(
     always_save: bool,
 ) -> Result<(NostrSigner, UserRef)> {
     let app_key = Keys::generate();
-    let app_key_secret = app_key.secret_key()?.to_secret_hex();
+    let app_key_secret = app_key.secret_key().to_secret_hex();
     let relays = if let Some(client) = client {
         client
             .get_fallback_signer_relays()
@@ -652,7 +652,7 @@ fn save_keys(git_repo: &Repo, keys: &nostr::Keys, always_save: bool) -> Result<(
                 .context("failed to get password input from interactor.password")?;
             encrypt_key(keys, &password)?
         } else {
-            keys.secret_key()?.to_bech32()?
+            keys.secret_key().to_bech32()?
         };
 
         if let Err(error) =
@@ -745,9 +745,9 @@ fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event]) -
                         )))
                 })
                 .map(|t| UserRelayRef {
-                    url: t.as_vec()[1].clone(),
-                    read: t.as_vec().len() == 2 || t.as_vec()[2].eq("read"),
-                    write: t.as_vec().len() == 2 || t.as_vec()[2].eq("write"),
+                    url: t.as_slice()[1].clone(),
+                    read: t.as_slice().len() == 2 || t.as_slice()[2].eq("read"),
+                    write: t.as_slice().len() == 2 || t.as_slice()[2].eq("write"),
                 })
                 .collect()
         } else {

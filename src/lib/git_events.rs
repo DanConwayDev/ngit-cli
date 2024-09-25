@@ -19,9 +19,9 @@ pub fn tag_value(event: &Event, tag_name: &str) -> Result<String> {
     Ok(event
         .tags
         .iter()
-        .find(|t| t.as_vec()[0].eq(tag_name))
+        .find(|t| t.as_slice()[0].eq(tag_name))
         .context(format!("tag '{tag_name}'not present"))?
-        .as_vec()[1]
+        .as_slice()[1]
         .clone())
 }
 
@@ -40,11 +40,11 @@ pub fn get_commit_id_from_patch(event: &Event) -> Result<String> {
 pub fn get_event_root(event: &nostr::Event) -> Result<EventId> {
     Ok(EventId::parse(
         event
-            .tags()
+            .tags
             .iter()
             .find(|t| t.is_root())
             .context("no thread root in event")?
-            .as_vec()
+            .as_slice()
             .get(1)
             .unwrap(),
     )?)
@@ -60,23 +60,23 @@ pub fn status_kinds() -> Vec<Kind> {
 }
 
 pub fn event_is_patch_set_root(event: &Event) -> bool {
-    event.kind.eq(&Kind::GitPatch) && event.tags().iter().any(|t| t.as_vec()[1].eq("root"))
+    event.kind.eq(&Kind::GitPatch) && event.tags.iter().any(|t| t.as_slice()[1].eq("root"))
 }
 
 pub fn event_is_revision_root(event: &Event) -> bool {
     event.kind.eq(&Kind::GitPatch)
         && event
-            .tags()
+            .tags
             .iter()
-            .any(|t| t.as_vec()[1].eq("revision-root"))
+            .any(|t| t.as_slice()[1].eq("revision-root"))
 }
 
 pub fn patch_supports_commit_ids(event: &Event) -> bool {
     event.kind.eq(&Kind::GitPatch)
         && event
-            .tags()
+            .tags
             .iter()
-            .any(|t| t.as_vec()[0].eq("commit-pgp-sig"))
+            .any(|t| t.as_slice()[0].eq("commit-pgp-sig"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -399,7 +399,7 @@ pub async fn generate_cover_letter_and_patch_events(
                 events.first().map(|event| event.id),
                 signer,
                 repo_ref,
-                events.last().map(nostr::Event::id),
+                events.last().map(|e| e.id),
                 if events.is_empty() && commits.len().eq(&1) {
                     None
                 } else {
@@ -461,11 +461,11 @@ pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
     //   [PATCH v1 0/n ] or
     //   [PATCH subsystem v2 0/n ]
     event.kind.eq(&Kind::GitPatch)
-        && event.tags().iter().any(|t| t.as_vec()[1].eq("root"))
+        && event.tags.iter().any(|t| t.as_slice()[1].eq("root"))
         && event
-            .tags()
+            .tags
             .iter()
-            .any(|t| t.as_vec()[1].eq("cover-letter"))
+            .any(|t| t.as_slice()[1].eq("cover-letter"))
 }
 
 pub fn commit_msg_from_patch(patch: &nostr::Event) -> Result<String> {
@@ -529,7 +529,7 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
                 .collect();
             s
         },
-        event_id: Some(event.id()),
+        event_id: Some(event.id),
     })
 }
 
@@ -580,17 +580,17 @@ fn get_event_parent_id(event: &nostr::Event) -> Result<String> {
     Ok(if let Some(reply_tag) = event
         .tags
         .iter()
-        .find(|t| t.as_vec().len().gt(&3) && t.as_vec()[3].eq("reply"))
+        .find(|t| t.as_slice().len().gt(&3) && t.as_slice()[3].eq("reply"))
     {
         reply_tag
     } else {
         event
             .tags
             .iter()
-            .find(|t| t.as_vec().len().gt(&3) && t.as_vec()[3].eq("root"))
+            .find(|t| t.as_slice().len().gt(&3) && t.as_slice()[3].eq("root"))
             .context("no reply or root e tag present".to_string())?
     }
-    .as_vec()[1]
+    .as_slice()[1]
         .clone())
 }
 
@@ -601,7 +601,7 @@ pub fn is_event_proposal_root_for_branch(
 ) -> Result<bool> {
     let branch_name = branch_name_or_refstr.replace("refs/heads/", "");
     Ok(event_to_cover_letter(e).is_ok_and(|cl| {
-        (logged_in_user.is_some_and(|public_key| e.author().eq(&public_key))
+        (logged_in_user.is_some_and(|public_key| e.pubkey.eq(&public_key))
             && (branch_name.eq(&format!("pr/{}", cl.branch_name))
                 || cl.branch_name.eq(&branch_name)))
             || cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name))

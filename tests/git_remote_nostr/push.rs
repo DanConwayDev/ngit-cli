@@ -298,7 +298,7 @@ mod two_branches_in_batch_one_added_one_updated {
         let state_event = r56
             .events
             .iter()
-            .find(|e| e.kind().eq(&STATE_KIND))
+            .find(|e| e.kind.eq(&STATE_KIND))
             .context("state event not created")?;
 
         assert_eq!(
@@ -311,7 +311,7 @@ mod two_branches_in_batch_one_added_one_updated {
                 .tags
                 .iter()
                 .filter(|t| t.kind().to_string().as_str().ne("d"))
-                .map(|t| t.as_vec().to_vec())
+                .map(|t| t.as_slice().to_vec())
                 .collect::<HashSet<Vec<String>>>(),
             HashSet::from([
                 vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
@@ -415,7 +415,7 @@ mod two_branches_in_batch_one_added_one_updated {
         let state_event = r56
             .events
             .iter()
-            .find(|e| e.kind().eq(&STATE_KIND))
+            .find(|e| e.kind.eq(&STATE_KIND))
             .context("state event not created")?;
 
         // println!("{:#?}", state_event);
@@ -424,7 +424,7 @@ mod two_branches_in_batch_one_added_one_updated {
                 .tags
                 .iter()
                 .filter(|t| t.kind().to_string().as_str().ne("d"))
-                .map(|t| t.as_vec().to_vec())
+                .map(|t| t.as_slice().to_vec())
                 .collect::<HashSet<Vec<String>>>(),
             HashSet::from([
                 vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
@@ -710,7 +710,7 @@ mod delete_one_branch {
             let state_event = r56
                 .events
                 .iter()
-                .find(|e| e.kind().eq(&STATE_KIND))
+                .find(|e| e.kind.eq(&STATE_KIND))
                 .context("state event not created")?;
 
             // println!("{:#?}", state_event);
@@ -719,7 +719,7 @@ mod delete_one_branch {
                     .tags
                     .iter()
                     .filter(|t| t.kind().to_string().as_str().ne("d"))
-                    .map(|t| t.as_vec().to_vec())
+                    .map(|t| t.as_slice().to_vec())
                     .collect::<HashSet<Vec<String>>>(),
                 HashSet::from([
                     vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
@@ -797,7 +797,7 @@ mod delete_one_branch {
                 let state_event = r56
                     .events
                     .iter()
-                    .find(|e| e.kind().eq(&STATE_KIND))
+                    .find(|e| e.kind.eq(&STATE_KIND))
                     .context("state event not created")?;
 
                 // println!("{:#?}", state_event);
@@ -806,7 +806,7 @@ mod delete_one_branch {
                         .tags
                         .iter()
                         .filter(|t| t.kind().to_string().as_str().ne("d"))
-                        .map(|t| t.as_vec().to_vec())
+                        .map(|t| t.as_slice().to_vec())
                         .collect::<HashSet<Vec<String>>>(),
                     HashSet::from([
                         vec!["HEAD".to_string(), "ref: refs/heads/main".to_string()],
@@ -980,16 +980,16 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         .events
         .iter()
         .find(|e| {
-            e.tags()
+            e.tags
                 .iter()
-                .find(|t| t.as_vec()[0].eq("branch-name"))
-                .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
+                .find(|t| t.as_slice()[0].eq("branch-name"))
+                .is_some_and(|t| t.as_slice()[1].eq(FEATURE_BRANCH_NAME_1))
         })
         .unwrap();
 
     let merge_status = new_events
         .iter()
-        .find(|e| e.kind().eq(&Kind::GitStatusApplied))
+        .find(|e| e.kind.eq(&Kind::GitStatusApplied))
         .unwrap();
 
     assert_eq!(
@@ -997,9 +997,9 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         merge_status
             .tags
             .iter()
-            .find(|t| t.as_vec()[0].eq("merge-commit-id"))
+            .find(|t| t.as_slice()[0].eq("merge-commit-id"))
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "status sets correct merge-commit-id tag"
     );
 
@@ -1007,35 +1007,35 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         .events
         .iter()
         .filter(|e| {
-            e.tags()
+            e.tags
                 .iter()
-                .any(|t| t.as_vec()[1].eq(&proposal.id().to_string()))
-                && e.kind().eq(&Kind::GitPatch)
+                .any(|t| t.as_slice()[1].eq(&proposal.id.to_string()))
+                && e.kind.eq(&Kind::GitPatch)
         })
         .last()
         .unwrap();
 
     assert_eq!(
-        proposal_tip.id().to_string(),
+        proposal_tip.id.to_string(),
         merge_status
             .tags
             .iter()
-            .find(|t| t.as_vec().len().eq(&4) && t.as_vec()[3].eq("mention"))
+            .find(|t| t.as_slice().len().eq(&4) && t.as_slice()[3].eq("mention"))
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "status mentions proposal tip event \r\nmerge status:\r\n{}\r\nproposal tip:\r\n{}",
         merge_status.as_json(),
         proposal_tip.as_json(),
     );
 
     assert_eq!(
-        proposal.id().to_string(),
+        proposal.id.to_string(),
         merge_status
             .tags
             .iter()
             .find(|t| t.is_root())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "status tags proposal id as root \r\nmerge status:\r\n{}\r\nproposal:\r\n{}",
         merge_status.as_json(),
         proposal.as_json(),
@@ -1136,32 +1136,32 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
         .events
         .iter()
         .find(|e| {
-            e.tags()
+            e.tags
                 .iter()
-                .find(|t| t.as_vec()[0].eq("branch-name"))
-                .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
+                .find(|t| t.as_slice()[0].eq("branch-name"))
+                .is_some_and(|t| t.as_slice()[1].eq(FEATURE_BRANCH_NAME_1))
         })
         .unwrap();
 
     assert_eq!(
-        proposal.id().to_string(),
+        proposal.id.to_string(),
         first_new_patch
             .tags
             .iter()
             .find(|t| t.is_root())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "first patch sets proposal id as root"
     );
 
     assert_eq!(
-        first_new_patch.id().to_string(),
+        first_new_patch.id.to_string(),
         second_new_patch
             .tags
             .iter()
             .find(|t| t.is_reply())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "second new patch replies to the first new patch"
     );
 
@@ -1169,21 +1169,21 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
         .events
         .iter()
         .find(|e| {
-            e.tags()
+            e.tags
                 .iter()
-                .any(|t| t.as_vec()[1].eq(&proposal.id().to_string()))
+                .any(|t| t.as_slice()[1].eq(&proposal.id.to_string()))
                 && e.content.contains("[PATCH 2/2]")
         })
         .unwrap();
 
     assert_eq!(
-        previous_proposal_tip_event.id().to_string(),
+        previous_proposal_tip_event.id.to_string(),
         first_new_patch
             .tags
             .iter()
             .find(|t| t.is_reply())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "first patch replies to the previous tip of proposal"
     );
 
@@ -1275,26 +1275,26 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
         .events
         .iter()
         .find(|e| {
-            e.tags()
+            e.tags
                 .iter()
-                .find(|t| t.as_vec()[0].eq("branch-name"))
-                .is_some_and(|t| t.as_vec()[1].eq(FEATURE_BRANCH_NAME_1))
+                .find(|t| t.as_slice()[0].eq("branch-name"))
+                .is_some_and(|t| t.as_slice()[1].eq(FEATURE_BRANCH_NAME_1))
         })
         .unwrap();
 
     let revision_root_patch = new_events
         .iter()
-        .find(|e| e.tags().iter().any(|t| t.as_vec()[1].eq("revision-root")))
+        .find(|e| e.tags.iter().any(|t| t.as_slice()[1].eq("revision-root")))
         .unwrap();
 
     assert_eq!(
-        proposal.id().to_string(),
+        proposal.id.to_string(),
         revision_root_patch
             .tags
             .iter()
             .find(|t| t.is_reply())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "revision root patch replies to original proposal"
     );
 
@@ -1321,24 +1321,24 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
     );
 
     assert_eq!(
-        revision_root_patch.id().to_string(),
+        revision_root_patch.id.to_string(),
         second_patch
             .tags
             .iter()
             .find(|t| t.is_root())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "second patch sets revision id as root"
     );
 
     assert_eq!(
-        second_patch.id().to_string(),
+        second_patch.id.to_string(),
         third_patch
             .tags
             .iter()
             .find(|t| t.is_reply())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "third patch replies to the second new patch"
     );
 
@@ -1423,7 +1423,7 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
 
     let proposal = new_events
         .iter()
-        .find(|e| e.tags().iter().any(|t| t.as_vec()[1].eq("root")))
+        .find(|e| e.tags.iter().any(|t| t.as_slice()[1].eq("root")))
         .unwrap();
 
     assert!(
@@ -1438,11 +1438,11 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
 
     assert_eq!(
         proposal
-            .tags()
+            .tags
             .iter()
-            .find(|t| t.as_vec()[0].eq("branch-name"))
+            .find(|t| t.as_slice()[0].eq("branch-name"))
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         branch_name.replace("pr/", ""),
     );
 
@@ -1457,13 +1457,13 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
     );
 
     assert_eq!(
-        proposal.id().to_string(),
+        proposal.id.to_string(),
         second_patch
             .tags
             .iter()
             .find(|t| t.is_root())
             .unwrap()
-            .as_vec()[1],
+            .as_slice()[1],
         "second patch sets proposal id as root"
     );
 

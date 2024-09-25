@@ -29,7 +29,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 #[cfg(test)]
 use mockall::*;
 use nostr::{nips::nip01::Coordinate, Event};
-use nostr_database::{NostrDatabase, Order};
+use nostr_database::NostrDatabase;
 use nostr_sdk::{
     prelude::RelayLimits, EventBuilder, EventId, Kind, NostrSigner, Options, PublicKey,
     SingleLetterTag, Timestamp, Url,
@@ -231,10 +231,10 @@ impl Connect for Client {
             });
         }
         save_event_in_cache(git_repo_path, &event).await?;
-        if event.kind().eq(&Kind::GitRepoAnnouncement) {
+        if event.kind.eq(&Kind::GitRepoAnnouncement) {
             save_event_in_global_cache(git_repo_path, &event).await?;
         }
-        Ok(event.id())
+        Ok(event.id)
     }
 
     async fn get_events(
@@ -758,7 +758,7 @@ pub async fn get_events_from_cache(
 ) -> Result<Vec<nostr::Event>> {
     get_local_cache_database(git_repo_path)
         .await?
-        .query(filters.clone(), Order::Asc)
+        .query(filters.clone())
         .await
         .context(
             "cannot execute query on opened git repo nostr cache database .git/nostr-cache.sqlite",
@@ -771,7 +771,7 @@ pub async fn get_event_from_global_cache(
 ) -> Result<Vec<nostr::Event>> {
     get_global_cache_database(git_repo_path)
         .await?
-        .query(filters.clone(), Order::Asc)
+        .query(filters.clone())
         .await
         .context("cannot execute query on opened ngit nostr cache database")
 }
@@ -839,12 +839,12 @@ pub async fn get_repo_ref_from_cache(
 
     let mut events: HashMap<Coordinate, nostr::Event> = HashMap::new();
     for m in &maintainers {
-        if let Some(e) = repo_events.iter().find(|e| e.author().eq(m)) {
+        if let Some(e) = repo_events.iter().find(|e| e.pubkey.eq(m)) {
             events.insert(
                 Coordinate {
                     kind: e.kind,
                     identifier: e.identifier().unwrap().to_string(),
-                    public_key: e.author(),
+                    public_key: e.pubkey,
                     relays: vec![],
                 },
                 e.clone(),
@@ -938,8 +938,8 @@ async fn create_relays_request(
         .await?
         {
             if event_is_patch_set_root(event) || event_is_revision_root(event) {
-                proposals.insert(event.id());
-                contributors.insert(event.author());
+                proposals.insert(event.id);
+                contributors.insert(event.pubkey);
             }
         }
 
@@ -951,7 +951,7 @@ async fn create_relays_request(
         for c in &contributors {
             if let Some(event) = profile_events
                 .iter()
-                .find(|e| e.kind() == Kind::Metadata && e.author().eq(c))
+                .find(|e| e.kind == Kind::Metadata && e.pubkey.eq(c))
             {
                 save_event_in_cache(git_repo_path, event).await?;
             } else {
@@ -1109,7 +1109,7 @@ async fn process_fetched_events(
     for event in &events {
         if !request.existing_events.contains(&event.id) {
             save_event_in_cache(git_repo_path, event).await?;
-            if event.kind().eq(&Kind::GitRepoAnnouncement) {
+            if event.kind.eq(&Kind::GitRepoAnnouncement) {
                 save_event_in_global_cache(git_repo_path, event).await?;
                 let new_coordinate = !request
                     .repo_coordinates_without_relays
@@ -1135,8 +1135,8 @@ async fn process_fetched_events(
                 if update_to_existing {
                     report.updated_repo_announcements.push((
                         Coordinate {
-                            kind: event.kind(),
-                            public_key: event.author(),
+                            kind: event.kind,
+                            public_key: event.pubkey,
                             identifier: event.identifier().unwrap().to_owned(),
                             relays: vec![],
                         },
@@ -1155,7 +1155,7 @@ async fn process_fetched_events(
                             .any(|c| c.identifier.eq(&repo_ref.identifier) && m.eq(&c.public_key))
                         {
                             let c = Coordinate {
-                                kind: event.kind(),
+                                kind: event.kind,
                                 public_key: *m,
                                 identifier: repo_ref.identifier.clone(),
                                 relays: vec![],
@@ -1177,7 +1177,7 @@ async fn process_fetched_events(
                         }
                     }
                 }
-            } else if event.kind().eq(&STATE_KIND) {
+            } else if event.kind.eq(&STATE_KIND) {
                 let existing_state = if report.updated_state.is_some() {
                     report.updated_state
                 } else {
@@ -1193,27 +1193,23 @@ async fn process_fetched_events(
             } else if event_is_patch_set_root(event) {
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
-                if !request.contributors.contains(&event.author())
-                    && !fresh_profiles.contains(&event.author())
+                if !request.contributors.contains(&event.pubkey)
+                    && !fresh_profiles.contains(&event.pubkey)
                 {
-                    fresh_profiles.insert(event.author());
+                    fresh_profiles.insert(event.pubkey);
                 }
-            } else if [Kind::RelayList, Kind::Metadata].contains(&event.kind()) {
-                if request
-                    .missing_contributor_profiles
-                    .contains(&event.author())
-                {
-                    report.contributor_profiles.insert(event.author());
+            } else if [Kind::RelayList, Kind::Metadata].contains(&event.kind) {
+                if request.missing_contributor_profiles.contains(&event.pubkey) {
+                    report.contributor_profiles.insert(event.pubkey);
                 } else if let Some((_, (metadata_timestamp, relay_list_timestamp))) = request
                     .profiles_to_fetch_from_user_relays
-                    .get_key_value(&event.author())
+                    .get_key_value(&event.pubkey)
                 {
-                    if (Kind::Metadata.eq(&event.kind())
-                        && event.created_at().gt(metadata_timestamp))
-                        || (Kind::RelayList.eq(&event.kind())
-                            && event.created_at().gt(relay_list_timestamp))
+                    if (Kind::Metadata.eq(&event.kind) && event.created_at.gt(metadata_timestamp))
+                        || (Kind::RelayList.eq(&event.kind)
+                            && event.created_at.gt(relay_list_timestamp))
                     {
-                        report.profile_updates.insert(event.author());
+                        report.profile_updates.insert(event.pubkey);
                     }
                 }
                 save_event_in_global_cache(git_repo_path, event).await?;
@@ -1224,9 +1220,9 @@ async fn process_fetched_events(
         if !request.existing_events.contains(&event.id)
             && !event.event_ids().any(|id| report.proposals.contains(id))
         {
-            if event.kind().eq(&Kind::GitPatch) && !event_is_patch_set_root(event) {
+            if event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event) {
                 report.commits.insert(event.id);
-            } else if status_kinds().contains(&event.kind()) {
+            } else if status_kinds().contains(&event.kind) {
                 report.statuses.insert(event.id);
             }
         }
@@ -1549,21 +1545,21 @@ pub async fn get_all_proposal_patch_events_from_cache(
         vec![
             commit_events
                 .iter()
-                .find(|e| e.id().eq(proposal_id))
+                .find(|e| e.id.eq(proposal_id))
                 .context("proposal not in cache")?
-                .author(),
+                .pubkey,
         ],
     ]
     .concat()
     .iter()
     .copied()
     .collect();
-    commit_events.retain(|e| permissioned_users.contains(&e.author()));
+    commit_events.retain(|e| permissioned_users.contains(&e.pubkey));
 
     let revision_roots: HashSet<nostr::EventId> = commit_events
         .iter()
         .filter(|e| event_is_revision_root(e))
-        .map(nostr::Event::id)
+        .map(|e| e.id)
         .collect();
 
     if !revision_roots.is_empty() {
@@ -1584,7 +1580,7 @@ pub async fn get_all_proposal_patch_events_from_cache(
 
     Ok(commit_events
         .iter()
-        .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(&e.author()))
+        .filter(|e| !event_is_cover_letter(e) && permissioned_users.contains(&e.pubkey))
         .cloned()
         .collect())
 }
@@ -1614,10 +1610,7 @@ pub async fn send_events(
 ) -> Result<()> {
     let fallback = [
         client.get_fallback_relays().clone(),
-        if events
-            .iter()
-            .any(|e| e.kind().eq(&Kind::GitRepoAnnouncement))
-        {
+        if events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
             client.get_blaster_relays().clone()
         } else {
             vec![]

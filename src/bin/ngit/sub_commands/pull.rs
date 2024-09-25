@@ -53,12 +53,9 @@ pub async fn launch() -> Result<()> {
             .context("cannot find proposal that matches the current branch name")?
             .clone();
 
-    let commit_events = get_all_proposal_patch_events_from_cache(
-        git_repo_path,
-        &repo_ref,
-        &proposal_root_event.id(),
-    )
-    .await?;
+    let commit_events =
+        get_all_proposal_patch_events_from_cache(git_repo_path, &repo_ref, &proposal_root_event.id)
+            .await?;
 
     let most_recent_proposal_patch_chain =
         get_most_recent_patch_with_ancestors(commit_events.clone())

@@ -15,12 +15,12 @@ impl RepoState {
         let event = state_events.first().context("no state events")?;
         let mut state = HashMap::new();
         for tag in &event.tags {
-            if let Some(name) = tag.as_vec().first() {
+            if let Some(name) = tag.as_slice().first() {
                 if ["refs/heads/", "refs/tags", "HEAD"]
                     .iter()
                     .any(|s| name.starts_with(*s))
                 {
-                    if let Some(value) = tag.as_vec().get(1) {
+                    if let Some(value) = tag.as_slice().get(1) {
                         if Oid::from_str(value).is_ok() || value.contains("ref: refs/") {
                             state.insert(name.to_owned(), value.to_owned());
                         }

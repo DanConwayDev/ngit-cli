@@ -52,7 +52,7 @@ pub async fn launch() -> Result<()> {
             vec![
                 nostr::Filter::default()
                     .kinds(status_kinds().clone())
-                    .events(proposals_and_revisions.iter().map(nostr::Event::id)),
+                    .events(proposals_and_revisions.iter().map(|e| e.id)),
             ],
         )
         .await?;
@@ -76,15 +76,15 @@ pub async fn launch() -> Result<()> {
         let status = if let Some(e) = statuses
             .iter()
             .filter(|e| {
-                status_kinds().contains(&e.kind())
-                    && e.tags()
+                status_kinds().contains(&e.kind)
+                    && e.tags
                         .iter()
-                        .any(|t| t.as_vec()[1].eq(&proposal.id.to_string()))
+                        .any(|t| t.as_slice()[1].eq(&proposal.id.to_string()))
             })
             .collect::<Vec<&nostr::Event>>()
             .first()
         {
-            e.kind()
+            e.kind
         } else {
             Kind::GitStatusOpen
         };
@@ -184,7 +184,7 @@ pub async fn launch() -> Result<()> {
         let commits_events: Vec<nostr::Event> = get_all_proposal_patch_events_from_cache(
             git_repo_path,
             &repo_ref,
-            &proposals_for_status[selected_index].id(),
+            &proposals_for_status[selected_index].id,
         )
         .await?;
 
@@ -704,7 +704,7 @@ fn save_patches_to_dir(mut patches: Vec<nostr::Event>, git_repo: &Repo) -> Resul
             .truncate(true)
             .open(path)
             .context("open new patch file with write and truncate options")?;
-        file.write_all(patch.content().as_bytes())?;
+        file.write_all(patch.content.as_bytes())?;
         file.write_all("\n\n".as_bytes())?;
         file.flush()?;
     }

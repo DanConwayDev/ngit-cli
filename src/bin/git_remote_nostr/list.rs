@@ -149,7 +149,7 @@ async fn get_open_proposals_state(
         if let Ok(cl) = event_to_cover_letter(&proposal) {
             if let Ok(mut branch_name) = cl.get_branch_name() {
                 branch_name = if let Some(public_key) = current_user {
-                    if proposal.author().eq(&public_key) {
+                    if proposal.pubkey.eq(&public_key) {
                         cl.branch_name.to_string()
                     } else {
                         branch_name

@@ -10,7 +10,7 @@ use dialoguer::theme::{ColorfulTheme, Theme};
 use futures::executor::block_on;
 use git::GitTestRepo;
 use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
-use nostr_database::{NostrDatabase, Order};
+use nostr_database::NostrDatabase;
 use nostr_sdk::{serde_json, Client, NostrSigner, TagStandard};
 use nostr_sqlite::SQLiteDatabase;
 use once_cell::sync::Lazy;
@@ -1064,7 +1064,7 @@ pub async fn get_events_from_cache(
 ) -> Result<Vec<nostr::Event>> {
     get_local_cache_database(git_repo_path)
         .await?
-        .query(filters.clone(), Order::Asc)
+        .query(filters.clone())
         .await
         .context(
             "cannot execute query on opened git repo nostr cache database .git/nostr-cache.sqlite",
@@ -1091,10 +1091,10 @@ pub fn get_proposal_branch_name_from_events(
     branch_name_in_event: &str,
 ) -> Result<String> {
     for event in events {
-        if event.tags().iter().any(|t| {
-            !t.as_vec()[1].eq("revision-root")
-                && event.tags().iter().any(|t| {
-                    t.as_vec()[0].eq("branch-name") && t.as_vec()[1].eq(branch_name_in_event)
+        if event.tags.iter().any(|t| {
+            !t.as_slice()[1].eq("revision-root")
+                && event.tags.iter().any(|t| {
+                    t.as_slice()[0].eq("branch-name") && t.as_slice()[1].eq(branch_name_in_event)
                 })
         }) {
             return Ok(format!(
@@ -1379,7 +1379,7 @@ fn get_first_proposal_event_id() -> Result<nostr::EventId> {
         .find(|e| {
             e.tags
                 .iter()
-                .any(|t| t.as_vec()[1].eq(&FEATURE_BRANCH_NAME_1))
+                .any(|t| t.as_slice()[1].eq(&FEATURE_BRANCH_NAME_1))
         })
         .unwrap()
         .id;

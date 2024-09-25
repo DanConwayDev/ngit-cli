@@ -11,7 +11,7 @@ pub fn encrypt_key(keys: &Keys, password: &str) -> Result<String> {
         15
     };
     Ok(nostr::nips::nip49::EncryptedSecretKey::new(
-        keys.secret_key()?,
+        keys.secret_key(),
         password,
         log2_rounds,
         KeySecurity::Medium,
@@ -47,14 +47,8 @@ mod tests {
         let decrypted_key = decrypt_key(TEST_KEY_1_ENCRYPTED, TEST_PASSWORD)?;
 
         assert_eq!(
-            format!(
-                "{}",
-                TEST_KEY_1_KEYS.secret_key().unwrap().to_bech32().unwrap()
-            ),
-            format!(
-                "{}",
-                decrypted_key.secret_key().unwrap().to_bech32().unwrap()
-            ),
+            format!("{}", TEST_KEY_1_KEYS.secret_key().to_bech32().unwrap()),
+            format!("{}", decrypted_key.secret_key().to_bech32().unwrap()),
         );
         Ok(())
     }
@@ -65,14 +59,8 @@ mod tests {
         let decrypted_key = decrypt_key(TEST_KEY_1_ENCRYPTED_WEAK, TEST_WEAK_PASSWORD)?;
 
         assert_eq!(
-            format!(
-                "{}",
-                TEST_KEY_1_KEYS.secret_key().unwrap().to_bech32().unwrap()
-            ),
-            format!(
-                "{}",
-                decrypted_key.secret_key().unwrap().to_bech32().unwrap()
-            ),
+            format!("{}", TEST_KEY_1_KEYS.secret_key().to_bech32().unwrap()),
+            format!("{}", decrypted_key.secret_key().to_bech32().unwrap()),
         );
         Ok(())
     }
@@ -84,8 +72,8 @@ mod tests {
         let newkey = decrypt_key(s.as_str(), TEST_PASSWORD)?;
 
         assert_eq!(
-            format!("{}", key.secret_key().unwrap().to_bech32().unwrap()),
-            format!("{}", newkey.secret_key().unwrap().to_bech32().unwrap()),
+            format!("{}", key.secret_key().to_bech32().unwrap()),
+            format!("{}", newkey.secret_key().to_bech32().unwrap()),
         );
         Ok(())
     }
@@ -97,8 +85,8 @@ mod tests {
         let newkey = decrypt_key(s.as_str(), TEST_PASSWORD)?;
 
         assert_eq!(
-            format!("{}", key.secret_key().unwrap().to_bech32().unwrap()),
-            format!("{}", newkey.secret_key().unwrap().to_bech32().unwrap()),
+            format!("{}", key.secret_key().to_bech32().unwrap()),
+            format!("{}", newkey.secret_key().to_bech32().unwrap()),
         );
         Ok(())
     }

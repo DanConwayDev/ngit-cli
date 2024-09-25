@@ -184,7 +184,7 @@ pub async fn run_push(
             if let Some((_, (proposal, patches))) =
                 find_proposal_and_patches_by_branch_name(to, &all_proposals, &current_user)
             {
-                if [repo_ref.maintainers.clone(), vec![proposal.author()]]
+                if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
                     .concat()
                     .contains(&user_ref.public_key)
                 {
@@ -200,7 +200,7 @@ pub async fn run_push(
                             &ahead,
                             &signer,
                             repo_ref,
-                            &Some(proposal.id().to_string()),
+                            &Some(proposal.id.to_string()),
                             &[],
                         )
                         .await?
@@ -223,7 +223,7 @@ pub async fn run_push(
                                 root_event_id
                             } else {
                                 // tip patch is the root proposal
-                                tip_patch.id()
+                                tip_patch.id
                             };
                             let mut parent_patch = tip_patch.clone();
                             ahead.reverse();
@@ -235,7 +235,7 @@ pub async fn run_push(
                                     Some(thread_id),
                                     &signer,
                                     repo_ref,
-                                    Some(parent_patch.id()),
+                                    Some(parent_patch.id),
                                     Some((
                                         (patches.len() + i + 1).try_into().unwrap(),
                                         (patches.len() + ahead.len()).try_into().unwrap(),
@@ -901,8 +901,8 @@ async fn get_merged_status_events(
                         .await?;
                         if let Some(commit_event) = commit_events.iter().find(|e| {
                             e.tags.iter().any(|t| {
-                                t.as_vec()[0].eq("commit")
-                                    && t.as_vec()[1].eq(&parent.id().to_string())
+                                t.as_slice()[0].eq("commit")
+                                    && t.as_slice()[1].eq(&parent.id().to_string())
                             })
                         }) {
                             let (proposal_id, revision_id) =
@@ -930,7 +930,7 @@ async fn get_merged_status_events(
                                         None
                                     },
                                     &commit_hash,
-                                    commit_event.id(),
+                                    commit_event.id,
                                 )
                                 .await?,
                             );
@@ -956,9 +956,9 @@ async fn create_merge_status(
         .iter()
         .copied()
         .collect::<HashSet<PublicKey>>();
-    public_keys.insert(proposal.author());
+    public_keys.insert(proposal.pubkey);
     if let Some(revision) = revision {
-        public_keys.insert(revision.author());
+        public_keys.insert(revision.pubkey);
     }
     sign_event(
         EventBuilder::new(
@@ -971,7 +971,7 @@ async fn create_merge_status(
                         vec!["git proposal merged / applied".to_string()],
                     ),
                     Tag::from_standardized(nostr::TagStandard::Event {
-                        event_id: proposal.id(),
+                        event_id: proposal.id,
                         relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
                         marker: Some(Marker::Root),
                         public_key: None,
@@ -985,7 +985,7 @@ async fn create_merge_status(
                 ],
                 if let Some(revision) = revision {
                     vec![Tag::from_standardized(nostr::TagStandard::Event {
-                        event_id: revision.id(),
+                        event_id: revision.id,
                         relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
                         marker: Some(Marker::Root),
                         public_key: None,
@@ -1023,7 +1023,7 @@ async fn get_proposal_and_revision_root_from_patch(
     git_repo: &Repo,
     patch: &Event,
 ) -> Result<(EventId, Option<EventId>)> {
-    let proposal_or_revision = if patch.tags.iter().any(|t| t.as_vec()[1].eq("root")) {
+    let proposal_or_revision = if patch.tags.iter().any(|t| t.as_slice()[1].eq("root")) {
         patch.clone()
     } else {
         let proposal_or_revision_id = EventId::parse(
@@ -1032,9 +1032,9 @@ async fn get_proposal_and_revision_root_from_patch(
             } else if let Some(t) = patch.tags.iter().find(|t| t.is_reply()) {
                 t.clone()
             } else {
-                Tag::event(patch.id())
+                Tag::event(patch.id)
             }
-            .as_vec()[1]
+            .as_slice()[1]
                 .clone(),
         )?;
 
@@ -1048,14 +1048,14 @@ async fn get_proposal_and_revision_root_from_patch(
         .clone()
     };
 
-    if !proposal_or_revision.kind().eq(&Kind::GitPatch) {
+    if !proposal_or_revision.kind.eq(&Kind::GitPatch) {
         bail!("thread root is not a git patch");
     }
 
     if proposal_or_revision
         .tags
         .iter()
-        .any(|t| t.as_vec()[1].eq("revision-root"))
+        .any(|t| t.as_slice()[1].eq("revision-root"))
     {
         Ok((
             EventId::parse(
@@ -1064,13 +1064,13 @@ async fn get_proposal_and_revision_root_from_patch(
                     .iter()
                     .find(|t| t.is_reply())
                     .unwrap()
-                    .as_vec()[1]
+                    .as_slice()[1]
                     .clone(),
             )?,
-            Some(proposal_or_revision.id()),
+            Some(proposal_or_revision.id),
         ))
     } else {
-        Ok((proposal_or_revision.id(), None))
+        Ok((proposal_or_revision.id, None))
     }
 }
 

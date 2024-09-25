@@ -842,9 +842,9 @@ fn extract_sig_from_patch_tags<'a>(
 ) -> Result<git2::Signature<'a>> {
     let v = tags
         .iter()
-        .find(|t| t.as_vec()[0].eq(tag_name))
+        .find(|t| t.as_slice()[0].eq(tag_name))
         .context(format!("tag '{tag_name}' not present in patch"))?
-        .as_vec();
+        .as_slice();
     if v.len() != 5 {
         bail!("tag '{tag_name}' is incorrectly formatted")
     }

@@ -113,7 +113,7 @@ pub async fn get_open_proposals(
             vec![
                 nostr::Filter::default()
                     .kinds(status_kinds().clone())
-                    .events(proposals.iter().map(nostr::Event::id)),
+                    .events(proposals.iter().map(|e| e.id)),
             ],
         )
         .await?;
@@ -127,15 +127,15 @@ pub async fn get_open_proposals(
         let status = if let Some(e) = statuses
             .iter()
             .filter(|e| {
-                status_kinds().contains(&e.kind())
-                    && e.tags()
+                status_kinds().contains(&e.kind)
+                    && e.tags
                         .iter()
-                        .any(|t| t.as_vec()[1].eq(&proposal.id.to_string()))
+                        .any(|t| t.as_slice()[1].eq(&proposal.id.to_string()))
             })
             .collect::<Vec<&nostr::Event>>()
             .first()
         {
-            e.kind()
+            e.kind
         } else {
             Kind::GitStatusOpen
         };
@@ -148,7 +148,7 @@ pub async fn get_open_proposals(
                     get_most_recent_patch_with_ancestors(commits_events.clone())
                 {
                     open_proposals
-                        .insert(proposal.id(), (proposal, most_recent_proposal_patch_chain));
+                        .insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
                 }
             }
         }
@@ -178,7 +178,7 @@ pub async fn get_all_proposals(
             if let Ok(most_recent_proposal_patch_chain) =
                 get_most_recent_patch_with_ancestors(commits_events.clone())
             {
-                all_proposals.insert(proposal.id(), (proposal, most_recent_proposal_patch_chain));
+                all_proposals.insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
             }
         }
     }
