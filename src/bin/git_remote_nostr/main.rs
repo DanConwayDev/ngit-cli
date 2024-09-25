@@ -15,7 +15,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use client::{consolidate_fetch_reports, get_repo_ref_from_cache, Connect};
 use git::{nostr_url::NostrUrlDecoded, RepoActions};
-use ngit::{client, git};
+use ngit::{client, git, login};
 use nostr::nips::nip01::Coordinate;
 use utils::read_line;
 
@@ -28,27 +28,42 @@ mod utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = env::args();
-    let args = args.skip(1).take(2).collect::<Vec<_>>();
-
-    let ([_, nostr_remote_url] | [nostr_remote_url]) = args.as_slice() else {
-        bail!("invalid arguments - no url");
-    };
-    if env::args().nth(1).as_deref() == Some("--version") {
-        const VERSION: &str = env!("CARGO_PKG_VERSION");
-        println!("v{VERSION}");
+    let Some((decoded_nostr_url, git_repo)) = process_args()? else {
         return Ok(());
-    }
+    };
 
-    let git_repo = Repo::from_path(&PathBuf::from(
-        std::env::var("GIT_DIR").context("git should set GIT_DIR when remote helper is called")?,
-    ))?;
     let git_repo_path = git_repo.get_path()?;
 
-    let client = Client::default();
+    let mut client = Client::default();
 
-    let decoded_nostr_url =
-        NostrUrlDecoded::from_str(nostr_remote_url).context("invalid nostr url")?;
+    if git_repo
+        .get_git_config_item("nostr.npub", None)
+        .is_ok_and(|x| x.is_some())
+        && (git_repo
+            .get_git_config_item("nostr.nsec", None)
+            .is_ok_and(|x| x.is_some())
+            || (git_repo
+                .get_git_config_item("nostr.bunker-uri", None)
+                .is_ok_and(|x| x.is_some())
+                && git_repo
+                    .get_git_config_item("nostr.bunker-app-key", None)
+                    .is_ok_and(|x| x.is_some())))
+    {
+        if let Ok((signer, _)) = login::launch(
+            &git_repo,
+            &None,
+            &None,
+            &None,
+            &None,
+            Some(&client),
+            false,
+            true,
+        )
+        .await
+        {
+            client.set_signer(signer).await;
+        };
+    }
 
     fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinates).await?;
 
@@ -113,6 +128,29 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
+    let args = env::args();
+    let args = args.skip(1).take(2).collect::<Vec<_>>();
+
+    let ([_, nostr_remote_url] | [nostr_remote_url]) = args.as_slice() else {
+        bail!("invalid arguments - no url");
+    };
+    let decoded_nostr_url =
+        NostrUrlDecoded::from_str(nostr_remote_url).context("invalid nostr url")?;
+
+    if env::args().nth(1).as_deref() == Some("--version") {
+        const VERSION: &str = env!("CARGO_PKG_VERSION");
+        println!("v{VERSION}");
+        return Ok(None);
+    }
+
+    let git_repo = Repo::from_path(&PathBuf::from(
+        std::env::var("GIT_DIR").context("git should set GIT_DIR when remote helper is called")?,
+    ))?;
+
+    Ok(Some((decoded_nostr_url, git_repo)))
 }
 
 async fn fetching_with_report_for_helper(
