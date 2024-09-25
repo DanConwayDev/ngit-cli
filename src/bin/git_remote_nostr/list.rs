@@ -150,7 +150,7 @@ async fn get_open_proposals_state(
             if let Ok(mut branch_name) = cl.get_branch_name() {
                 branch_name = if let Some(public_key) = current_user {
                     if proposal.pubkey.eq(&public_key) {
-                        cl.branch_name.to_string()
+                        format!("pr/{}", cl.branch_name)
                     } else {
                         branch_name
                     }
