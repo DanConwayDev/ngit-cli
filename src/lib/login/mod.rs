@@ -290,15 +290,12 @@ async fn get_nip46_signer_from_uri_and_key(uri: &str, app_key: &str) -> Result<N
     let term = console::Term::stderr();
     term.write_line("connecting to remote signer...")?;
     let uri = NostrConnectURI::parse(uri)?;
-    let signer = NostrSigner::nip46(
-        Nip46Signer::new(
-            uri,
-            nostr::Keys::from_str(app_key).context("invalid app key")?,
-            Duration::from_secs(10 * 60),
-            None,
-        )
-        .await?,
-    );
+    let signer = NostrSigner::nip46(Nip46Signer::new(
+        uri,
+        nostr::Keys::from_str(app_key).context("invalid app key")?,
+        Duration::from_secs(10 * 60),
+        None,
+    )?);
     term.clear_last_lines(1)?;
     Ok(signer)
 }
@@ -411,9 +408,7 @@ async fn fresh_login(
             app_key.clone(),
             Duration::from_secs(10 * 60),
             None,
-        )
-        .await
-        {
+        ) {
             let signer = NostrSigner::nip46(nip46_signer);
             if let Ok(pub_key) = fetch_public_key(&signer).await {
                 let mut printer_locked = printer_clone.lock().await;
