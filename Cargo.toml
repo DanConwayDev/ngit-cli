@@ -24,11 +24,11 @@ futures = "0.3.28"
 git2 = "0.19.0"
 indicatif = "0.17.7"
 keyring = "2.0.5"
-nostr = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
-nostr-database = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
-nostr-sdk = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
-nostr-signer = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
-nostr-lmdb = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
+nostr = { git = "https://github.com/rust-nostr/nostr", rev = "ede2a91" }
+nostr-database = { git = "https://github.com/rust-nostr/nostr", rev = "ede2a91" }
+nostr-sdk = { git = "https://github.com/rust-nostr/nostr", rev = "ede2a91" }
+nostr-signer = { git = "https://github.com/rust-nostr/nostr", rev = "ede2a91" }
+nostr-lmdb = { git = "https://github.com/rust-nostr/nostr", rev = "ede2a91" }
 passwords = "3.1.13"
 qrcode = { version = "0.14.1", default-features = false }
 scrypt = "0.11.0"

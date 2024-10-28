@@ -6,7 +6,10 @@ use std::{
 use anyhow::{bail, Context, Result};
 use git2::{DiffOptions, Oid, Revwalk};
 pub use identify_ahead_behind::identify_ahead_behind;
-use nostr_sdk::hashes::{sha1::Hash as Sha1Hash, Hash};
+use nostr_sdk::{
+    hashes::{sha1::Hash as Sha1Hash, Hash},
+    Tags,
+};
 
 use crate::git_events::{get_commit_id_from_patch, tag_value};
 pub mod identify_ahead_behind;
@@ -836,10 +839,7 @@ fn git_sig_to_tag_vec(sig: &git2::Signature) -> Vec<String> {
     ]
 }
 
-fn extract_sig_from_patch_tags<'a>(
-    tags: &'a [nostr::Tag],
-    tag_name: &str,
-) -> Result<git2::Signature<'a>> {
+fn extract_sig_from_patch_tags<'a>(tags: &'a Tags, tag_name: &str) -> Result<git2::Signature<'a>> {
     let v = tags
         .iter()
         .find(|t| t.as_slice()[0].eq(tag_name))
@@ -1092,10 +1092,10 @@ mod tests {
             fn test(time: git2::Time) -> Result<()> {
                 assert_eq!(
                     extract_sig_from_patch_tags(
-                        &[nostr::Tag::custom(
+                        &Tags::new(vec![nostr::Tag::custom(
                             nostr::TagKind::Custom("author".to_string().into()),
                             prep(&time)?,
-                        )],
+                        )]),
                         "author",
                     )?
                     .to_string(),

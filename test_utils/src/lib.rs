@@ -142,7 +142,7 @@ pub fn make_event_old_or_change_user(
         &keys.public_key(),
         &unsigned.created_at,
         &unsigned.kind,
-        &unsigned.tags,
+        &unsigned.tags.clone().to_vec(),
         &unsigned.content,
     ));
 
@@ -1061,13 +1061,14 @@ pub async fn get_events_from_cache(
     git_repo_path: &Path,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<nostr::Event>> {
-    get_local_cache_database(git_repo_path)
+    Ok(get_local_cache_database(git_repo_path)
         .await?
         .query(filters.clone())
         .await
         .context(
             "cannot execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
-        )
+        )?
+        .to_vec())
 }
 
 pub fn get_proposal_branch_name(
@@ -1360,17 +1361,19 @@ fn get_first_proposal_event_id() -> Result<nostr::EventId> {
     let client = Client::default();
     Handle::current().block_on(client.add_relay("ws://localhost:8055"))?;
     Handle::current().block_on(client.connect_relay("ws://localhost:8055"))?;
-    let proposals = Handle::current().block_on(client.get_events_of(
-        vec![
-        nostr::Filter::default()
-            .kind(nostr::Kind::GitPatch)
-            .custom_tag(
-                nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                vec!["root"],
-            ),
-    ],
-        nostr_sdk::EventSource::relays(Some(Duration::from_millis(500))),
-    ))?;
+    let proposals = Handle::current()
+        .block_on(client.fetch_events(
+            vec![
+                    nostr::Filter::default()
+                        .kind(nostr::Kind::GitPatch)
+                        .custom_tag(
+                            nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                            vec!["root"],
+                        ),
+                ],
+            Some(Duration::from_millis(500)),
+        ))?
+        .to_vec();
     Handle::current().block_on(client.disconnect())?;
 
     let proposal_1_id = proposals

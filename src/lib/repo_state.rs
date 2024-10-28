@@ -14,7 +14,7 @@ impl RepoState {
         state_events.sort_by_key(|e| e.created_at);
         let event = state_events.first().context("no state events")?;
         let mut state = HashMap::new();
-        for tag in &event.tags {
+        for tag in event.tags.iter() {
             if let Some(name) = tag.as_slice().first() {
                 if ["refs/heads/", "refs/tags", "HEAD"]
                     .iter()
@@ -30,6 +30,7 @@ impl RepoState {
         }
         Ok(RepoState {
             identifier: event
+                .tags
                 .identifier()
                 .context("existing event must have an identifier")?
                 .to_string(),

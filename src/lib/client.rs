@@ -179,14 +179,14 @@ impl Connect for Client {
 
         let relay = self.client.relay(relay_url).await?;
 
-        if !relay.is_connected().await {
+        if !relay.is_connected() {
             #[allow(clippy::large_futures)]
             relay
                 .connect(Some(std::time::Duration::from_secs(CONNECTION_TIMEOUT)))
                 .await;
         }
 
-        if !relay.is_connected().await {
+        if !relay.is_connected() {
             bail!("connection timeout");
         }
         Ok(())
@@ -615,26 +615,27 @@ async fn get_events_of(
 ) -> Result<Vec<Event>> {
     // relay.reconcile(filter, opts).await?;
 
-    if !relay.is_connected().await {
+    if !relay.is_connected() {
         #[allow(clippy::large_futures)]
         relay
             .connect(Some(std::time::Duration::from_secs(CONNECTION_TIMEOUT)))
             .await;
     }
 
-    if !relay.is_connected().await {
+    if !relay.is_connected() {
         bail!("connection timeout");
     } else if let Some(pb) = pb {
         pb.set_prefix(format!("connected  {}", relay.url()));
     }
     let events = relay
-        .get_events_of(
+        .fetch_events(
             filters,
             // 20 is nostr_sdk default
             std::time::Duration::from_secs(GET_EVENTS_TIMEOUT),
             nostr_sdk::FilterOptions::ExitOnEOSE,
         )
-        .await?;
+        .await?
+        .to_vec();
     Ok(events)
 }
 
@@ -754,24 +755,26 @@ pub async fn get_events_from_cache(
     git_repo_path: &Path,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<nostr::Event>> {
-    get_local_cache_database(git_repo_path)
+    Ok(get_local_cache_database(git_repo_path)
         .await?
         .query(filters.clone())
         .await
         .context(
             "cannot execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
-        )
+        )?
+        .to_vec())
 }
 
 pub async fn get_event_from_global_cache(
     git_repo_path: &Path,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<nostr::Event>> {
-    get_global_cache_database(git_repo_path)
+    Ok(get_global_cache_database(git_repo_path)
         .await?
         .query(filters.clone())
         .await
-        .context("cannot execute query on opened ngit nostr cache database")
+        .context("cannot execute query on opened ngit nostr cache database")?
+        .to_vec())
 }
 
 pub async fn save_event_in_cache(git_repo_path: &Path, event: &nostr::Event) -> Result<bool> {
@@ -841,7 +844,7 @@ pub async fn get_repo_ref_from_cache(
             events.insert(
                 Coordinate {
                     kind: e.kind,
-                    identifier: e.identifier().unwrap().to_string(),
+                    identifier: e.tags.identifier().unwrap().to_string(),
                     public_key: e.pubkey,
                     relays: vec![],
                 },
@@ -1114,7 +1117,7 @@ async fn process_fetched_events(
                     .iter()
                     .map(|(c, _)| c.clone())
                     .any(|c| {
-                        c.identifier.eq(event.identifier().unwrap())
+                        c.identifier.eq(event.tags.identifier().unwrap())
                             && c.public_key.eq(&event.pubkey)
                     });
                 let update_to_existing = !new_coordinate
@@ -1122,7 +1125,7 @@ async fn process_fetched_events(
                         .repo_coordinates_without_relays
                         .iter()
                         .any(|(c, t)| {
-                            c.identifier.eq(event.identifier().unwrap())
+                            c.identifier.eq(event.tags.identifier().unwrap())
                                 && c.public_key.eq(&event.pubkey)
                                 && if let Some(t) = t {
                                     event.created_at.gt(t)
@@ -1135,7 +1138,7 @@ async fn process_fetched_events(
                         Coordinate {
                             kind: event.kind,
                             public_key: event.pubkey,
-                            identifier: event.identifier().unwrap().to_owned(),
+                            identifier: event.tags.identifier().unwrap().to_owned(),
                             relays: vec![],
                         },
                         event.created_at,
@@ -1216,7 +1219,10 @@ async fn process_fetched_events(
     }
     for event in &events {
         if !request.existing_events.contains(&event.id)
-            && !event.event_ids().any(|id| report.proposals.contains(id))
+            && !event
+                .tags
+                .event_ids()
+                .any(|id| report.proposals.contains(id))
         {
             if event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event) {
                 report.commits.insert(event.id);

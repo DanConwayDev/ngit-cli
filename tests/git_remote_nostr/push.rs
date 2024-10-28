@@ -302,8 +302,8 @@ mod two_branches_in_batch_one_added_one_updated {
             .context("state event not created")?;
 
         assert_eq!(
-            state_event.identifier(),
-            generate_repo_ref_event().identifier(),
+            state_event.tags.identifier(),
+            generate_repo_ref_event().tags.identifier(),
         );
         // println!("{:#?}", state_event);
         assert_eq!(

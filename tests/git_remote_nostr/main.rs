@@ -21,7 +21,7 @@ fn get_nostr_remote_url() -> Result<String> {
     let naddr = Coordinate {
         kind: Kind::GitRepoAnnouncement,
         public_key: repo_event.pubkey,
-        identifier: repo_event.identifier().unwrap().to_string(),
+        identifier: repo_event.tags.identifier().unwrap().to_string(),
         relays: vec![
             "ws://localhost:8055".to_string(),
             "ws://localhost:8056".to_string(),

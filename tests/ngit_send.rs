@@ -400,7 +400,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                             && t.as_slice()[1].eq(&format!(
                                 "{}:{TEST_KEY_1_PUBKEY_HEX}:{}",
                                 Kind::GitRepoAnnouncement,
-                                generate_repo_ref_event().identifier().unwrap()
+                                generate_repo_ref_event().tags.identifier().unwrap()
                             )))
                 );
                 assert!(
@@ -411,7 +411,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                             && t.as_slice()[1].eq(&format!(
                                 "{}:{TEST_KEY_2_PUBKEY_HEX}:{}",
                                 Kind::GitRepoAnnouncement,
-                                generate_repo_ref_event().identifier().unwrap()
+                                generate_repo_ref_event().tags.identifier().unwrap()
                             )))
                 );
             }
@@ -606,7 +606,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     && t.as_slice()[1].eq(&format!(
                         "{}:{TEST_KEY_1_PUBKEY_HEX}:{}",
                         Kind::GitRepoAnnouncement,
-                        generate_repo_ref_event().identifier().unwrap()
+                        generate_repo_ref_event().tags.identifier().unwrap()
                     ))
             }));
             assert!(prep().await?.tags.iter().any(|t| {
@@ -614,7 +614,7 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     && t.as_slice()[1].eq(&format!(
                         "{}:{TEST_KEY_2_PUBKEY_HEX}:{}",
                         Kind::GitRepoAnnouncement,
-                        generate_repo_ref_event().identifier().unwrap()
+                        generate_repo_ref_event().tags.identifier().unwrap()
                     ))
             }));
             Ok(())

@@ -90,7 +90,7 @@ mod cannot_find_repo_event {
                         &Coordinate {
                             kind: nostr::Kind::GitRepoAnnouncement,
                             public_key: TEST_KEY_1_KEYS.public_key(),
-                            identifier: repo_event.identifier().unwrap().to_string(),
+                            identifier: repo_event.tags.identifier().unwrap().to_string(),
                             relays: vec!["ws://localhost:8056".to_string()],
                         }
                         .to_bech32()?,

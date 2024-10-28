@@ -105,7 +105,7 @@ impl TryFrom<nostr::Event> for RepoRef {
         r.events.insert(
             Coordinate {
                 kind: event.kind,
-                identifier: event.identifier().unwrap().to_string(),
+                identifier: event.tags.identifier().unwrap().to_string(),
                 public_key: event.pubkey,
                 relays: vec![],
             },
@@ -343,7 +343,7 @@ async fn get_repo_coordinates_from_maintainers_yaml(
                     .await?;
             }
             if let Some(e) = events.first() {
-                if let Some(identifier) = e.identifier() {
+                if let Some(identifier) = e.tags.identifier() {
                     for m in &repo_config.maintainers {
                         if let Ok(maintainer) = PublicKey::parse(m) {
                             repo_coordinates.insert(Coordinate {
