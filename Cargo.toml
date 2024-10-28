@@ -28,7 +28,7 @@ nostr = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
 nostr-database = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
 nostr-sdk = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
 nostr-signer = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
-nostr-sqlite = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
+nostr-lmdb = { git = "https://github.com/rust-nostr/nostr", rev = "4dbfa94" }
 passwords = "3.1.13"
 qrcode = { version = "0.14.1", default-features = false }
 scrypt = "0.11.0"

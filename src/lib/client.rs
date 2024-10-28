@@ -30,11 +30,11 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 use mockall::*;
 use nostr::{nips::nip01::Coordinate, Event};
 use nostr_database::NostrDatabase;
+use nostr_lmdb::NostrLMDB;
 use nostr_sdk::{
     prelude::RelayLimits, EventBuilder, EventId, Kind, NostrSigner, Options, PublicKey,
     SingleLetterTag, Timestamp, Url,
 };
-use nostr_sqlite::SQLiteDatabase;
 
 use crate::{
     get_dirs,
@@ -157,7 +157,7 @@ impl Connect for Client {
                 .opts(Options::new().relay_limits(RelayLimits::disable()))
                 .signer(opts.keys.unwrap_or(nostr::Keys::generate()))
                 // .database(
-                //     SQLiteDatabase::open(get_dirs()?.cache_dir().join("nostr-cache.sqlite")).
+                //     SQLiteDatabase::open(get_dirs()?.cache_dir().join("nostr-cache.lmdb")).
                 // await?, )
                 .build(),
             fallback_relays: opts.fallback_relays,
@@ -732,23 +732,21 @@ fn pb_after_style(succeed: bool) -> indicatif::ProgressStyle {
     .unwrap()
 }
 
-async fn get_local_cache_database(git_repo_path: &Path) -> Result<SQLiteDatabase> {
-    SQLiteDatabase::open(git_repo_path.join(".git/nostr-cache.sqlite"))
-        .await
-        .context("cannot open or create nostr cache database at .git/nostr-cache.sqlite")
+async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
+    NostrLMDB::open(git_repo_path.join(".git/nostr-cache.lmdb"))
+        .context("cannot open or create nostr cache database at .git/nostr-cache.lmdb")
 }
 
-async fn get_global_cache_database(git_repo_path: &Path) -> Result<SQLiteDatabase> {
-    SQLiteDatabase::open(if std::env::var("NGITTEST").is_err() {
+async fn get_global_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
+    NostrLMDB::open(if std::env::var("NGITTEST").is_err() {
         create_dir_all(get_dirs()?.cache_dir()).context(format!(
             "cannot create cache directory in: {:?}",
             get_dirs()?.cache_dir()
         ))?;
-        get_dirs()?.cache_dir().join("nostr-cache.sqlite")
+        get_dirs()?.cache_dir().join("nostr-cache.lmdb")
     } else {
-        git_repo_path.join(".git/test-global-cache.sqlite")
+        git_repo_path.join(".git/test-global-cache.lmdb")
     })
-    .await
     .context("cannot open ngit global nostr cache database")
 }
 
@@ -761,7 +759,7 @@ pub async fn get_events_from_cache(
         .query(filters.clone())
         .await
         .context(
-            "cannot execute query on opened git repo nostr cache database .git/nostr-cache.sqlite",
+            "cannot execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
         )
 }
 
