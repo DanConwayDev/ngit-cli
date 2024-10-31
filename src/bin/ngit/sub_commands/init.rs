@@ -66,9 +66,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         None
     };
 
-    let repo_ref = if let Some(repo_coordinates) = repo_coordinates {
+    let repo_ref = if let Some(repo_coordinates) = repo_coordinates.clone() {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        Some(get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?)
+        if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await {
+            Some(repo_ref)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -95,6 +99,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .with_prompt("name")
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.name.clone()
+                } else if let Some(repo_coordinates) = repo_coordinates.clone() {
+                    if let Some(coordinate) = repo_coordinates.iter().next() {
+                        coordinate.identifier.clone()
+                    } else {
+                        String::new()
+                    }
                 } else {
                     String::new()
                 }),
@@ -108,6 +118,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .with_prompt("identifier")
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.identifier.clone()
+                } else if let Some(repo_coordinates) = repo_coordinates.clone() {
+                    if let Some(coordinate) = repo_coordinates.iter().next() {
+                        coordinate.identifier.clone()
+                    } else {
+                        String::new()
+                    }
                 } else {
                     let fallback = name
                         .clone()
