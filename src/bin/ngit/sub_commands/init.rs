@@ -252,19 +252,41 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     .await?
                     .to_bech32()?
                     .eq(&maintainers_string)
-                && Interactor::default().confirm(
+            {
+                if Interactor::default().confirm(
                     PromptConfirmParms::default()
                         .with_prompt("are you the only maintainer?")
                         .with_default(true),
-                )?
-            {
-                dont_ask = true;
+                )? {
+                    dont_ask = true;
+                } else {
+                    let mut opt_out_default = false;
+                    if !Interactor::default().confirm(
+                        PromptConfirmParms::default()
+                            .with_prompt("are the other maintainers on nostr?")
+                            .with_default(true),
+                    )? {
+                        opt_out_default = true;
+                        dont_ask = true;
+                    }
+                    println!(
+                        "nostr can reduce the trust placed in git servers by storing the state of git branches and tags. if you have other maintainers not using git via nostr, the verifiable state can fall behind the git server."
+                    );
+
+                    if Interactor::default().confirm(
+                        PromptConfirmParms::default()
+                            .with_prompt("opt-out of storing git state on nostr and relay on git server for now? you will still receive PRs and issues via nostr")
+                            .with_default(true),
+                    )? {
+                        git_repo.save_git_config_item("nostr.nostate", "true", opt_out_default)?;
+                    }
+                }
             }
             if !dont_ask {
                 println!("{}", &maintainers_string);
                 maintainers_string = Interactor::default().input(
                     PromptInputParms::default()
-                        .with_prompt("maintainers")
+                        .with_prompt("maintainers - space seperated list of npubs")
                         .with_default(maintainers_string),
                 )?;
             }
@@ -273,7 +295,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 if let Ok(m_pubkey) = PublicKey::from_bech32(m) {
                     maintainers.push(m_pubkey);
                 } else {
-                    println!("not a valid set of npubs seperated by a space");
+                    println!("not a valid set of space seperated npubs");
                     dont_ask = false;
                     continue 'outer;
                 }

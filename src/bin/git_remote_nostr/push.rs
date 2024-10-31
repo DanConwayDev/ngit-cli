@@ -153,10 +153,18 @@ pub async fn run_push(
     if !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, &git_server_refspecs)?;
 
-        let new_repo_state =
-            RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
+        let store_state =
+            if let Ok(Some(nostate)) = git_repo.get_git_config_item("nostr.nostate", None) {
+                !nostate.eq("true")
+            } else {
+                true
+            };
 
-        events.push(new_repo_state.event);
+        if store_state {
+            let new_repo_state =
+                RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
+            events.push(new_repo_state.event);
+        }
 
         for event in get_merged_status_events(
             &term,
