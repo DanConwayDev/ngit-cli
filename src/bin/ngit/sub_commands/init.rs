@@ -246,6 +246,20 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         };
         'outer: loop {
+            if !dont_ask
+                && signer
+                    .public_key()
+                    .await?
+                    .to_bech32()?
+                    .eq(&maintainers_string)
+                && Interactor::default().confirm(
+                    PromptConfirmParms::default()
+                        .with_prompt("are you the only maintainer?")
+                        .with_default(true),
+                )?
+            {
+                dont_ask = true;
+            }
             if !dont_ask {
                 println!("{}", &maintainers_string);
                 maintainers_string = Interactor::default().input(
