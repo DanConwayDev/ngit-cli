@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use ngit::cli_interactor::PromptConfirmParms;
 use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
 use nostr_sdk::Kind;
 
@@ -96,7 +97,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         Some(t) => t.clone(),
         None => Interactor::default().input(
             PromptInputParms::default()
-                .with_prompt("name")
+                .with_prompt("repo name")
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.name.clone()
                 } else if let Some(repo_coordinates) = repo_coordinates.clone() {
@@ -115,7 +116,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         Some(t) => t.clone(),
         None => Interactor::default().input(
             PromptInputParms::default()
-                .with_prompt("identifier")
+                .with_prompt(
+                    "repo identifier (typically the short name with hypens instead of spaces)",
+                )
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.identifier.clone()
                 } else if let Some(repo_coordinates) = repo_coordinates.clone() {
@@ -154,7 +157,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         Some(t) => t.clone(),
         None => Interactor::default().input(
             PromptInputParms::default()
-                .with_prompt("description")
+                .with_prompt("repo description (one sentance)")
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.description.clone()
                 } else {
