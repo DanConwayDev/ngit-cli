@@ -134,17 +134,26 @@ fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
     let args = env::args();
     let args = args.skip(1).take(2).collect::<Vec<_>>();
 
-    let ([_, nostr_remote_url] | [nostr_remote_url]) = args.as_slice() else {
-        bail!("invalid arguments - no url");
-    };
-    let decoded_nostr_url =
-        NostrUrlDecoded::from_str(nostr_remote_url).context("invalid nostr url")?;
-
     if env::args().nth(1).as_deref() == Some("--version") {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
         println!("v{VERSION}");
         return Ok(None);
     }
+
+    let ([_, nostr_remote_url] | [nostr_remote_url]) = args.as_slice() else {
+        println!("nostr plugin for git");
+        println!("Usage:");
+        println!(
+            " - add a nostr repository as a remote by using the url format nostr://pub123/identifier"
+        );
+        println!(" - remote branches begining with `pr/` are PRs from contributors");
+        println!(" - to open a PR, push a branch with the prefix `pr/`");
+        println!(" - branches with this prefix are issued by the maintainer(s)");
+        return Ok(None);
+    };
+
+    let decoded_nostr_url =
+        NostrUrlDecoded::from_str(nostr_remote_url).context("invalid nostr url")?;
 
     let git_repo = Repo::from_path(&PathBuf::from(
         std::env::var("GIT_DIR").context("git should set GIT_DIR when remote helper is called")?,
