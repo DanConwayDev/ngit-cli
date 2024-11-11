@@ -1088,9 +1088,11 @@ pub fn get_proposal_branch_name(
 }
 
 pub fn get_proposal_branch_name_from_events(
-    events: &Vec<nostr::Event>,
+    events: &[nostr::Event],
     branch_name_in_event: &str,
 ) -> Result<String> {
+    let mut events = events.to_owned();
+    events.reverse();
     for event in events {
         if event.tags.iter().any(|t| {
             !t.as_slice()[1].eq("revision-root")
