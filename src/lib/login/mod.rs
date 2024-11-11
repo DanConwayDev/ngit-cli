@@ -7,11 +7,11 @@ use nostr::{
     nips::{nip05, nip46::NostrConnectURI},
     PublicKey,
 };
+use nostr_connect::client::NostrConnect;
 use nostr_sdk::{
     Alphabet, FromBech32, JsonUtil, Keys, Kind, NostrSigner, SingleLetterTag, Timestamp, ToBech32,
     Url,
 };
-use nostr_signer::Nip46Signer;
 use qrcode::QrCode;
 use tokio::sync::{oneshot, Mutex};
 
@@ -45,7 +45,7 @@ pub async fn launch(
     #[cfg(not(test))] client: Option<&Client>,
     change_user: bool,
     silent: bool,
-) -> Result<(NostrSigner, UserRef)> {
+) -> Result<(Arc<dyn NostrSigner>, UserRef)> {
     if let Ok(signer) = match get_signer_without_prompts(
         git_repo,
         bunker_uri,
@@ -86,7 +86,7 @@ pub async fn launch(
                         .password(PromptPasswordParms::default().with_prompt("password"))
                         .context("failed to get password input from interactor.password")?;
                     if let Ok(keys) = get_keys_with_password(git_repo, &password) {
-                        break Ok(NostrSigner::Keys(keys));
+                        break Ok(Arc::new(keys) as Arc<dyn NostrSigner>);
                     }
                     eprintln!("incorrect password");
                 }
@@ -101,7 +101,7 @@ pub async fn launch(
         // get user ref
         let user_ref = get_user_details(
             &signer
-                .public_key()
+                .get_public_key()
                 .await
                 .context("cannot get public key from signer")?,
             client,
@@ -139,15 +139,13 @@ async fn get_signer_without_prompts(
     nsec: &Option<String>,
     password: &Option<String>,
     save_local: bool,
-) -> Result<NostrSigner> {
+) -> Result<Arc<dyn NostrSigner>> {
     if let Some(nsec) = nsec {
-        Ok(NostrSigner::Keys(get_keys_from_nsec(
+        Ok(Arc::new(get_keys_from_nsec(
             git_repo, nsec, password, save_local,
         )?))
     } else if let Some(password) = password {
-        Ok(NostrSigner::Keys(get_keys_with_password(
-            git_repo, password,
-        )?))
+        Ok(Arc::new(get_keys_with_password(git_repo, password)?))
     } else if let Some(bunker_uri) = bunker_uri {
         if let Some(bunker_app_key) = bunker_app_key {
             let signer = get_nip46_signer_from_uri_and_key(bunker_uri, bunker_app_key)
@@ -156,7 +154,7 @@ async fn get_signer_without_prompts(
             if save_local {
                 save_to_git_config(
                     git_repo,
-                    &signer.public_key().await?.to_bech32()?,
+                    &signer.get_public_key().await?.to_bech32()?,
                     &None,
                     &Some((bunker_uri.to_string(),bunker_app_key.to_string())),
                     false,
@@ -286,11 +284,14 @@ fn get_keys_with_password(git_repo: &Repo, password: &str) -> Result<nostr::Keys
     .context("failed to decrypt stored nsec key with provided password")
 }
 
-async fn get_nip46_signer_from_uri_and_key(uri: &str, app_key: &str) -> Result<NostrSigner> {
+async fn get_nip46_signer_from_uri_and_key(
+    uri: &str,
+    app_key: &str,
+) -> Result<Arc<dyn NostrSigner>> {
     let term = console::Term::stderr();
     term.write_line("connecting to remote signer...")?;
     let uri = NostrConnectURI::parse(uri)?;
-    let signer = NostrSigner::nip46(Nip46Signer::new(
+    let signer = Arc::new(NostrConnect::new(
         uri,
         nostr::Keys::from_str(app_key).context("invalid app key")?,
         Duration::from_secs(10 * 60),
@@ -302,7 +303,7 @@ async fn get_nip46_signer_from_uri_and_key(uri: &str, app_key: &str) -> Result<N
 
 async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
     git_repo: &Repo,
-) -> Result<NostrSigner> {
+) -> Result<Arc<dyn NostrSigner>> {
     if let Ok(local_nsec) = &git_repo
         .get_git_config_item("nostr.nsec", Some(false))
         .context("failed get local git config")?
@@ -311,7 +312,7 @@ async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
         if local_nsec.contains("ncryptsec") {
             bail!("git global config item nostr.nsec is an ncryptsec")
         }
-        Ok(NostrSigner::Keys(
+        Ok(Arc::new(
             nostr::Keys::from_str(local_nsec).context("invalid nsec parameter")?,
         ))
     } else if let Ok((uri, app_key)) = get_git_config_bunker_uri_and_app_key(git_repo, Some(false))
@@ -325,7 +326,7 @@ async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
         if global_nsec.contains("ncryptsec") {
             bail!("git global config item nostr.nsec is an ncryptsec")
         }
-        Ok(NostrSigner::Keys(
+        Ok(Arc::new(
             nostr::Keys::from_str(global_nsec).context("invalid nsec parameter")?,
         ))
     } else if let Ok((uri, app_key)) = get_git_config_bunker_uri_and_app_key(git_repo, Some(true)) {
@@ -358,7 +359,7 @@ async fn fresh_login(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     always_save: bool,
-) -> Result<(NostrSigner, UserRef)> {
+) -> Result<(Arc<dyn NostrSigner>, UserRef)> {
     let app_key = Keys::generate();
     let app_key_secret = app_key.secret_key().to_secret_hex();
     let relays = if let Some(client) = client {
@@ -403,13 +404,13 @@ async fn fresh_login(
         if offline {
             return;
         }
-        if let Ok(nip46_signer) = Nip46Signer::new(
+        if let Ok(nostr_connect) = NostrConnect::new(
             nostr_connect_url.clone(),
             app_key.clone(),
             Duration::from_secs(10 * 60),
             None,
         ) {
-            let signer = NostrSigner::nip46(nip46_signer);
+            let signer: Arc<dyn NostrSigner> = Arc::new(nostr_connect);
             if let Ok(pub_key) = fetch_public_key(&signer).await {
                 let mut printer_locked = printer_clone.lock().await;
                 printer_locked.clear_all();
@@ -437,7 +438,7 @@ async fn fresh_login(
     let (signer, public_key) = {
         if let Ok(Some((signer, public_key))) = rx.await {
             let bunker_url = NostrConnectURI::Bunker {
-                signer_public_key: public_key,
+                remote_signer_public_key: public_key,
                 relays: relays.clone(),
                 secret: None,
             };
@@ -455,7 +456,7 @@ async fn fresh_login(
             let mut public_key: Option<PublicKey> = None;
             // prompt for nsec
             let mut prompt = "login with nsec / bunker url / nostr address";
-            let signer = loop {
+            let signer: Arc<dyn NostrSigner> = loop {
                 let input = Interactor::default()
                     .input(PromptInputParms::default().with_prompt(prompt))
                     .context("failed to get nsec input from interactor")?;
@@ -463,7 +464,7 @@ async fn fresh_login(
                     if let Err(error) = save_keys(git_repo, &keys, always_save) {
                         eprintln!("{error}");
                     }
-                    break NostrSigner::Keys(keys);
+                    break Arc::new(keys);
                 }
                 let uri = if let Ok(uri) = NostrConnectURI::parse(&input) {
                     uri
@@ -501,7 +502,7 @@ async fn fresh_login(
             let public_key = if let Some(public_key) = public_key {
                 public_key
             } else {
-                signer.public_key().await?
+                signer.get_public_key().await?
             };
             (signer, public_key)
         }
@@ -561,7 +562,7 @@ pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> 
                 bail!("nip05 provider isn't configured for remote login")
             }
             Ok(NostrConnectURI::Bunker {
-                signer_public_key: profile.public_key,
+                remote_signer_public_key: profile.public_key,
                 relays: profile.nip46,
                 secret: None,
             })

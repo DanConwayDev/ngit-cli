@@ -2,6 +2,7 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -35,16 +36,16 @@ pub static TEST_KEY_1_ENCRYPTED_WEAK: &str = "ncryptsec1qg835almhlrmyxqtqeva44d5
 pub static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
 
-pub static TEST_KEY_1_SIGNER: Lazy<NostrSigner> =
-    Lazy::new(|| NostrSigner::Keys(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap()));
+pub static TEST_KEY_1_SIGNER: Lazy<Arc<dyn NostrSigner>> =
+    Lazy::new(|| Arc::new(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap()));
 
-pub fn generate_test_key_1_signer() -> NostrSigner {
-    NostrSigner::Keys(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap())
+pub fn generate_test_key_1_signer() -> Arc<dyn NostrSigner> {
+    Arc::new(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap())
 }
 
 pub fn generate_test_key_1_metadata_event(name: &str) -> nostr::Event {
     nostr::event::EventBuilder::metadata(&nostr::Metadata::new().name(name))
-        .to_event(&TEST_KEY_1_KEYS)
+        .sign_with_keys(&TEST_KEY_1_KEYS)
         .unwrap()
 }
 
@@ -58,7 +59,7 @@ pub fn generate_test_key_1_metadata_event_old(name: &str) -> nostr::Event {
 
 pub fn generate_test_key_1_kind_event(kind: Kind) -> nostr::Event {
     nostr::event::EventBuilder::new(kind, "", [])
-        .to_event(&TEST_KEY_1_KEYS)
+        .sign_with_keys(&TEST_KEY_1_KEYS)
         .unwrap()
 }
 
@@ -81,7 +82,7 @@ pub fn generate_test_key_1_relay_list_event() -> nostr::Event {
             }),
         ],
     )
-    .to_event(&TEST_KEY_1_KEYS)
+    .sign_with_keys(&TEST_KEY_1_KEYS)
     .unwrap()
 }
 
@@ -100,7 +101,7 @@ pub fn generate_test_key_1_relay_list_event_same_as_fallback() -> nostr::Event {
             }),
         ],
     )
-    .to_event(&TEST_KEY_1_KEYS)
+    .sign_with_keys(&TEST_KEY_1_KEYS)
     .unwrap()
 }
 
@@ -117,7 +118,7 @@ pub static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
 
 pub fn generate_test_key_2_metadata_event(name: &str) -> nostr::Event {
     nostr::event::EventBuilder::metadata(&nostr::Metadata::new().name(name))
-        .to_event(&TEST_KEY_2_KEYS)
+        .sign_with_keys(&TEST_KEY_2_KEYS)
         .unwrap()
 }
 
@@ -134,7 +135,7 @@ pub fn make_event_old_or_change_user(
 ) -> nostr::Event {
     let mut unsigned =
         nostr::event::EventBuilder::new(event.kind, event.content.clone(), event.tags.clone())
-            .to_unsigned_event(keys.public_key());
+            .build(keys.public_key());
 
     unsigned.created_at =
         nostr::types::Timestamp::from(nostr::types::Timestamp::now().as_u64() - how_old_in_secs);
@@ -146,7 +147,7 @@ pub fn make_event_old_or_change_user(
         &unsigned.content,
     ));
 
-    unsigned.sign(keys).unwrap()
+    unsigned.sign_with_keys(keys).unwrap()
 }
 
 pub fn generate_repo_ref_event() -> nostr::Event {
@@ -196,7 +197,7 @@ pub fn generate_repo_ref_event_with_git_server(git_servers: Vec<String>) -> nost
             ),
         ],
     )
-    .to_event(&TEST_KEY_1_KEYS)
+    .sign_with_keys(&TEST_KEY_1_KEYS)
     .unwrap()
 }
 

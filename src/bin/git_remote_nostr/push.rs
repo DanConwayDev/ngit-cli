@@ -29,9 +29,8 @@ use ngit::{
 };
 use nostr::nips::nip10::Marker;
 use nostr_sdk::{
-    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, Kind, PublicKey, Tag,
+    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, Tag,
 };
-use nostr_signer::NostrSigner;
 use repo_ref::RepoRef;
 use repo_state::RepoState;
 
@@ -876,7 +875,7 @@ async fn get_merged_status_events(
     repo_ref: &RepoRef,
     git_repo: &Repo,
     remote_nostr_url: &str,
-    signer: &NostrSigner,
+    signer: &Arc<dyn NostrSigner>,
     refspecs_to_git_server: &Vec<String>,
 ) -> Result<Vec<Event>> {
     let mut events = vec![];
@@ -952,7 +951,7 @@ async fn get_merged_status_events(
 }
 
 async fn create_merge_status(
-    signer: &NostrSigner,
+    signer: &Arc<dyn NostrSigner>,
     repo_ref: &RepoRef,
     proposal: &Event,
     revision: &Option<Event>,
@@ -1194,14 +1193,14 @@ trait BuildRepoState {
     async fn build(
         identifier: String,
         state: HashMap<String, String>,
-        signer: &NostrSigner,
+        signer: &Arc<dyn NostrSigner>,
     ) -> Result<RepoState>;
 }
 impl BuildRepoState for RepoState {
     async fn build(
         identifier: String,
         state: HashMap<String, String>,
-        signer: &NostrSigner,
+        signer: &Arc<dyn NostrSigner>,
     ) -> Result<RepoState> {
         let mut tags = vec![Tag::identifier(identifier.clone())];
         for (name, value) in &state {
