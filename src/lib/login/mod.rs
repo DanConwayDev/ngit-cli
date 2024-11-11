@@ -65,8 +65,7 @@ pub async fn launch(
                 eprintln!(
                     "login as {}",
                     if let Ok(public_key) = PublicKey::from_bech32(
-                        get_config_item(git_repo, "nostr.npub")
-                            .unwrap_or("unknown ncryptsec".to_string()),
+                        get_config_item(git_repo, "nostr.npub").unwrap_or("unknown".to_string()),
                     ) {
                         if let Ok(user_ref) =
                             get_user_details(&public_key, client, git_repo.get_path()?, silent)
@@ -99,16 +98,17 @@ pub async fn launch(
         }
     } {
         // get user ref
-        let user_ref = get_user_details(
-            &signer
+        let public_key = if let Ok(public_key) = PublicKey::from_bech32(
+            get_config_item(git_repo, "nostr.npub").unwrap_or("unknown".to_string()),
+        ) {
+            public_key
+        } else {
+            signer
                 .get_public_key()
                 .await
-                .context("cannot get public key from signer")?,
-            client,
-            git_repo.get_path()?,
-            silent,
-        )
-        .await?;
+                .context("cannot get public key from signer")?
+        };
+        let user_ref = get_user_details(&public_key, client, git_repo.get_path()?, silent).await?;
         if !silent {
             print_logged_in_as(&user_ref, client.is_none())?;
         }
