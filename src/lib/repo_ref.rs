@@ -3,6 +3,7 @@ use std::{
     fs::File,
     io::BufReader,
     str::FromStr,
+    sync::Arc,
 };
 
 use anyhow::{bail, Context, Result};
@@ -116,7 +117,7 @@ impl TryFrom<nostr::Event> for RepoRef {
 }
 
 impl RepoRef {
-    pub async fn to_event(&self, signer: &NostrSigner) -> Result<nostr::Event> {
+    pub async fn to_event(&self, signer: &Arc<dyn NostrSigner>) -> Result<nostr::Event> {
         sign_event(
             nostr_sdk::EventBuilder::new(
                 nostr::event::Kind::GitRepoAnnouncement,

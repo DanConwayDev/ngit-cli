@@ -1,12 +1,11 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use anyhow::{bail, Context, Result};
 use nostr::nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19};
 use nostr_sdk::{
-    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
-    TagKind, TagStandard, UncheckedUrl,
+    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, FromBech32, Kind, NostrSigner,
+    PublicKey, Tag, TagKind, TagStandard, UncheckedUrl,
 };
-use nostr_signer::NostrSigner;
 
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
@@ -86,7 +85,7 @@ pub async fn generate_patch_event(
     root_commit: &Sha1Hash,
     commit: &Sha1Hash,
     thread_event_id: Option<nostr::EventId>,
-    signer: &nostr_sdk::NostrSigner,
+    signer: &Arc<dyn NostrSigner>,
     repo_ref: &RepoRef,
     parent_patch_event_id: Option<nostr::EventId>,
     series_count: Option<(u64, u64)>,
@@ -309,7 +308,7 @@ pub async fn generate_cover_letter_and_patch_events(
     cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
     commits: &[Sha1Hash],
-    signer: &NostrSigner,
+    signer: &Arc<dyn NostrSigner>,
     repo_ref: &RepoRef,
     root_proposal_id: &Option<String>,
     mentions: &[nostr::Tag],
@@ -624,7 +623,7 @@ mod tests {
                     Tag::hashtag("root"),
                 ],
             )
-            .to_event(&nostr::Keys::generate())?)
+            .sign_with_keys(&nostr::Keys::generate())?)
         }
 
         #[test]

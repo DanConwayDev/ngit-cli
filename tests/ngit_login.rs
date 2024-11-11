@@ -191,7 +191,7 @@ mod with_relays {
                                         nostr::event::EventBuilder::metadata(
                                             &nostr::Metadata::new().display_name("fred"),
                                         )
-                                        .to_event(&TEST_KEY_1_KEYS)
+                                        .sign_with_keys(&TEST_KEY_1_KEYS)
                                         .unwrap(),
                                         generate_test_key_1_relay_list_event_same_as_fallback(),
                                     ],
@@ -229,7 +229,7 @@ mod with_relays {
                                             &nostr::Metadata::new()
                                                 .custom_field("displayName", "fred"),
                                         )
-                                        .to_event(&TEST_KEY_1_KEYS)
+                                        .sign_with_keys(&TEST_KEY_1_KEYS)
                                         .unwrap(),
                                         generate_test_key_1_relay_list_event_same_as_fallback(),
                                     ],
@@ -254,7 +254,7 @@ mod with_relays {
                                         nostr::event::EventBuilder::metadata(
                                             &nostr::Metadata::new().about("other info in metadata"),
                                         )
-                                        .to_event(&TEST_KEY_1_KEYS)
+                                        .sign_with_keys(&TEST_KEY_1_KEYS)
                                         .unwrap(),
                                         generate_test_key_1_relay_list_event_same_as_fallback(),
                                     ],

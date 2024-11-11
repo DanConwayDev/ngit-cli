@@ -212,7 +212,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         let mut maintainers_string = if !args.other_maintainers.is_empty() {
             [args.other_maintainers.clone()].concat().join(" ")
         } else if repo_ref.is_none() && repo_config_result.is_err() {
-            signer.public_key().await?.to_bech32()?
+            signer.get_public_key().await?.to_bech32()?
         } else {
             let maintainers = if let Ok(config) = &repo_config_result {
                 config.maintainers.clone()
@@ -225,7 +225,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     .collect()
             } else {
                 //unreachable
-                vec![signer.public_key().await?.to_bech32()?]
+                vec![signer.get_public_key().await?.to_bech32()?]
             };
             // add current user if not present
             if maintainers.iter().any(|m| {
@@ -237,9 +237,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }) {
                 maintainers.join(" ")
             } else {
-                [maintainers, vec![signer.public_key().await?.to_bech32()?]]
-                    .concat()
-                    .join(" ")
+                [
+                    maintainers,
+                    vec![signer.get_public_key().await?.to_bech32()?],
+                ]
+                .concat()
+                .join(" ")
             }
         };
         'outer: loop {
@@ -263,7 +266,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
             // add current user incase removed
             if !maintainers.iter().any(|m| user_ref.public_key.eq(m)) {
-                maintainers.push(signer.public_key().await?);
+                maintainers.push(signer.get_public_key().await?);
             }
             break maintainers;
         }
