@@ -27,12 +27,18 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// update cache with latest updates from nostr
+    Fetch(sub_commands::fetch::SubCommandArgs),
     /// signal you are this repo's maintainer accepting proposals via nostr
     Init(sub_commands::init::SubCommandArgs),
     /// issue commits as a proposal
     Send(sub_commands::send::SubCommandArgs),
     /// list proposals; checkout, apply or download selected
     List,
+    /// send proposal revision
+    Push(sub_commands::push::SubCommandArgs),
+    /// fetch and apply new proposal commits / revisions linked to branch
+    Pull,
     /// run with --nsec flag to change npub
     Login(sub_commands::login::SubCommandArgs),
 }
