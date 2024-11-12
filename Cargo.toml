@@ -1,6 +1,6 @@
 [package]
 name = "ngit"
-version = "1.5.2"
+version = "1.5.3"
 edition = "2021"
 description = "cli for code collaboration over nostr with nip34 support"
 authors = ["DanConwayDev <DanConwayDev@protonmail.com>"]
