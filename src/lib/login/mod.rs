@@ -46,7 +46,7 @@ pub async fn launch(
     change_user: bool,
     silent: bool,
 ) -> Result<(Arc<dyn NostrSigner>, UserRef)> {
-    if let Ok(signer) = match get_signer_without_prompts(
+    if let Ok((signer, public_key)) = match get_signer_without_prompts(
         git_repo,
         bunker_uri,
         bunker_app_key,
@@ -56,7 +56,7 @@ pub async fn launch(
     )
     .await
     {
-        Ok(signer) => Ok(signer),
+        Ok((signer, public_key)) => Ok((signer, public_key)),
         Err(error) => {
             if error
                 .to_string()
@@ -85,7 +85,7 @@ pub async fn launch(
                         .password(PromptPasswordParms::default().with_prompt("password"))
                         .context("failed to get password input from interactor.password")?;
                     if let Ok(keys) = get_keys_with_password(git_repo, &password) {
-                        break Ok(Arc::new(keys) as Arc<dyn NostrSigner>);
+                        break Ok((Arc::new(keys) as Arc<dyn NostrSigner>, None));
                     }
                     eprintln!("incorrect password");
                 }
@@ -97,18 +97,23 @@ pub async fn launch(
             }
         }
     } {
-        // get user ref
-        let public_key = if let Ok(public_key) = PublicKey::from_bech32(
-            get_config_item(git_repo, "nostr.npub").unwrap_or("unknown".to_string()),
-        ) {
-            public_key
-        } else {
-            signer
-                .get_public_key()
-                .await
-                .context("cannot get public key from signer")?
-        };
-        let user_ref = get_user_details(&public_key, client, git_repo.get_path()?, silent).await?;
+        let user_ref = get_user_details(
+            // Note: if rust-nostr NostrConnect::new() were updated to accept user public key as
+            // requested then the added complexity added in this commit can be undone
+            &(if let Some(public_key) = public_key {
+                public_key
+            } else {
+                signer
+                    .get_public_key()
+                    .await
+                    .context("cannot get public key from signer")?
+            }),
+            client,
+            git_repo.get_path()?,
+            silent,
+        )
+        .await?;
+
         if !silent {
             print_logged_in_as(&user_ref, client.is_none())?;
         }
@@ -139,13 +144,14 @@ async fn get_signer_without_prompts(
     nsec: &Option<String>,
     password: &Option<String>,
     save_local: bool,
-) -> Result<Arc<dyn NostrSigner>> {
+) -> Result<(Arc<dyn NostrSigner>, Option<PublicKey>)> {
     if let Some(nsec) = nsec {
-        Ok(Arc::new(get_keys_from_nsec(
-            git_repo, nsec, password, save_local,
-        )?))
+        Ok((
+            Arc::new(get_keys_from_nsec(git_repo, nsec, password, save_local)?),
+            None,
+        ))
     } else if let Some(password) = password {
-        Ok(Arc::new(get_keys_with_password(git_repo, password)?))
+        Ok((Arc::new(get_keys_with_password(git_repo, password)?), None))
     } else if let Some(bunker_uri) = bunker_uri {
         if let Some(bunker_app_key) = bunker_app_key {
             let signer = get_nip46_signer_from_uri_and_key(bunker_uri, bunker_app_key)
@@ -161,7 +167,7 @@ async fn get_signer_without_prompts(
                 )
                     .context("failed to save bunker details local git config nostr.bunker-uri and nostr.bunker-app-key")?;
             }
-            Ok(signer)
+            Ok((signer, None))
         } else {
             bail!(
                 "bunker-app-key parameter must be provided alongside bunker-uri. if unknown, login interactively."
@@ -303,7 +309,7 @@ async fn get_nip46_signer_from_uri_and_key(
 
 async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
     git_repo: &Repo,
-) -> Result<Arc<dyn NostrSigner>> {
+) -> Result<(Arc<dyn NostrSigner>, Option<PublicKey>)> {
     if let Ok(local_nsec) = &git_repo
         .get_git_config_item("nostr.nsec", Some(false))
         .context("failed get local git config")?
@@ -312,12 +318,21 @@ async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
         if local_nsec.contains("ncryptsec") {
             bail!("git global config item nostr.nsec is an ncryptsec")
         }
-        Ok(Arc::new(
-            nostr::Keys::from_str(local_nsec).context("invalid nsec parameter")?,
+        Ok((
+            Arc::new(nostr::Keys::from_str(local_nsec).context("invalid nsec parameter")?),
+            None,
         ))
-    } else if let Ok((uri, app_key)) = get_git_config_bunker_uri_and_app_key(git_repo, Some(false))
+    } else if let Ok((uri, app_key, npub)) =
+        get_git_config_bunker_uri_and_app_key(git_repo, Some(false))
     {
-        get_nip46_signer_from_uri_and_key(&uri, &app_key).await
+        Ok((
+            get_nip46_signer_from_uri_and_key(&uri, &app_key).await?,
+            if let Ok(pubic_key) = PublicKey::parse(npub) {
+                Some(pubic_key)
+            } else {
+                None
+            },
+        ))
     } else if let Ok(global_nsec) = &git_repo
         .get_git_config_item("nostr.nsec", Some(true))
         .context("failed get global git config")?
@@ -326,11 +341,21 @@ async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
         if global_nsec.contains("ncryptsec") {
             bail!("git global config item nostr.nsec is an ncryptsec")
         }
-        Ok(Arc::new(
-            nostr::Keys::from_str(global_nsec).context("invalid nsec parameter")?,
+        Ok((
+            Arc::new(nostr::Keys::from_str(global_nsec).context("invalid nsec parameter")?),
+            None,
         ))
-    } else if let Ok((uri, app_key)) = get_git_config_bunker_uri_and_app_key(git_repo, Some(true)) {
-        get_nip46_signer_from_uri_and_key(&uri, &app_key).await
+    } else if let Ok((uri, app_key, npub)) =
+        get_git_config_bunker_uri_and_app_key(git_repo, Some(true))
+    {
+        Ok((
+            get_nip46_signer_from_uri_and_key(&uri, &app_key).await?,
+            if let Ok(pubic_key) = PublicKey::parse(npub) {
+                Some(pubic_key)
+            } else {
+                None
+            },
+        ))
     } else {
         bail!("cannot get nsec or bunker from git config")
     }
@@ -339,7 +364,7 @@ async fn get_signer_with_git_config_nsec_or_bunker_without_prompts(
 fn get_git_config_bunker_uri_and_app_key(
     git_repo: &Repo,
     global: Option<bool>,
-) -> Result<(String, String)> {
+) -> Result<(String, String, String)> {
     Ok((
         git_repo
             .get_git_config_item("nostr.bunker-uri", global)
@@ -350,6 +375,11 @@ fn get_git_config_bunker_uri_and_app_key(
             .get_git_config_item("nostr.bunker-app-key", global)
             .context("failed get local git config")?
             .context("git local config item nostr.bunker-app-key doesn't exist")?
+            .to_string(),
+        git_repo
+            .get_git_config_item("nostr.npub", global)
+            .context("failed get local git config")?
+            .context("git local config item nostr.npub doesn't exist")?
             .to_string(),
     ))
 }
@@ -796,6 +826,9 @@ async fn get_user_details(
         }
     }
 }
+
+// None: in the edge case where the user is logged in via cli arguments rather
+// than from git config this may be wrong. TODO: fix this
 pub async fn get_logged_in_user(git_repo_path: &Path) -> Result<Option<PublicKey>> {
     let git_repo = Repo::from_path(&git_repo_path.to_path_buf())?;
     Ok(
