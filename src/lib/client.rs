@@ -223,14 +223,11 @@ impl Connect for Client {
         self.client.add_relay(url).await?;
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
-        let res = self.client.send_event_to(vec![url], event.clone()).await?;
-        if let Some(err) = res.failed.get(&Url::parse(url)?) {
-            bail!(if let Some(err) = err {
-                err.to_string()
-            } else {
-                "error: unknown".to_string()
-            });
-        }
+        self.client
+            .relay(url)
+            .await?
+            .send_event(event.clone())
+            .await?;
         save_event_in_cache(git_repo_path, &event).await?;
         if event.kind.eq(&Kind::GitRepoAnnouncement) {
             save_event_in_global_cache(git_repo_path, &event).await?;
