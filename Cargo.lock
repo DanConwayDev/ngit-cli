@@ -1776,7 +1776,7 @@ checksum = "43a88da9dd148bbcdce323dd6ac47d369b4769d4a3b78c6c52389b9269f77932"
 
 [[package]]
 name = "ngit"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
