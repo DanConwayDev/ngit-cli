@@ -665,21 +665,24 @@ pub async fn sign_event(
     event_builder: EventBuilder,
     signer: &Arc<dyn NostrSigner>,
 ) -> Result<nostr::Event> {
-    // if signer.type_id().().eq(&nostr_signer::NostrSignerType::NIP46) {
-    let term = console::Term::stderr();
-    term.write_line("signing event with remote signer...")?;
-    let event = signer
-        .sign_event(event_builder.build(signer.get_public_key().await?))
-        .await
-        .context("failed to sign event")?;
-    term.clear_last_lines(1)?;
-    Ok(event)
-    // } else {
-    //     signer
-    //         .sign_event(event_builder.build(signer.get_public_key().await?))
-    //         .await
-    //         .context("failed to sign event")
-    // }
+    // TODO: Yuki suggested he would add a backend option to NostrSigner so we can
+    // identify nip46 signers again and replace the below if statement with:
+    // if signer.backend() == nip46 {
+    if std::env::var("NGITTEST").is_err() {
+        let term = console::Term::stderr();
+        term.write_line("signing event with remote signer...")?;
+        let event = signer
+            .sign_event(event_builder.build(signer.get_public_key().await?))
+            .await
+            .context("failed to sign event")?;
+        term.clear_last_lines(1)?;
+        Ok(event)
+    } else {
+        signer
+            .sign_event(event_builder.build(signer.get_public_key().await?))
+            .await
+            .context("failed to sign event")
+    }
 }
 
 pub async fn fetch_public_key(signer: &Arc<dyn NostrSigner>) -> Result<nostr::PublicKey> {
