@@ -35,7 +35,7 @@ pub async fn run_list(
     for_push: bool,
 ) -> Result<HashMap<String, HashMap<String, String>>> {
     let nostr_state =
-        if let Ok(nostr_state) = get_state_from_cache(git_repo.get_path()?, repo_ref).await {
+        if let Ok(nostr_state) = get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await {
             Some(nostr_state)
         } else {
             None

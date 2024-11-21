@@ -8,7 +8,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use auth_git2::GitAuthenticator;
-use client::{get_events_from_cache, get_state_from_cache, send_events, sign_event, STATE_KIND};
+use client::{
+    get_events_from_local_cache, get_state_from_cache, send_events, sign_event, STATE_KIND,
+};
 use console::Term;
 use git::{sha1_to_oid, RepoActions};
 use git2::{Oid, Repository};
@@ -76,7 +78,7 @@ pub async fn run_push(
         _ => list_from_remotes(&term, git_repo, &repo_ref.git_server, decoded_nostr_url),
     };
 
-    let nostr_state = get_state_from_cache(git_repo.get_path()?, repo_ref).await;
+    let nostr_state = get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await;
 
     let existing_state = {
         // if no state events - create from first git server listed
@@ -122,17 +124,8 @@ pub async fn run_push(
         return Ok(());
     }
 
-    let (signer, user_ref) = login::launch(
-        git_repo,
-        &None,
-        &None,
-        &None,
-        &None,
-        Some(client),
-        false,
-        false,
-    )
-    .await?;
+    let (signer, user_ref, _) =
+        login::login_or_signup(&Some(git_repo), &None, &None, Some(client)).await?;
 
     if !repo_ref.maintainers.contains(&user_ref.public_key) {
         for refspec in &git_server_refspecs {
@@ -306,7 +299,7 @@ pub async fn run_push(
         term.write_line("broadcast to nostr relays:")?;
         send_events(
             client,
-            git_repo.get_path()?,
+            Some(git_repo.get_path()?),
             events,
             user_ref.relays.write(),
             repo_ref.relays.clone(),
@@ -897,7 +890,7 @@ async fn get_merged_status_events(
                     // merge commit
                     for parent in commit.parents() {
                         // lookup parent id
-                        let commit_events = get_events_from_cache(
+                        let commit_events = get_events_from_local_cache(
                             git_repo.get_path()?,
                             vec![
                                 nostr::Filter::default()
@@ -1045,7 +1038,7 @@ async fn get_proposal_and_revision_root_from_patch(
                 .clone(),
         )?;
 
-        get_events_from_cache(
+        get_events_from_local_cache(
             git_repo.get_path()?,
             vec![nostr::Filter::default().id(proposal_or_revision_id)],
         )

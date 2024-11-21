@@ -10,12 +10,12 @@ use nostr::{
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 use crate::{
-    cli::Cli,
+    cli::{extract_signer_cli_arguments, Cli},
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
     },
     client::{
-        fetching_with_report, get_events_from_cache, get_repo_ref_from_cache, Client, Connect,
+        fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache, Client, Connect,
     },
     git::{identify_ahead_behind, Repo, RepoActions},
     git_events::{event_is_patch_set_root, event_tag_from_nip19_or_hex},
@@ -175,21 +175,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     } else {
         None
     };
-    let (signer, user_ref) = login::launch(
-        &git_repo,
-        &cli_args.bunker_uri,
-        &cli_args.bunker_app_key,
-        &cli_args.nsec,
+
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
         &cli_args.password,
         Some(&client),
-        false,
-        false,
     )
     .await?;
 
     client.set_signer(signer.clone()).await;
 
-    let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
     // oldest first
     commits.reverse();
@@ -228,7 +225,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     send_events(
         &client,
-        git_repo_path,
+        Some(git_repo_path),
         events.clone(),
         user_ref.relays.write(),
         repo_ref.relays.clone(),
@@ -370,9 +367,11 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
                 marker: _,
                 public_key: _,
             }) => {
-                let events =
-                    get_events_from_cache(git_repo_path, vec![nostr::Filter::new().id(*event_id)])
-                        .await?;
+                let events = get_events_from_local_cache(
+                    git_repo_path,
+                    vec![nostr::Filter::new().id(*event_id)],
+                )
+                .await?;
 
                 if let Some(first) = events.iter().find(|e| e.id.eq(event_id)) {
                     if event_is_patch_set_root(first) {

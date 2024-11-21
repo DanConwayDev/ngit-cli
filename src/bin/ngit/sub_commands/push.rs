@@ -6,7 +6,7 @@ use ngit::{
 use nostr_sdk::PublicKey;
 
 use crate::{
-    cli::Cli,
+    cli::{extract_signer_cli_arguments, Cli},
     client::{
         fetching_with_report, get_all_proposal_patch_events_from_cache,
         get_proposals_and_revisions_from_cache, get_repo_ref_from_cache, Client, Connect,
@@ -53,7 +53,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 
-    let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
     let logged_in_public_key =
         if let Ok(Some(npub)) = git_repo.get_git_config_item("nostr.npub", None) {
@@ -166,15 +166,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         ahead.len()
     );
 
-    let (signer, user_ref) = login::launch(
-        &git_repo,
-        &cli_args.bunker_uri,
-        &cli_args.bunker_app_key,
-        &cli_args.nsec,
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
         &cli_args.password,
         Some(&client),
-        false,
-        false,
     )
     .await?;
 
@@ -204,7 +200,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     send_events(
         &client,
-        git_repo_path,
+        Some(git_repo_path),
         patch_events,
         user_ref.relays.write(),
         repo_ref.relays.clone(),

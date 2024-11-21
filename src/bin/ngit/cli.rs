@@ -1,4 +1,6 @@
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
+use ngit::login::SignerInfo;
 
 use crate::sub_commands;
 
@@ -23,6 +25,30 @@ pub struct Cli {
     /// disable spinner animations
     #[arg(long, action)]
     pub disable_cli_spinners: bool,
+}
+
+pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
+    if let Some(nsec) = &args.nsec {
+        Ok(Some(SignerInfo::Nsec {
+            nsec: nsec.to_string(),
+            password: None,
+            npub: None,
+        }))
+    } else if let Some(bunker_uri) = args.bunker_uri.clone() {
+        if let Some(bunker_app_key) = args.bunker_app_key.clone() {
+            Ok(Some(SignerInfo::Bunker {
+                bunker_uri,
+                bunker_app_key,
+                npub: None,
+            }))
+        } else {
+            bail!("cli argument bunker-app-key must be supplied when bunker-uri is")
+        }
+    } else if args.bunker_app_key.is_some() {
+        bail!("cli argument bunker-uri must be supplied when bunker-app-key is")
+    } else {
+        Ok(None)
+    }
 }
 
 #[derive(Subcommand)]

@@ -860,6 +860,44 @@ fn extract_sig_from_patch_tags<'a>(tags: &'a Tags, tag_name: &str) -> Result<git
     .context("failed to create git signature")
 }
 
+pub fn get_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<Option<String>> {
+    if let Some(git_repo) = git_repo {
+        git_repo.get_git_config_item(item, Some(false))
+    } else {
+        Ok(
+            match git2::Config::open_default()?.open_global()?.get_entry(item) {
+                Ok(item) => item.value().map(|v| v.to_string()),
+                Err(_) => None,
+            },
+        )
+    }
+}
+
+pub fn save_git_config_item(git_repo: &Option<&Repo>, item: &str, value: &str) -> Result<()> {
+    if let Some(git_repo) = git_repo {
+        git_repo.save_git_config_item(item, value, false)
+    } else {
+        git2::Config::open_default()?
+            .open_global()?
+            .set_str(item, value)
+            .context(format!("cannot set global git config item {}", item))
+    }
+}
+
+pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bool> {
+    if let Some(git_repo) = git_repo {
+        git_repo.remove_git_config_item(item, false)
+    } else if get_git_config_item(&None, item)?.is_none() {
+        Ok(false)
+    } else {
+        git2::Config::open_default()?
+            .open_global()?
+            .remove(item)
+            .context(format!("cannot remove existing git config item {}", item))?;
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

@@ -1,23 +1,5 @@
 use anyhow::Result;
-use nostr::{prelude::*, Keys};
-
-pub fn encrypt_key(keys: &Keys, password: &str) -> Result<String> {
-    let log2_rounds: u8 = if password.len() > 20 {
-        // we have enough of entropy - no need to spend CPU time adding much more
-        1
-    } else {
-        println!("this may take a few seconds...");
-        // default (scrypt::Params::RECOMMENDED_LOG_N) is 17 but 30s is too long to wait
-        15
-    };
-    Ok(nostr::nips::nip49::EncryptedSecretKey::new(
-        keys.secret_key(),
-        password,
-        log2_rounds,
-        KeySecurity::Medium,
-    )?
-    .to_bech32()?)
-}
+use nostr::prelude::*;
 
 pub fn decrypt_key(encrypted_key: &str, password: &str) -> Result<nostr::Keys> {
     let encrypted_key = nostr::nips::nip49::EncryptedSecretKey::from_bech32(encrypted_key)?;
@@ -33,6 +15,24 @@ mod tests {
     use test_utils::*;
 
     use super::*;
+
+    pub fn encrypt_key(keys: &Keys, password: &str) -> Result<String> {
+        let log2_rounds: u8 = if password.len() > 20 {
+            // we have enough of entropy - no need to spend CPU time adding much more
+            1
+        } else {
+            println!("this may take a few seconds...");
+            // default (scrypt::Params::RECOMMENDED_LOG_N) is 17 but 30s is too long to wait
+            15
+        };
+        Ok(nostr::nips::nip49::EncryptedSecretKey::new(
+            keys.secret_key(),
+            password,
+            log2_rounds,
+            KeySecurity::Medium,
+        )?
+        .to_bech32()?)
+    }
 
     #[test]
     fn encrypt_key_produces_string_prefixed_with() -> Result<()> {

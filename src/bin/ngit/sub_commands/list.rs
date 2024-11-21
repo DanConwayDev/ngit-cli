@@ -12,7 +12,7 @@ use nostr_sdk::Kind;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::{
-        fetching_with_report, get_events_from_cache, get_repo_ref_from_cache, Client, Connect,
+        fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache, Client, Connect,
     },
     git::{str_to_sha1, Repo, RepoActions},
     git_events::{
@@ -37,7 +37,7 @@ pub async fn launch() -> Result<()> {
 
     fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 
-    let repo_ref = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await?;
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
     let proposals_and_revisions: Vec<nostr::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
@@ -47,7 +47,7 @@ pub async fn launch() -> Result<()> {
     }
 
     let statuses: Vec<nostr::Event> = {
-        let mut statuses = get_events_from_cache(
+        let mut statuses = get_events_from_local_cache(
             git_repo_path,
             vec![
                 nostr::Filter::default()

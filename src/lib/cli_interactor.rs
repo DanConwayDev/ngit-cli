@@ -24,11 +24,13 @@ impl InteractorPrompt for Interactor {
         if !parms.default.is_empty() {
             input.default(parms.default);
         }
+        input.report(parms.report);
         Ok(input.interact_text()?)
     }
     fn password(&self, parms: PromptPasswordParms) -> Result<String> {
         let mut p = Password::with_theme(&self.theme);
         p.with_prompt(parms.prompt);
+        p.report(parms.report);
         if parms.confirm {
             p.with_confirmation("confirm password", "passwords didnt match...");
         }
@@ -44,10 +46,10 @@ impl InteractorPrompt for Interactor {
     }
     fn choice(&self, parms: PromptChoiceParms) -> Result<usize> {
         let mut choice = dialoguer::Select::with_theme(&self.theme);
-        choice
-            .with_prompt(parms.prompt)
-            .report(parms.report)
-            .items(&parms.choices);
+        if !parms.prompt.is_empty() {
+            choice.with_prompt(parms.prompt);
+        }
+        choice.report(parms.report).items(&parms.choices);
         if let Some(default) = parms.default {
             if std::env::var("NGITTEST").is_err() {
                 choice.default(default);
@@ -73,6 +75,7 @@ impl InteractorPrompt for Interactor {
 pub struct PromptInputParms {
     pub prompt: String,
     pub default: String,
+    pub report: bool,
     pub optional: bool,
 }
 
@@ -89,12 +92,18 @@ impl PromptInputParms {
         self.optional = true;
         self
     }
+
+    pub fn dont_report(mut self) -> Self {
+        self.report = false;
+        self
+    }
 }
 
 #[derive(Default)]
 pub struct PromptPasswordParms {
     pub prompt: String,
     pub confirm: bool,
+    pub report: bool,
 }
 
 impl PromptPasswordParms {
@@ -104,6 +113,10 @@ impl PromptPasswordParms {
     }
     pub const fn with_confirm(mut self) -> Self {
         self.confirm = true;
+        self
+    }
+    pub fn dont_report(mut self) -> Self {
+        self.report = false;
         self
     }
 }
@@ -140,10 +153,11 @@ impl PromptChoiceParms {
         self
     }
 
-    // pub fn dont_report(mut self) -> Self {
-    //     self.report = false;
-    //     self
-    // }
+    pub fn dont_report(mut self) -> Self {
+        self.report = false;
+        self
+    }
+
     pub fn with_choices(mut self, choices: Vec<String>) -> Self {
         self.choices = choices;
         self

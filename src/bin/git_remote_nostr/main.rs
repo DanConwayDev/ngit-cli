@@ -15,7 +15,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use client::{consolidate_fetch_reports, get_repo_ref_from_cache, Connect};
 use git::{nostr_url::NostrUrlDecoded, RepoActions};
-use ngit::{client, git, login};
+use ngit::{client, git, login::existing::load_existing_login};
 use nostr::nips::nip01::Coordinate;
 use utils::read_line;
 
@@ -36,38 +36,17 @@ async fn main() -> Result<()> {
 
     let mut client = Client::default();
 
-    if git_repo
-        .get_git_config_item("nostr.npub", None)
-        .is_ok_and(|x| x.is_some())
-        && (git_repo
-            .get_git_config_item("nostr.nsec", None)
-            .is_ok_and(|x| x.is_some())
-            || (git_repo
-                .get_git_config_item("nostr.bunker-uri", None)
-                .is_ok_and(|x| x.is_some())
-                && git_repo
-                    .get_git_config_item("nostr.bunker-app-key", None)
-                    .is_ok_and(|x| x.is_some())))
+    if let Ok((signer, _, _)) =
+        load_existing_login(&Some(&git_repo), &None, &None, &None, None, true, false).await
     {
-        if let Ok((signer, _)) = login::launch(
-            &git_repo,
-            &None,
-            &None,
-            &None,
-            &None,
-            Some(&client),
-            false,
-            true,
-        )
-        .await
-        {
-            client.set_signer(signer).await;
-        };
+        // signer for to respond to relay auth request
+        client.set_signer(signer).await;
     }
 
     fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinates).await?;
 
-    let repo_ref = get_repo_ref_from_cache(git_repo_path, &decoded_nostr_url.coordinates).await?;
+    let repo_ref =
+        get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinates).await?;
 
     let stdin = io::stdin();
     let mut line = String::new();
@@ -170,7 +149,7 @@ async fn fetching_with_report_for_helper(
     let term = console::Term::stderr();
     term.write_line("nostr: fetching...")?;
     let (relay_reports, progress_reporter) = client
-        .fetch_all(git_repo_path, repo_coordinates, &HashSet::new())
+        .fetch_all(Some(git_repo_path), repo_coordinates, &HashSet::new())
         .await?;
     if !relay_reports.iter().any(std::result::Result::is_err) {
         let _ = progress_reporter.clear();

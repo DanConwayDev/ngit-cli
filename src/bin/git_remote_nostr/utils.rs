@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use git2::Repository;
 use ngit::{
     client::{
-        get_all_proposal_patch_events_from_cache, get_events_from_cache,
+        get_all_proposal_patch_events_from_cache, get_events_from_local_cache,
         get_proposals_and_revisions_from_cache,
     },
     git::{
@@ -108,7 +108,7 @@ pub async fn get_open_proposals(
             .collect();
 
     let statuses: Vec<nostr::Event> = {
-        let mut statuses = get_events_from_cache(
+        let mut statuses = get_events_from_local_cache(
             git_repo_path,
             vec![
                 nostr::Filter::default()

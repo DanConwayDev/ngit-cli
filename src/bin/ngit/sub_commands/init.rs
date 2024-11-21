@@ -6,7 +6,7 @@ use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
 use nostr_sdk::Kind;
 
 use crate::{
-    cli::Cli,
+    cli::{extract_signer_cli_arguments, Cli},
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{fetching_with_report, get_repo_ref_from_cache, send_events, Client, Connect},
     git::{nostr_url::convert_clone_url_to_https, Repo, RepoActions},
@@ -69,7 +69,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let repo_ref = if let Some(repo_coordinates) = repo_coordinates.clone() {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, &repo_coordinates).await {
+        if let Ok(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await
+        {
             Some(repo_ref)
         } else {
             None
@@ -78,15 +79,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         None
     };
 
-    let (signer, user_ref) = login::launch(
-        &git_repo,
-        &cli_args.bunker_uri,
-        &cli_args.bunker_app_key,
-        &cli_args.nsec,
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
         &cli_args.password,
         Some(&client),
-        false,
-        false,
     )
     .await?;
 
@@ -381,7 +378,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     send_events(
         &client,
-        git_repo_path,
+        Some(git_repo_path),
         vec![repo_event],
         user_ref.relays.write(),
         relays.clone(),

@@ -43,7 +43,7 @@ use crate::{
     git_events::{
         event_is_cover_letter, event_is_patch_set_root, event_is_revision_root, status_kinds,
     },
-    login::{get_logged_in_user, get_user_ref_from_cache},
+    login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
     repo_ref::RepoRef,
     repo_state::RepoState,
 };
@@ -69,9 +69,9 @@ pub trait Connect {
     fn get_more_fallback_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
     fn get_fallback_signer_relays(&self) -> &Vec<String>;
-    async fn send_event_to(
+    async fn send_event_to<'a>(
         &self,
-        git_repo_path: &Path,
+        git_repo_path: Option<&'a Path>,
         url: &str,
         event: nostr::event::Event,
     ) -> Result<nostr::EventId>;
@@ -86,15 +86,15 @@ pub trait Connect {
         filters: Vec<nostr::Filter>,
         progress_reporter: MultiProgress,
     ) -> Result<(Vec<Result<Vec<nostr::Event>>>, MultiProgress)>;
-    async fn fetch_all(
+    async fn fetch_all<'a>(
         &self,
-        git_repo_path: &Path,
+        git_repo_path: Option<&'a Path>,
         repo_coordinates: &HashSet<Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)>;
-    async fn fetch_all_from_relay(
+    async fn fetch_all_from_relay<'a>(
         &self,
-        git_repo_path: &Path,
+        git_repo_path: Option<&'a Path>,
         request: FetchRequest,
         pb: &Option<ProgressBar>,
     ) -> Result<FetchReport>;
@@ -214,9 +214,9 @@ impl Connect for Client {
         &self.fallback_signer_relays
     }
 
-    async fn send_event_to(
+    async fn send_event_to<'a>(
         &self,
-        git_repo_path: &Path,
+        git_repo_path: Option<&'a Path>,
         url: &str,
         event: Event,
     ) -> Result<nostr::EventId> {
@@ -228,7 +228,9 @@ impl Connect for Client {
             .await?
             .send_event(event.clone())
             .await?;
-        save_event_in_cache(git_repo_path, &event).await?;
+        if let Some(git_repo_path) = git_repo_path {
+            save_event_in_local_cache(git_repo_path, &event).await?;
+        }
         if event.kind.eq(&Kind::GitRepoAnnouncement) {
             save_event_in_global_cache(git_repo_path, &event).await?;
         }
@@ -324,9 +326,9 @@ impl Connect for Client {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn fetch_all(
+    async fn fetch_all<'a>(
         &self,
-        git_repo_path: &Path,
+        git_repo_path: Option<&'a Path>,
         repo_coordinates: &HashSet<Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
@@ -496,9 +498,9 @@ impl Connect for Client {
         Ok((relay_reports, progress_reporter))
     }
 
-    async fn fetch_all_from_relay(
+    async fn fetch_all_from_relay<'a>(
         &self,
-        git_repo_path: &Path,
+        git_repo_path: Option<&'a Path>,
         request: FetchRequest,
         pb: &Option<ProgressBar>,
     ) -> Result<FetchReport> {
@@ -742,20 +744,25 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
         .context("cannot open or create nostr cache database at .git/nostr-cache.lmdb")
 }
 
-async fn get_global_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
-    NostrLMDB::open(if std::env::var("NGITTEST").is_err() {
+async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLMDB> {
+    let path = if std::env::var("NGITTEST").is_ok() {
+        if let Some(git_repo_path) = git_repo_path {
+            git_repo_path.join(".git/test-global-cache.lmdb")
+        } else {
+            bail!("git_repo must be supplied to get_global_cache_database during integration tests")
+        }
+    } else {
         create_dir_all(get_dirs()?.cache_dir()).context(format!(
             "cannot create cache directory in: {:?}",
             get_dirs()?.cache_dir()
         ))?;
         get_dirs()?.cache_dir().join("nostr-cache.lmdb")
-    } else {
-        git_repo_path.join(".git/test-global-cache.lmdb")
-    })
-    .context("cannot open ngit global nostr cache database")
+    };
+
+    NostrLMDB::open(path).context("cannot open ngit global nostr cache database")
 }
 
-pub async fn get_events_from_cache(
+pub async fn get_events_from_local_cache(
     git_repo_path: &Path,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<nostr::Event>> {
@@ -770,7 +777,7 @@ pub async fn get_events_from_cache(
 }
 
 pub async fn get_event_from_global_cache(
-    git_repo_path: &Path,
+    git_repo_path: Option<&Path>,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<nostr::Event>> {
     Ok(get_global_cache_database(git_repo_path)
@@ -781,7 +788,7 @@ pub async fn get_event_from_global_cache(
         .to_vec())
 }
 
-pub async fn save_event_in_cache(git_repo_path: &Path, event: &nostr::Event) -> Result<bool> {
+pub async fn save_event_in_local_cache(git_repo_path: &Path, event: &nostr::Event) -> Result<bool> {
     get_local_cache_database(git_repo_path)
         .await?
         .save_event(event)
@@ -790,7 +797,7 @@ pub async fn save_event_in_cache(git_repo_path: &Path, event: &nostr::Event) -> 
 }
 
 pub async fn save_event_in_global_cache(
-    git_repo_path: &Path,
+    git_repo_path: Option<&Path>,
     event: &nostr::Event,
 ) -> Result<bool> {
     get_global_cache_database(git_repo_path)
@@ -801,7 +808,7 @@ pub async fn save_event_in_global_cache(
 }
 
 pub async fn get_repo_ref_from_cache(
-    git_repo_path: &Path,
+    git_repo_path: Option<&Path>,
     repo_coordinates: &HashSet<Coordinate>,
 ) -> Result<RepoRef> {
     let mut maintainers = HashSet::new();
@@ -817,7 +824,11 @@ pub async fn get_repo_ref_from_cache(
 
         let events = [
             get_event_from_global_cache(git_repo_path, vec![repo_events_filter.clone()]).await?,
-            get_events_from_cache(git_repo_path, vec![repo_events_filter]).await?,
+            if let Some(git_repo_path) = git_repo_path {
+                get_events_from_local_cache(git_repo_path, vec![repo_events_filter]).await?
+            } else {
+                vec![]
+            },
         ]
         .concat();
         for e in events {
@@ -866,19 +877,32 @@ pub async fn get_repo_ref_from_cache(
     })
 }
 
-pub async fn get_state_from_cache(git_repo_path: &Path, repo_ref: &RepoRef) -> Result<RepoState> {
-    RepoState::try_from(
-        get_events_from_cache(
-            git_repo_path,
-            vec![get_filter_state_events(&repo_ref.coordinates())],
+pub async fn get_state_from_cache(
+    git_repo_path: Option<&Path>,
+    repo_ref: &RepoRef,
+) -> Result<RepoState> {
+    if let Some(git_repo_path) = git_repo_path {
+        RepoState::try_from(
+            get_events_from_local_cache(
+                git_repo_path,
+                vec![get_filter_state_events(&repo_ref.coordinates())],
+            )
+            .await?,
         )
-        .await?,
-    )
+    } else {
+        RepoState::try_from(
+            get_event_from_global_cache(
+                git_repo_path,
+                vec![get_filter_state_events(&repo_ref.coordinates())],
+            )
+            .await?,
+        )
+    }
 }
 
 #[allow(clippy::too_many_lines)]
 async fn create_relays_request(
-    git_repo_path: &Path,
+    git_repo_path: Option<&Path>,
     repo_coordinates: &HashSet<Coordinate>,
     user_profiles: &HashSet<PublicKey>,
     fallback_relays: HashSet<Url>,
@@ -926,25 +950,27 @@ async fn create_relays_request(
             }
         }
 
-        for event in &get_events_from_cache(
-            git_repo_path,
-            vec![
-                nostr::Filter::default()
-                    .kinds(vec![Kind::GitPatch])
-                    .custom_tag(
-                        SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
-                        repo_coordinates_without_relays
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect::<Vec<String>>(),
-                    ),
-            ],
-        )
-        .await?
-        {
-            if event_is_patch_set_root(event) || event_is_revision_root(event) {
-                proposals.insert(event.id);
-                contributors.insert(event.pubkey);
+        if let Some(git_repo_path) = git_repo_path {
+            for event in &get_events_from_local_cache(
+                git_repo_path,
+                vec![
+                    nostr::Filter::default()
+                        .kinds(vec![Kind::GitPatch])
+                        .custom_tag(
+                            SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                            repo_coordinates_without_relays
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<String>>(),
+                        ),
+                ],
+            )
+            .await?
+            {
+                if event_is_patch_set_root(event) || event_is_revision_root(event) {
+                    proposals.insert(event.id);
+                    contributors.insert(event.pubkey);
+                }
             }
         }
 
@@ -958,7 +984,9 @@ async fn create_relays_request(
                 .iter()
                 .find(|e| e.kind == Kind::Metadata && e.pubkey.eq(c))
             {
-                save_event_in_cache(git_repo_path, event).await?;
+                if let Some(git_repo_path) = git_repo_path {
+                    save_event_in_local_cache(git_repo_path, event).await?;
+                }
             } else {
                 missing_contributor_profiles.insert(c.to_owned());
             }
@@ -967,8 +995,10 @@ async fn create_relays_request(
 
     let profiles_to_fetch_from_user_relays = {
         let mut user_profiles = user_profiles.clone();
-        if let Ok(Some(current_user)) = get_logged_in_user(git_repo_path).await {
-            user_profiles.insert(current_user);
+        if let Some(git_repo_path) = git_repo_path {
+            if let Ok(Some(current_user)) = get_likely_logged_in_user(git_repo_path).await {
+                user_profiles.insert(current_user);
+            }
         }
         let mut map: HashMap<PublicKey, (Timestamp, Timestamp)> = HashMap::new();
         for public_key in &user_profiles {
@@ -1022,12 +1052,14 @@ async fn create_relays_request(
                 .copied()
                 .collect(),
         ) {
-            for (id, _) in get_local_cache_database(git_repo_path)
-                .await?
-                .negentropy_items(filter)
-                .await?
-            {
-                existing_events.insert(id);
+            if let Some(git_repo_path) = git_repo_path {
+                for (id, _) in get_local_cache_database(git_repo_path)
+                    .await?
+                    .negentropy_items(filter)
+                    .await?
+                {
+                    existing_events.insert(id);
+                }
             }
         }
         existing_events
@@ -1105,7 +1137,7 @@ async fn create_relays_request(
 async fn process_fetched_events(
     events: Vec<nostr::Event>,
     request: &FetchRequest,
-    git_repo_path: &Path,
+    git_repo_path: Option<&Path>,
     fresh_coordinates: &mut HashSet<Coordinate>,
     fresh_proposal_roots: &mut HashSet<EventId>,
     fresh_profiles: &mut HashSet<PublicKey>,
@@ -1113,7 +1145,9 @@ async fn process_fetched_events(
 ) -> Result<()> {
     for event in &events {
         if !request.existing_events.contains(&event.id) {
-            save_event_in_cache(git_repo_path, event).await?;
+            if let Some(git_repo_path) = git_repo_path {
+                save_event_in_local_cache(git_repo_path, event).await?;
+            }
             if event.kind.eq(&Kind::GitRepoAnnouncement) {
                 save_event_in_global_cache(git_repo_path, event).await?;
                 let new_coordinate = !request
@@ -1488,7 +1522,7 @@ pub async fn fetching_with_report(
     let term = console::Term::stderr();
     term.write_line("fetching updates...")?;
     let (relay_reports, progress_reporter) = client
-        .fetch_all(git_repo_path, repo_coordinates, &HashSet::new())
+        .fetch_all(Some(git_repo_path), repo_coordinates, &HashSet::new())
         .await?;
     if !relay_reports.iter().any(std::result::Result::is_err) {
         let _ = progress_reporter.clear();
@@ -1506,7 +1540,7 @@ pub async fn get_proposals_and_revisions_from_cache(
     git_repo_path: &Path,
     repo_coordinates: HashSet<Coordinate>,
 ) -> Result<Vec<nostr::Event>> {
-    let mut proposals = get_events_from_cache(
+    let mut proposals = get_events_from_local_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
@@ -1535,7 +1569,7 @@ pub async fn get_all_proposal_patch_events_from_cache(
     repo_ref: &RepoRef,
     proposal_id: &nostr::EventId,
 ) -> Result<Vec<nostr::Event>> {
-    let mut commit_events = get_events_from_cache(
+    let mut commit_events = get_events_from_local_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
@@ -1571,7 +1605,7 @@ pub async fn get_all_proposal_patch_events_from_cache(
         .collect();
 
     if !revision_roots.is_empty() {
-        for event in get_events_from_cache(
+        for event in get_events_from_local_cache(
             git_repo_path,
             vec![
                 nostr::Filter::default()
@@ -1594,7 +1628,7 @@ pub async fn get_all_proposal_patch_events_from_cache(
 }
 
 pub async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> Result<Event> {
-    Ok(get_events_from_cache(
+    Ok(get_events_from_local_cache(
         git_repo.get_path()?,
         vec![nostr::Filter::default().id(*event_id)],
     )
@@ -1609,7 +1643,7 @@ pub async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> 
 pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    git_repo_path: &Path,
+    git_repo_path: Option<&Path>,
     events: Vec<nostr::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<String>,
