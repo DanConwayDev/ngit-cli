@@ -30,7 +30,7 @@ pub async fn login_or_signup(
     if res.is_ok() {
         res
     } else {
-        fresh_login_or_signup(git_repo, client, false).await
+        fresh_login_or_signup(git_repo, client, None, false).await
     }
 }
 

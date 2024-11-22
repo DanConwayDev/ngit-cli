@@ -10,6 +10,7 @@ use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
 use super::{
+    existing::load_existing_login,
     key_encryption::decrypt_key,
     print_logged_in_as,
     user::{get_user_details, UserRef},
@@ -24,7 +25,7 @@ use crate::{
         Interactor, InteractorPrompt, Printer, PromptChoiceParms, PromptConfirmParms,
         PromptInputParms, PromptPasswordParms,
     },
-    client::{send_events, Connect},
+    client::{fetch_public_key, send_events, Connect},
     git::{remove_git_config_item, save_git_config_item, Repo, RepoActions},
 };
 
@@ -32,9 +33,24 @@ pub async fn fresh_login_or_signup(
     git_repo: &Option<&Repo>,
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
+    signer_info: Option<SignerInfo>,
     save_local: bool,
 ) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
     let (signer, public_key, signer_info, source) = loop {
+        if let Some(signer_info) = signer_info {
+            let (signer, _user_ref, source) = load_existing_login(
+                git_repo,
+                &Some(signer_info.clone()),
+                &None,
+                &Some(SignerInfoSource::CommandLineArguments),
+                client,
+                true,
+                true,
+            )
+            .await?;
+            let public_key = fetch_public_key(&signer).await?;
+            break (signer, public_key, signer_info, source);
+        }
         match Interactor::default().choice(
             PromptChoiceParms::default()
                 .with_prompt("login to nostr")
