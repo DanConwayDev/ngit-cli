@@ -7,7 +7,7 @@ use nostr::nips::{nip05, nip46::NostrConnectURI};
 use nostr_connect::client::NostrConnect;
 use nostr_sdk::{Keys, NostrSigner, PublicKey, ToBech32, Url};
 use qrcode::QrCode;
-use tokio::sync::{oneshot, Mutex};
+use tokio::{signal, sync::Mutex};
 
 use super::{
     key_encryption::decrypt_key,
@@ -297,8 +297,10 @@ pub async fn get_fresh_nip46_signer(
                     .println("login to nostr with remote signer via nostr connect".to_string());
                 printer_locked.println("scan QR code in signer app (eg Amber):".to_string());
                 printer_locked.printlns(generate_qr(&url.to_string())?);
-                printer_locked
-                    .println("scan QR code in signer app or press any key to abort...".to_string());
+                printer_locked.println(
+                    "scan QR code in signer app or use ctrl + c to go back to login menu..."
+                        .to_string(),
+                );
             }
             1 => {
                 printer_locked
@@ -309,12 +311,15 @@ pub async fn get_fresh_nip46_signer(
                     url.to_string(),
                 );
                 printer_locked.println("".to_string());
-                printer_locked
-                    .println("paste url into signer app or press any key to abort...".to_string());
+                printer_locked.println(
+                    "paste this url into signer app or use ctrl + c to go back to login menu..."
+                        .to_string(),
+                );
             }
             _ => {
                 printer_locked.println(
-                    "add / approve in your signer or press any key to abort... ".to_string(),
+                    "add / approve in your signer or use ctrl + c to go back to login menu..."
+                        .to_string(),
                 );
             }
         }
@@ -382,43 +387,33 @@ pub async fn listen_for_remote_signer(
     nostr_connect_url: &NostrConnectURI,
     printer: Arc<Mutex<Printer>>,
 ) -> Result<(Arc<dyn NostrSigner>, PublicKey, NostrConnectURI)> {
-    let (tx, rx) = oneshot::channel();
-    let printer_clone = Arc::clone(&printer);
     let app_key = app_key.clone();
     let nostr_connect_url_clone = nostr_connect_url.clone();
-    let qr_listener = tokio::spawn(async move {
-        if let Ok(nostr_connect) = NostrConnect::new(
-            nostr_connect_url_clone,
-            app_key,
-            Duration::from_secs(10 * 60),
-            None,
-        ) {
-            let signer: Arc<dyn NostrSigner> = Arc::new(nostr_connect);
-            if let Ok(pub_key) = signer.get_public_key().await {
-                let mut printer_locked = printer_clone.lock().await;
-                printer_locked.clear_all();
 
-                printer_locked.println_with_custom_formatting(
-                    format!(
-                        "{}",
-                        Style::new().bold().apply_to("connected to remote signer"),
-                    ),
-                    "connected to remote signer".to_string(),
-                );
-                printer_locked.println("press any key to continue...".to_string());
-                let _ = tx.send(Some((signer, pub_key)));
-            } else {
-                let _ = tx.send(None);
-            }
+    let nostr_connect = NostrConnect::new(
+        nostr_connect_url_clone,
+        app_key,
+        Duration::from_secs(10 * 60),
+        None,
+    )?;
+    let signer: Arc<dyn NostrSigner> = Arc::new(nostr_connect);
+    let pubkey_future = signer.get_public_key();
+
+    // wait for signer response or ctrl + c
+    let res = tokio::select! {
+        pubkey_result = pubkey_future => {
+            Some(pubkey_result)
+        },
+        _ = signal::ctrl_c() => {
+            None
         }
-    });
-    let _ = console::Term::stderr().read_char();
-    qr_listener.abort();
+    };
+
     let printer_clone = Arc::clone(&printer);
     let mut printer = printer_clone.lock().await;
     printer.clear_all();
 
-    if let Some((signer, public_key)) = rx.await? {
+    if let Some(Ok(public_key)) = res {
         let bunker_url = NostrConnectURI::Bunker {
             // TODO the remote signer pubkey may not be the user pubkey
             remote_signer_public_key: public_key,

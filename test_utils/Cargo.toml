@@ -19,5 +19,5 @@ rand = "0.8"
 rexpect = { git = "https://github.com/rust-cli/rexpect.git", rev = "9eb61dd" }
 simple-websockets = { git = "https://github.com/DanConwayDev/simple-websockets", branch= "auto-release-port" }
 strip-ansi-escapes = "0.2.0"
-tokio = "1.33.0"
+tokio = { version = "1.40.0", features = ["full"] }
 tungstenite = "0.20.1"
