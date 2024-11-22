@@ -573,9 +573,9 @@ fn silently_save_to_git_config(
             npub,
         } => {
             npub_to_save = npub;
-            remove_git_config_item(git_repo, "nostr.nsec")?;
             save_git_config_item(git_repo, "nostr.bunker-uri", bunker_uri)?;
             save_git_config_item(git_repo, "nostr.bunker-app-key", bunker_app_key)?;
+            remove_git_config_item(git_repo, "nostr.nsec")?;
         }
     }
     if let Some(npub) = npub_to_save {
