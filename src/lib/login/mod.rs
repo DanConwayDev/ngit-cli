@@ -74,7 +74,7 @@ fn print_logged_in_as(
         user_ref.metadata.name,
         match source {
             SignerInfoSource::CommandLineArguments => " via cli arguments",
-            SignerInfoSource::GitLocal => " just to local repository",
+            SignerInfoSource::GitLocal => " to local repository",
             SignerInfoSource::GitGlobal => "",
         }
     );
