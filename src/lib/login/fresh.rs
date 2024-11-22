@@ -1,7 +1,7 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use console::{Style, Term};
+use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::nips::{nip05, nip46::NostrConnectURI};
 use nostr_connect::client::NostrConnect;
@@ -68,7 +68,7 @@ pub async fn fresh_login_or_signup(
                 continue;
             }
             _ => {
-                display_login_help_content();
+                display_login_help_content().await;
                 continue;
             }
         }
@@ -566,7 +566,7 @@ fn silently_save_to_git_config(
     Ok(())
 }
 
-fn display_login_help_content() {
+async fn display_login_help_content() {
     let mut printer = Printer::default();
     let title_style = Style::new().bold().fg(console::Color::Yellow);
     printer.println("|==============================|".to_owned());
@@ -583,8 +583,8 @@ fn display_login_help_content() {
     printer.printlns(vec![
         "".to_string(),
         "login / sign up help content should go here...".to_string(),
-        "press any key to see the login / signup menu again...".to_string(),
+        "press ctrl + c to return the login / sign up menu again...".to_string(),
     ]);
-    let _ = Term::stdout().read_char();
+    let _ = signal::ctrl_c().await;
     printer.clear_all();
 }
