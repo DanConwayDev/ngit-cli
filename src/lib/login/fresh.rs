@@ -5,7 +5,7 @@ use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::nips::{nip05, nip46::NostrConnectURI};
 use nostr_connect::client::NostrConnect;
-use nostr_sdk::{Keys, NostrSigner, PublicKey, ToBech32, Url};
+use nostr_sdk::{EventBuilder, Keys, Metadata, NostrSigner, PublicKey, ToBech32, Url};
 use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
@@ -24,7 +24,7 @@ use crate::{
         Interactor, InteractorPrompt, Printer, PromptChoiceParms, PromptConfirmParms,
         PromptInputParms, PromptPasswordParms,
     },
-    client::Connect,
+    client::{send_events, Connect},
     git::{remove_git_config_item, save_git_config_item, Repo, RepoActions},
 };
 
@@ -63,10 +63,14 @@ pub async fn fresh_login_or_signup(
                     continue;
                 }
             },
-            2 => {
-                eprintln!("TODO create account...");
-                continue;
-            }
+            2 => match signup(client).await {
+                Ok(Some(res)) => break res,
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!("error getting fresh signer from signup: {e}");
+                    continue;
+                }
+            },
             _ => {
                 display_login_help_content().await;
                 continue;
@@ -564,6 +568,84 @@ fn silently_save_to_git_config(
         remove_git_config_item(git_repo, "nostr.npub")?;
     }
     Ok(())
+}
+
+async fn signup(
+    #[cfg(test)] client: Option<&MockConnect>,
+    #[cfg(not(test))] client: Option<&Client>,
+) -> Result<
+    Option<(
+        Arc<dyn NostrSigner>,
+        PublicKey,
+        SignerInfo,
+        SignerInfoSource,
+    )>,
+> {
+    eprintln!("create account");
+    loop {
+        let name = Interactor::default()
+            .input(
+                PromptInputParms::default()
+                    .with_prompt("user display name")
+                    .optional()
+                    .dont_report(),
+            )
+            .context("failed to get display name input from interactor")?;
+        if name.is_empty() {
+            show_prompt_error("emtpy display name", "");
+            match Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_choices(vec![
+                        "enter non-empty display name".to_string(),
+                        "back to login menu".to_string(),
+                    ])
+                    .dont_report(),
+            )? {
+                0 => continue,
+                _ => break Ok(None),
+            }
+        }
+        let keys = nostr::Keys::generate();
+        let nsec = keys.secret_key().to_bech32()?;
+        show_prompt_success("user display name", &name);
+        let signer_info = SignerInfo::Nsec {
+            nsec,
+            password: None,
+            npub: Some(keys.public_key().to_bech32()?),
+        };
+        let public_key = keys.public_key();
+        if let Some(client) = client {
+            let profile =
+                EventBuilder::metadata(&Metadata::new().name(name)).sign_with_keys(&keys)?;
+            let relay_list = EventBuilder::relay_list(
+                client
+                    .get_fallback_relays()
+                    .iter()
+                    .map(|s| (Url::parse(s).unwrap(), None)),
+            )
+            .sign_with_keys(&keys)?;
+            eprintln!("publishing user profile to relays");
+            send_events(
+                client,
+                None,
+                vec![profile, relay_list],
+                client.get_fallback_relays().clone(),
+                vec![],
+                true,
+                false,
+            )
+            .await?;
+        }
+        eprintln!("TODO: advice about using in other clients");
+        break Ok(Some((
+            Arc::new(keys),
+            public_key,
+            signer_info,
+            // TODO factor in source
+            SignerInfoSource::GitGlobal,
+        )));
+    }
 }
 
 async fn display_login_help_content() {
