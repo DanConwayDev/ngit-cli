@@ -41,7 +41,8 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         }
     };
 
-    if logout(git_repo.as_ref(), command_args.local).await? {
+    let (logged_out, log_in_locally_only) = logout(git_repo.as_ref(), command_args.local).await?;
+    if logged_out || log_in_locally_only {
         fresh_login_or_signup(
             &git_repo.as_ref(),
             client.as_ref(),
@@ -58,7 +59,8 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     Ok(())
 }
 
-async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<bool> {
+/// return ( bool - logged out, bool - log in to local git locally)
+async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool)> {
     for source in if local_only {
         vec![SignerInfoSource::GitLocal]
     } else {
@@ -77,12 +79,20 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<bool> {
                 user_ref.metadata.name
             );
             match Interactor::default().choice(
-                PromptChoiceParms::default()
-                    .with_default(0)
-                    .with_choices(vec![
-                        format!("logout as \"{}\"", user_ref.metadata.name),
-                        "remain logged in".to_string(),
-                    ]),
+                PromptChoiceParms::default().with_default(0).with_choices(
+                    if source == SignerInfoSource::GitGlobal {
+                        vec![
+                            format!("logout as \"{}\"", user_ref.metadata.name),
+                            "remain logged in".to_string(),
+                            "login to local git repo only as another user".to_string(),
+                        ]
+                    } else {
+                        vec![
+                            format!("logout as \"{}\"", user_ref.metadata.name),
+                            "remain logged in".to_string(),
+                        ]
+                    },
+                ),
             )? {
                 0 => {
                     for item in [
@@ -101,9 +111,10 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<bool> {
                         )?;
                     }
                 }
-                _ => return Ok(false),
+                1 => return Ok((false, local_only)),
+                _ => return Ok((false, true)),
             }
         }
     }
-    Ok(true)
+    Ok((true, local_only))
 }
