@@ -87,7 +87,7 @@ mod with_relays {
 
                         p.expect("searching for profile...\r\n")?;
 
-                        p.expect_end_with("logged in as fred\r\n")?;
+                        p.expect_end_with("logged in as fred via cli arguments\r\n")?;
                         for p in [51, 52] {
                             shutdown_relay(8000 + p)?;
                         }
@@ -437,7 +437,7 @@ mod with_relays {
 
                             p.expect("searching for profile...\r\n")?;
 
-                            p.expect_end_with("logged in as fred\r\n")?;
+                            p.expect_end_with("logged in as fred via cli arguments\r\n")?;
                             for p in [51, 52] {
                                 shutdown_relay(8000 + p)?;
                             }
@@ -504,7 +504,7 @@ mod with_relays {
 
                             p.expect("searching for profile...\r\n")?;
 
-                            p.expect_end_with("logged in as fred\r\n")?;
+                            p.expect_end_with("logged in as fred via cli arguments\r\n")?;
                             for p in [51, 52] {
                                 shutdown_relay(8000 + p)?;
                             }
@@ -566,7 +566,7 @@ mod with_relays {
 
                             p.expect("searching for profile...\r\n")?;
 
-                            p.expect_end_with("logged in as fred\r\n")?;
+                            p.expect_end_with("logged in as fred via cli arguments\r\n")?;
                             for p in [51, 52] {
                                 shutdown_relay(8000 + p)?;
                             }
@@ -747,7 +747,7 @@ mod with_relays {
 
                         p.expect("saved login details to local git config\r\n")?;
 
-                        p.expect_end_eventually_with("logged in as fred\r\n")?;
+                        p.expect_end_eventually_with("logged in as fred via cli arguments\r\n")?;
 
                         for p in [51, 52] {
                             shutdown_relay(8000 + p)?;

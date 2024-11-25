@@ -252,7 +252,7 @@ mod when_branch_is_checked_out {
                         p.expect(
                             "1 commits ahead. preparing to create creating patch events.\r\n",
                         )?;
-                        p.expect("logged in as fred\r\n")?;
+                        p.expect("logged in as fred via cli arguments\r\n")?;
                         p.expect("pushing 1 commits\r\n")?;
 
                         expect_send_with_progress(
@@ -490,7 +490,7 @@ mod when_branch_is_checked_out {
                         p.expect("creating proposal from 2 commits:\r\n")?;
                         p.expect("355bdf1 add a4.md\r\n")?;
                         p.expect("dbd1115 add a3.md\r\n")?;
-                        p.expect("logged in as fred\r\n")?;
+                        p.expect("logged in as fred via cli arguments\r\n")?;
                         p.expect("posting 2 patches without a covering letter...\r\n")?;
 
                         relay::expect_send_with_progress(
