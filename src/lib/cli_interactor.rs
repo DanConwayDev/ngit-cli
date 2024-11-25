@@ -71,12 +71,22 @@ impl InteractorPrompt for Interactor {
     }
 }
 
-#[derive(Default)]
 pub struct PromptInputParms {
     pub prompt: String,
     pub default: String,
     pub report: bool,
     pub optional: bool,
+}
+
+impl Default for PromptInputParms {
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            default: String::new(),
+            optional: false,
+            report: true,
+        }
+    }
 }
 
 impl PromptInputParms {
@@ -99,11 +109,20 @@ impl PromptInputParms {
     }
 }
 
-#[derive(Default)]
 pub struct PromptPasswordParms {
     pub prompt: String,
     pub confirm: bool,
     pub report: bool,
+}
+
+impl Default for PromptPasswordParms {
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            confirm: false,
+            report: true,
+        }
+    }
 }
 
 impl PromptPasswordParms {
@@ -138,12 +157,22 @@ impl PromptConfirmParms {
     }
 }
 
-#[derive(Default)]
 pub struct PromptChoiceParms {
     pub prompt: String,
     pub choices: Vec<String>,
     pub default: Option<usize>,
     pub report: bool,
+}
+
+impl Default for PromptChoiceParms {
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            choices: vec![],
+            default: None,
+            report: true,
+        }
+    }
 }
 
 impl PromptChoiceParms {
