@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap;
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
-    git::remove_git_config_item,
+    git::{get_git_config_item, remove_git_config_item},
     login::{existing::load_existing_login, SignerInfoSource},
 };
 
@@ -101,14 +101,39 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                         "nostr.bunker-uri",
                         "nostr.bunker-app-key",
                     ] {
-                        remove_git_config_item(
+                        if let Err(error) = remove_git_config_item(
                             if source == SignerInfoSource::GitLocal {
                                 &git_repo
                             } else {
                                 &None
                             },
                             item,
-                        )?;
+                        ) {
+                            eprintln!("{error:?}");
+
+                            eprintln!(
+                                "consider manually removing {} git config items: {}",
+                                if source == SignerInfoSource::GitGlobal {
+                                    "global"
+                                } else {
+                                    "local"
+                                },
+                                format_items_as_list(&get_global_login_config_items_set())
+                            );
+                            match Interactor::default().choice(
+                                PromptChoiceParms::default().with_default(0).with_choices(
+                                    vec![
+                                        "continue with global login to reveal what git config items to manually set".to_string(),
+                                        "login to this local repository with a different account".to_string(),
+                                        "cancel".to_string(),
+                                    ]
+                                ),
+                            )? {
+                                0 => return Ok((true, false)),
+                                1 => return Ok((true, true)),
+                                _ => return Ok((false, local_only)),
+                            }
+                        }
                     }
                 }
                 1 => return Ok((false, local_only)),
@@ -117,4 +142,29 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
         }
     }
     Ok((true, local_only))
+}
+
+fn get_global_login_config_items_set() -> Vec<&'static str> {
+    [
+        "nostr.nsec",
+        "nostr.npub",
+        "nostr.bunker-uri",
+        "nostr.bunker-app-key",
+    ]
+    .iter()
+    .copied()
+    .filter(|item| get_git_config_item(&None, item).is_ok_and(|item| item.is_some()))
+    .collect::<Vec<&str>>()
+}
+
+fn format_items_as_list(items: &[&str]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].to_string(),
+        2 => format!("{} and {}", items[0], items[1]),
+        _ => {
+            let all_but_last = items[..items.len() - 1].join(", ");
+            format!("{}, and {}", all_but_last, items[items.len() - 1])
+        }
+    }
 }

@@ -93,7 +93,7 @@ pub async fn fresh_login_or_signup(
             }
         }
     };
-    let _ = save_to_git_config(git_repo, &signer_info, !save_local);
+    let _ = save_to_git_config(git_repo, &signer_info, !save_local).await;
     let user_ref = get_user_details(
         &public_key,
         client,
@@ -483,7 +483,7 @@ fn generate_qr(data: &str) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn save_to_git_config(
+async fn save_to_git_config(
     git_repo: &Option<&Repo>,
     signer_info: &SignerInfo,
     global: bool,
@@ -516,7 +516,64 @@ fn save_to_git_config(
             }
         }
         if global {
-            save_to_git_config(git_repo, signer_info, false)?
+            loop {
+                match Interactor::default().choice(
+                    PromptChoiceParms::default()
+                        .with_default(0)
+                        .with_choices(vec![
+                            "i'll update global git config manually with above values".to_string(),
+                            "only log into local git repository (save to local git config)"
+                                .to_string(),
+                            "one time login".to_string(),
+                        ]),
+                )? {
+                    0 => {
+                        // check
+                        if let Ok((_, user_ref, _)) = load_existing_login(
+                            git_repo,
+                            &None,
+                            &None,
+                            &Some(SignerInfoSource::GitGlobal),
+                            None,
+                            true,
+                            true,
+                        )
+                        .await
+                        {
+                            if user_ref.public_key == get_pubkey_from_signer_info(signer_info)? {
+                                return Ok(());
+                            } else {
+                                eprintln!(
+                                    "global git config hasn't been updated with different npub"
+                                );
+                            }
+                        } else {
+                            eprintln!(
+                                "global git config hasn't been updated with nostr login values"
+                            );
+                        }
+                    }
+                    1 => {
+                        if let Err(error) =
+                            silently_save_to_git_config(git_repo, signer_info, false).context(
+                                format!(
+                                    "failed to save login details to {} git config",
+                                    if global { "global" } else { "local" }
+                                ),
+                            )
+                        {
+                            eprintln!("Error: {:?}", error);
+                            eprintln!("login details were not saved");
+                        } else {
+                            eprintln!(
+                                "saved login details to local git config. you are only logged in to this local repository."
+                            );
+                        }
+                        return Ok(());
+                    }
+                    _ => return Ok(()),
+                }
+            }
         }
         Err(error)
     } else {
@@ -529,6 +586,26 @@ fn save_to_git_config(
             }
         );
         Ok(())
+    }
+}
+
+fn get_pubkey_from_signer_info(signer_info: &SignerInfo) -> Result<PublicKey> {
+    let npub = match signer_info {
+        SignerInfo::Bunker {
+            bunker_uri: _,
+            bunker_app_key: _,
+            npub,
+        } => npub,
+        SignerInfo::Nsec {
+            nsec: _,
+            password: _,
+            npub,
+        } => npub,
+    };
+    if let Some(npub) = npub {
+        PublicKey::parse(npub).context("format of npub string in signer_info is invalid")
+    } else {
+        bail!("no npub in signer_info object");
     }
 }
 
