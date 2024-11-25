@@ -1298,7 +1298,7 @@ pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
             format!("back"),
         ],
     )?;
-    c.succeeds_with(0, false, Some(0))?;
+    c.succeeds_with(0, true, Some(0))?;
     p.expect_end_eventually()?;
     Ok(())
 }

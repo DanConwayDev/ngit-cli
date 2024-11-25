@@ -178,7 +178,6 @@ impl Default for PromptChoiceParms {
 impl PromptChoiceParms {
     pub fn with_prompt<S: Into<String>>(mut self, prompt: S) -> Self {
         self.prompt = prompt.into();
-        self.report = true;
         self
     }
 
@@ -198,7 +197,6 @@ impl PromptChoiceParms {
     }
 }
 
-#[derive(Default)]
 pub struct PromptMultiChoiceParms {
     pub prompt: String,
     pub choices: Vec<String>,
@@ -206,10 +204,20 @@ pub struct PromptMultiChoiceParms {
     pub report: bool,
 }
 
+impl Default for PromptMultiChoiceParms {
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            choices: vec![],
+            defaults: None,
+            report: true,
+        }
+    }
+}
+
 impl PromptMultiChoiceParms {
     pub fn with_prompt<S: Into<String>>(mut self, prompt: S) -> Self {
         self.prompt = prompt.into();
-        self.report = true;
         self
     }
 
