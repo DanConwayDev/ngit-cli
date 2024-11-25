@@ -46,10 +46,10 @@ impl InteractorPrompt for Interactor {
     }
     fn choice(&self, parms: PromptChoiceParms) -> Result<usize> {
         let mut choice = dialoguer::Select::with_theme(&self.theme);
-        if !parms.prompt.is_empty() {
-            choice.with_prompt(parms.prompt);
-        }
-        choice.report(parms.report).items(&parms.choices);
+        choice
+            .with_prompt(parms.prompt)
+            .report(parms.report)
+            .items(&parms.choices);
         if let Some(default) = parms.default {
             if std::env::var("NGITTEST").is_err() {
                 choice.default(default);
