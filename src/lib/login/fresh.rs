@@ -25,7 +25,7 @@ use crate::{
         Interactor, InteractorPrompt, Printer, PromptChoiceParms, PromptConfirmParms,
         PromptInputParms, PromptPasswordParms,
     },
-    client::{fetch_public_key, send_events, Connect},
+    client::{send_events, Connect},
     git::{remove_git_config_item, save_git_config_item, Repo, RepoActions},
 };
 
@@ -38,7 +38,7 @@ pub async fn fresh_login_or_signup(
 ) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
     let (signer, public_key, signer_info, source) = loop {
         if let Some(signer_info) = signer_info {
-            let (signer, _user_ref, source) = load_existing_login(
+            let (signer, user_ref, source) = load_existing_login(
                 git_repo,
                 &Some(signer_info.clone()),
                 &None,
@@ -48,8 +48,7 @@ pub async fn fresh_login_or_signup(
                 true,
             )
             .await?;
-            let public_key = fetch_public_key(&signer).await?;
-            break (signer, public_key, signer_info, source);
+            break (signer, user_ref.public_key, signer_info, source);
         }
         match Interactor::default().choice(
             PromptChoiceParms::default()
@@ -176,7 +175,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
             (keys, signer_info)
         } else if let Ok(keys) = nostr::Keys::from_str(&input) {
             let nsec = keys.secret_key().to_bech32()?;
-            show_prompt_success("nsec", &shorten_string(&nsec));
+            show_prompt_success("nsec", &shorten_string(&input));
             let signer_info = SignerInfo::Nsec {
                 nsec,
                 password: None,
@@ -223,11 +222,11 @@ fn show_prompt_error(label: &str, value: &str) {
         let _ = ColorfulTheme::default().format_error(
             &mut s,
             &format!(
-                "{label}: {}",
+                "{label}: \"{}\"",
                 if value.is_empty() {
                     "empty".to_string()
                 } else {
-                    shorten_string(&format!("\"{}\"", &value))
+                    shorten_string(value)
                 }
             ),
         );
@@ -490,6 +489,11 @@ async fn save_to_git_config(
     signer_info: &SignerInfo,
     global: bool,
 ) -> Result<()> {
+    let global = if std::env::var("NGITTEST").is_ok() {
+        false
+    } else {
+        global
+    };
     let err_msg = format!(
         "failed to save login details to {} git config",
         if global { "global" } else { "local" }

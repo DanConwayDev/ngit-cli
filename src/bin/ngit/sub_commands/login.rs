@@ -61,7 +61,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
 
 /// return ( bool - logged out, bool - log in to local git locally)
 async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool)> {
-    for source in if local_only {
+    for source in if local_only || std::env::var("NGITTEST").is_ok() {
         vec![SignerInfoSource::GitLocal]
     } else {
         vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]

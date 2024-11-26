@@ -336,6 +336,14 @@ impl CliTesterInputPrompt<'_> {
     }
 
     pub fn succeeds_with(&mut self, input: &str) -> Result<&mut Self> {
+        self.succeeds_with_optional_shortened_report(input, false)
+    }
+
+    pub fn succeeds_with_optional_shortened_report(
+        &mut self,
+        input: &str,
+        shorten_report_to_15_chars: bool,
+    ) -> Result<&mut Self> {
         self.tester.send_line(input)?;
         self.tester
             .expect(input)
@@ -345,9 +353,14 @@ impl CliTesterInputPrompt<'_> {
             .context("expect new line after input to be printed")?;
 
         let mut s = String::new();
+        let printed_input = if shorten_report_to_15_chars {
+            shorten_string(input)
+        } else {
+            input.to_string()
+        };
         self.tester
             .formatter
-            .format_input_prompt_selection(&mut s, self.prompt.as_str(), input)
+            .format_input_prompt_selection(&mut s, self.prompt.as_str(), &printed_input)
             .expect("diagluer theme formatter should succeed");
         if !s.contains(self.prompt.as_str()) {
             panic!("dialoguer must be broken as formatted prompt success doesnt contain prompt");
@@ -358,6 +371,61 @@ impl CliTesterInputPrompt<'_> {
             .expect(formatted_success.as_str())
             .context("expect immediate prompt success")?;
         Ok(self)
+    }
+
+    pub fn fails_with_optional_shortened_report(
+        &mut self,
+        input: &str,
+        prefix: Option<&str>,
+        shorten_report_to_15_chars: bool,
+    ) -> Result<&mut Self> {
+        self.tester.send_line(input)?;
+        self.tester
+            .expect(input)
+            .context("expect input to be printed")?;
+        self.tester
+            .expect("\r")
+            .context("expect new line after input to be printed")?;
+
+        let mut s = String::new();
+        let printed_input = if shorten_report_to_15_chars {
+            shorten_string(input)
+        } else {
+            input.to_string()
+        };
+        self.tester
+            .formatter
+            .format_error(
+                &mut s,
+                &format!(
+                    "{}{}: {}",
+                    prefix.unwrap_or_default(),
+                    &self.prompt,
+                    if input.is_empty() {
+                        "empty".to_string()
+                    } else {
+                        format!("\"{printed_input}\"")
+                    }
+                ),
+            )
+            .expect("diagluer theme formatter should succeed");
+        if !s.contains(self.prompt.as_str()) {
+            panic!("dialoguer must be broken as formatted prompt success doesnt contain prompt");
+        }
+        let formatted_success = format!("{}\r\n", sanatize(s));
+
+        self.tester
+            .expect(formatted_success.as_str())
+            .context("expect immediate prompt success")?;
+        Ok(self)
+    }
+}
+
+fn shorten_string(s: &str) -> String {
+    if s.len() < 15 {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..15])
     }
 }
 

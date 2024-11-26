@@ -3,44 +3,49 @@ use git::GitTestRepo;
 use serial_test::serial;
 use test_utils::*;
 
-static EXPECTED_NSEC_PROMPT: &str = "login with nsec / bunker url / nostr address";
-static EXPECTED_LOCAL_REPOSITORY_PROMPT: &str = "just for this repository?";
-static EXPECTED_REQUIRE_PASSWORD_PROMPT: &str = "require password?";
-static EXPECTED_SET_PASSWORD_PROMPT: &str = "encrypt with password";
-static EXPECTED_SET_PASSWORD_CONFIRM_PROMPT: &str = "confirm password";
+static EXPECTED_NSEC_PROMPT: &str = "nsec";
 
-fn standard_first_time_login_encrypting_nsec() -> Result<CliTester> {
+fn show_first_time_login_choices(p: &mut CliTester) -> Result<CliTesterChoicePrompt> {
+    p.expect_choice(
+        "login to nostr",
+        vec![
+            "secret key (nsec / ncryptsec)".to_string(),
+            "nostr connect (remote signer)".to_string(),
+            "create account".to_string(),
+            "help".to_string(),
+        ],
+    )
+}
+
+fn first_time_login_choices_succeeds_with_nsec(p: &mut CliTester, nsec: &str) -> Result<()> {
+    p.expect_choice(
+        "login to nostr",
+        vec![
+            "secret key (nsec / ncryptsec)".to_string(),
+            "nostr connect (remote signer)".to_string(),
+            "create account".to_string(),
+            "help".to_string(),
+        ],
+    )?
+    .succeeds_with(0, false, Some(0))?;
+
+    p.expect_input(EXPECTED_NSEC_PROMPT)?
+        .succeeds_with_optional_shortened_report(nsec, true)?;
+
+    p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
+    Ok(())
+}
+
+fn standard_first_time_login_with_nsec() -> Result<CliTester> {
     let test_repo = GitTestRepo::default();
     let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
 
-    p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
-        .succeeds_with(TEST_KEY_1_NSEC)?;
-
-    p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-        .succeeds_with(Some(true))?;
-
-    p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-        .succeeds_with(Some(true))?;
-
-    p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-        .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-        .succeeds_with(TEST_PASSWORD)?;
+    first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
     p.expect_end_eventually()?;
     Ok(p)
 }
 
-fn expect_qr_prompt_opt_for_other_methods(p: &mut CliTester) -> Result<()> {
-    p.expect_eventually("scan QR or paste into remote signer")?;
-    p.expect_eventually("\r\n")?;
-    p.expect_eventually("login with nsec / bunker url / nostr address instead")?;
-    p.expect_eventually("\r\n")?;
-    p.send_line("")?;
-    // p.expect_eventually("\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r")?;
-    // p.expect_eventually("\r\r\r\r\r\r\r\r\r\r\r\r\r")?;
-
-    Ok(())
-}
 mod with_relays {
     use anyhow::Ok;
     use futures::join;
@@ -73,21 +78,12 @@ mod with_relays {
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
-                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
-                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
-                            .succeeds_with(TEST_KEY_1_NSEC)?;
 
-                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                            .succeeds_with(Some(true))?;
-
-                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                            .succeeds_with(Some(false))?;
-
-                        p.expect("saved login details to local git config\r\n")?;
+                        first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
                         p.expect("searching for profile...\r\n")?;
 
-                        p.expect_end_with("logged in as fred via cli arguments\r\n")?;
+                        p.expect_end_with("logged in as fred\r\n")?;
                         for p in [51, 52] {
                             shutdown_relay(8000 + p)?;
                         }
@@ -114,17 +110,7 @@ mod with_relays {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
-                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
-                            .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                            .succeeds_with(Some(true))?;
-
-                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                            .succeeds_with(Some(false))?;
-
-                        p.expect("saved login details to local git config\r\n")?;
+                        first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
                         p.expect("searching for profile...\r\n")?;
 
@@ -395,7 +381,7 @@ mod with_relays {
                     .await
                 }
 
-                mod when_specifying_command_line_nsec_only {
+                mod when_specifying_command_line_nsec {
                     use super::*;
 
                     #[tokio::test]
@@ -433,136 +419,7 @@ mod with_relays {
                                 ["login", "--nsec", TEST_KEY_1_NSEC],
                             );
 
-                            p.expect("saved login details to local git config\r\n")?;
-
-                            p.expect("searching for profile...\r\n")?;
-
-                            p.expect_end_with("logged in as fred via cli arguments\r\n")?;
-                            for p in [51, 52] {
-                                shutdown_relay(8000 + p)?;
-                            }
-                            Ok(())
-                        });
-
-                        // launch relay
-                        let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
-
-                        cli_tester_handle.join().unwrap()?;
-                        Ok(())
-                    }
-                }
-                mod when_specifying_command_line_password_only {
-                    use super::*;
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn displays_correct_name() -> Result<()> {
-                        run_test_when_specifying_command_line_password_only_displays_correct_name(
-                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        generate_test_key_1_metadata_event("fred"),
-                                        generate_test_key_1_relay_list_event_same_as_fallback(),
-                                    ],
-                                )?;
-                                Ok(())
-                            }),
-                            None,
-                        )
-                        .await
-                    }
-                    async fn run_test_when_specifying_command_line_password_only_displays_correct_name(
-                        relay_listener1: Option<ListenerReqFunc<'_>>,
-                        relay_listener2: Option<ListenerReqFunc<'_>>,
-                    ) -> Result<()> {
-                        let (mut r51, mut r52) = (
-                            Relay::new(8051, None, relay_listener1),
-                            Relay::new(8052, None, relay_listener2),
-                        );
-
-                        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            let test_repo = GitTestRepo::default();
-                            CliTester::new_from_dir(
-                                &test_repo.dir,
-                                [
-                                    "login",
-                                    "--offline",
-                                    "--nsec",
-                                    TEST_KEY_1_NSEC,
-                                    "--password",
-                                    TEST_PASSWORD,
-                                ],
-                            )
-                            .expect_end_eventually()?;
-
-                            let mut p = CliTester::new_from_dir(
-                                &test_repo.dir,
-                                ["login", "--password", TEST_PASSWORD],
-                            );
-
-                            p.expect("searching for profile...\r\n")?;
-
-                            p.expect_end_with("logged in as fred via cli arguments\r\n")?;
-                            for p in [51, 52] {
-                                shutdown_relay(8000 + p)?;
-                            }
-                            Ok(())
-                        });
-
-                        // launch relay
-                        let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
-
-                        cli_tester_handle.join().unwrap()?;
-                        Ok(())
-                    }
-                }
-
-                mod when_specifying_command_line_nsec_and_password {
-                    use super::*;
-
-                    #[tokio::test]
-                    #[serial]
-                    async fn displays_correct_name() -> Result<()> {
-                        run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
-                            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        generate_test_key_1_metadata_event("fred"),
-                                        generate_test_key_1_relay_list_event_same_as_fallback(),
-                                    ],
-                                )?;
-                                Ok(())
-                            }),
-                            None,
-                        ).await
-                    }
-                    async fn run_test_when_specifying_command_line_nsec_and_password_displays_correct_name(
-                        relay_listener1: Option<ListenerReqFunc<'_>>,
-                        relay_listener2: Option<ListenerReqFunc<'_>>,
-                    ) -> Result<()> {
-                        let (mut r51, mut r52) = (
-                            Relay::new(8051, None, relay_listener1),
-                            Relay::new(8052, None, relay_listener2),
-                        );
-
-                        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                            let test_repo = GitTestRepo::default();
-                            let mut p = CliTester::new_from_dir(
-                                &test_repo.dir,
-                                [
-                                    "login",
-                                    "--nsec",
-                                    TEST_KEY_1_NSEC,
-                                    "--password",
-                                    TEST_PASSWORD,
-                                ],
-                            );
-
-                            p.expect("saved login details to local git config\r\n")?;
+                            p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
                             p.expect("searching for profile...\r\n")?;
 
@@ -581,7 +438,6 @@ mod with_relays {
                     }
                 }
             }
-
             mod when_no_metadata_found {
                 use super::*;
 
@@ -604,17 +460,7 @@ mod with_relays {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
-                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
-                            .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                            .succeeds_with(Some(true))?;
-
-                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                            .succeeds_with(Some(false))?;
-
-                        p.expect("saved login details to local git config\r\n")?;
+                        first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
                         p.expect("searching for profile...\r\n")?;
 
@@ -668,17 +514,7 @@ mod with_relays {
                         let test_repo = GitTestRepo::default();
                         let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                        expect_qr_prompt_opt_for_other_methods(&mut p)?;
-                        p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
-                            .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                        p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                            .succeeds_with(Some(true))?;
-
-                        p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                            .succeeds_with(Some(false))?;
-
-                        p.expect("saved login details to local git config\r\n")?;
+                        first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
                         p.expect("searching for profile...\r\n")?;
 
@@ -695,79 +531,6 @@ mod with_relays {
                     let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
 
                     cli_tester_handle.join().unwrap()?;
-                    Ok(())
-                }
-            }
-        }
-
-        mod when_second_time_login_and_details_already_fetched {
-            use super::*;
-
-            mod uses_cache_and_stores_and_retrieves_ncryptsec_from_local_git_config {
-                use super::*;
-
-                #[tokio::test]
-                #[serial]
-                async fn dislays_logged_in_with_correct_name() -> Result<()> {
-                    run_test_dislays_logged_in_with_correct_name(Some(
-                        &|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event("fred"),
-                                    generate_test_key_1_relay_list_event_same_as_fallback(),
-                                ],
-                            )?;
-                            Ok(())
-                        },
-                    ))
-                    .await
-                }
-                async fn run_test_dislays_logged_in_with_correct_name(
-                    relay_listener: Option<ListenerReqFunc<'_>>,
-                ) -> Result<()> {
-                    let (mut r51, mut r52) = (
-                        Relay::new(8051, None, relay_listener),
-                        Relay::new(8052, None, None),
-                    );
-
-                    let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-                        let test_repo = GitTestRepo::default();
-                        let mut p = CliTester::new_from_dir(
-                            &test_repo.dir,
-                            [
-                                "login",
-                                "--nsec",
-                                TEST_KEY_1_NSEC,
-                                "--password",
-                                TEST_PASSWORD,
-                            ],
-                        );
-
-                        p.expect("saved login details to local git config\r\n")?;
-
-                        p.expect_end_eventually_with("logged in as fred via cli arguments\r\n")?;
-
-                        for p in [51, 52] {
-                            shutdown_relay(8000 + p)?;
-                        }
-
-                        let mut p = CliTester::new_from_dir(
-                            &test_repo.dir,
-                            ["login", "--password", TEST_PASSWORD],
-                        );
-
-                        p.expect_end_eventually_with("logged in as fred\r\n")?;
-
-                        Ok(())
-                    });
-
-                    // launch relay
-                    let _ = join!(r51.listen_until_close(), r52.listen_until_close(),);
-
-                    cli_tester_handle.join().unwrap()?;
-
                     Ok(())
                 }
             }
@@ -792,17 +555,7 @@ mod with_relays {
                     let test_repo = GitTestRepo::default();
                     let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
 
-                    expect_qr_prompt_opt_for_other_methods(&mut p)?;
-                    p.expect_input_eventually(EXPECTED_NSEC_PROMPT)?
-                        .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                    p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                        .succeeds_with(Some(true))?;
-
-                    p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                        .succeeds_with(Some(false))?;
-
-                    p.expect("saved login details to local git config\r\n")?;
+                    first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
                     p.expect("searching for profile...\r\n")?;
 
@@ -868,7 +621,7 @@ mod with_offline_flag {
 
         #[test]
         fn prompts_for_nsec_and_password() -> Result<()> {
-            standard_first_time_login_encrypting_nsec()?;
+            standard_first_time_login_with_nsec()?;
             Ok(())
         }
 
@@ -877,20 +630,12 @@ mod with_offline_flag {
             let test_repo = GitTestRepo::default();
             let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
 
+            show_first_time_login_choices(&mut p)?.succeeds_with(0, false, Some(0))?;
+
             p.expect_input(EXPECTED_NSEC_PROMPT)?
-                .succeeds_with(TEST_KEY_1_NSEC)?;
+                .succeeds_with_optional_shortened_report(TEST_KEY_1_NSEC, true)?;
 
-            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                .succeeds_with(Some(true))?;
-
-            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                .succeeds_with(Some(true))?;
-
-            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                .succeeds_with(TEST_PASSWORD)?;
-
-            p.expect("saved login details to local git config\r\n")?;
+            p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
             p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
         }
@@ -900,20 +645,12 @@ mod with_offline_flag {
             let test_repo = GitTestRepo::default();
             let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
 
+            show_first_time_login_choices(&mut p)?.succeeds_with(0, false, Some(0))?;
+
             p.expect_input(EXPECTED_NSEC_PROMPT)?
-                .succeeds_with(TEST_KEY_1_SK_HEX)?;
+                .succeeds_with_optional_shortened_report(TEST_KEY_1_SK_HEX, true)?;
 
-            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                .succeeds_with(Some(true))?;
-
-            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                .succeeds_with(Some(true))?;
-
-            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                .succeeds_with(TEST_PASSWORD)?;
-
-            p.expect("saved login details to local git config\r\n")?;
+            p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
             p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
         }
@@ -923,35 +660,30 @@ mod with_offline_flag {
 
             #[test]
             fn prompts_for_nsec_until_valid() -> Result<()> {
-                let invalid_nsec_response =
-                    "invalid. try again with nostr address / bunker uri / nsec";
-
                 let test_repo = GitTestRepo::default();
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
 
+                show_first_time_login_choices(&mut p)?.succeeds_with(0, false, Some(0))?;
+
+                for _ in 0..2 {
+                    p.expect_input(EXPECTED_NSEC_PROMPT)?
+                        .fails_with_optional_shortened_report(
+                            TEST_INVALID_NSEC,
+                            Some("invalid "),
+                            true,
+                        )?;
+
+                    p.expect_choice(
+                        "login to nostr",
+                        vec!["try again with nsec".to_string(), "back".to_string()],
+                    )?
+                    .succeeds_with(0, false, Some(0))?;
+                }
+
                 p.expect_input(EXPECTED_NSEC_PROMPT)?
-                    // this behaviour is intentional. rejecting the response with dialoguer
-                    // hides the original input from the user so they
-                    // failed to see the mistake they made.
-                    .succeeds_with(TEST_INVALID_NSEC)?;
+                    .succeeds_with_optional_shortened_report(TEST_KEY_1_NSEC, true)?;
 
-                p.expect_input(invalid_nsec_response)?
-                    .succeeds_with(TEST_INVALID_NSEC)?;
-
-                p.expect_input(invalid_nsec_response)?
-                    .succeeds_with(TEST_KEY_1_NSEC)?;
-
-                p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                    .succeeds_with(Some(true))?;
-
-                p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                    .succeeds_with(Some(true))?;
-
-                p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                    .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                    .succeeds_with(TEST_PASSWORD)?;
-
-                p.expect("saved login details to local git config\r\n")?;
+                p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
                 p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
             }
@@ -969,48 +701,13 @@ mod with_offline_flag {
                 ["login", "--offline", "--nsec", TEST_KEY_1_NSEC],
             );
 
-            p.expect("saved login details to local git config\r\n")?;
+            p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
-            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+            p.expect_end_with(
+                format!("logged in as {} via cli arguments\r\n", TEST_KEY_1_NPUB).as_str(),
+            )
         }
 
-        #[test]
-        fn forgets_identity() -> Result<()> {
-            let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(
-                &test_repo.dir,
-                ["login", "--offline", "--nsec", TEST_KEY_1_NSEC],
-            );
-
-            p.expect("saved login details to local git config\r\n")?;
-
-            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())?;
-
-            p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
-
-            p.expect_input(EXPECTED_NSEC_PROMPT)?
-                .succeeds_with(TEST_KEY_1_NSEC)?;
-
-            p.exit()
-        }
-
-        mod when_logging_in_as_different_nsec {
-            use super::*;
-
-            #[test]
-            fn valid_nsec_param_succeeds_without_prompts_and_logs_in() -> Result<()> {
-                standard_first_time_login_encrypting_nsec()?.exit()?;
-                let test_repo = GitTestRepo::default();
-                let mut p = CliTester::new_from_dir(
-                    &test_repo.dir,
-                    ["login", "--offline", "--nsec", TEST_KEY_2_NSEC],
-                );
-
-                p.expect("saved login details to local git config\r\n")?;
-
-                p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_2_NPUB).as_str())
-            }
-        }
         #[test]
         fn invalid_nsec_param_fails_without_prompts() -> Result<()> {
             let test_repo = GitTestRepo::default();
@@ -1042,8 +739,11 @@ mod with_offline_flag {
                     TEST_PASSWORD,
                 ],
             );
-            p.expect("saved login details to local git config\r\n")?;
-            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+            p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
+
+            p.expect_end_with(
+                format!("logged in as {} via cli arguments\r\n", TEST_KEY_1_NPUB).as_str(),
+            )
         }
 
         #[test]
@@ -1060,8 +760,11 @@ mod with_offline_flag {
                     "--offline",
                 ],
             );
-            p.expect("saved login details to local git config\r\n")?;
-            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+            p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
+
+            p.expect_end_with(
+                format!("logged in as {} via cli arguments\r\n", TEST_KEY_1_NPUB).as_str(),
+            )
         }
 
         mod when_logging_in_as_different_nsec {
@@ -1069,7 +772,7 @@ mod with_offline_flag {
 
             #[test]
             fn valid_nsec_param_succeeds_without_prompts_and_logs_in() -> Result<()> {
-                standard_first_time_login_encrypting_nsec()?.exit()?;
+                standard_first_time_login_with_nsec()?.exit()?;
                 let test_repo = GitTestRepo::default();
                 let mut p = CliTester::new_from_dir(
                     &test_repo.dir,
@@ -1082,105 +785,12 @@ mod with_offline_flag {
                         TEST_PASSWORD,
                     ],
                 );
-                p.expect("saved login details to local git config\r\n")?;
-                p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_2_NPUB).as_str())
-            }
-        }
+                p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
-        mod when_provided_with_new_password {
-            use super::*;
-
-            #[test]
-            fn password_changes() -> Result<()> {
-                standard_first_time_login_encrypting_nsec()?.exit()?;
-                let test_repo = GitTestRepo::default();
-                let mut p = CliTester::new_from_dir(
-                    &test_repo.dir,
-                    [
-                        "login",
-                        "--offline",
-                        "--nsec",
-                        TEST_KEY_1_NSEC,
-                        "--password",
-                        TEST_INVALID_PASSWORD,
-                    ],
-                );
-                p.expect("saved login details to local git config\r\n")?;
-                p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())?;
-
-                CliTester::new_from_dir(
-                    &test_repo.dir,
-                    ["--password", TEST_INVALID_PASSWORD, "login", "--offline"],
+                p.expect_end_with(
+                    format!("logged in as {} via cli arguments\r\n", TEST_KEY_2_NPUB).as_str(),
                 )
-                .expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
             }
-        }
-
-        #[test]
-        fn invalid_nsec_param_fails_without_prompts() -> Result<()> {
-            let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(
-                &test_repo.dir,
-                [
-                    "login",
-                    "--offline",
-                    "--nsec",
-                    TEST_INVALID_NSEC,
-                    "--password",
-                    TEST_PASSWORD,
-                ],
-            );
-            p.expect_end_with(
-                "Error: invalid nsec parameter\r\n\r\nCaused by:\r\n    Invalid secret key\r\n",
-            )
-        }
-    }
-
-    mod when_weak_password {
-        use super::*;
-
-        #[test]
-        #[serial]
-        // combined into a single test as it is computationally expensive to run
-        fn warns_it_might_take_a_few_seconds_then_succeeds_then_second_login_prompts_for_password_then_warns_again_then_succeeds()
-        -> Result<()> {
-            let test_repo = GitTestRepo::default();
-            let mut p =
-                CliTester::new_with_timeout_from_dir(15000, &test_repo.dir, ["login", "--offline"]);
-
-            p.expect_input(EXPECTED_NSEC_PROMPT)?
-                .succeeds_with(TEST_KEY_1_NSEC)?;
-
-            p.expect_confirm(EXPECTED_LOCAL_REPOSITORY_PROMPT, Some(false))?
-                .succeeds_with(Some(true))?;
-
-            p.expect_confirm(EXPECTED_REQUIRE_PASSWORD_PROMPT, Some(false))?
-                .succeeds_with(Some(true))?;
-
-            p.expect_password(EXPECTED_SET_PASSWORD_PROMPT)?
-                .with_confirmation(EXPECTED_SET_PASSWORD_CONFIRM_PROMPT)?
-                .succeeds_with(TEST_WEAK_PASSWORD)?;
-
-            p.expect("this may take a few seconds...\r\n")?;
-
-            p.expect("saved login details to local git config\r\n")?;
-
-            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
-
-            // commented out as 'login' command now assumes you want to
-            // login as a new user
-            // p = CliTester::new_with_timeout(10000, ["login",
-            // "--offline"]);
-
-            // p.expect(format!("login as {}\r\n",
-            // TEST_KEY_1_NPUB).as_str())?
-            //     .expect_password(EXPECTED_PASSWORD_PROMPT)?
-            //     .succeeds_with(TEST_WEAK_PASSWORD)?;
-
-            // p.expect("this may take a few seconds...\r\n")?;
-
-            // p.expect_end_with(format!("logged in as {}\r\n",
-            // TEST_KEY_1_NPUB).as_str())
         }
     }
 }

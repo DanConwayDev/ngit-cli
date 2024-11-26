@@ -69,11 +69,18 @@ fn get_signer_info(
     Ok(match source {
         None => {
             let mut result = None;
-            for source in &[
-                SignerInfoSource::CommandLineArguments,
-                SignerInfoSource::GitLocal,
-                SignerInfoSource::GitGlobal,
-            ] {
+            for source in if std::env::var("NGITTEST").is_ok() {
+                vec![
+                    SignerInfoSource::CommandLineArguments,
+                    SignerInfoSource::GitLocal,
+                ]
+            } else {
+                vec![
+                    SignerInfoSource::CommandLineArguments,
+                    SignerInfoSource::GitLocal,
+                    SignerInfoSource::GitGlobal,
+                ]
+            } {
                 if let Ok(res) =
                     get_signer_info(git_repo, signer_info, password, &Some(source.clone()))
                 {
