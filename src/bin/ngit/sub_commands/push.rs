@@ -29,7 +29,7 @@ pub struct SubCommandArgs {
 
 #[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
-    let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
     let (main_or_master_branch_name, _) = git_repo
@@ -42,7 +42,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let branch_name = git_repo
         .get_checked_out_branch_name()
-        .context("cannot get checked out branch name")?;
+        .context("failed to get checked out branch name")?;
 
     if branch_name == main_or_master_branch_name {
         bail!("checkout a branch associated with a proposal first")
@@ -70,7 +70,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 is_event_proposal_root_for_branch(e, &branch_name, &logged_in_public_key)
                     .unwrap_or(false)
             })
-            .context("cannot find proposal that matches the current branch name")?
+            .context("failed to find proposal that matches the current branch name")?
             .clone();
 
     let commit_events =
@@ -78,7 +78,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             .await?;
 
     let most_recent_proposal_patch_chain = get_most_recent_patch_with_ancestors(commit_events)
-        .context("cannot get most recent patch for proposal")?;
+        .context("failed to get most recent patch for proposal")?;
 
     let branch_tip = git_repo.get_tip_of_branch(&branch_name)?;
 
@@ -191,7 +191,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 &[],
             )
             .await
-            .context("cannot make patch event from commit")?,
+            .context("failed to make patch event from commit")?,
         );
     }
     println!("pushing {} commits", ahead.len());

@@ -58,7 +58,7 @@ mod when_proposal_isnt_associated_with_branch_name {
                 p.expect("fetching updates...\r\n")?;
                 p.expect_eventually("\r\n")?; // some updates listed here
                 p.expect_end_with(
-                    "Error: cannot find proposal that matches the current branch name\r\n",
+                    "Error: failed to find proposal that matches the current branch name\r\n",
                 )?;
                 for p in [51, 52, 53, 55, 56] {
                     relay::shutdown_relay(8000 + p)?;

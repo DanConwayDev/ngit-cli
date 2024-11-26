@@ -61,12 +61,12 @@ fn print_logged_in_as(
     source: &SignerInfoSource,
 ) -> Result<()> {
     if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
-        eprintln!("cannot find profile...");
+        eprintln!("failed to find profile...");
     } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
-        eprintln!("cannot extract account name from account metadata...");
+        eprintln!("failed to extract account name from account metadata...");
     } else if !offline_mode && user_ref.relays.created_at.eq(&Timestamp::from(0)) {
         eprintln!(
-            "cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience."
+            "failed to find your relay list. consider using another nostr client to create one to enhance your nostr experience."
         );
     }
     eprintln!(

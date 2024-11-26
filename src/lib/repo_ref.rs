@@ -95,7 +95,7 @@ impl TryFrom<nostr::Event> for RepoRef {
             for pk in maintainers {
                 r.maintainers.push(
                 nostr_sdk::prelude::PublicKey::from_str(&pk)
-                    .context(format!("cannot convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
+                    .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
                     .context("invalid repository event")?,
                 );
             }
@@ -421,8 +421,9 @@ pub fn extract_pks(pk_strings: Vec<String>) -> Result<Vec<PublicKey>> {
     let mut pks: Vec<PublicKey> = vec![];
     for s in pk_strings {
         pks.push(
-            nostr_sdk::prelude::PublicKey::from_bech32(s.clone())
-                .context(format!("cannot convert {s} into a valid nostr public key"))?,
+            nostr_sdk::prelude::PublicKey::from_bech32(s.clone()).context(format!(
+                "failed to convert {s} into a valid nostr public key"
+            ))?,
         );
     }
     Ok(pks)
@@ -441,15 +442,15 @@ pub fn save_repo_config_to_yaml(
             .write(true)
             .truncate(true)
             .open(path)
-            .context("cannot open maintainers.yaml file with write and truncate options")?
+            .context("failed to open maintainers.yaml file with write and truncate options")?
     } else {
-        std::fs::File::create(path).context("cannot create maintainers.yaml file")?
+        std::fs::File::create(path).context("failed to create maintainers.yaml file")?
     };
     let mut maintainers_npubs = vec![];
     for m in maintainers {
         maintainers_npubs.push(
             m.to_bech32()
-                .context("cannot convert public key into npub")?,
+                .context("failed to convert public key into npub")?,
         );
     }
     serde_yaml::to_writer(
@@ -460,7 +461,7 @@ pub fn save_repo_config_to_yaml(
             relays,
         },
     )
-    .context("cannot write maintainers to maintainers.yaml file serde_yaml")
+    .context("failed to write maintainers to maintainers.yaml file serde_yaml")
 }
 
 #[cfg(test)]

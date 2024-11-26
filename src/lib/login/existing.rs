@@ -81,13 +81,13 @@ fn get_signer_info(
                     break;
                 }
             }
-            result.context("cannot get or find signer info in cli arguments, local git config or global git config")?
+            result.context("failed to get or find signer info in cli arguments, local git config or global git config")?
         }
         Some(SignerInfoSource::CommandLineArguments) => {
             if let Some(signer_info) = signer_info {
                 (signer_info.clone(), SignerInfoSource::CommandLineArguments)
             } else {
-                bail!("cannot get signer from cli signer arguments because none were specified")
+                bail!("failed to get signer from cli signer arguments because none were specified")
             }
         }
         Some(SignerInfoSource::GitLocal) => {
@@ -169,7 +169,9 @@ async fn get_signer(
                     password.clone()
                 } else {
                     if !prompt_for_ncryptsec_password {
-                        bail!("cannot login without prompts a nsec is encrypted with a password");
+                        bail!(
+                            "failed to login without prompts a nsec is encrypted with a password"
+                        );
                     }
                     Interactor::default()
                         .password(PromptPasswordParms::default().with_prompt("password"))

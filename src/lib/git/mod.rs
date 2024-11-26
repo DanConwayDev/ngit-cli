@@ -99,16 +99,16 @@ impl RepoActions for Repo {
         self.git_repo
             .path()
             .parent()
-            .context("cannot find repositiory path as .git has  no parent")
+            .context("failed to find repositiory path as .git has  no parent")
     }
 
     fn get_origin_url(&self) -> Result<String> {
         Ok(self
             .git_repo
             .find_remote("origin")
-            .context("cannot find origin")?
+            .context("failed to find origin")?
             .url()
-            .context("cannot find origin url")?
+            .context("failed to find origin url")?
             .to_string())
     }
 
@@ -116,7 +116,7 @@ impl RepoActions for Repo {
         let main_branch_name = {
             let remote_branches = self
                 .get_remote_branch_names()
-                .context("cannot find any local branches")?;
+                .context("failed to find any local branches")?;
             if remote_branches.contains(&"origin/main".to_string()) {
                 "origin/main"
             } else if remote_branches.contains(&"origin/master".to_string()) {
@@ -129,7 +129,7 @@ impl RepoActions for Repo {
         let tip = self
             .get_tip_of_branch(main_branch_name)
             .context(format!(
-                "branch {main_branch_name} was listed as a remote branch but cannot get its tip commit id",
+                "branch {main_branch_name} was listed as a remote branch but failed to get its tip commit id",
             ))?;
 
         Ok((main_branch_name, tip))
@@ -139,7 +139,7 @@ impl RepoActions for Repo {
         let main_branch_name = {
             let local_branches = self
                 .get_local_branch_names()
-                .context("cannot find any local branches")?;
+                .context("failed to find any local branches")?;
             if local_branches.contains(&"main".to_string()) {
                 "main"
             } else if local_branches.contains(&"master".to_string()) {
@@ -152,7 +152,7 @@ impl RepoActions for Repo {
         let tip = self
             .get_tip_of_branch(main_branch_name)
             .context(format!(
-                "branch {main_branch_name} was listed as a local branch but cannot get its tip commit id",
+                "branch {main_branch_name} was listed as a local branch but failed to get its tip commit id",
             ))?;
 
         Ok((main_branch_name, tip))
@@ -217,13 +217,15 @@ impl RepoActions for Repo {
         let branch = if let Ok(branch) = self
             .git_repo
             .find_branch(branch_name, git2::BranchType::Local)
-            .context(format!("cannot find local branch {branch_name}"))
+            .context(format!("failed to find local branch {branch_name}"))
         {
             branch
         } else {
             self.git_repo
                 .find_branch(branch_name, git2::BranchType::Remote)
-                .context(format!("cannot find local or remote branch {branch_name}"))?
+                .context(format!(
+                    "failed to find local or remote branch {branch_name}"
+                ))?
         };
         Ok(oid_to_sha1(&branch.into_reference().peel_to_commit()?.id()))
     }
@@ -385,7 +387,7 @@ impl RepoActions for Repo {
             .context("failed to extract signature - perhaps there is no signature?")?;
 
         Ok(std::str::from_utf8(&sign)
-            .context("commit signature cannot be converted to a utf8 string")?
+            .context("commit signature failed to be converted to a utf8 string")?
             .to_owned())
     }
 
@@ -525,7 +527,7 @@ impl RepoActions for Repo {
                 last_patch
             } else {
                 self.checkout(branch_name)
-                    .context("no patches and so cannot create a proposal branch")?;
+                    .context("no patches and so failed to create a proposal branch")?;
                 return Ok(vec![]);
             },
             "parent-commit",
@@ -533,7 +535,7 @@ impl RepoActions for Repo {
 
         // check patches can be applied
         if !self.does_commit_exist(&parent_commit_id)? {
-            bail!("cannot find parent commit ({parent_commit_id}). run git pull and try again.")
+            bail!("failed to find parent commit ({parent_commit_id}). run git pull and try again.")
         }
 
         // checkout branch
@@ -644,7 +646,7 @@ impl RepoActions for Repo {
                             None,
                             None,
                         )
-                        .context("cannot amend commit to produce new oid")?;
+                        .context("failed to amend commit to produce new oid")?;
                 }
                 if !applied_oid.to_string().eq(commit_id) {
                     bail!(
@@ -669,12 +671,12 @@ impl RepoActions for Repo {
                     &oid_to_sha1(
                         &revspec
                             .from()
-                            .context("cannot get starting commit from specified value")?
+                            .context("failed to get starting commit from specified value")?
                             .id(),
                     ),
                     &self
                         .get_head_commit()
-                        .context("cannot get head commit with gitlib2")?,
+                        .context("failed to get head commit with gitlib2")?,
                 )
                 .context("specified commit is not an ancestor of current head")?;
             Ok(ahead)
@@ -684,13 +686,13 @@ impl RepoActions for Repo {
                     &oid_to_sha1(
                         &revspec
                             .from()
-                            .context("cannot get starting commit of range from specified value")?
+                            .context("failed to get starting commit of range from specified value")?
                             .id(),
                     ),
                     &oid_to_sha1(
                         &revspec
                             .to()
-                            .context("cannot get end of range commit from specified value")?
+                            .context("failed to get end of range commit from specified value")?
                             .id(),
                     ),
                 )
@@ -720,11 +722,13 @@ impl RepoActions for Repo {
         match if just_global {
             self.git_repo
                 .config()
-                .context("cannot open git config")?
+                .context("failed to open git config")?
                 .open_global()
-                .context("cannot open global git config")?
+                .context("failed to open global git config")?
         } else {
-            self.git_repo.config().context("cannot open git config")?
+            self.git_repo
+                .config()
+                .context("failed to open git config")?
         }
         .get_entry(item)
         {
@@ -742,7 +746,7 @@ impl RepoActions for Repo {
                 }
                 Ok(Some(
                     item.value()
-                        .context("cannot find git config item")?
+                        .context("failed to find git config item")?
                         .to_string(),
                 ))
             }
@@ -754,15 +758,17 @@ impl RepoActions for Repo {
         if global {
             self.git_repo
                 .config()
-                .context("cannot open git config")?
+                .context("failed to open git config")?
                 .open_global()
-                .context("cannot open global git config")?
+                .context("failed to open global git config")?
         } else {
-            self.git_repo.config().context("cannot open git config")?
+            self.git_repo
+                .config()
+                .context("failed to open git config")?
         }
         .set_str(item, value)
         .context(format!(
-            "cannot set {} git config item {}",
+            "failed to set {} git config item {}",
             if global { "global" } else { "local" },
             item
         ))?;
@@ -777,14 +783,16 @@ impl RepoActions for Repo {
             if global {
                 self.git_repo
                     .config()
-                    .context("cannot open git config")?
+                    .context("failed to open git config")?
                     .open_global()
-                    .context("cannot open global git config")?
+                    .context("failed to open global git config")?
             } else {
-                self.git_repo.config().context("cannot open git config")?
+                self.git_repo
+                    .config()
+                    .context("failed to open git config")?
             }
             .remove(item)
-            .context("cannot remove existing git config item")?;
+            .context("failed to remove existing git config item")?;
             Ok(true)
         }
     }
@@ -880,7 +888,7 @@ pub fn save_git_config_item(git_repo: &Option<&Repo>, item: &str, value: &str) -
         git2::Config::open_default()?
             .open_global()?
             .set_str(item, value)
-            .context(format!("cannot set global git config item {}", item))
+            .context(format!("failed to set global git config item {}", item))
     }
 }
 
@@ -893,7 +901,10 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
         git2::Config::open_default()?
             .open_global()?
             .remove(item)
-            .context(format!("cannot remove existing git config item {}", item))?;
+            .context(format!(
+                "failed to remove existing git config item {}",
+                item
+            ))?;
         Ok(true)
     }
 }

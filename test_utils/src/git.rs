@@ -265,7 +265,7 @@ impl GitTestRepo {
         let branch = self
             .git_repo
             .find_branch(branch_name, git2::BranchType::Local)
-            .context(format!("cannot find branch {branch_name}"))?;
+            .context(format!("failed to find branch {branch_name}"))?;
         Ok(branch.into_reference().peel_to_commit()?.id())
     }
 

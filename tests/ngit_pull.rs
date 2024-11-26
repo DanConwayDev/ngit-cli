@@ -96,7 +96,9 @@ mod when_branch_doesnt_exist {
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["pull"]);
                 p.expect("fetching updates...\r\n")?;
                 p.expect_eventually("\r\n")?; // some updates listed here
-                p.expect("Error: cannot find proposal that matches the current branch name\r\n")?;
+                p.expect(
+                    "Error: failed to find proposal that matches the current branch name\r\n",
+                )?;
 
                 p.expect_end()?;
 

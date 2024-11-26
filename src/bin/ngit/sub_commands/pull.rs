@@ -14,7 +14,7 @@ use crate::{
 
 #[allow(clippy::too_many_lines)]
 pub async fn launch() -> Result<()> {
-    let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
     let (main_or_master_branch_name, _) = git_repo
@@ -23,7 +23,7 @@ pub async fn launch() -> Result<()> {
 
     let branch_name = git_repo
         .get_checked_out_branch_name()
-        .context("cannot get checked out branch name")?;
+        .context("failed to get checked out branch name")?;
 
     if branch_name == main_or_master_branch_name {
         bail!("checkout a branch associated with a proposal first")
@@ -50,7 +50,7 @@ pub async fn launch() -> Result<()> {
                 is_event_proposal_root_for_branch(e, &branch_name, &logged_in_public_key)
                     .unwrap_or(false)
             })
-            .context("cannot find proposal that matches the current branch name")?
+            .context("failed to find proposal that matches the current branch name")?
             .clone();
 
     let commit_events =
@@ -59,7 +59,7 @@ pub async fn launch() -> Result<()> {
 
     let most_recent_proposal_patch_chain =
         get_most_recent_patch_with_ancestors(commit_events.clone())
-            .context("cannot get most recent patch for proposal")?;
+            .context("failed to get most recent patch for proposal")?;
 
     let local_branch_tip = git_repo.get_tip_of_branch(&branch_name)?;
 
@@ -74,7 +74,7 @@ pub async fn launch() -> Result<()> {
             .context("there should be at least one patch as we have already checked for this")?,
         "parent-commit",
     )?)
-    .context("cannot get valid parent commit id from patch")?;
+    .context("failed to get valid parent commit id from patch")?;
 
     let (_, proposal_behind_main) =
         git_repo.get_commits_ahead_behind(&master_tip, &proposal_base_commit)?;
@@ -84,9 +84,9 @@ pub async fn launch() -> Result<()> {
             &get_commit_id_from_patch(most_recent_proposal_patch_chain.first().context(
                 "there should be at least one patch as we have already checked for this",
             )?)
-            .context("cannot get valid commit_id from patch")?,
+            .context("failed to get valid commit_id from patch")?,
         )
-        .context("cannot get valid commit_id from patch")?;
+        .context("failed to get valid commit_id from patch")?;
 
     // if uptodate
     if proposal_tip.eq(&local_branch_tip) {
@@ -101,7 +101,7 @@ pub async fn launch() -> Result<()> {
         check_clean(&git_repo)?;
         let applied = git_repo
             .apply_patch_chain(&branch_name, most_recent_proposal_patch_chain)
-            .context("cannot apply patch chain")?;
+            .context("failed to apply patch chain")?;
         println!("applied {} new commits", applied.len(),);
     }
     // if parent commit doesnt exist
@@ -123,7 +123,7 @@ pub async fn launch() -> Result<()> {
         git_repo.create_branch_at_commit(&branch_name, &proposal_base_commit.to_string())?;
         let applied = git_repo
             .apply_patch_chain(&branch_name, most_recent_proposal_patch_chain)
-            .context("cannot apply patch chain")?;
+            .context("failed to apply patch chain")?;
 
         println!(
             "pulled new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
@@ -138,7 +138,7 @@ pub async fn launch() -> Result<()> {
     else if git_repo.ancestor_of(&local_branch_tip, &proposal_tip)? {
         let (local_ahead_of_proposal, _) = git_repo
             .get_commits_ahead_behind(&proposal_tip, &local_branch_tip)
-            .context("cannot get commits ahead behind for propsal_top and local_branch_tip")?;
+            .context("failed to get commits ahead behind for propsal_top and local_branch_tip")?;
         println!(
             "local proposal branch exists with {} unpublished commits on top of the most up-to-date version of the proposal",
             local_ahead_of_proposal.len()
@@ -196,7 +196,7 @@ pub async fn launch() -> Result<()> {
 fn check_clean(git_repo: &Repo) -> Result<()> {
     if git_repo.has_outstanding_changes()? {
         bail!(
-            "cannot pull proposal branch when repository is not clean. discard or stash (un)staged changes and try again."
+            "failed to pull proposal branch when repository is not clean. discard or stash (un)staged changes and try again."
         );
     }
     Ok(())

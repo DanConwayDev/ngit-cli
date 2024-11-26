@@ -308,7 +308,7 @@ impl CloneUrl {
         // Set the port if present
         if let Some(port) = self.port {
             url.set_port(Some(port))
-                .map_err(|_| anyhow!("cannot add port"))?;
+                .map_err(|_| anyhow!("failed to add port"))?;
         }
 
         // Set the query parameters if present

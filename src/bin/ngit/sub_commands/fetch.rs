@@ -20,7 +20,7 @@ pub struct SubCommandArgs {
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     let _ = args;
-    let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo = Repo::discover().context("failed to find a git repository")?;
     let client = Client::default();
     let repo_coordinates = if command_args.repo.is_empty() {
         get_repo_coordinates(&git_repo, &client).await?

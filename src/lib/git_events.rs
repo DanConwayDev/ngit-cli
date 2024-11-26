@@ -103,7 +103,7 @@ pub async fn generate_patch_event(
             nostr::event::Kind::GitPatch,
             git_repo
                 .make_patch_from_commit(commit, &series_count)
-                .context(format!("cannot make patch for commit {commit}"))?,
+                .context(format!("failed to make patch for commit {commit}"))?,
             [
                 repo_ref
                     .maintainers
@@ -558,7 +558,7 @@ pub fn get_most_recent_patch_with_ancestors(
                 }
             })
         })
-        .context("cannot find patches_with_youngest_created_at")?
+        .context("failed to find patches_with_youngest_created_at")?
         .id
         .to_string();
 

@@ -128,7 +128,7 @@ mod with_relays {
 
                         p.expect("searching for profile...\r\n")?;
 
-                        p.expect("cannot extract account name from account metadata...\r\n")?;
+                        p.expect("failed to extract account name from account metadata...\r\n")?;
 
                         p.expect_end_with(
                             format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str(),
@@ -618,7 +618,7 @@ mod with_relays {
 
                         p.expect("searching for profile...\r\n")?;
 
-                        p.expect("cannot find profile...\r\n")?;
+                        p.expect("failed to find profile...\r\n")?;
 
                         p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())?;
                         for p in [51, 52] {
@@ -682,7 +682,7 @@ mod with_relays {
 
                         p.expect("searching for profile...\r\n")?;
 
-                        p.expect("cannot find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
+                        p.expect("failed to find your relay list. consider using another nostr client to create one to enhance your nostr experience.\r\n")?;
 
                         p.expect_end_with("logged in as fred\r\n")?;
                         for p in [51, 52] {
@@ -932,7 +932,7 @@ mod with_offline_flag {
                 p.expect_input(EXPECTED_NSEC_PROMPT)?
                     // this behaviour is intentional. rejecting the response with dialoguer
                     // hides the original input from the user so they
-                    // cannot see the mistake they made.
+                    // failed to see the mistake they made.
                     .succeeds_with(TEST_INVALID_NSEC)?;
 
                 p.expect_input(invalid_nsec_response)?

@@ -45,7 +45,7 @@ pub struct SubCommandArgs {
 
 #[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Result<()> {
-    let git_repo = Repo::discover().context("cannot find a git repository")?;
+    let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
     let (main_branch_name, main_tip) = git_repo
@@ -83,7 +83,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         } else {
             git_repo
                 .parse_starting_commits(&args.since_or_range)
-                .context("cannot parse specified starting commit or range")?
+                .context("failed to parse specified starting commit or range")?
         }
     };
 

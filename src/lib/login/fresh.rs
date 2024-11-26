@@ -627,7 +627,7 @@ fn silently_save_to_git_config(
     let git_repo = if global {
         &None
     } else if git_repo.is_none() {
-        bail!("cannot update local git config wihout git_repo object")
+        bail!("failed to update local git config wihout git_repo object")
     } else {
         git_repo
     };

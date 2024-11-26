@@ -176,7 +176,7 @@ impl Connect for Client {
         self.client
             .add_relay(relay_url)
             .await
-            .context("cannot add relay")?;
+            .context("failed to add relay")?;
 
         let relay = self.client.relay(relay_url).await?;
 
@@ -263,7 +263,7 @@ impl Connect for Client {
             self.client
                 .add_relay(relay.as_str())
                 .await
-                .context("cannot add relay")?;
+                .context("failed to add relay")?;
         }
 
         let relays_map = self.client.relays().await;
@@ -374,7 +374,7 @@ impl Connect for Client {
                 self.client
                     .add_relay(relay.as_str())
                     .await
-                    .context("cannot add relay")?;
+                    .context("failed to add relay")?;
             }
 
             let dim = Style::new().color256(247);
@@ -741,7 +741,7 @@ fn pb_after_style(succeed: bool) -> indicatif::ProgressStyle {
 
 async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
     NostrLMDB::open(git_repo_path.join(".git/nostr-cache.lmdb"))
-        .context("cannot open or create nostr cache database at .git/nostr-cache.lmdb")
+        .context("failed to open or create nostr cache database at .git/nostr-cache.lmdb")
 }
 
 async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLMDB> {
@@ -753,13 +753,13 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
         }
     } else {
         create_dir_all(get_dirs()?.cache_dir()).context(format!(
-            "cannot create cache directory in: {:?}",
+            "failed to create cache directory in: {:?}",
             get_dirs()?.cache_dir()
         ))?;
         get_dirs()?.cache_dir().join("nostr-cache.lmdb")
     };
 
-    NostrLMDB::open(path).context("cannot open ngit global nostr cache database")
+    NostrLMDB::open(path).context("failed to open ngit global nostr cache database")
 }
 
 pub async fn get_events_from_local_cache(
@@ -771,7 +771,7 @@ pub async fn get_events_from_local_cache(
         .query(filters.clone())
         .await
         .context(
-            "cannot execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
+            "failed to execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
         )?
         .to_vec())
 }
@@ -784,7 +784,7 @@ pub async fn get_event_from_global_cache(
         .await?
         .query(filters.clone())
         .await
-        .context("cannot execute query on opened ngit nostr cache database")?
+        .context("failed to execute query on opened ngit nostr cache database")?
         .to_vec())
 }
 
@@ -793,7 +793,7 @@ pub async fn save_event_in_local_cache(git_repo_path: &Path, event: &nostr::Even
         .await?
         .save_event(event)
         .await
-        .context("cannot save event in local cache")
+        .context("failed to save event in local cache")
 }
 
 pub async fn save_event_in_global_cache(
@@ -804,7 +804,7 @@ pub async fn save_event_in_global_cache(
         .await?
         .save_event(event)
         .await
-        .context("cannot save event in local cache")
+        .context("failed to save event in local cache")
 }
 
 pub async fn get_repo_ref_from_cache(
@@ -1634,7 +1634,7 @@ pub async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> 
     )
     .await?
     .first()
-    .context("cannot find event in cache")?
+    .context("failed to find event in cache")?
     .clone())
 }
 

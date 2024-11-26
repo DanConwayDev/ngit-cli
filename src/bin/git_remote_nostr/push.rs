@@ -92,7 +92,7 @@ pub async fn run_push(
             list_outputs.get(url).unwrap().to_owned()
         } else {
             bail!(
-                "cannot connect to git servers: {}",
+                "failed to connect to git servers: {}",
                 repo_ref.git_server.join(" ")
             );
         }
@@ -245,7 +245,7 @@ pub async fn run_push(
                                     &[],
                                 )
                                 .await
-                                .context("cannot make patch event from commit")?;
+                                .context("failed to make patch event from commit")?;
                                 events.push(new_patch.clone());
                                 parent_patch = new_patch;
                             }
@@ -259,7 +259,7 @@ pub async fn run_push(
                             )
                             .unwrap();
                             println!(
-                                "error {to} cannot fastforward as newer patches found on proposal"
+                                "error {to} failed to fastforward as newer patches found on proposal"
                             );
                             rejected_proposal_refspecs.push(refspec.to_string());
                         }
@@ -1089,7 +1089,7 @@ fn update_remote_refs_pushed(
         }
     } else {
         let commit = reference_to_commit(git_repo, from)
-            .context(format!("cannot get commit of reference {from}"))?;
+            .context(format!("failed to get commit of reference {from}"))?;
         if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
             remote_ref.set_target(commit, "updated by nostr remote helper")?;
         } else {
@@ -1142,9 +1142,9 @@ fn refspec_remote_ref_name(
 fn reference_to_commit(git_repo: &Repository, reference: &str) -> Result<Oid> {
     Ok(git_repo
         .find_reference(reference)
-        .context(format!("cannot find reference: {reference}"))?
+        .context(format!("failed to find reference: {reference}"))?
         .peel_to_commit()
-        .context(format!("cannot get commit from reference: {reference}"))?
+        .context(format!("failed to get commit from reference: {reference}"))?
         .id())
 }
 
@@ -1152,13 +1152,13 @@ fn reference_to_commit(git_repo: &Repository, reference: &str) -> Result<Oid> {
 fn reference_to_ref_value(git_repo: &Repository, reference: &str) -> Result<String> {
     let reference_obj = git_repo
         .find_reference(reference)
-        .context(format!("cannot find reference: {reference}"))?;
+        .context(format!("failed to find reference: {reference}"))?;
     if let Some(symref) = reference_obj.symbolic_target() {
         Ok(symref.to_string())
     } else {
         Ok(reference_obj
             .peel_to_commit()
-            .context(format!("cannot get commit from reference: {reference}"))?
+            .context(format!("failed to get commit from reference: {reference}"))?
             .id()
             .to_string())
     }

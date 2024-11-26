@@ -33,7 +33,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         Some(Client::default())
     };
 
-    let git_repo_result = Repo::discover().context("cannot find a git repository");
+    let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = {
         match git_repo_result {
             Ok(git_repo) => Some(git_repo),

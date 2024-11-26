@@ -163,7 +163,7 @@ async fn get_open_proposals_state(
                     }
                     Err(error) => {
                         let _ = term.write_line(
-                            format!("WARNING: cannot fetch branch {branch_name} error: {error}")
+                            format!("WARNING: failed to fetch branch {branch_name} error: {error}")
                                 .as_str(),
                         );
                     }

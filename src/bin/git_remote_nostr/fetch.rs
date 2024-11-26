@@ -110,7 +110,7 @@ pub fn make_commits_for_proposal(
         let commit_id = git_repo
             .create_commit_from_patch(patch, Some(tip_commit_id.clone()))
             .context(format!(
-                "cannot create commit for patch {}",
+                "failed to create commit for patch {}",
                 nip19::Nip19Event {
                     event_id: patch.id,
                     author: Some(patch.pubkey),
@@ -146,7 +146,7 @@ async fn fetch_proposals(
             {
                 if let Err(error) = make_commits_for_proposal(git_repo, repo_ref, patches) {
                     term.write_line(
-                        format!("WARNING: cannot create branch for {refstr}, error: {error}",)
+                        format!("WARNING: failed to create branch for {refstr}, error: {error}",)
                             .as_str(),
                     )?;
                     break;

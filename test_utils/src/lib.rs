@@ -1054,7 +1054,7 @@ where
 /** copied from client.rs */
 async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
     NostrLMDB::open(git_repo_path.join(".git/nostr-cache.lmdb"))
-        .context("cannot open or create nostr cache database at .git/nostr-cache.lmdb")
+        .context("failed to open or create nostr cache database at .git/nostr-cache.lmdb")
 }
 
 /** copied from client.rs */
@@ -1067,7 +1067,7 @@ pub async fn get_events_from_cache(
         .query(filters.clone())
         .await
         .context(
-            "cannot execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
+            "failed to execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
         )?
         .to_vec())
 }
@@ -1107,7 +1107,7 @@ pub fn get_proposal_branch_name_from_events(
             ));
         }
     }
-    bail!("cannot find proposal root with branch-name tag matching title")
+    bail!("failed to find proposal root with branch-name tag matching title")
 }
 
 pub static FEATURE_BRANCH_NAME_1: &str = "feature-example-t";

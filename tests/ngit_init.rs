@@ -309,7 +309,7 @@ mod when_repo_not_previously_claimed {
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let yaml_path = git_repo.dir.join("maintainers.yaml");
                         let mut file = std::fs::File::create(&yaml_path)
-                            .expect("cannot create maintainers.yaml file");
+                            .expect("failed to create maintainers.yaml file");
                         write!(
                             file,
                             "\

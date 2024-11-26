@@ -43,7 +43,7 @@ fn set_git_nostr_login_config(test_repo: &GitTestRepo) -> Result<()> {
     let mut config = test_repo
         .git_repo
         .config()
-        .context("cannot open git config")?;
+        .context("failed to open git config")?;
     config.set_str("nostr.nsec", TEST_KEY_2_NSEC)?;
     config.set_str("nostr.npub", TEST_KEY_2_NPUB)?;
     config.set_str("user.name", "test name")?;
