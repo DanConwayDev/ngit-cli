@@ -47,7 +47,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
             &git_repo.as_ref(),
             client.as_ref(),
             extract_signer_cli_arguments(args)?,
-            command_args.local,
+            log_in_locally_only || command_args.local,
         )
         .await?;
     }
