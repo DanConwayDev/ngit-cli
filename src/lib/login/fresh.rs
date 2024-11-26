@@ -146,6 +146,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
                 match Interactor::default().choice(
                     PromptChoiceParms::default()
                         .with_default(0)
+                        .with_prompt("login to nostr")
                         .with_choices(vec!["try again with nsec".to_string(), "back".to_string()])
                         .dont_report(),
                 )? {
@@ -187,6 +188,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
             match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)
+                    .with_prompt("login to nostr")
                     .with_choices(vec!["try again with nsec".to_string(), "back".to_string()])
                     .dont_report(),
             )? {
@@ -488,10 +490,13 @@ async fn save_to_git_config(
     signer_info: &SignerInfo,
     global: bool,
 ) -> Result<()> {
-    if let Err(error) = silently_save_to_git_config(git_repo, signer_info, global).context(format!(
+    let err_msg = format!(
         "failed to save login details to {} git config",
         if global { "global" } else { "local" }
-    )) {
+    );
+    if let Err(error) =
+        silently_save_to_git_config(git_repo, signer_info, global).context(err_msg.clone())
+    {
         eprintln!("Error: {:?}", error);
         match signer_info {
             SignerInfo::Nsec {
@@ -520,6 +525,7 @@ async fn save_to_git_config(
                 match Interactor::default().choice(
                     PromptChoiceParms::default()
                         .with_default(0)
+                        .with_prompt(&err_msg)
                         .with_choices(vec![
                             "i'll update global git config manually with above values".to_string(),
                             "only log into local git repository (save to local git config)"
