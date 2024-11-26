@@ -69,20 +69,21 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
         if let Ok((_, user_ref, source)) =
             load_existing_login(&git_repo, &None, &None, &Some(source), None, true, false).await
         {
-            eprintln!(
-                "logged in {}as {}",
-                if source == SignerInfoSource::GitLocal {
-                    "to local git repository "
-                } else {
-                    ""
-                },
-                user_ref.metadata.name
-            );
             match Interactor::default().choice(
-                PromptChoiceParms::default().with_default(0).with_choices(
-                    if source == SignerInfoSource::GitGlobal {
+                PromptChoiceParms::default()
+                    .with_default(0)
+                    .with_prompt(format!(
+                        "logged in {}as {}",
+                        if source == SignerInfoSource::GitLocal {
+                            "to local git repository "
+                        } else {
+                            ""
+                        },
+                        user_ref.metadata.name
+                    ))
+                    .with_choices(if source == SignerInfoSource::GitGlobal {
                         vec![
-                            format!("logout as \"{}\"", user_ref.metadata.name),
+                            "logout".to_string(),
                             "remain logged in".to_string(),
                             "login to local git repo only as another user".to_string(),
                         ]
@@ -91,8 +92,7 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                             format!("logout as \"{}\"", user_ref.metadata.name),
                             "remain logged in".to_string(),
                         ]
-                    },
-                ),
+                    }),
             )? {
                 0 => {
                     for item in [
@@ -121,7 +121,9 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                                 format_items_as_list(&get_global_login_config_items_set())
                             );
                             match Interactor::default().choice(
-                                PromptChoiceParms::default().with_default(0).with_choices(
+                                PromptChoiceParms::default().with_default(0)
+                                .with_prompt("failed to remove login details from global git config")
+                                .with_choices(
                                     vec![
                                         "continue with global login to reveal what git config items to manually set".to_string(),
                                         "login to this local repository with a different account".to_string(),
