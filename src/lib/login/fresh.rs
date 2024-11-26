@@ -751,7 +751,6 @@ async fn display_login_help_content() {
     let mut printer = Printer::default();
     let title_style = Style::new().bold().fg(console::Color::Yellow);
     printer.println("|==============================|".to_owned());
-    // printer.println("|                              |".to_owned());
     printer.println_with_custom_formatting(
         format!(
             "|  {}  |",
@@ -759,13 +758,38 @@ async fn display_login_help_content() {
         ),
         "|  nostr login / sign up help  |".to_string(),
     );
-    // printer.println("|                              |".to_owned());
     printer.println("|==============================|".to_owned());
-    printer.printlns(vec![
-        "".to_string(),
-        "login / sign up help content should go here...".to_string(),
-        "press ctrl + c to return the login / sign up menu again...".to_string(),
-    ]);
+    print_lines_with_headings(
+        vec![
+            "# What is a Nostr account?",
+            "A Nostr account consists of a secret key you control, known as an 'nsec' and a corresponding public key called an 'npub.' Clients like ngit and gitworkshop.dev use your keys to sign messages and verify that other messages are signed by the correct keys.",
+            "",
+            "# How do I sign into an existing Nostr account?",
+            "1. Using your secret key (nsec): Export your nsec from an existing client or browser extension. Run `ngit login` and enter your nsec.",
+            "2. Using Nostr Connect.",
+            "",
+            "# What is Nostr Connect?",
+            "Nostr Connect allows you to use multiple clients without sharing your secret key. A signer app manages your secret and signs messages on behalf of connected clients. This technology is new, and as of December 2024, only Amber for Android is recommended.",
+            "",
+            "# If I create a Nostr account using ngit, how can I sign in with other Nostr clients?",
+            "You can export your secret key by running `ngit export-key` and import it into another client.",
+            "",
+            "press ctrl + c to return the login / sign up menu again...",
+        ],
+        &mut printer,
+    );
     let _ = signal::ctrl_c().await;
     printer.clear_all();
+}
+
+fn print_lines_with_headings(lines: Vec<&str>, printer: &mut Printer) {
+    let heading_style = Style::new().bold();
+    for line in lines {
+        if line.starts_with("# ") {
+            let s = line.replace("# ", "").to_string();
+            printer.println_with_custom_formatting(heading_style.apply_to(&s).to_string(), s);
+        } else {
+            printer.println(line.to_string());
+        }
+    }
 }
