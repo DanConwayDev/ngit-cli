@@ -169,7 +169,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         let mut maintainers_string = if !args.other_maintainers.is_empty() {
             [args.other_maintainers.clone()].concat().join(" ")
         } else if repo_ref.is_none() && repo_config_result.is_err() {
-            signer.get_public_key().await?.to_bech32()?
+            user_ref.public_key.to_bech32()?
         } else {
             let maintainers = if let Ok(config) = &repo_config_result {
                 config.maintainers.clone()
@@ -182,7 +182,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     .collect()
             } else {
                 //unreachable
-                vec![signer.get_public_key().await?.to_bech32()?]
+                vec![user_ref.public_key.to_bech32()?]
             };
             // add current user if not present
             if maintainers.iter().any(|m| {
@@ -194,22 +194,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }) {
                 maintainers.join(" ")
             } else {
-                [
-                    maintainers,
-                    vec![signer.get_public_key().await?.to_bech32()?],
-                ]
-                .concat()
-                .join(" ")
+                [maintainers, vec![user_ref.public_key.to_bech32()?]]
+                    .concat()
+                    .join(" ")
             }
         };
         'outer: loop {
-            if !dont_ask
-                && signer
-                    .get_public_key()
-                    .await?
-                    .to_bech32()?
-                    .eq(&maintainers_string)
-            {
+            if !dont_ask && user_ref.public_key.to_bech32()?.eq(&maintainers_string) {
                 if Interactor::default().confirm(
                     PromptConfirmParms::default()
                         .with_prompt("are you the only maintainer?")
@@ -259,7 +250,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
             // add current user incase removed
             if !maintainers.iter().any(|m| user_ref.public_key.eq(m)) {
-                maintainers.push(signer.get_public_key().await?);
+                maintainers.push(user_ref.public_key);
             }
             break maintainers;
         }
