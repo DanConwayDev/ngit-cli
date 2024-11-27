@@ -155,6 +155,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         None => Interactor::default().input(
             PromptInputParms::default()
                 .with_prompt("repo description (one sentance)")
+                .optional()
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.description.clone()
                 } else {
