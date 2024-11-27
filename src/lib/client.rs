@@ -29,7 +29,7 @@ use futures::{
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
-use nostr::{nips::nip01::Coordinate, Event};
+use nostr::{nips::nip01::Coordinate, signer::SignerBackend, Event};
 use nostr_database::NostrEventsDatabase;
 use nostr_lmdb::NostrLMDB;
 use nostr_sdk::{
@@ -663,7 +663,7 @@ pub async fn sign_event(
     // TODO: Yuki suggested he would add a backend option to NostrSigner so we can
     // identify nip46 signers again and replace the below if statement with:
     // if signer.backend() == nip46 {
-    if std::env::var("NGITTEST").is_err() {
+    if signer.backend() == SignerBackend::NostrConnect {
         let term = console::Term::stderr();
         term.write_line("signing event with remote signer...")?;
         let event = signer
@@ -681,14 +681,21 @@ pub async fn sign_event(
 }
 
 pub async fn fetch_public_key(signer: &Arc<dyn NostrSigner>) -> Result<nostr::PublicKey> {
-    let term = console::Term::stderr();
-    term.write_line("fetching npub from remote signer...")?;
-    let public_key = signer
-        .get_public_key()
-        .await
-        .context("failed to get npub from remote signer")?;
-    term.clear_last_lines(1)?;
-    Ok(public_key)
+    if signer.backend() == SignerBackend::NostrConnect {
+        let term = console::Term::stderr();
+        term.write_line("fetching npub from remote signer...")?;
+        let public_key = signer
+            .get_public_key()
+            .await
+            .context("failed to get npub from remote signer")?;
+        term.clear_last_lines(1)?;
+        Ok(public_key)
+    } else {
+        signer
+            .get_public_key()
+            .await
+            .context("failed to get public key from local keys")
+    }
 }
 
 fn pb_style() -> Result<ProgressStyle> {
