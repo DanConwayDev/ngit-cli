@@ -198,24 +198,25 @@ async fn get_signer(
             bunker_app_key,
             npub,
         } => {
-            let term = console::Term::stderr();
-            term.write_line("connecting to remote signer...")?;
             let uri = NostrConnectURI::parse(bunker_uri)?;
-            let signer: Arc<dyn NostrSigner> = Arc::new(NostrConnect::new(
+            let s = NostrConnect::new(
                 uri,
                 nostr::Keys::from_str(bunker_app_key).context("invalid app key")?,
                 Duration::from_secs(10 * 60),
                 None,
-            )?);
-            term.clear_last_lines(1)?;
-            let public_key = if let Some(pubic_key) =
-                npub.clone().and_then(|npub| PublicKey::parse(npub).ok())
-            {
-                pubic_key
+            )?;
+            if let Some(public_key) = npub.clone().and_then(|npub| PublicKey::parse(npub).ok()) {
+                s.non_secure_set_user_public_key(public_key)?;
+                let signer: Arc<dyn NostrSigner> = Arc::new(s);
+                Ok((signer, public_key))
             } else {
-                fetch_public_key(&signer).await?
-            };
-            Ok((signer, public_key))
+                let signer: Arc<dyn NostrSigner> = Arc::new(s);
+                let term = console::Term::stderr();
+                term.write_line("connecting to remote signer...")?;
+                let public_key = fetch_public_key(&signer).await?;
+                term.clear_last_lines(1)?;
+                Ok((signer, public_key))
+            }
         }
     }
 }
