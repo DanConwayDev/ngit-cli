@@ -57,6 +57,8 @@ pub enum Commands {
     Fetch(sub_commands::fetch::SubCommandArgs),
     /// signal you are this repo's maintainer accepting proposals via nostr
     Init(sub_commands::init::SubCommandArgs),
+    /// export nostr keys to login to other nostr clients
+    ExportKeys,
     /// issue commits as a proposal
     Send(sub_commands::send::SubCommandArgs),
     /// list proposals; checkout, apply or download selected

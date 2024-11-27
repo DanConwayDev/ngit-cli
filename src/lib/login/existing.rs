@@ -60,7 +60,7 @@ pub async fn load_existing_login(
 }
 
 /// priority order: cli arguments, local git config, global git config
-fn get_signer_info(
+pub fn get_signer_info(
     git_repo: &Option<&Repo>,
     signer_info: &Option<SignerInfo>,
     password: &Option<String>,

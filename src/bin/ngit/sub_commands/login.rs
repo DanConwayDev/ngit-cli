@@ -25,8 +25,6 @@ pub struct SubCommandArgs {
 }
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
-    // TODO show existing login on record, prompt to logout
-
     let client = if command_args.offline {
         None
     } else {

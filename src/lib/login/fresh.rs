@@ -447,7 +447,7 @@ pub async fn listen_for_remote_signer(
     }
 }
 
-fn generate_qr(data: &str) -> Result<Vec<String>> {
+pub fn generate_qr(data: &str) -> Result<Vec<String>> {
     let mut lines = vec![];
     let qr =
         QrCode::new(data.as_bytes()).context("failed to create QR of nostrconnect login url")?;
@@ -695,7 +695,7 @@ async fn signup(
             )
             .context("failed to get display name input from interactor")?;
         if name.is_empty() {
-            show_prompt_error("emtpy display name", "");
+            show_prompt_error("empty display name", "");
             match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)
@@ -740,7 +740,9 @@ async fn signup(
             )
             .await?;
         }
-        eprintln!("TODO: advice about using in other clients");
+        eprintln!(
+            "to login to other nostr clients eg. gitworkshop.dev with this account run `ngit export-keys` at any time to reveal your nostr account secret"
+        );
         break Ok(Some((
             Arc::new(keys),
             public_key,
