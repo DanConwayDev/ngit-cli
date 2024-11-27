@@ -11,7 +11,7 @@ use dialoguer::theme::{ColorfulTheme, Theme};
 use futures::executor::block_on;
 use git::GitTestRepo;
 use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
-use nostr_database::NostrDatabase;
+use nostr_database::NostrEventsDatabase;
 use nostr_lmdb::NostrLMDB;
 use nostr_sdk::{serde_json, Client, NostrSigner, TagStandard};
 use once_cell::sync::Lazy;
@@ -58,51 +58,46 @@ pub fn generate_test_key_1_metadata_event_old(name: &str) -> nostr::Event {
 }
 
 pub fn generate_test_key_1_kind_event(kind: Kind) -> nostr::Event {
-    nostr::event::EventBuilder::new(kind, "", [])
+    nostr::event::EventBuilder::new(kind, "")
+        .tags([])
         .sign_with_keys(&TEST_KEY_1_KEYS)
         .unwrap()
 }
 
 pub fn generate_test_key_1_relay_list_event() -> nostr::Event {
-    nostr::event::EventBuilder::new(
-        nostr::Kind::RelayList,
-        "",
-        [
+    nostr::event::EventBuilder::new(nostr::Kind::RelayList, "")
+        .tags([
             nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
-                relay_url: nostr::Url::from_str("ws://localhost:8053").unwrap(),
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8053").unwrap(),
                 metadata: Some(RelayMetadata::Write),
             }),
             nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
-                relay_url: nostr::Url::from_str("ws://localhost:8054").unwrap(),
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8054").unwrap(),
                 metadata: Some(RelayMetadata::Read),
             }),
             nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
-                relay_url: nostr::Url::from_str("ws://localhost:8055").unwrap(),
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8055").unwrap(),
                 metadata: None,
             }),
-        ],
-    )
-    .sign_with_keys(&TEST_KEY_1_KEYS)
-    .unwrap()
+        ])
+        .sign_with_keys(&TEST_KEY_1_KEYS)
+        .unwrap()
 }
 
 pub fn generate_test_key_1_relay_list_event_same_as_fallback() -> nostr::Event {
-    nostr::event::EventBuilder::new(
-        nostr::Kind::RelayList,
-        "",
-        [
+    nostr::event::EventBuilder::new(nostr::Kind::RelayList, "")
+        .tags([
             nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
-                relay_url: nostr::Url::from_str("ws://localhost:8051").unwrap(),
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8051").unwrap(),
                 metadata: Some(RelayMetadata::Write),
             }),
             nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
-                relay_url: nostr::Url::from_str("ws://localhost:8052").unwrap(),
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8052").unwrap(),
                 metadata: Some(RelayMetadata::Write),
             }),
-        ],
-    )
-    .sign_with_keys(&TEST_KEY_1_KEYS)
-    .unwrap()
+        ])
+        .sign_with_keys(&TEST_KEY_1_KEYS)
+        .unwrap()
 }
 
 pub static TEST_KEY_2_NSEC: &str =
@@ -133,9 +128,9 @@ pub fn make_event_old_or_change_user(
     keys: &nostr::Keys,
     how_old_in_secs: u64,
 ) -> nostr::Event {
-    let mut unsigned =
-        nostr::event::EventBuilder::new(event.kind, event.content.clone(), event.tags.clone())
-            .build(keys.public_key());
+    let mut unsigned = nostr::event::EventBuilder::new(event.kind, event.content.clone())
+        .tags(event.tags.clone())
+        .build(keys.public_key());
 
     unsigned.created_at =
         nostr::types::Timestamp::from(nostr::types::Timestamp::now().as_u64() - how_old_in_secs);
@@ -159,10 +154,8 @@ pub fn generate_repo_ref_event_with_git_server(git_servers: Vec<String>) -> nost
     // TODO - this may not be consistant across computers as it might take the
     // author and committer from global git config
     let root_commit = "9ee507fc4357d7ee16a5d8901bedcd103f23c17d";
-    nostr::event::EventBuilder::new(
-        nostr::Kind::GitRepoAnnouncement,
-        "",
-        [
+    nostr::event::EventBuilder::new(nostr::Kind::GitRepoAnnouncement, "")
+        .tags([
             Tag::identifier(
                 // root_commit.to_string()
                 format!("{}-consider-it-random", root_commit),
@@ -195,10 +188,9 @@ pub fn generate_repo_ref_event_with_git_server(git_servers: Vec<String>) -> nost
                     TEST_KEY_2_KEYS.public_key().to_string(),
                 ],
             ),
-        ],
-    )
-    .sign_with_keys(&TEST_KEY_1_KEYS)
-    .unwrap()
+        ])
+        .sign_with_keys(&TEST_KEY_1_KEYS)
+        .unwrap()
 }
 
 /// enough to fool event_is_patch_set_root

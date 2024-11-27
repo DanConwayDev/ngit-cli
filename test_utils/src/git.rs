@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 use git2::{Branch, Oid, RepositoryInitOptions, Signature, Time};
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{Kind, ToBech32};
+use nostr_sdk::{Kind, RelayUrl, ToBech32};
 
 use crate::generate_repo_ref_event;
 
@@ -28,8 +28,8 @@ impl Default for GitTestRepo {
             public_key: repo_event.pubkey,
             identifier: repo_event.tags.identifier().unwrap().to_string(),
             relays: vec![
-                "ws://localhost:8055".to_string(),
-                "ws://localhost:8056".to_string(),
+                RelayUrl::parse("ws://localhost:8055").unwrap(),
+                RelayUrl::parse("ws://localhost:8056").unwrap(),
             ],
         };
 

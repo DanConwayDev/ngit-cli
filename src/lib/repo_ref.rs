@@ -9,7 +9,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use console::Style;
 use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, Tag, TagStandard, ToBech32};
-use nostr_sdk::{Kind, NostrSigner, Timestamp};
+use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -28,7 +28,7 @@ pub struct RepoRef {
     pub root_commit: String,
     pub git_server: Vec<String>,
     pub web: Vec<String>,
-    pub relays: Vec<String>,
+    pub relays: Vec<RelayUrl>,
     pub maintainers: Vec<PublicKey>,
     pub events: HashMap<Coordinate, nostr::Event>,
     // code languages and hashtags
@@ -78,8 +78,11 @@ impl TryFrom<nostr::Event> for RepoRef {
         }
 
         if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("relays")) {
-            r.relays = t.clone().to_vec();
-            r.relays.remove(0);
+            for relay in t.clone().to_vec() {
+                if let Ok(relay) = RelayUrl::parse(relay) {
+                    r.relays.push(relay);
+                }
+            }
         }
 
         if let Some(t) = event
@@ -119,9 +122,7 @@ impl TryFrom<nostr::Event> for RepoRef {
 impl RepoRef {
     pub async fn to_event(&self, signer: &Arc<dyn NostrSigner>) -> Result<nostr::Event> {
         sign_event(
-            nostr_sdk::EventBuilder::new(
-                nostr::event::Kind::GitRepoAnnouncement,
-                "",
+            nostr_sdk::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
                 [
                     vec![
                         Tag::identifier(if self.identifier.to_string().is_empty() {
@@ -158,7 +159,7 @@ impl RepoRef {
                         ),
                         Tag::custom(
                             nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
-                            self.relays.clone(),
+                            self.relays.iter().map(|r| r.to_string()),
                         ),
                         Tag::custom(
                             nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
@@ -206,7 +207,7 @@ impl RepoRef {
                 .unwrap(),
             identifier: self.identifier.clone(),
             relays: if let Some(relay) = self.relays.first() {
-                vec![relay.to_string()]
+                vec![relay.clone()]
             } else {
                 vec![]
             },
@@ -481,7 +482,10 @@ mod tests {
                 "https://exampleproject.xyz".to_string(),
                 "https://gitworkshop.dev/123".to_string(),
             ],
-            relays: vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
+            relays: vec![
+                RelayUrl::parse("ws://relay1.io").unwrap(),
+                RelayUrl::parse("ws://relay2.io").unwrap(),
+            ],
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             events: HashMap::new(),
         }
@@ -592,7 +596,10 @@ mod tests {
         async fn relays() {
             assert_eq!(
                 RepoRef::try_from(create().await).unwrap().relays,
-                vec!["ws://relay1.io".to_string(), "ws://relay2.io".to_string()],
+                vec![
+                    RelayUrl::parse("ws://relay1.io").unwrap(),
+                    RelayUrl::parse("ws://relay2.io").unwrap(),
+                ],
             )
         }
 

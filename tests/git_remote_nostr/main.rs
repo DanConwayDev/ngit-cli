@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use futures::join;
 use git2::Oid;
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{secp256k1::rand, Event, JsonUtil, Kind, ToBech32};
+use nostr_sdk::{secp256k1::rand, Event, JsonUtil, Kind, RelayUrl, ToBech32};
 use relay::Relay;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
@@ -23,8 +23,8 @@ fn get_nostr_remote_url() -> Result<String> {
         public_key: repo_event.pubkey,
         identifier: repo_event.tags.identifier().unwrap().to_string(),
         relays: vec![
-            "ws://localhost:8055".to_string(),
-            "ws://localhost:8056".to_string(),
+            RelayUrl::parse("ws://localhost:8055").unwrap(),
+            RelayUrl::parse("ws://localhost:8056").unwrap(),
         ],
     }
     .to_bech32()?;

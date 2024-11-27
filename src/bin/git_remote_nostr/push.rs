@@ -961,9 +961,7 @@ async fn create_merge_status(
         public_keys.insert(revision.pubkey);
     }
     sign_event(
-        EventBuilder::new(
-            nostr::event::Kind::GitStatusApplied,
-            String::new(),
+        EventBuilder::new(nostr::event::Kind::GitStatusApplied, String::new()).tags(
             [
                 vec![
                     Tag::custom(
@@ -972,23 +970,26 @@ async fn create_merge_status(
                     ),
                     Tag::from_standardized(nostr::TagStandard::Event {
                         event_id: proposal.id,
-                        relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
+                        relay_url: repo_ref.relays.first().cloned(),
                         marker: Some(Marker::Root),
                         public_key: None,
+                        uppercase: false,
                     }),
                     Tag::from_standardized(nostr::TagStandard::Event {
                         event_id: merged_patch,
-                        relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
+                        relay_url: repo_ref.relays.first().cloned(),
                         marker: Some(Marker::Mention),
                         public_key: None,
+                        uppercase: false,
                     }),
                 ],
                 if let Some(revision) = revision {
                     vec![Tag::from_standardized(nostr::TagStandard::Event {
                         event_id: revision.id,
-                        relay_url: repo_ref.relays.first().map(nostr::UncheckedUrl::new),
+                        relay_url: repo_ref.relays.first().cloned(),
                         marker: Some(Marker::Root),
                         public_key: None,
+                        uppercase: false,
                     })]
                 } else {
                     vec![]
@@ -1202,7 +1203,7 @@ impl BuildRepoState for RepoState {
                 vec![value.clone()],
             ));
         }
-        let event = sign_event(EventBuilder::new(STATE_KIND, "", tags), signer).await?;
+        let event = sign_event(EventBuilder::new(STATE_KIND, "").tags(tags), signer).await?;
         Ok(RepoState {
             identifier,
             state,

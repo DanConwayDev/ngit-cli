@@ -5,7 +5,7 @@ use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::nips::{nip05, nip46::NostrConnectURI};
 use nostr_connect::client::NostrConnect;
-use nostr_sdk::{EventBuilder, Keys, Metadata, NostrSigner, PublicKey, ToBech32, Url};
+use nostr_sdk::{EventBuilder, Keys, Metadata, NostrSigner, PublicKey, RelayUrl, ToBech32};
 use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
@@ -370,8 +370,8 @@ pub fn generate_nostr_connect_app(
         client
             .get_fallback_signer_relays()
             .iter()
-            .flat_map(|s| Url::parse(s))
-            .collect::<Vec<Url>>()
+            .flat_map(RelayUrl::parse)
+            .collect::<Vec<RelayUrl>>()
     } else {
         vec![]
     };
@@ -438,8 +438,8 @@ pub async fn listen_for_remote_signer(
         let bunker_url = NostrConnectURI::Bunker {
             // TODO the remote signer pubkey may not be the user pubkey
             remote_signer_public_key: public_key,
-            relays: nostr_connect_url.relays(),
-            secret: nostr_connect_url.secret(),
+            relays: nostr_connect_url.relays().to_vec(),
+            secret: nostr_connect_url.secret().map(String::from),
         };
         Ok((signer, public_key, bunker_url))
     } else {
@@ -727,7 +727,7 @@ async fn signup(
                 client
                     .get_fallback_relays()
                     .iter()
-                    .map(|s| (Url::parse(s).unwrap(), None)),
+                    .map(|s| (RelayUrl::parse(s).unwrap(), None)),
             )
             .sign_with_keys(&keys)?;
             eprintln!("publishing user profile to relays");

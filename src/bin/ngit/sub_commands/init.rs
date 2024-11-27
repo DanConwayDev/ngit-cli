@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use ngit::cli_interactor::PromptConfirmParms;
 use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
-use nostr_sdk::Kind;
+use nostr_sdk::{Kind, RelayUrl};
 
 use crate::{
     cli::{extract_signer_cli_arguments, Cli},
@@ -323,24 +323,45 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     // TODO: check if relays are free to post to so contributors can submit patches
     // TODO: recommend some reliable free ones
-    let relays: Vec<String> = if args.relays.is_empty() {
-        Interactor::default()
-            .input(
-                PromptInputParms::default()
-                    .with_prompt("relays")
-                    .with_default(if let Ok(config) = &repo_config_result {
-                        config.relays.clone().join(" ")
-                    } else if let Some(repo_ref) = &repo_ref {
-                        repo_ref.relays.clone().join(" ")
-                    } else {
-                        user_ref.relays.write().join(" ")
-                    }),
-            )?
-            .split(' ')
-            .map(std::string::ToString::to_string)
-            .collect()
-    } else {
-        args.relays.clone()
+    let relays: Vec<RelayUrl> = {
+        let mut default = if let Ok(config) = &repo_config_result {
+            config.relays.clone().join(" ")
+        } else if let Some(repo_ref) = &repo_ref {
+            repo_ref
+                .relays
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<String>>()
+                .join(" ")
+        } else {
+            user_ref.relays.write().join(" ")
+        };
+        'outer: loop {
+            let relays: Vec<String> = if args.relays.is_empty() {
+                Interactor::default()
+                    .input(
+                        PromptInputParms::default()
+                            .with_prompt("relays")
+                            .with_default(default),
+                    )?
+                    .split(' ')
+                    .map(std::string::ToString::to_string)
+                    .collect()
+            } else {
+                args.relays.clone()
+            };
+            let mut relay_urls = vec![];
+            for r in &relays {
+                if let Ok(r) = RelayUrl::parse(r) {
+                    relay_urls.push(r);
+                } else {
+                    eprintln!("{r} is not a valid relay url");
+                    default = relays.join(" ");
+                    continue 'outer;
+                }
+            }
+            break relay_urls;
+        }
     };
 
     let earliest_unique_commit = match &args.earliest_unique_commit {
@@ -415,6 +436,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         false,
     )?;
 
+    let relays = relays
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<String>>();
     // if yaml file doesnt exist or needs updating
     if match &repo_config_result {
         Ok(config) => {

@@ -30,11 +30,11 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 #[cfg(test)]
 use mockall::*;
 use nostr::{nips::nip01::Coordinate, Event};
-use nostr_database::NostrDatabase;
+use nostr_database::NostrEventsDatabase;
 use nostr_lmdb::NostrLMDB;
 use nostr_sdk::{
-    prelude::RelayLimits, EventBuilder, EventId, Kind, NostrSigner, Options, PublicKey,
-    SingleLetterTag, Timestamp, Url,
+    prelude::RelayLimits, EventBuilder, EventId, Kind, NostrSigner, Options, PublicKey, RelayUrl,
+    SingleLetterTag, Timestamp,
 };
 
 use crate::{
@@ -63,7 +63,7 @@ pub trait Connect {
     fn default() -> Self;
     fn new(opts: Params) -> Self;
     async fn set_signer(&mut self, signer: Arc<dyn NostrSigner>);
-    async fn connect(&self, relay_url: &Url) -> Result<()>;
+    async fn connect(&self, relay_url: &RelayUrl) -> Result<()>;
     async fn disconnect(&self) -> Result<()>;
     fn get_fallback_relays(&self) -> &Vec<String>;
     fn get_more_fallback_relays(&self) -> &Vec<String>;
@@ -82,7 +82,7 @@ pub trait Connect {
     ) -> Result<Vec<nostr::Event>>;
     async fn get_events_per_relay(
         &self,
-        relays: Vec<Url>,
+        relays: Vec<RelayUrl>,
         filters: Vec<nostr::Filter>,
         progress_reporter: MultiProgress,
     ) -> Result<(Vec<Result<Vec<nostr::Event>>>, MultiProgress)>;
@@ -172,7 +172,7 @@ impl Connect for Client {
         self.client.set_signer(signer).await;
     }
 
-    async fn connect(&self, relay_url: &Url) -> Result<()> {
+    async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
         self.client
             .add_relay(relay_url)
             .await
@@ -244,7 +244,7 @@ impl Connect for Client {
     ) -> Result<Vec<nostr::Event>> {
         let (relay_results, _) = self
             .get_events_per_relay(
-                relays.iter().map(|r| Url::parse(r).unwrap()).collect(),
+                relays.iter().map(|r| RelayUrl::parse(r).unwrap()).collect(),
                 filters,
                 MultiProgress::new(),
             )
@@ -254,7 +254,7 @@ impl Connect for Client {
 
     async fn get_events_per_relay(
         &self,
-        relays: Vec<Url>,
+        relays: Vec<RelayUrl>,
         filters: Vec<nostr::Filter>,
         progress_reporter: MultiProgress,
     ) -> Result<(Vec<Result<Vec<nostr::Event>>>, MultiProgress)> {
@@ -335,8 +335,8 @@ impl Connect for Client {
         let fallback_relays = &self
             .fallback_relays
             .iter()
-            .filter_map(|r| Url::parse(r).ok())
-            .collect::<HashSet<Url>>();
+            .filter_map(|r| RelayUrl::parse(r).ok())
+            .collect::<HashSet<RelayUrl>>();
 
         let mut request = create_relays_request(
             git_repo_path,
@@ -359,17 +359,17 @@ impl Connect for Client {
                 // don't look for events on blaster
                 .filter(|&r| !r.as_str().contains("nostr.mutinywallet.com"))
                 .cloned()
-                .collect::<HashSet<Url>>()
+                .collect::<HashSet<RelayUrl>>()
                 .difference(&processed_relays)
                 .cloned()
-                .collect::<HashSet<Url>>();
+                .collect::<HashSet<RelayUrl>>();
             if relays.is_empty() {
                 break;
             }
             let profile_relays_only = request
                 .user_relays_for_profiles
                 .difference(&request.repo_relays)
-                .collect::<HashSet<&Url>>();
+                .collect::<HashSet<&RelayUrl>>();
             for relay in &request.repo_relays {
                 self.client
                     .add_relay(relay.as_str())
@@ -469,11 +469,7 @@ impl Connect for Client {
             processed_relays.extend(relays.clone());
 
             if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await {
-                request.repo_relays = repo_ref
-                    .relays
-                    .iter()
-                    .filter_map(|r| Url::parse(r).ok())
-                    .collect();
+                request.repo_relays = repo_ref.relays.iter().cloned().collect();
             }
 
             request.user_relays_for_profiles = {
@@ -486,7 +482,7 @@ impl Connect for Client {
                 {
                     if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, user).await {
                         for r in user_ref.relays.write() {
-                            if let Ok(url) = Url::parse(&r) {
+                            if let Ok(url) = RelayUrl::parse(&r) {
                                 set.insert(url);
                             }
                         }
@@ -905,7 +901,7 @@ async fn create_relays_request(
     git_repo_path: Option<&Path>,
     repo_coordinates: &HashSet<Coordinate>,
     user_profiles: &HashSet<PublicKey>,
-    fallback_relays: HashSet<Url>,
+    fallback_relays: HashSet<RelayUrl>,
 ) -> Result<FetchRequest> {
     let repo_ref = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await;
 
@@ -1026,7 +1022,7 @@ async fn create_relays_request(
         {
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, user).await {
                 for r in user_ref.relays.write() {
-                    if let Ok(url) = Url::parse(&r) {
+                    if let Ok(url) = RelayUrl::parse(&r) {
                         set.insert(url);
                     }
                 }
@@ -1068,17 +1064,13 @@ async fn create_relays_request(
     let relays = {
         let mut relays = fallback_relays;
         if let Ok(repo_ref) = &repo_ref {
-            for r in &repo_ref.relays {
-                if let Ok(url) = Url::parse(r) {
-                    relays.insert(url);
-                }
+            for r in repo_ref.relays.clone() {
+                relays.insert(r);
             }
         }
         for c in repo_coordinates {
             for r in &c.relays {
-                if let Ok(url) = Url::parse(r) {
-                    relays.insert(url);
-                }
+                relays.insert(r.clone());
             }
         }
         relays
@@ -1500,8 +1492,8 @@ impl Display for FetchReport {
 
 #[derive(Default, Clone)]
 pub struct FetchRequest {
-    repo_relays: HashSet<Url>,
-    selected_relay: Option<Url>,
+    repo_relays: HashSet<RelayUrl>,
+    selected_relay: Option<RelayUrl>,
     relay_column_width: usize,
     repo_coordinates_without_relays: Vec<(Coordinate, Option<Timestamp>)>,
     state: Option<(Timestamp, EventId)>,
@@ -1510,7 +1502,7 @@ pub struct FetchRequest {
     missing_contributor_profiles: HashSet<PublicKey>,
     existing_events: HashSet<EventId>,
     profiles_to_fetch_from_user_relays: HashMap<PublicKey, (Timestamp, Timestamp)>,
-    user_relays_for_profiles: HashSet<Url>,
+    user_relays_for_profiles: HashSet<RelayUrl>,
 }
 
 pub async fn fetching_with_report(
@@ -1646,7 +1638,7 @@ pub async fn send_events(
     git_repo_path: Option<&Path>,
     events: Vec<nostr::Event>,
     my_write_relays: Vec<String>,
-    repo_read_relays: Vec<String>,
+    repo_read_relays: Vec<RelayUrl>,
     animate: bool,
     silent: bool,
 ) -> Result<()> {
@@ -1659,7 +1651,12 @@ pub async fn send_events(
         },
     ]
     .concat();
-    let mut relays: Vec<&String> = vec![];
+    let mut relays: Vec<&str> = vec![];
+
+    let repo_read_relays = repo_read_relays
+        .iter()
+        .map(|r| r.to_string())
+        .collect::<Vec<String>>();
 
     let all = &[
         repo_read_relays.clone(),
@@ -1722,7 +1719,7 @@ pub async fn send_events(
 
     #[allow(clippy::borrow_deref_ref)]
     join_all(relays.iter().map(|&relay| async {
-        let relay_clean = remove_trailing_slash(&*relay);
+        let relay_clean = remove_trailing_slash(relay);
         let details = format!(
             "{}{}{} {}",
             if my_write_relays
@@ -1735,7 +1732,7 @@ pub async fn send_events(
             },
             if repo_read_relays
                 .iter()
-                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+                .any(|r| relay_clean.eq(&remove_trailing_slash(&r.to_string())))
             {
                 " [repo-relay]"
             } else {
@@ -1763,7 +1760,7 @@ pub async fn send_events(
         let mut failed = false;
         for event in &events {
             match client
-                .send_event_to(git_repo_path, relay.as_str(), event.clone())
+                .send_event_to(git_repo_path, relay, event.clone())
                 .await
             {
                 Ok(_) => pb.inc(1),
@@ -1793,8 +1790,8 @@ pub async fn send_events(
     Ok(())
 }
 
-fn remove_trailing_slash(s: &String) -> String {
-    match s.as_str().strip_suffix('/') {
+fn remove_trailing_slash(s: &str) -> String {
+    match s.strip_suffix('/') {
         Some(s) => s,
         None => s,
     }

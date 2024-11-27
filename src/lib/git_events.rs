@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use nostr::nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19};
 use nostr_sdk::{
     hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, FromBech32, Kind, NostrSigner,
-    PublicKey, Tag, TagKind, TagStandard, UncheckedUrl,
+    PublicKey, RelayUrl, Tag, TagKind, TagStandard,
 };
 
 use crate::{
@@ -96,7 +96,7 @@ pub async fn generate_patch_event(
     let commit_parent = git_repo
         .get_commit_parent(commit)
         .context("failed to get parent commit")?;
-    let relay_hint = repo_ref.relays.first().map(nostr::UncheckedUrl::from);
+    let relay_hint = repo_ref.relays.first().cloned();
 
     sign_event(
         EventBuilder::new(
@@ -104,6 +104,8 @@ pub async fn generate_patch_event(
             git_repo
                 .make_patch_from_commit(commit, &series_count)
                 .context(format!("failed to make patch for commit {commit}"))?,
+        )
+        .tags(
             [
                 repo_ref
                     .maintainers
@@ -141,6 +143,7 @@ pub async fn generate_patch_event(
                         relay_url: relay_hint.clone(),
                         marker: Some(Marker::Root),
                         public_key: None,
+                        uppercase: false,
                     })]
                 } else if let Some(event_ref) = root_proposal_id.clone() {
                     vec![
@@ -165,6 +168,7 @@ pub async fn generate_patch_event(
                         relay_url: relay_hint.clone(),
                         marker: Some(Marker::Reply),
                         public_key: None,
+                        uppercase: false,
                     })]
                 } else {
                     vec![]
@@ -256,9 +260,10 @@ pub fn event_tag_from_nip19_or_hex(
                 Nip19::Event(n) => {
                     break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                         event_id: n.event_id,
-                        relay_url: n.relays.first().map(UncheckedUrl::new),
+                        relay_url: n.relays.first().and_then(|url| RelayUrl::parse(url).ok()),
                         marker: Some(marker),
                         public_key: None,
+                        uppercase: false,
                     }));
                 }
                 Nip19::EventId(id) => {
@@ -267,6 +272,7 @@ pub fn event_tag_from_nip19_or_hex(
                         relay_url: None,
                         marker: Some(marker),
                         public_key: None,
+                        uppercase: false,
                     }));
                 }
                 Nip19::Coordinate(coordinate) => {
@@ -291,6 +297,7 @@ pub fn event_tag_from_nip19_or_hex(
                 relay_url: None,
                 marker: Some(marker),
                 public_key: None,
+                uppercase: false,
             }));
         }
         if prompt_for_correction {
@@ -326,7 +333,8 @@ pub async fn generate_cover_letter_and_patch_events(
             "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
             commits.last().unwrap(),
             commits.len()
-        ),
+        ))
+        .tags(
         [
             repo_ref.maintainers.iter().map(|m| Tag::coordinate(Coordinate {
                 kind: nostr::Kind::GitRepoAnnouncement,
@@ -618,7 +626,8 @@ mod tests {
             Ok(nostr::event::EventBuilder::new(
                 nostr::event::Kind::GitPatch,
                 format!("From ea897e987ea9a7a98e7a987e97987ea98e7a3334 Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/2] {title}\n\n{description}"),
-                [
+                )
+            .tags([
                     Tag::hashtag("cover-letter"),
                     Tag::hashtag("root"),
                 ],

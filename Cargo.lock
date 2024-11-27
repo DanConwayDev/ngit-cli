@@ -1802,18 +1802,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lnurl-pay"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "536e7c782167a2d48346ca0b2677fad19eaef20f19a4ab868e4d5b96ca879def"
-dependencies = [
- "bech32",
- "reqwest",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2006,9 +1994,9 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
 name = "nostr"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14ad56c1d9a59f4edc46b17bc64a217b38b99baefddc0080f85ad98a0855336d"
+checksum = "8aad4b767bbed24ac5eb4465bfb83bc1210522eb99d67cf4e547ec2ec7e47786"
 dependencies = [
  "aes",
  "async-trait",
@@ -2021,7 +2009,6 @@ dependencies = [
  "chacha20poly1305",
  "getrandom",
  "instant",
- "js-sys",
  "negentropy 0.3.1",
  "negentropy 0.4.3",
  "once_cell",
@@ -2031,16 +2018,13 @@ dependencies = [
  "serde_json",
  "unicode-normalization",
  "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
 name = "nostr-connect"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29d2a145eecf951c5461fdb72a064142b422f882760542c855bc1eca02516afb"
+checksum = "5b1bf2a6324d2c1739be462e83d27caa2c025fd7ca14b401b4bc4b7cac11d382"
 dependencies = [
  "async-trait",
  "async-utility",
@@ -2053,9 +2037,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-database"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1859abebf78d7d9e945b20c8faaf710c9db905adeb148035b803ae45792dbebe"
+checksum = "23696338d51e45cd44e061823847f4b0d1d362eca80d5033facf9c184149f72f"
 dependencies = [
  "async-trait",
  "flatbuffers",
@@ -2068,9 +2052,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-lmdb"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "964cd83b0fa821cd09e3cf02287a3581d7deb26c9cb6d03990936b3f0228ba84"
+checksum = "70c97ff4e384735527af2dc74b6c8f0042f02daea476bad6c7bb56be32739250"
 dependencies = [
  "heed",
  "nostr",
@@ -2082,9 +2066,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-relay-pool"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e39cfcb30cab86b30ca9acba89f5ccb25a4142a5dc5fcfbf3edf34b204ddd7c7"
+checksum = "15fcc6e3f0ca54d0fc779009bc5f2684cea9147be3b6aa68a7d301ea590f95f5"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -2101,32 +2085,18 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4739ed15ff81a0e474d79b38c3eb481ff5f968c1865f38ba46852daf6f6495e"
+checksum = "491221fc89b1aa189a0de640127127d68b4e7c5c1d44371b04d9a6d10694b5af"
 dependencies = [
  "async-utility",
  "atomic-destructor",
- "lnurl-pay",
  "nostr",
  "nostr-database",
  "nostr-relay-pool",
- "nostr-zapper",
- "nwc",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "nostr-zapper"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d9709ecf8050bbe4ecf0e5efda2f25b690bb1761fc504e05654621ba9e568a8"
-dependencies = [
- "async-trait",
- "nostr",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2207,21 +2177,6 @@ name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
-
-[[package]]
-name = "nwc"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b5f98bcaf232b3ec48e018792ca7bc2b90e7520d001a07b8218a9e76a03fda2"
-dependencies = [
- "async-trait",
- "async-utility",
- "nostr",
- "nostr-relay-pool",
- "nostr-zapper",
- "thiserror 1.0.69",
- "tracing",
-]
 
 [[package]]
 name = "object"
@@ -2646,7 +2601,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.7",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
