@@ -449,16 +449,18 @@ pub async fn listen_for_remote_signer(
 
 pub fn generate_qr(data: &str) -> Result<Vec<String>> {
     let mut lines = vec![];
-    let qr =
-        QrCode::new(data.as_bytes()).context("failed to create QR of nostrconnect login url")?;
+    let qr = QrCode::new(data.as_bytes()).context("failed to create QR")?;
     let colors = qr.to_colors();
-    let rows: Vec<&[qrcode::Color]> = colors.chunks(qr.width()).collect();
+    let mut rows: Vec<&[qrcode::Color]> = colors.chunks(qr.width()).collect();
+    let light_row = vec![qrcode::Color::Light; qr.width()];
+    rows.insert(0, &light_row);
+    rows.push(&light_row);
     for (row, data) in rows.iter().enumerate() {
         let odd = row % 2 != 0;
         if odd {
             continue;
         }
-        let mut line = String::new();
+        let mut line = " ".to_string();
         for (col, color) in data.iter().enumerate() {
             let top = color;
             let mut bottom = qrcode::Color::Light;
