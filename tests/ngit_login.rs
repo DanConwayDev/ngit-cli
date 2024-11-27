@@ -732,6 +732,7 @@ mod with_offline_flag {
             let mut p = CliTester::new_from_dir(
                 &test_repo.dir,
                 [
+                    "account",
                     "login",
                     "--offline",
                     "--nsec",
@@ -757,6 +758,7 @@ mod with_offline_flag {
                     TEST_KEY_1_NSEC,
                     "--password",
                     TEST_PASSWORD,
+                    "account",
                     "login",
                     "--offline",
                 ],
@@ -778,6 +780,7 @@ mod with_offline_flag {
                 let mut p = CliTester::new_from_dir(
                     &test_repo.dir,
                     [
+                        "account",
                         "login",
                         "--offline",
                         "--nsec",
