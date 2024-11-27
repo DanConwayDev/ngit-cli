@@ -20,11 +20,8 @@ async fn main() -> Result<()> {
             AccountCommands::Logout => sub_commands::logout::launch().await,
             AccountCommands::ExportKeys => sub_commands::export_keys::launch().await,
         },
-        Commands::Fetch(args) => sub_commands::fetch::launch(&cli, args).await,
         Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
         Commands::List => sub_commands::list::launch().await,
-        Commands::Pull => sub_commands::pull::launch().await,
-        Commands::Push(args) => sub_commands::push::launch(&cli, args).await,
         Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
     }
 }

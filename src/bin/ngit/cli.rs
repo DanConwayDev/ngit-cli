@@ -53,18 +53,12 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// update cache with latest updates from nostr
-    Fetch(sub_commands::fetch::SubCommandArgs),
     /// signal you are this repo's maintainer accepting proposals via nostr
     Init(sub_commands::init::SubCommandArgs),
     /// issue commits as a proposal
     Send(sub_commands::send::SubCommandArgs),
     /// list proposals; checkout, apply or download selected
     List,
-    /// send proposal revision
-    Push(sub_commands::push::SubCommandArgs),
-    /// fetch and apply new proposal commits / revisions linked to branch
-    Pull,
     /// login, logout or export keys
     Account(AccountSubCommandArgs),
 }
