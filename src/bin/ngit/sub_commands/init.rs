@@ -256,29 +256,28 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         }
     };
 
-    let no_state = if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.nostate", None) {
-        s == "true"
-    } else {
-        false
-    };
-    if no_state {
-        println!(
-            "you have opted out of storing git state on nostr, so a git server must be used for the state of authoritative branches, tags and related git objects."
-        );
-    } else {
-        println!(
-            "your repository state will be stored on nostr, but a git server is still required to store the git objects associated with this state."
-        );
-    }
-    println!(
-        "you can change this git server at any time and even configure multiple servers for redundancy. In this case, the git plugin will push to all of them when using the nostr remote."
-    );
-    println!("only maintainers need write access as PRs are sent over nostr.");
-    println!(
-        "a lightweight git server implementation for use with nostr, requiring no signup, is in development. several providers have shown interest in hosting it. for now use github, codeberg, or self-hosted song, forge, etc."
-    );
-
     let git_server = if args.clone_url.is_empty() {
+        let no_state = if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.nostate", None) {
+            s == "true"
+        } else {
+            false
+        };
+        if no_state {
+            println!(
+                "you have opted out of storing git state on nostr, so a git server must be used for the state of authoritative branches, tags and related git objects."
+            );
+        } else {
+            println!(
+                "your repository state will be stored on nostr, but a git server is still required to store the git objects associated with this state."
+            );
+        }
+        println!(
+            "you can change this git server at any time and even configure multiple servers for redundancy. In this case, the git plugin will push to all of them when using the nostr remote."
+        );
+        println!("only maintainers need write access as PRs are sent over nostr.");
+        println!(
+            "a lightweight git server implementation for use with nostr, requiring no signup, is in development. several providers have shown interest in hosting it. for now use github, codeberg, or self-hosted song, forge, etc."
+        );
         Interactor::default()
             .input(
                 PromptInputParms::default()
@@ -344,9 +343,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.relays.clone()
     };
 
-    println!(
-        "the earliest unique commit helps with discoverability. It defaults to the root commit. Only change this if your repo has completely forked off an has formed its own identity."
-    );
     let earliest_unique_commit = match &args.earliest_unique_commit {
         Some(t) => t.clone(),
         None => {
@@ -355,6 +351,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             } else {
                 root_commit.to_string()
             };
+            println!(
+                "the earliest unique commit helps with discoverability. It defaults to the root commit. Only change this if your repo has completely forked off an has formed its own identity."
+            );
             loop {
                 earliest_unique_commit = Interactor::default().input(
                     PromptInputParms::default()
