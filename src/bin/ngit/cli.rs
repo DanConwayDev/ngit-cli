@@ -71,7 +71,7 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum AccountCommands {
-    /// run with --nsec flag to change npub
+    /// login with nsec or nostr connect
     Login(sub_commands::login::SubCommandArgs),
     /// remove nostr account details stored in git config
     Logout,
