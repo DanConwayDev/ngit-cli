@@ -131,6 +131,7 @@ fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
         println!(
             " - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options"
         );
+        println!("- publish a repository to nostr with `ngit init`");
         return Ok(None);
     };
 
