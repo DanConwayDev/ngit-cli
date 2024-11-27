@@ -144,7 +144,7 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
     Ok((true, local_only))
 }
 
-fn get_global_login_config_items_set() -> Vec<&'static str> {
+pub fn get_global_login_config_items_set() -> Vec<&'static str> {
     [
         "nostr.nsec",
         "nostr.npub",
@@ -157,7 +157,7 @@ fn get_global_login_config_items_set() -> Vec<&'static str> {
     .collect::<Vec<&str>>()
 }
 
-fn format_items_as_list(items: &[&str]) -> String {
+pub fn format_items_as_list(items: &[&str]) -> String {
     match items.len() {
         0 => String::new(),
         1 => items[0].to_string(),

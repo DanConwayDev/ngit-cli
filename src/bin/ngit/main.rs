@@ -17,6 +17,7 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Fetch(args) => sub_commands::fetch::launch(&cli, args).await,
         Commands::Login(args) => sub_commands::login::launch(&cli, args).await,
+        Commands::Logout => sub_commands::logout::launch().await,
         Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
         Commands::ExportKeys => sub_commands::export_keys::launch().await,
         Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,

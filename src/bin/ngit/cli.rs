@@ -69,4 +69,6 @@ pub enum Commands {
     Pull,
     /// run with --nsec flag to change npub
     Login(sub_commands::login::SubCommandArgs),
+    /// remove nostr account details stored in git config
+    Logout,
 }
