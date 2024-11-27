@@ -52,19 +52,14 @@ eg self-hosted, github, codeberg, etc.
 
 run from the directory of the git repository:
 
-- `ngit init` signal you are this repo's maintainer accepting proposals via nostr
-- `ngit send` issue commits as a proposal
-- `ngit list` list proposals; checkout, apply or donwload selected
-- `ngit fetch` fetch download latest repository updates to allow `ngit list` usage offline
-
-and when on a proposal branch:
-
-- `ngit push` send proposal revision
-- `ngit pull` fetch and apply new proposal commits / revisions linked to branch
+- `ngit init` signal you are this repo's maintainer accepting PRs and issues via nostr
+- `ngit send` submit PR with advanced options
+- `ngit list` list Prs; checkout, apply or donwload selected
+- `ngit account` login, logout, export keys
 
 ## contributions welcome!
 
-use ngit to submit proposals!
+use ngit to submit PRs!
 
 [gitworkshop.dev/r/naddr1qqzxuemfwsq3gamnwvaz7tmjv4kxz7fwv3sk6atn9e5k7q3q5qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exsxpqqqpmejawq4qj](https://gitworkshop.dev/repo/ngit) to report issues and see proposals
 

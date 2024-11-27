@@ -53,11 +53,11 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// signal you are this repo's maintainer accepting proposals via nostr
+    /// signal you are this repo's maintainer accepting PRs and issues via nostr
     Init(sub_commands::init::SubCommandArgs),
-    /// issue commits as a proposal
+    /// submit PR with advanced options
     Send(sub_commands::send::SubCommandArgs),
-    /// list proposals; checkout, apply or download selected
+    /// list PRs; checkout, apply or download selected
     List,
     /// login, logout or export keys
     Account(AccountSubCommandArgs),
