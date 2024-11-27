@@ -57,8 +57,6 @@ pub enum Commands {
     Fetch(sub_commands::fetch::SubCommandArgs),
     /// signal you are this repo's maintainer accepting proposals via nostr
     Init(sub_commands::init::SubCommandArgs),
-    /// export nostr keys to login to other nostr clients
-    ExportKeys,
     /// issue commits as a proposal
     Send(sub_commands::send::SubCommandArgs),
     /// list proposals; checkout, apply or download selected
@@ -67,8 +65,22 @@ pub enum Commands {
     Push(sub_commands::push::SubCommandArgs),
     /// fetch and apply new proposal commits / revisions linked to branch
     Pull,
+    /// login, logout or export keys
+    Account(AccountSubCommandArgs),
+}
+
+#[derive(Subcommand)]
+pub enum AccountCommands {
     /// run with --nsec flag to change npub
     Login(sub_commands::login::SubCommandArgs),
     /// remove nostr account details stored in git config
     Logout,
+    /// export nostr keys to login to other nostr clients
+    ExportKeys,
+}
+
+#[derive(clap::Parser)]
+pub struct AccountSubCommandArgs {
+    #[command(subcommand)]
+    pub account_command: AccountCommands,
 }

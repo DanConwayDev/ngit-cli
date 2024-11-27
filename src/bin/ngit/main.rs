@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{AccountCommands, Cli, Commands};
 
 mod cli;
 use ngit::{cli_interactor, client, git, git_events, login, repo_ref};
@@ -15,14 +15,16 @@ mod sub_commands;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Commands::Account(args) => match &args.account_command {
+            AccountCommands::Login(sub_args) => sub_commands::login::launch(&cli, sub_args).await,
+            AccountCommands::Logout => sub_commands::logout::launch().await,
+            AccountCommands::ExportKeys => sub_commands::export_keys::launch().await,
+        },
         Commands::Fetch(args) => sub_commands::fetch::launch(&cli, args).await,
-        Commands::Login(args) => sub_commands::login::launch(&cli, args).await,
-        Commands::Logout => sub_commands::logout::launch().await,
         Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
-        Commands::ExportKeys => sub_commands::export_keys::launch().await,
-        Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
         Commands::List => sub_commands::list::launch().await,
         Commands::Pull => sub_commands::pull::launch().await,
         Commands::Push(args) => sub_commands::push::launch(&cli, args).await,
+        Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
     }
 }

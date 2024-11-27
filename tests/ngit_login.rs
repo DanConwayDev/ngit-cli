@@ -38,7 +38,7 @@ fn first_time_login_choices_succeeds_with_nsec(p: &mut CliTester, nsec: &str) ->
 
 fn standard_first_time_login_with_nsec() -> Result<CliTester> {
     let test_repo = GitTestRepo::default();
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login", "--offline"]);
 
     first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
@@ -77,7 +77,7 @@ mod with_relays {
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let test_repo = GitTestRepo::default();
-                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
+                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login"]);
 
                         first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
@@ -108,7 +108,7 @@ mod with_relays {
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let test_repo = GitTestRepo::default();
-                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
+                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login"]);
 
                         first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
@@ -416,7 +416,7 @@ mod with_relays {
                             let test_repo = GitTestRepo::default();
                             let mut p = CliTester::new_from_dir(
                                 &test_repo.dir,
-                                ["login", "--nsec", TEST_KEY_1_NSEC],
+                                ["account", "login", "--nsec", TEST_KEY_1_NSEC],
                             );
 
                             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
@@ -458,7 +458,7 @@ mod with_relays {
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let test_repo = GitTestRepo::default();
-                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
+                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login"]);
 
                         first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
@@ -512,7 +512,7 @@ mod with_relays {
 
                     let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                         let test_repo = GitTestRepo::default();
-                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
+                        let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login"]);
 
                         first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
@@ -553,7 +553,7 @@ mod with_relays {
 
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let test_repo = GitTestRepo::default();
-                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["login"]);
+                    let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login"]);
 
                     first_time_login_choices_succeeds_with_nsec(&mut p, TEST_KEY_1_NSEC)?;
 
@@ -628,7 +628,7 @@ mod with_offline_flag {
         #[test]
         fn succeeds_with_text_logged_in_as_npub() -> Result<()> {
             let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login", "--offline"]);
 
             show_first_time_login_choices(&mut p)?.succeeds_with(0, false, Some(0))?;
 
@@ -643,7 +643,7 @@ mod with_offline_flag {
         #[test]
         fn succeeds_with_hex_secret_key_in_place_of_nsec() -> Result<()> {
             let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["account", "login", "--offline"]);
 
             show_first_time_login_choices(&mut p)?.succeeds_with(0, false, Some(0))?;
 
@@ -661,7 +661,8 @@ mod with_offline_flag {
             #[test]
             fn prompts_for_nsec_until_valid() -> Result<()> {
                 let test_repo = GitTestRepo::default();
-                let mut p = CliTester::new_from_dir(&test_repo.dir, ["login", "--offline"]);
+                let mut p =
+                    CliTester::new_from_dir(&test_repo.dir, ["account", "login", "--offline"]);
 
                 show_first_time_login_choices(&mut p)?.succeeds_with(0, false, Some(0))?;
 
@@ -698,7 +699,7 @@ mod with_offline_flag {
             let test_repo = GitTestRepo::default();
             let mut p = CliTester::new_from_dir(
                 &test_repo.dir,
-                ["login", "--offline", "--nsec", TEST_KEY_1_NSEC],
+                ["account", "login", "--offline", "--nsec", TEST_KEY_1_NSEC],
             );
 
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
@@ -713,7 +714,7 @@ mod with_offline_flag {
             let test_repo = GitTestRepo::default();
             let mut p = CliTester::new_from_dir(
                 &test_repo.dir,
-                ["login", "--offline", "--nsec", TEST_INVALID_NSEC],
+                ["account", "login", "--offline", "--nsec", TEST_INVALID_NSEC],
             );
 
             p.expect_end_with(
