@@ -123,11 +123,14 @@ fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
         println!("nostr plugin for git");
         println!("Usage:");
         println!(
-            " - add a nostr repository as a remote by using the url format nostr://pub123/identifier"
+            " - clone a nostr repository, or add as a remote, by using the url format nostr://pub123/identifier"
         );
-        println!(" - remote branches begining with `pr/` are PRs from contributors");
-        println!(" - to open a PR, push a branch with the prefix `pr/`");
-        println!(" - branches with this prefix are issued by the maintainer(s)");
+        println!(
+            " - remote branches begining with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs"
+        );
+        println!(
+            " - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options"
+        );
         return Ok(None);
     };
 

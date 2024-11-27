@@ -1,19 +1,28 @@
 # ngit
 
-a command-line tool to send and review patches via nostr
+a command-line tool and git plugin to work with nostr enabled git repositories
 
-- works seemlessly with [gitworkshop.dev](https://gitworkshop.dev)
-- fully implements nostr git protocol (nip34)
-- enables proposals to be managed as branches, similar to GitHub PRs, or patches similar to patches-over-email
+- clone a nostr repository, or add as a remote, by using the url format nostr://pub123/identifier
+- remote branches begining with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs
+- to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options
 
-see [gitworkshop.dev/ngit](https://gitworkshop.dev/ngit) and [gitworkshop.dev/about](https://gitworkshop.dev/about) for more details
+browse [gitworkshop.dev/repos](https://gitworkshop.dev/repos) to find nostr repositories.
 
-## git-remote-nostr
+## install
 
-a git remote helper (git plugin) included with ngit that enables nostr integration with native git commands when used with a nostr remote eg nostr://npub123/identifer
+install options:
 
-- repository state stored in a nostr event with git server(s) used for data sync
-- treats open proposals branches prefixed `pr/*`
+1. **build from source**: clone this repository, [install rust and cargo](https://www.rust-lang.org/tools/install), checkout the latest release tag, run `cargo build --release` and move `./target/release/ngit` and `./target/release/git-remote-nostr` to your PATH.
+2. **install with cargo**: [install rust and cargo](https://www.rust-lang.org/tools/install), run `cargo install ngit`, maken sure `~/.cargo/bin` is in your PATH
+3. download the latest release binaries from [gitworkshop.dev/ngit](https://gitworkshop.dev/ngit) and add to PATH
+
+run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in your PATH.
+
+## contributions welcome!
+
+[gitworkshop.dev/repos/ngit](gitworkshop.dev/r/naddr1qqzxuemfwsq3gamnwvaz7tmjv4kxz7fwv3sk6atn9e5k7q3q5qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exsxpqqqpmejawq4qj) to report issues and see PRs
+
+use ngit to submit PRs with clone url: `nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.damus.io/ngit`
 
 ## primer
 
@@ -47,20 +56,3 @@ eg self-hosted, github, codeberg, etc.
                          │  User   │
                          └─────────┘
 ```
-
-### ngit commands
-
-run from the directory of the git repository:
-
-- `ngit init` signal you are this repo's maintainer accepting PRs and issues via nostr
-- `ngit send` submit PR with advanced options
-- `ngit list` list Prs; checkout, apply or donwload selected
-- `ngit account` login, logout, export keys
-
-## contributions welcome!
-
-use ngit to submit PRs!
-
-[gitworkshop.dev/r/naddr1qqzxuemfwsq3gamnwvaz7tmjv4kxz7fwv3sk6atn9e5k7q3q5qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exsxpqqqpmejawq4qj](https://gitworkshop.dev/repo/ngit) to report issues and see proposals
-
-install the tool with `cargo install ngit`, use a prebuilt binary or build from source off the master branch.

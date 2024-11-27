@@ -2,7 +2,7 @@
 name = "ngit"
 version = "1.5.3"
 edition = "2021"
-description = "cli for code collaboration over nostr with nip34 support"
+description = "a command-line tool and git plugin to work with nostr enabled git repositories"
 authors = ["DanConwayDev <DanConwayDev@protonmail.com>"]
 readme = "README.md"
 homepage = "https://gitworkshop.dev/r/naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqvzqqqrhnym0k2qj"
