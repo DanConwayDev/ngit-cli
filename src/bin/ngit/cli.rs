@@ -11,19 +11,19 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
     /// remote signer address
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub bunker_uri: Option<String>,
     /// remote signer app secret key
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub bunker_app_key: Option<String>,
     /// nsec or hex private key
     #[arg(short, long, global = true)]
     pub nsec: Option<String>,
     /// password to decrypt nsec
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, hide = true)]
     pub password: Option<String>,
     /// disable spinner animations
-    #[arg(long, action)]
+    #[arg(long, action, hide = true)]
     pub disable_cli_spinners: bool,
 }
 
