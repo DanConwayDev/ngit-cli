@@ -38,6 +38,13 @@ impl UserRelays {
             .map(|r| r.url.clone())
             .collect()
     }
+    pub fn read(&self) -> Vec<String> {
+        self.relays
+            .iter()
+            .filter(|r| r.read)
+            .map(|r| r.url.clone())
+            .collect()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

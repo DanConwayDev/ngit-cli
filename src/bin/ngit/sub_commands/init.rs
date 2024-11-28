@@ -302,21 +302,25 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.clone_url.clone()
     };
 
-    // TODO: check if relays are free to post to so contributors can submit patches
-    // TODO: recommend some reliable free ones
+    // TODO: when NIP-66 is functional, use this to reccommend relays and filter out
+    //       relays that won't accept contributors events. NIP-11 'limitations'
+    //       isn't widely used enough to be usedful.
+
     let relays: Vec<RelayUrl> = {
         let mut default = if let Ok(config) = &repo_config_result {
-            config.relays.clone().join(" ")
+            config.relays.clone()
         } else if let Some(repo_ref) = &repo_ref {
             repo_ref
                 .relays
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<String>>()
-                .join(" ")
+        } else if user_ref.relays.read().is_empty() {
+            client.get_fallback_relays().clone()
         } else {
-            user_ref.relays.write().join(" ")
-        };
+            user_ref.relays.read().clone()
+        }
+        .join(" ");
         'outer: loop {
             let relays: Vec<String> = if args.relays.is_empty() {
                 Interactor::default()
