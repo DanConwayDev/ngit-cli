@@ -660,9 +660,6 @@ pub async fn sign_event(
     event_builder: EventBuilder,
     signer: &Arc<dyn NostrSigner>,
 ) -> Result<nostr::Event> {
-    // TODO: Yuki suggested he would add a backend option to NostrSigner so we can
-    // identify nip46 signers again and replace the below if statement with:
-    // if signer.backend() == nip46 {
     if signer.backend() == SignerBackend::NostrConnect {
         let term = console::Term::stderr();
         term.write_line("signing event with remote signer...")?;
