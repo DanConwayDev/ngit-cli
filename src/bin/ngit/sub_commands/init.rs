@@ -287,6 +287,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     } else if let Ok(url) = git_repo.get_origin_url() {
                         if let Ok(fetch_url) = convert_clone_url_to_https(&url) {
                             fetch_url
+                        } else if url.starts_with("nostr://") {
+                            // nostr added as origin remote before repo announcement sent
+                            String::new()
                         } else {
                             // local repo or custom protocol
                             url
