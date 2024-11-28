@@ -444,7 +444,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         .iter()
         .map(std::string::ToString::to_string)
         .collect::<Vec<String>>();
-    // if yaml file doesnt exist or needs updating
+
+    // no longer create a new maintainers.yaml file - its too confusing for users
+    // as it falls out of sync with data in nostr event . update if it already
+    // exists
     if match &repo_config_result {
         Ok(config) => {
             !<std::option::Option<std::string::String> as Clone>::clone(&config.identifier)
@@ -453,7 +456,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 || !extract_pks(config.maintainers.clone())?.eq(&maintainers)
                 || !config.relays.eq(&relays)
         }
-        Err(_) => true,
+        Err(_) => false,
     } {
         save_repo_config_to_yaml(
             &git_repo,
