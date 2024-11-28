@@ -302,25 +302,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.clone_url.clone()
     };
 
-    let web: Vec<String> = if args.web.is_empty() {
-        Interactor::default()
-            .input(
-                PromptInputParms::default()
-                    .with_prompt("repo website")
-                    .optional()
-                    .with_default(if let Some(repo_ref) = &repo_ref {
-                        repo_ref.web.clone().join(" ")
-                    } else {
-                        format!("https://gitworkshop.dev/repo/{}", &identifier)
-                    }),
-            )?
-            .split(' ')
-            .map(std::string::ToString::to_string)
-            .collect()
-    } else {
-        args.web.clone()
-    };
-
     // TODO: check if relays are free to post to so contributors can submit patches
     // TODO: recommend some reliable free ones
     let relays: Vec<RelayUrl> = {
@@ -362,6 +343,25 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
             break relay_urls;
         }
+    };
+
+    let web: Vec<String> = if args.web.is_empty() {
+        Interactor::default()
+            .input(
+                PromptInputParms::default()
+                    .with_prompt("repo website")
+                    .optional()
+                    .with_default(if let Some(repo_ref) = &repo_ref {
+                        repo_ref.web.clone().join(" ")
+                    } else {
+                        format!("https://gitworkshop.dev/repo/{}", &identifier)
+                    }),
+            )?
+            .split(' ')
+            .map(std::string::ToString::to_string)
+            .collect()
+    } else {
+        args.web.clone()
     };
 
     let earliest_unique_commit = match &args.earliest_unique_commit {
