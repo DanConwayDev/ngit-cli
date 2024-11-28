@@ -162,6 +162,7 @@ pub async fn launch() -> Result<()> {
         let selected_index = Interactor::default().choice(
             PromptChoiceParms::default()
                 .with_prompt(prompt)
+                .with_default(0)
                 .with_choices(choices.clone()),
         )?;
 
