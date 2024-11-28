@@ -20,7 +20,7 @@ use crate::{
     git::{nostr_url::NostrUrlDecoded, Repo, RepoActions},
 };
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct RepoRef {
     pub name: String,
     pub description: String,

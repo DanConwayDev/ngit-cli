@@ -27,11 +27,13 @@ use ngit::{
     },
     git_events::{self, get_event_root},
     login::{self, get_curent_user},
-    repo_ref, repo_state,
+    repo_ref::{self, get_repo_config_from_yaml},
+    repo_state,
 };
 use nostr::nips::nip10::Marker;
 use nostr_sdk::{
-    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, Tag,
+    hashes::sha1::Hash as Sha1Hash, Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey,
+    RelayUrl, Tag,
 };
 use repo_ref::RepoRef;
 use repo_state::RepoState;
@@ -169,6 +171,19 @@ pub async fn run_push(
         .await?
         {
             events.push(event);
+        }
+
+        if let Some(repo_ref_event) = get_maintainers_yaml_update(
+            &term,
+            repo_ref,
+            git_repo,
+            &decoded_nostr_url.original_string,
+            &signer,
+            &git_server_refspecs,
+        )
+        .await?
+        {
+            events.push(repo_ref_event);
         }
     }
 
@@ -861,6 +876,72 @@ fn generate_updated_state(
         }
     }
     Ok(new_state)
+}
+
+async fn get_maintainers_yaml_update(
+    term: &console::Term,
+    repo_ref: &RepoRef,
+    git_repo: &Repo,
+    remote_nostr_url: &str,
+    signer: &Arc<dyn NostrSigner>,
+    refspecs_to_git_server: &Vec<String>,
+) -> Result<Option<Event>> {
+    for refspec in refspecs_to_git_server {
+        let (from, to) = refspec_to_from_to(refspec)?;
+        if to.eq("refs/heads/main") || to.eq("refs/heads/master") {
+            let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
+            let tip_of_remote_branch = git_repo.get_commit_or_tip_of_reference(
+                &refspec_remote_ref_name(&git_repo.git_repo, refspec, remote_nostr_url)?,
+            )?;
+            let diff = git_repo.git_repo.diff_tree_to_tree(
+                Some(
+                    &git_repo
+                        .git_repo
+                        .find_commit(sha1_to_oid(&tip_of_pushed_branch)?)?
+                        .tree()?,
+                ),
+                Some(
+                    &git_repo
+                        .git_repo
+                        .find_commit(sha1_to_oid(&tip_of_remote_branch)?)?
+                        .tree()?,
+                ),
+                None,
+            )?;
+            for delta in diff.deltas() {
+                // File was added or updated
+                if let Some(path) = delta.new_file().path() {
+                    if path.to_string_lossy() == "maintainers.yaml" {
+                        let config = get_repo_config_from_yaml(git_repo)?;
+                        if config.identifier == Some(repo_ref.identifier.clone())
+                            || config.identifier.is_none()
+                        {
+                            let config_maintainers = config
+                                .maintainers
+                                .iter()
+                                .filter_map(|s| PublicKey::parse(s).ok())
+                                .collect::<Vec<PublicKey>>();
+                            let config_relays = config
+                                .relays
+                                .iter()
+                                .filter_map(|s| RelayUrl::parse(s).ok())
+                                .collect::<Vec<RelayUrl>>();
+                            if repo_ref.maintainers != config_maintainers
+                                || repo_ref.relays != config_relays
+                            {
+                                let mut repo_ref = repo_ref.clone();
+                                repo_ref.maintainers = config_maintainers;
+                                repo_ref.relays = config_relays;
+                                term.write_line("maintainers.yaml update detected so publishing repo announcement update")?;
+                                return Ok(Some(repo_ref.to_event(signer).await?));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 async fn get_merged_status_events(
