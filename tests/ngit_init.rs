@@ -494,7 +494,7 @@ mod when_repo_not_previously_claimed {
                         ],
                         1,
                     )?;
-                    p.expect_end()?;
+                    p.expect_end_with_whitespace()?;
                     for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
                     }
