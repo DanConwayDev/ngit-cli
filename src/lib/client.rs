@@ -832,7 +832,13 @@ pub async fn get_repo_ref_from_cache(
         ]
         .concat();
         for e in events {
-            if let Ok(repo_ref) = RepoRef::try_from(e.clone()) {
+            if let Ok(repo_ref) = RepoRef::try_from((
+                e.clone(),
+                repo_coordinates
+                    .iter()
+                    .next()
+                    .map(|coordinate| coordinate.public_key),
+            )) {
                 for m in repo_ref.maintainers {
                     if maintainers.insert(m) {
                         new_coordinate = true;
@@ -846,12 +852,16 @@ pub async fn get_repo_ref_from_cache(
         }
     }
     repo_events.sort_by_key(|e| e.created_at);
-    let repo_ref = RepoRef::try_from(
+    let repo_ref = RepoRef::try_from((
         repo_events
             .first()
             .context("no repo events at specified coordinates")?
             .clone(),
-    )?;
+        repo_coordinates
+            .iter()
+            .next()
+            .map(|coordinate| coordinate.public_key),
+    ))?;
 
     let mut events: HashMap<Coordinate, nostr::Event> = HashMap::new();
     for m in &maintainers {
@@ -1179,7 +1189,7 @@ async fn process_fetched_events(
                     ));
                 }
                 // if contains new maintainer
-                if let Ok(repo_ref) = &RepoRef::try_from(event.clone()) {
+                if let Ok(repo_ref) = &RepoRef::try_from((event.clone(), None)) {
                     for m in &repo_ref.maintainers {
                         if !request
                             .repo_coordinates_without_relays // prexisting maintainers

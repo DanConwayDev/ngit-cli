@@ -3,7 +3,7 @@ use std::{collections::HashSet, str::FromStr};
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{PublicKey, RelayUrl, Url};
+use nostr_sdk::{PublicKey, RelayUrl, ToBech32, Url};
 
 #[derive(Debug, PartialEq, Default, Clone)]
 pub enum ServerProtocol {
@@ -59,6 +59,33 @@ pub struct NostrUrlDecoded {
     pub coordinates: HashSet<Coordinate>,
     pub protocol: Option<ServerProtocol>,
     pub user: Option<String>,
+}
+
+impl fmt::Display for NostrUrlDecoded {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "nostr://")?;
+        if let Some(user) = &self.user {
+            write!(f, "{}@", user)?;
+        }
+        if let Some(protocol) = &self.protocol {
+            write!(f, "{}/", protocol)?;
+        }
+        let c = self.coordinates.iter().next().unwrap();
+        write!(f, "{}/", c.public_key.to_bech32().unwrap())?;
+        if let Some(relay) = c.relays.first() {
+            write!(
+                f,
+                "{}/",
+                urlencoding::encode(
+                    relay
+                        .as_str_without_trailing_slash()
+                        .replace("wss://", "")
+                        .as_str()
+                )
+            )?;
+        }
+        write!(f, "{}", c.identifier)
+    }
 }
 
 static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format. try nostr://naddr123 or nostr://npub123/my-repo or nostr://ssh/npub123/relay.damus.io/my-repo";
@@ -837,8 +864,117 @@ mod tests {
             assert!(result.is_err());
         }
     }
+    mod nostr_git_url_format {
+        use std::collections::HashSet;
 
-    mod nostr_git_url_paramemters_from_str {
+        use nostr::nips::nip01::Coordinate;
+        use nostr_sdk::PublicKey;
+
+        use super::*;
+        use crate::git::nostr_url::NostrUrlDecoded;
+
+        #[test]
+        fn standard() -> Result<()> {
+            assert_eq!(
+                format!(
+                    "{}",
+                    NostrUrlDecoded {
+                        original_string: String::new(),
+                        coordinates: HashSet::from_iter(vec![Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
+                        }]),
+                        protocol: None,
+                        user: None,
+                    }
+                ),
+                "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn no_relay() -> Result<()> {
+            assert_eq!(
+                format!(
+                    "{}",
+                    NostrUrlDecoded {
+                        original_string: String::new(),
+                        coordinates: HashSet::from_iter(vec![Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            relays: vec![],
+                        }]),
+                        protocol: None,
+                        user: None,
+                    }
+                ),
+                "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn with_protocol() -> Result<()> {
+            assert_eq!(
+                format!(
+                    "{}",
+                    NostrUrlDecoded {
+                        original_string: String::new(),
+                        coordinates: HashSet::from_iter(vec![Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
+                        }]),
+                        protocol: Some(ServerProtocol::Ssh),
+                        user: None,
+                    }
+                ),
+                "nostr://ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn with_protocol_and_user() -> Result<()> {
+            assert_eq!(
+                format!(
+                    "{}",
+                    NostrUrlDecoded {
+                        original_string: String::new(),
+                        coordinates: HashSet::from_iter(vec![Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
+                        }]),
+                        protocol: Some(ServerProtocol::Ssh),
+                        user: Some("bla".to_string()),
+                    }
+                ),
+                "nostr://bla@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
+            );
+            Ok(())
+        }
+    }
+
+    mod nostr_url_decoded_paramemters_from_str {
         use std::str::FromStr;
 
         use super::*;

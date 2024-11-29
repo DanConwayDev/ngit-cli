@@ -1716,7 +1716,7 @@ mod tests {
                 &oid_to_sha1(&original_oid),
                 Some(nostr::EventId::all_zeros()),
                 &TEST_KEY_1_SIGNER,
-                &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
+                &RepoRef::try_from((generate_repo_ref_event(), None)).unwrap(),
                 None,
                 None,
                 None,
@@ -1869,7 +1869,7 @@ mod tests {
                 &git_repo,
                 &[oid_to_sha1(&oid1), oid_to_sha1(&oid2), oid_to_sha1(&oid3)],
                 &TEST_KEY_1_SIGNER,
-                &RepoRef::try_from(generate_repo_ref_event()).unwrap(),
+                &RepoRef::try_from((generate_repo_ref_event(), None)).unwrap(),
                 &None,
                 &[],
             )

@@ -11,6 +11,15 @@ fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
     Ok(())
 }
 
+fn expect_prompt_to_set_origin(p: &mut CliTester) -> Result<()> {
+    p.expect_confirm_eventually(
+        "set remote \"origin\" to the nostr url of your repository?",
+        Some(true),
+    )?
+    .succeeds_with(Some(false))?;
+    Ok(())
+}
+
 fn get_cli_args() -> Vec<&'static str> {
     vec![
         "--nsec",
@@ -96,6 +105,7 @@ mod when_repo_not_previously_claimed {
             // // check relay had the right number of events
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_init(&git_repo);
+                expect_prompt_to_set_origin(&mut p)?;
                 p.expect_end_eventually()?;
                 for p in [51, 52, 53, 55, 56, 57] {
                     relay::shutdown_relay(8000 + p)?;
@@ -222,6 +232,7 @@ mod when_repo_not_previously_claimed {
                 // // check relay had the right number of events
                 let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                     let mut p = cli_tester_init(&git_repo);
+                    expect_prompt_to_set_origin(&mut p)?;
                     p.expect_end_eventually()?;
                     for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
@@ -494,7 +505,8 @@ mod when_repo_not_previously_claimed {
                         ],
                         1,
                     )?;
-                    p.expect_end_with_whitespace()?;
+                    expect_prompt_to_set_origin(&mut p)?;
+                    p.expect_end_eventually()?;
                     for p in [51, 52, 53, 55, 56, 57] {
                         relay::shutdown_relay(8000 + p)?;
                     }

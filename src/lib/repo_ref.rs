@@ -20,7 +20,7 @@ use crate::{
     git::{nostr_url::NostrUrlDecoded, Repo, RepoActions},
 };
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct RepoRef {
     pub name: String,
     pub description: String,
@@ -30,18 +30,30 @@ pub struct RepoRef {
     pub web: Vec<String>,
     pub relays: Vec<RelayUrl>,
     pub maintainers: Vec<PublicKey>,
+    pub trusted_maintainer: PublicKey,
     pub events: HashMap<Coordinate, nostr::Event>,
-    // code languages and hashtags
 }
 
-impl TryFrom<nostr::Event> for RepoRef {
+impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
     type Error = anyhow::Error;
 
-    fn try_from(event: nostr::Event) -> Result<Self> {
+    fn try_from((event, trusted_maintainer): (nostr::Event, Option<PublicKey>)) -> Result<Self> {
         if !event.kind.eq(&Kind::GitRepoAnnouncement) {
             bail!("incorrect kind");
         }
-        let mut r = Self::default();
+
+        let mut r = Self {
+            name: String::new(),
+            description: String::new(),
+            identifier: String::new(),
+            root_commit: String::new(),
+            git_server: Vec::new(),
+            web: Vec::new(),
+            relays: Vec::new(),
+            maintainers: Vec::new(),
+            trusted_maintainer: trusted_maintainer.unwrap_or(event.pubkey),
+            events: HashMap::new(),
+        };
 
         for tag in event.tags.iter() {
             match tag.as_slice() {
@@ -183,11 +195,7 @@ impl RepoRef {
     pub fn coordinate_with_hint(&self) -> Coordinate {
         Coordinate {
             kind: Kind::GitRepoAnnouncement,
-            public_key: *self
-                .maintainers
-                .first()
-                .context("no maintainers in repo ref")
-                .unwrap(),
+            public_key: self.trusted_maintainer,
             identifier: self.identifier.clone(),
             relays: if let Some(relay) = self.relays.first() {
                 vec![relay.clone()]
@@ -203,6 +211,18 @@ impl RepoRef {
             .iter()
             .map(|c| (c.clone(), self.events.get(c).map(|e| e.created_at)))
             .collect::<Vec<(Coordinate, Option<Timestamp>)>>()
+    }
+
+    pub fn to_nostr_git_url(&self) -> String {
+        format!(
+            "{}",
+            NostrUrlDecoded {
+                original_string: String::new(),
+                coordinates: HashSet::from_iter(vec![self.coordinate_with_hint()]),
+                protocol: None,
+                user: None,
+            }
+        )
     }
 }
 
@@ -469,6 +489,7 @@ mod tests {
                 RelayUrl::parse("ws://relay1.io").unwrap(),
                 RelayUrl::parse("ws://relay2.io").unwrap(),
             ],
+            trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             events: HashMap::new(),
         }
@@ -482,20 +503,27 @@ mod tests {
         #[tokio::test]
         async fn identifier() {
             assert_eq!(
-                RepoRef::try_from(create().await).unwrap().identifier,
+                RepoRef::try_from((create().await, None))
+                    .unwrap()
+                    .identifier,
                 "123412341",
             )
         }
 
         #[tokio::test]
         async fn name() {
-            assert_eq!(RepoRef::try_from(create().await).unwrap().name, "test name",)
+            assert_eq!(
+                RepoRef::try_from((create().await, None)).unwrap().name,
+                "test name",
+            )
         }
 
         #[tokio::test]
         async fn description() {
             assert_eq!(
-                RepoRef::try_from(create().await).unwrap().description,
+                RepoRef::try_from((create().await, None))
+                    .unwrap()
+                    .description,
                 "test description",
             )
         }
@@ -503,7 +531,9 @@ mod tests {
         #[tokio::test]
         async fn root_commit_is_r_tag() {
             assert_eq!(
-                RepoRef::try_from(create().await).unwrap().root_commit,
+                RepoRef::try_from((create().await, None))
+                    .unwrap()
+                    .root_commit,
                 "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2",
             )
         }
@@ -526,7 +556,7 @@ mod tests {
             async fn less_than_40_characters() {
                 let s = "5e664e5a7845cd1373";
                 assert_eq!(
-                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s).await)
+                    RepoRef::try_from((create_with_incorrect_first_commit_ref(s).await, None))
                         .unwrap()
                         .root_commit,
                     "",
@@ -537,7 +567,7 @@ mod tests {
             async fn more_than_40_characters() {
                 let s = "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2111111111";
                 assert_eq!(
-                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s).await)
+                    RepoRef::try_from((create_with_incorrect_first_commit_ref(s).await, None))
                         .unwrap()
                         .root_commit,
                     "",
@@ -548,7 +578,7 @@ mod tests {
             async fn not_hex_characters() {
                 let s = "xxx64e5a7845cd1373c79f580ca4fe29ab5b34d2";
                 assert_eq!(
-                    RepoRef::try_from(create_with_incorrect_first_commit_ref(s).await)
+                    RepoRef::try_from((create_with_incorrect_first_commit_ref(s).await, None))
                         .unwrap()
                         .root_commit,
                     "",
@@ -559,7 +589,9 @@ mod tests {
         #[tokio::test]
         async fn git_server() {
             assert_eq!(
-                RepoRef::try_from(create().await).unwrap().git_server,
+                RepoRef::try_from((create().await, None))
+                    .unwrap()
+                    .git_server,
                 vec!["https://localhost:1000"],
             )
         }
@@ -567,7 +599,7 @@ mod tests {
         #[tokio::test]
         async fn web() {
             assert_eq!(
-                RepoRef::try_from(create().await).unwrap().web,
+                RepoRef::try_from((create().await, None)).unwrap().web,
                 vec![
                     "https://exampleproject.xyz".to_string(),
                     "https://gitworkshop.dev/123".to_string()
@@ -578,7 +610,7 @@ mod tests {
         #[tokio::test]
         async fn relays() {
             assert_eq!(
-                RepoRef::try_from(create().await).unwrap().relays,
+                RepoRef::try_from((create().await, None)).unwrap().relays,
                 vec![
                     RelayUrl::parse("ws://relay1.io").unwrap(),
                     RelayUrl::parse("ws://relay2.io").unwrap(),
@@ -589,7 +621,9 @@ mod tests {
         #[tokio::test]
         async fn maintainers() {
             assert_eq!(
-                RepoRef::try_from(create().await).unwrap().maintainers,
+                RepoRef::try_from((create().await, None))
+                    .unwrap()
+                    .maintainers,
                 vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             )
         }

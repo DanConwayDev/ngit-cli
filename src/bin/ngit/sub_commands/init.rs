@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Result};
-use ngit::cli_interactor::PromptConfirmParms;
+use ngit::{cli_interactor::PromptConfirmParms, git::nostr_url::NostrUrlDecoded};
 use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
 use nostr_sdk::{Kind, RelayUrl};
 
@@ -413,6 +413,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         git_server,
         web,
         relays: relays.clone(),
+        trusted_maintainer: user_ref.public_key,
         maintainers: maintainers.clone(),
         events: HashMap::new(),
     };
@@ -431,6 +432,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     )
     .await?;
 
+    // TODO - does this git config item do more harm than good?
     git_repo.save_git_config_item(
         "nostr.repo",
         &Coordinate {
@@ -447,6 +449,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         .iter()
         .map(std::string::ToString::to_string)
         .collect::<Vec<String>>();
+
+    prompt_to_set_nostr_url_as_origin(&repo_ref, &git_repo)?;
+
+    // TODO: if no state event exists and there is currently a remote called
+    // "origin", automtically push rather than waiting for the next commit
 
     // no longer create a new maintainers.yaml file - its too confusing for users
     // as it falls out of sync with data in nostr event . update if it already
@@ -478,6 +485,85 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         println!(
             "this optional file helps in identifying who the maintainers are over time through the commit history"
         );
+    }
+    Ok(())
+}
+
+fn prompt_to_set_nostr_url_as_origin(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
+    println!(
+        "starting from your next commit, when you `git push` to a remote that uses your nostr url, it will store your repository state on nostr and update the state of the git server(s) you just listed."
+    );
+    println!(
+        "in addition, any remote branches beginning with `pr/` are open PRs from contributors. they can submit these by simply pushing a branch with this `pr/` prefix."
+    );
+
+    if let Ok(origin_remote) = git_repo.git_repo.find_remote("origin") {
+        if let Some(origin_url) = origin_remote.url() {
+            if let Ok(nostr_url) = NostrUrlDecoded::from_str(origin_url) {
+                if let Some(c) = &nostr_url.coordinates.iter().next() {
+                    if c.identifier == repo_ref.identifier {
+                        if nostr_url
+                            .coordinates
+                            .iter()
+                            .next()
+                            .context(
+                                "a decoded nostr url will always have at least one coordinate",
+                            )?
+                            .public_key
+                            == repo_ref.trusted_maintainer
+                        {
+                            return Ok(());
+                        }
+                        // origin is set to a different trusted maintainer
+                        println!(
+                            "warning: currently git remote 'origin' is set to a different trusted maintainer with the same identifier"
+                        );
+                        ask_to_set_origin_remote(repo_ref, git_repo)?;
+                    } else {
+                        // origin is linked to a different identifier
+                        println!(
+                            "warning: currently git remote 'origin' is set to a different repository identifier"
+                        );
+                        ask_to_set_origin_remote(repo_ref, git_repo)?;
+                    }
+                }
+            } else {
+                // remote is non-nostr url
+                ask_to_set_origin_remote(repo_ref, git_repo)?;
+            }
+        } else {
+            // no origin remote
+            ask_to_create_new_origin_remote(repo_ref, git_repo)?;
+        }
+    }
+    println!("contributors can clone your repository by installing ngit and using this clone url:");
+    println!("{}", repo_ref.to_nostr_git_url());
+
+    Ok(())
+}
+
+fn ask_to_set_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
+    if Interactor::default().confirm(
+        PromptConfirmParms::default()
+            .with_default(true)
+            .with_prompt("set remote \"origin\" to the nostr url of your repository?"),
+    )? {
+        git_repo
+            .git_repo
+            .remote_set_url("origin", &repo_ref.to_nostr_git_url())?;
+    }
+    Ok(())
+}
+
+fn ask_to_create_new_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
+    if Interactor::default().confirm(
+        PromptConfirmParms::default()
+            .with_default(true)
+            .with_prompt("set remote \"origin\" to the nostr url of your repository?"),
+    )? {
+        git_repo
+            .git_repo
+            .remote("origin", &repo_ref.to_nostr_git_url())?;
     }
     Ok(())
 }
