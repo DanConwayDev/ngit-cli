@@ -43,67 +43,50 @@ impl TryFrom<nostr::Event> for RepoRef {
         }
         let mut r = Self::default();
 
-        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("d")) {
-            r.identifier = t.as_slice()[1].clone();
-        }
-
-        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("name")) {
-            r.name = t.as_slice()[1].clone();
-        }
-
-        if let Some(t) = event
-            .tags
-            .iter()
-            .find(|t| t.as_slice()[0].eq("description"))
-        {
-            r.description = t.as_slice()[1].clone();
-        }
-
-        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("clone")) {
-            r.git_server = t.clone().to_vec();
-            r.git_server.remove(0);
-        }
-
-        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("web")) {
-            r.web = t.clone().to_vec();
-            r.web.remove(0);
-        }
-
-        if let Some(t) = event.tags.iter().find(|t| {
-            t.as_slice()[0].eq("r")
-                && t.as_slice()[1].len().eq(&40)
-                && git2::Oid::from_str(t.as_slice()[1].as_str()).is_ok()
-        }) {
-            r.root_commit = t.as_slice()[1].clone();
-        }
-
-        if let Some(t) = event.tags.iter().find(|t| t.as_slice()[0].eq("relays")) {
-            for relay in t.clone().to_vec() {
-                if let Ok(relay) = RelayUrl::parse(relay) {
-                    r.relays.push(relay);
+        for tag in event.tags.iter() {
+            match tag.as_slice() {
+                [t, id] if t == "d" => r.identifier = id.clone(),
+                [t, name] if t == "name" => r.name = name.clone(),
+                [t, description] if t == "description" => r.description = description.clone(),
+                [t, clone @ ..] if t == "clone" => {
+                    r.git_server = clone.to_vec();
                 }
+                [t, web @ ..] if t == "web" => {
+                    r.web = web.to_vec();
+                }
+                [t, commit_id]
+                    if t == "r"
+                        && commit_id.len() == 40
+                        && git2::Oid::from_str(commit_id).is_ok() =>
+                {
+                    r.root_commit = commit_id.clone();
+                }
+                [t, relays @ ..] if t == "relays" => {
+                    for relay in relays {
+                        if let Ok(relay_url) = RelayUrl::parse(relay) {
+                            r.relays.push(relay_url);
+                        }
+                    }
+                }
+                [t, maintainers @ ..] if t == "maintainers" => {
+                    if !maintainers.contains(&event.pubkey.to_string()) {
+                        r.maintainers.push(event.pubkey);
+                    }
+                    for pk in maintainers {
+                        r.maintainers.push(
+                            nostr_sdk::prelude::PublicKey::from_str(pk)
+                                .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
+                                .context("invalid repository event")?,
+                        );
+                    }
+                }
+                _ => {}
             }
         }
 
-        if let Some(t) = event
-            .tags
-            .iter()
-            .find(|t| t.as_slice()[0].eq("maintainers"))
-        {
-            let mut maintainers = t.clone().to_vec();
-            maintainers.remove(0);
-            if !maintainers.contains(&event.pubkey.to_string()) {
-                r.maintainers.push(event.pubkey);
-            }
-            for pk in maintainers {
-                r.maintainers.push(
-                nostr_sdk::prelude::PublicKey::from_str(&pk)
-                    .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
-                    .context("invalid repository event")?,
-                );
-            }
-        } else {
-            r.maintainers = vec![event.pubkey];
+        // If no maintainers were added, add the event's public key
+        if r.maintainers.is_empty() {
+            r.maintainers.push(event.pubkey);
         }
         r.events = HashMap::new();
         r.events.insert(
