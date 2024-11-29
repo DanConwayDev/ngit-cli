@@ -173,7 +173,7 @@ pub async fn run_push(
             events.push(event);
         }
 
-        if let Some(repo_ref_event) = get_maintainers_yaml_update(
+        if let Ok(Some(repo_ref_event)) = get_maintainers_yaml_update(
             &term,
             repo_ref,
             git_repo,
@@ -181,7 +181,7 @@ pub async fn run_push(
             &signer,
             &git_server_refspecs,
         )
-        .await?
+        .await
         {
             events.push(repo_ref_event);
         }
