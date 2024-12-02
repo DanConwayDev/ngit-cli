@@ -178,7 +178,7 @@ pub async fn generate_patch_event(
                     if thread_event_id.is_none() {
                         vec![Tag::custom(
                             TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
-                            vec![branch_name.to_string()],
+                            vec![branch_name.chars().take(60).collect::<String>()],
                         )]
                     } else {
                         vec![]
@@ -380,7 +380,7 @@ pub async fn generate_cover_letter_and_patch_events(
                                 branch_name.to_string()
                             } else {
                                 branch_name
-                            }],
+                            }.chars().take(60).collect::<String>()],
                         ),
                     ]
                 }
@@ -419,11 +419,16 @@ pub async fn generate_cover_letter_and_patch_events(
                             && !branch_name.eq("origin/main")
                             && !branch_name.eq("origin/master")
                         {
-                            Some(if let Some(branch_name) = branch_name.strip_prefix("pr/") {
-                                branch_name.to_string()
-                            } else {
-                                branch_name
-                            })
+                            Some(
+                                if let Some(branch_name) = branch_name.strip_prefix("pr/") {
+                                    branch_name.to_string()
+                                } else {
+                                    branch_name
+                                }
+                                .chars()
+                                .take(60)
+                                .collect::<String>(),
+                            )
                         } else {
                             None
                         }
@@ -514,7 +519,7 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
         branch_name: if let Ok(name) = match tag_value(event, "branch-name") {
             Ok(name) => {
                 if !name.eq("main") && !name.eq("master") {
-                    Ok(name)
+                    Ok(name.chars().take(60).collect::<String>())
                 } else {
                     Err(())
                 }
@@ -535,7 +540,10 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
                 })
                 .collect();
             s
-        },
+        }
+        .chars()
+        .take(60)
+        .collect(),
         event_id: Some(event.id),
     })
 }
