@@ -855,7 +855,7 @@ pub async fn get_repo_ref_from_cache(
     let repo_ref = RepoRef::try_from((
         repo_events
             .first()
-            .context("no repo events at specified coordinates")?
+            .context("no repo announcement event found at specified coordinates")?
             .clone(),
         repo_coordinates
             .iter()
