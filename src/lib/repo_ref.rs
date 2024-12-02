@@ -57,9 +57,9 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
 
         for tag in event.tags.iter() {
             match tag.as_slice() {
-                [t, id] if t == "d" => r.identifier = id.clone(),
-                [t, name] if t == "name" => r.name = name.clone(),
-                [t, description] if t == "description" => r.description = description.clone(),
+                [t, id, ..] if t == "d" => r.identifier = id.clone(),
+                [t, name, ..] if t == "name" => r.name = name.clone(),
+                [t, description, ..] if t == "description" => r.description = description.clone(),
                 [t, clone @ ..] if t == "clone" => {
                     r.git_server = clone.to_vec();
                 }
@@ -68,6 +68,14 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                 }
                 [t, commit_id]
                     if t == "r"
+                        && commit_id.len() == 40
+                        && git2::Oid::from_str(commit_id).is_ok() =>
+                {
+                    r.root_commit = commit_id.clone();
+                }
+                [t, commit_id, marker]
+                    if t == "r"
+                        && marker == "euc"
                         && commit_id.len() == 40
                         && git2::Oid::from_str(commit_id).is_ok() =>
                 {
