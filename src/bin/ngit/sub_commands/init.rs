@@ -1,6 +1,7 @@
 use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Result};
+use console::Style;
 use ngit::{cli_interactor::PromptConfirmParms, git::nostr_url::NostrUrlDecoded};
 use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
 use nostr_sdk::{Kind, RelayUrl};
@@ -468,6 +469,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         }
         Err(_) => false,
     } {
+        let title_style = Style::new().bold().fg(console::Color::Yellow);
+        println!("{}", title_style.apply_to("maintainers.yaml"));
         save_repo_config_to_yaml(
             &git_repo,
             identifier.clone(),
