@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::HashSet, str::FromStr};
+use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use nostr::nips::nip01::Coordinate;
@@ -56,7 +56,7 @@ impl FromStr for ServerProtocol {
 #[derive(Debug, PartialEq)]
 pub struct NostrUrlDecoded {
     pub original_string: String,
-    pub coordinates: HashSet<Coordinate>,
+    pub coordinate: Coordinate,
     pub protocol: Option<ServerProtocol>,
     pub user: Option<String>,
 }
@@ -70,9 +70,8 @@ impl fmt::Display for NostrUrlDecoded {
         if let Some(protocol) = &self.protocol {
             write!(f, "{}/", protocol)?;
         }
-        let c = self.coordinates.iter().next().unwrap();
-        write!(f, "{}/", c.public_key.to_bech32().unwrap())?;
-        if let Some(relay) = c.relays.first() {
+        write!(f, "{}/", self.coordinate.public_key.to_bech32().unwrap())?;
+        if let Some(relay) = self.coordinate.relays.first() {
             write!(
                 f,
                 "{}/",
@@ -84,7 +83,7 @@ impl fmt::Display for NostrUrlDecoded {
                 )
             )?;
         }
-        write!(f, "{}", c.identifier)
+        write!(f, "{}", self.coordinate.identifier)
     }
 }
 
@@ -94,7 +93,6 @@ impl std::str::FromStr for NostrUrlDecoded {
     type Err = anyhow::Error;
 
     fn from_str(url: &str) -> Result<Self> {
-        let mut coordinates = HashSet::new();
         let mut protocol = None;
         let mut user = None;
         let mut relays = vec![];
@@ -157,9 +155,9 @@ impl std::str::FromStr for NostrUrlDecoded {
         // extract naddr npub/<optional-relays>/identifer
         let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
         // naddr used
-        if let Ok(coordinate) = Coordinate::parse(part) {
+        let coordinate = if let Ok(coordinate) = Coordinate::parse(part) {
             if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
-                coordinates.insert(coordinate);
+                coordinate
             } else {
                 bail!("naddr doesnt point to a git repository announcement");
             }
@@ -181,19 +179,19 @@ impl std::str::FromStr for NostrUrlDecoded {
                     RelayUrl::parse(&decoded).context("could not parse relays in nostr git url")?;
                 relays.push(url);
             }
-            coordinates.insert(Coordinate {
+            Coordinate {
                 identifier,
                 public_key,
                 kind: nostr_sdk::Kind::GitRepoAnnouncement,
                 relays,
-            });
+            }
         } else {
             bail!(INCORRECT_NOSTR_URL_FORMAT_ERROR);
-        }
+        };
 
         Ok(Self {
             original_string: url.to_string(),
-            coordinates,
+            coordinate,
             protocol,
             user,
         })
@@ -865,8 +863,6 @@ mod tests {
         }
     }
     mod nostr_git_url_format {
-        use std::collections::HashSet;
-
         use nostr::nips::nip01::Coordinate;
         use nostr_sdk::PublicKey;
 
@@ -880,7 +876,7 @@ mod tests {
                     "{}",
                     NostrUrlDecoded {
                         original_string: String::new(),
-                        coordinates: HashSet::from_iter(vec![Coordinate {
+                        coordinate: Coordinate {
                             identifier: "ngit".to_string(),
                             public_key: PublicKey::parse(
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
@@ -888,7 +884,7 @@ mod tests {
                             .unwrap(),
                             kind: nostr_sdk::Kind::GitRepoAnnouncement,
                             relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
-                        }]),
+                        },
                         protocol: None,
                         user: None,
                     }
@@ -905,7 +901,7 @@ mod tests {
                     "{}",
                     NostrUrlDecoded {
                         original_string: String::new(),
-                        coordinates: HashSet::from_iter(vec![Coordinate {
+                        coordinate: Coordinate {
                             identifier: "ngit".to_string(),
                             public_key: PublicKey::parse(
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
@@ -913,7 +909,7 @@ mod tests {
                             .unwrap(),
                             kind: nostr_sdk::Kind::GitRepoAnnouncement,
                             relays: vec![],
-                        }]),
+                        },
                         protocol: None,
                         user: None,
                     }
@@ -930,7 +926,7 @@ mod tests {
                     "{}",
                     NostrUrlDecoded {
                         original_string: String::new(),
-                        coordinates: HashSet::from_iter(vec![Coordinate {
+                        coordinate: Coordinate {
                             identifier: "ngit".to_string(),
                             public_key: PublicKey::parse(
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
@@ -938,7 +934,7 @@ mod tests {
                             .unwrap(),
                             kind: nostr_sdk::Kind::GitRepoAnnouncement,
                             relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
-                        }]),
+                        },
                         protocol: Some(ServerProtocol::Ssh),
                         user: None,
                     }
@@ -955,7 +951,7 @@ mod tests {
                     "{}",
                     NostrUrlDecoded {
                         original_string: String::new(),
-                        coordinates: HashSet::from_iter(vec![Coordinate {
+                        coordinate: Coordinate {
                             identifier: "ngit".to_string(),
                             public_key: PublicKey::parse(
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
@@ -963,7 +959,7 @@ mod tests {
                             .unwrap(),
                             kind: nostr_sdk::Kind::GitRepoAnnouncement,
                             relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
-                        }]),
+                        },
                         protocol: Some(ServerProtocol::Ssh),
                         user: Some("bla".to_string()),
                     }
@@ -1002,7 +998,7 @@ mod tests {
                 NostrUrlDecoded::from_str(&url)?,
                 NostrUrlDecoded {
                     original_string: url.clone(),
-                    coordinates: HashSet::from([Coordinate {
+                    coordinate: Coordinate {
                         identifier: "ngit".to_string(),
                         public_key: PublicKey::parse(
                             "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
@@ -1011,7 +1007,7 @@ mod tests {
                         kind: nostr_sdk::Kind::GitRepoAnnouncement,
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()], /* wont add the
                                                                                   * slash */
-                    }]),
+                    },
                     protocol: None,
                     user: None,
                 },
@@ -1031,7 +1027,7 @@ mod tests {
                     NostrUrlDecoded::from_str(&url)?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
-                        coordinates: HashSet::from([get_model_coordinate(false)]),
+                        coordinate: get_model_coordinate(false),
                         protocol: None,
                         user: None,
                     },
@@ -1049,7 +1045,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(true)]),
+                            coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
                         },
@@ -1067,7 +1063,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(true)]),
+                            coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
                         },
@@ -1086,7 +1082,7 @@ mod tests {
                     NostrUrlDecoded::from_str(&url)?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
-                        coordinates: HashSet::from([Coordinate {
+                        coordinate: Coordinate {
                             identifier: "ngit".to_string(),
                             public_key: PublicKey::parse(
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
@@ -1097,7 +1093,7 @@ mod tests {
                                 RelayUrl::parse("wss://nos.lol/").unwrap(),
                                 RelayUrl::parse("wss://relay.damus.io/").unwrap(),
                             ],
-                        }]),
+                        },
                         protocol: None,
                         user: None,
                     },
@@ -1112,7 +1108,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(false)]),
+                            coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: None,
                         },
@@ -1127,7 +1123,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(false)]),
+                            coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: Some("fred".to_string()),
                         },
@@ -1146,7 +1142,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(true)]),
+                            coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
                         },
@@ -1164,7 +1160,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(true)]),
+                            coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
                         },
@@ -1183,7 +1179,7 @@ mod tests {
                     NostrUrlDecoded::from_str(&url)?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
-                        coordinates: HashSet::from([Coordinate {
+                        coordinate: Coordinate {
                             identifier: "ngit".to_string(),
                             public_key: PublicKey::parse(
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
@@ -1194,7 +1190,7 @@ mod tests {
                                 RelayUrl::parse("wss://nos.lol/").unwrap(),
                                 RelayUrl::parse("wss://relay.damus.io/").unwrap(),
                             ],
-                        }]),
+                        },
                         protocol: None,
                         user: None,
                     },
@@ -1209,7 +1205,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(false)]),
+                            coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: None,
                         },
@@ -1224,7 +1220,7 @@ mod tests {
                         NostrUrlDecoded::from_str(&url)?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
-                            coordinates: HashSet::from([get_model_coordinate(false)]),
+                            coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: Some("fred".to_string()),
                         },

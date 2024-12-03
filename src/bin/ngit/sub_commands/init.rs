@@ -60,18 +60,17 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let mut client = Client::default();
 
-    let repo_coordinates = if let Ok(repo_coordinates) =
+    let repo_coordinate = if let Ok(repo_coordinate) =
         try_and_get_repo_coordinates(&git_repo, &client, false).await
     {
-        Some(repo_coordinates)
+        Some(repo_coordinate)
     } else {
         None
     };
 
-    let repo_ref = if let Some(repo_coordinates) = repo_coordinates.clone() {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        if let Ok(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await
-        {
+    let repo_ref = if let Some(repo_coordinate) = &repo_coordinate {
+        fetching_with_report(git_repo_path, &client, repo_coordinate).await?;
+        if let Ok(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await {
             Some(repo_ref)
         } else {
             None
@@ -98,12 +97,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .with_prompt("repo name")
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.name.clone()
-                } else if let Some(repo_coordinates) = repo_coordinates.clone() {
-                    if let Some(coordinate) = repo_coordinates.iter().next() {
-                        coordinate.identifier.clone()
-                    } else {
-                        String::new()
-                    }
+                } else if let Some(coordinate) = &repo_coordinate {
+                    coordinate.identifier.clone()
                 } else {
                     String::new()
                 }),
@@ -119,12 +114,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 )
                 .with_default(if let Some(repo_ref) = &repo_ref {
                     repo_ref.identifier.clone()
-                } else if let Some(repo_coordinates) = repo_coordinates.clone() {
-                    if let Some(coordinate) = repo_coordinates.iter().next() {
-                        coordinate.identifier.clone()
-                    } else {
-                        String::new()
-                    }
+                } else if let Some(repo_coordinate) = &repo_coordinate {
+                    repo_coordinate.identifier.clone()
                 } else {
                     let fallback = name
                         .clone()
@@ -503,32 +494,21 @@ fn prompt_to_set_nostr_url_as_origin(repo_ref: &RepoRef, git_repo: &Repo) -> Res
     if let Ok(origin_remote) = git_repo.git_repo.find_remote("origin") {
         if let Some(origin_url) = origin_remote.url() {
             if let Ok(nostr_url) = NostrUrlDecoded::from_str(origin_url) {
-                if let Some(c) = &nostr_url.coordinates.iter().next() {
-                    if c.identifier == repo_ref.identifier {
-                        if nostr_url
-                            .coordinates
-                            .iter()
-                            .next()
-                            .context(
-                                "a decoded nostr url will always have at least one coordinate",
-                            )?
-                            .public_key
-                            == repo_ref.trusted_maintainer
-                        {
-                            return Ok(());
-                        }
-                        // origin is set to a different trusted maintainer
-                        println!(
-                            "warning: currently git remote 'origin' is set to a different trusted maintainer with the same identifier"
-                        );
-                        ask_to_set_origin_remote(repo_ref, git_repo)?;
-                    } else {
-                        // origin is linked to a different identifier
-                        println!(
-                            "warning: currently git remote 'origin' is set to a different repository identifier"
-                        );
-                        ask_to_set_origin_remote(repo_ref, git_repo)?;
+                if nostr_url.coordinate.identifier == repo_ref.identifier {
+                    if nostr_url.coordinate.public_key == repo_ref.trusted_maintainer {
+                        return Ok(());
                     }
+                    // origin is set to a different trusted maintainer
+                    println!(
+                        "warning: currently git remote 'origin' is set to a different trusted maintainer with the same identifier"
+                    );
+                    ask_to_set_origin_remote(repo_ref, git_repo)?;
+                } else {
+                    // origin is linked to a different identifier
+                    println!(
+                        "warning: currently git remote 'origin' is set to a different repository identifier"
+                    );
+                    ask_to_set_origin_remote(repo_ref, git_repo)?;
                 }
             } else {
                 // remote is non-nostr url

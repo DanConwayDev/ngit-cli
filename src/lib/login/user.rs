@@ -75,11 +75,7 @@ pub async fn get_user_details(
             let term = console::Term::stderr();
             term.write_line("searching for profile...")?;
             let (_, progress_reporter) = client
-                .fetch_all(
-                    git_repo_path,
-                    &HashSet::new(),
-                    &HashSet::from_iter(vec![*public_key]),
-                )
+                .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
                 .await?;
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
                 progress_reporter.clear()?;

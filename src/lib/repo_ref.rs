@@ -188,6 +188,13 @@ impl RepoRef {
     /// coordinates without relay hints
     pub fn coordinates(&self) -> HashSet<Coordinate> {
         let mut res = HashSet::new();
+        res.insert(Coordinate {
+            kind: Kind::GitRepoAnnouncement,
+            public_key: self.trusted_maintainer,
+            identifier: self.identifier.clone(),
+            relays: vec![],
+        });
+
         for m in &self.maintainers {
             res.insert(Coordinate {
                 kind: Kind::GitRepoAnnouncement,
@@ -226,7 +233,7 @@ impl RepoRef {
             "{}",
             NostrUrlDecoded {
                 original_string: String::new(),
-                coordinates: HashSet::from_iter(vec![self.coordinate_with_hint()]),
+                coordinate: self.coordinate_with_hint(),
                 protocol: None,
                 user: None,
             }
@@ -238,7 +245,7 @@ pub async fn get_repo_coordinates(
     git_repo: &Repo,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-) -> Result<HashSet<Coordinate>> {
+) -> Result<Coordinate> {
     try_and_get_repo_coordinates(git_repo, client, true).await
 }
 
@@ -247,7 +254,7 @@ pub async fn try_and_get_repo_coordinates(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     prompt_user: bool,
-) -> Result<HashSet<Coordinate>> {
+) -> Result<Coordinate> {
     let mut repo_coordinates = get_repo_coordinates_from_git_config(git_repo)?;
 
     if repo_coordinates.is_empty() {
@@ -265,7 +272,11 @@ pub async fn try_and_get_repo_coordinates(
             bail!("couldn't find repo coordinates in git config nostr.repo or in maintainers.yaml");
         }
     }
-    Ok(repo_coordinates)
+    Ok(repo_coordinates
+        .iter()
+        .next()
+        .context("would have bailed if no coordinates found")?
+        .clone())
 }
 
 fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<HashSet<Coordinate>> {
@@ -285,9 +296,7 @@ fn get_repo_coordinates_from_nostr_remotes(git_repo: &Repo) -> Result<HashSet<Co
     for remote_name in git_repo.git_repo.remotes()?.iter().flatten() {
         if let Some(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
             if let Ok(nostr_url_decoded) = NostrUrlDecoded::from_str(remote_url) {
-                for c in nostr_url_decoded.coordinates {
-                    repo_coordinates.insert(c);
-                }
+                repo_coordinates.insert(nostr_url_decoded.coordinate);
             }
         }
     }

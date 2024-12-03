@@ -89,7 +89,7 @@ pub trait Connect {
     async fn fetch_all<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
-        repo_coordinates: &HashSet<Coordinate>,
+        repo_coordinates: Option<&'a Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)>;
     async fn fetch_all_from_relay<'a>(
@@ -329,7 +329,7 @@ impl Connect for Client {
     async fn fetch_all<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
-        repo_coordinates: &HashSet<Coordinate>,
+        trusted_maintainer_coordinate: Option<&'a Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
         let fallback_relays = &self
@@ -340,7 +340,7 @@ impl Connect for Client {
 
         let mut request = create_relays_request(
             git_repo_path,
-            repo_coordinates,
+            trusted_maintainer_coordinate,
             user_profiles,
             fallback_relays.clone(),
         )
@@ -468,8 +468,12 @@ impl Connect for Client {
             }
             processed_relays.extend(relays.clone());
 
-            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await {
-                request.repo_relays = repo_ref.relays.iter().cloned().collect();
+            if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
+                if let Ok(repo_ref) =
+                    get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await
+                {
+                    request.repo_relays = repo_ref.relays.iter().cloned().collect();
+                }
             }
 
             request.user_relays_for_profiles = {
@@ -809,18 +813,24 @@ pub async fn save_event_in_global_cache(
 
 pub async fn get_repo_ref_from_cache(
     git_repo_path: Option<&Path>,
-    repo_coordinates: &HashSet<Coordinate>,
+    repo_coordinate: &Coordinate,
 ) -> Result<RepoRef> {
     let mut maintainers = HashSet::new();
     let mut new_coordinate: bool;
 
-    for c in repo_coordinates {
-        maintainers.insert(c.public_key);
-    }
+    maintainers.insert(repo_coordinate.public_key);
     let mut repo_events = vec![];
     loop {
         new_coordinate = false;
-        let repo_events_filter = get_filter_repo_events(repo_coordinates);
+        let repo_events_filter =
+            get_filter_repo_events(&HashSet::from_iter(maintainers.iter().map(|m| {
+                Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: *m,
+                    identifier: repo_coordinate.identifier.to_string(),
+                    relays: vec![],
+                }
+            })));
 
         let events = [
             get_event_from_global_cache(git_repo_path, vec![repo_events_filter.clone()]).await?,
@@ -832,13 +842,7 @@ pub async fn get_repo_ref_from_cache(
         ]
         .concat();
         for e in events {
-            if let Ok(repo_ref) = RepoRef::try_from((
-                e.clone(),
-                repo_coordinates
-                    .iter()
-                    .next()
-                    .map(|coordinate| coordinate.public_key),
-            )) {
+            if let Ok(repo_ref) = RepoRef::try_from((e.clone(), None)) {
                 for m in repo_ref.maintainers {
                     if maintainers.insert(m) {
                         new_coordinate = true;
@@ -857,10 +861,7 @@ pub async fn get_repo_ref_from_cache(
             .first()
             .context("no repo announcement event found at specified coordinates. if you are the repository maintainer consider running `ngit init` to create one")?
             .clone(),
-        repo_coordinates
-            .iter()
-            .next()
-            .map(|coordinate| coordinate.public_key),
+        Some(repo_coordinate.public_key),
     ))?;
 
     let mut events: HashMap<Coordinate, nostr::Event> = HashMap::new();
@@ -913,27 +914,40 @@ pub async fn get_state_from_cache(
 #[allow(clippy::too_many_lines)]
 async fn create_relays_request(
     git_repo_path: Option<&Path>,
-    repo_coordinates: &HashSet<Coordinate>,
+    trusted_maintainer_coordinate: Option<&Coordinate>,
     user_profiles: &HashSet<PublicKey>,
     fallback_relays: HashSet<RelayUrl>,
 ) -> Result<FetchRequest> {
-    let repo_ref = get_repo_ref_from_cache(git_repo_path, repo_coordinates).await;
+    let repo_ref = if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
+        if let Ok(repo_ref) =
+            get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await
+        {
+            Some(repo_ref)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let repo_coordinates = {
         // add coordinates of users listed in maintainers to explicitly specified
         // coodinates
-        let mut repo_coordinates = repo_coordinates.clone();
-        if let Ok(repo_ref) = &repo_ref {
+        let mut set: HashSet<Coordinate> = HashSet::new();
+        if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
+            set.insert(trusted_maintainer_coordinate.clone());
+        }
+        if let Some(repo_ref) = &repo_ref {
             for c in repo_ref.coordinates() {
-                if !repo_coordinates
+                if !set
                     .iter()
                     .any(|e| e.identifier.eq(&c.identifier) && e.public_key.eq(&c.public_key))
                 {
-                    repo_coordinates.insert(c);
+                    set.insert(c);
                 }
             }
         }
-        repo_coordinates
+        set
     };
 
     let repo_coordinates_without_relays = {
@@ -954,7 +968,7 @@ async fn create_relays_request(
     let mut contributors: HashSet<PublicKey> = HashSet::new();
 
     if !repo_coordinates_without_relays.is_empty() {
-        if let Ok(repo_ref) = &repo_ref {
+        if let Some(repo_ref) = &repo_ref {
             for m in &repo_ref.maintainers {
                 contributors.insert(m.to_owned());
             }
@@ -1077,7 +1091,7 @@ async fn create_relays_request(
 
     let relays = {
         let mut relays = fallback_relays;
-        if let Ok(repo_ref) = &repo_ref {
+        if let Some(repo_ref) = &repo_ref {
             for r in repo_ref.relays.clone() {
                 relays.insert(r);
             }
@@ -1113,7 +1127,7 @@ async fn create_relays_request(
         selected_relay: None,
         repo_relays: relays,
         relay_column_width,
-        repo_coordinates_without_relays: if let Ok(repo_ref) = &repo_ref {
+        repo_coordinates_without_relays: if let Some(repo_ref) = &repo_ref {
             repo_ref.coordinates_with_timestamps()
         } else {
             repo_coordinates_without_relays
@@ -1121,7 +1135,7 @@ async fn create_relays_request(
                 .map(|c| (c.clone(), None))
                 .collect()
         },
-        state: if let Ok(repo_ref) = &repo_ref {
+        state: if let Some(repo_ref) = &repo_ref {
             if let Ok(existing_state) = get_state_from_cache(git_repo_path, repo_ref).await {
                 Some((existing_state.event.created_at, existing_state.event.id))
             } else {
@@ -1523,12 +1537,16 @@ pub async fn fetching_with_report(
     git_repo_path: &Path,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    repo_coordinates: &HashSet<Coordinate>,
+    trusted_maintainer_coordinate: &Coordinate,
 ) -> Result<FetchReport> {
     let term = console::Term::stderr();
     term.write_line("fetching updates...")?;
     let (relay_reports, progress_reporter) = client
-        .fetch_all(Some(git_repo_path), repo_coordinates, &HashSet::new())
+        .fetch_all(
+            Some(git_repo_path),
+            Some(trusted_maintainer_coordinate),
+            &HashSet::new(),
+        )
         .await?;
     if !relay_reports.iter().any(std::result::Result::is_err) {
         let _ = progress_reporter.clear();

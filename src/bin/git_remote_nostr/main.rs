@@ -43,10 +43,10 @@ async fn main() -> Result<()> {
         client.set_signer(signer).await;
     }
 
-    fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinates).await?;
+    fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinate).await?;
 
     let repo_ref =
-        get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinates).await?;
+        get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
 
     let stdin = io::stdin();
     let mut line = String::new();
@@ -148,12 +148,16 @@ fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
 async fn fetching_with_report_for_helper(
     git_repo_path: &Path,
     client: &Client,
-    repo_coordinates: &HashSet<Coordinate>,
+    trusted_maintainer_coordinate: &Coordinate,
 ) -> Result<()> {
     let term = console::Term::stderr();
     term.write_line("nostr: fetching...")?;
     let (relay_reports, progress_reporter) = client
-        .fetch_all(Some(git_repo_path), repo_coordinates, &HashSet::new())
+        .fetch_all(
+            Some(git_repo_path),
+            Some(trusted_maintainer_coordinate),
+            &HashSet::new(),
+        )
         .await?;
     if !relay_reports.iter().any(std::result::Result::is_err) {
         let _ = progress_reporter.clear();
