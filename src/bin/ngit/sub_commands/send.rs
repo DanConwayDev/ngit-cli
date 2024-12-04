@@ -20,7 +20,7 @@ use crate::{
     git::{identify_ahead_behind, Repo, RepoActions},
     git_events::{event_is_patch_set_root, event_tag_from_nip19_or_hex},
     login,
-    repo_ref::get_repo_coordinates,
+    repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
 #[derive(Debug, clap::Args)]
@@ -54,7 +54,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     let mut client = Client::default();
 
-    let repo_coordinates = get_repo_coordinates(&git_repo, &client).await?;
+    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo).await?;
 
     if !no_fetch {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;

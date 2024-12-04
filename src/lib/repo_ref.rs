@@ -12,12 +12,11 @@ use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, Tag, TagStandard, To
 use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(test))]
-use crate::client::Client;
 use crate::{
-    cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::{get_event_from_global_cache, get_events_from_local_cache, sign_event, Connect},
+    cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptInputParms},
+    client::sign_event,
     git::{nostr_url::NostrUrlDecoded, Repo, RepoActions},
+    login::user::get_user_details,
 };
 
 #[derive(Clone)]
@@ -241,155 +240,121 @@ impl RepoRef {
     }
 }
 
-pub async fn get_repo_coordinates(
-    git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
-) -> Result<Coordinate> {
-    try_and_get_repo_coordinates(git_repo, client, true).await
+pub async fn get_repo_coordinates_when_remote_unknown(git_repo: &Repo) -> Result<Coordinate> {
+    if let Ok(c) = try_and_get_repo_coordinates_when_remote_unknown(git_repo).await {
+        Ok(c)
+    } else {
+        get_repo_coordinates_from_user_prompt(git_repo)
+    }
 }
 
-pub async fn try_and_get_repo_coordinates(
+pub async fn try_and_get_repo_coordinates_when_remote_unknown(
     git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
-    prompt_user: bool,
 ) -> Result<Coordinate> {
-    let mut repo_coordinates = get_repo_coordinates_from_git_config(git_repo)?;
-
-    if repo_coordinates.is_empty() {
-        repo_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo)?;
-    }
-
-    if repo_coordinates.is_empty() {
-        repo_coordinates = get_repo_coordinates_from_maintainers_yaml(git_repo, client).await?;
-    }
-
-    if repo_coordinates.is_empty() {
-        if prompt_user {
-            repo_coordinates = get_repo_coordinates_from_user_prompt(git_repo)?;
+    let remote_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo)?;
+    if remote_coordinates.is_empty() {
+        if let Ok(c) = get_repo_coordinates_from_git_config(git_repo) {
+            Ok(c)
         } else {
-            bail!("couldn't find repo coordinates in git config nostr.repo or in maintainers.yaml");
+            get_repo_coordinates_from_maintainers_yaml(git_repo)
+                .await
+                // not mentioning maintainers.yaml as its not auto generated anymore
+                .context("no nostr git remotes or git config \"nostr.repo\" value")
         }
+    } else if remote_coordinates.len() == 1
+        || remote_coordinates.values().all(|coordinate| {
+            let first = remote_coordinates.values().next().unwrap();
+            coordinate.public_key == first.public_key && coordinate.identifier == first.identifier
+        })
+    {
+        Ok(remote_coordinates.values().next().unwrap().clone())
+    } else {
+        let choice_index = Interactor::default().choice(
+            PromptChoiceParms::default()
+                .with_prompt("select nostr repository from those listed as git remotes")
+                .with_default(0)
+                .with_choices(
+                    get_nostr_git_remote_selection_labels(git_repo, &remote_coordinates).await?,
+                ),
+        )?;
+
+        Ok(remote_coordinates
+            .get(
+                remote_coordinates
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .get(choice_index)
+                    .unwrap(),
+            )
+            .unwrap()
+            .clone())
     }
-    Ok(repo_coordinates
-        .iter()
-        .next()
-        .context("would have bailed if no coordinates found")?
-        .clone())
 }
 
-fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<HashSet<Coordinate>> {
-    let mut repo_coordinates = HashSet::new();
-    if let Some(repo_override) = git_repo.get_git_config_item("nostr.repo", Some(false))? {
-        for s in repo_override.split(',') {
-            if let Ok(c) = Coordinate::parse(s) {
-                repo_coordinates.insert(c);
-            }
-        }
+async fn get_nostr_git_remote_selection_labels(
+    git_repo: &Repo,
+    remote_coordinates: &HashMap<String, Coordinate>,
+) -> Result<Vec<String>> {
+    let mut res = vec![];
+    for (remote, c) in remote_coordinates {
+        res.push(format!(
+            "{remote} - {}/{}",
+            get_user_details(&c.public_key, None, Some(git_repo.get_path()?), true)
+                .await?
+                .metadata
+                .name,
+            c.identifier
+        ));
     }
-    Ok(repo_coordinates)
+    Ok(res)
 }
 
-fn get_repo_coordinates_from_nostr_remotes(git_repo: &Repo) -> Result<HashSet<Coordinate>> {
-    let mut repo_coordinates = HashSet::new();
+fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Coordinate> {
+    Coordinate::parse(
+        git_repo
+            .get_git_config_item("nostr.repo", Some(false))?
+            .context("git config item \"nostr.repo\" is not set in local repository")?,
+    )
+    .context("git config item \"nostr.repo\" is not an naddr")
+}
+
+fn get_repo_coordinates_from_nostr_remotes(git_repo: &Repo) -> Result<HashMap<String, Coordinate>> {
+    let mut repo_coordinates = HashMap::new();
     for remote_name in git_repo.git_repo.remotes()?.iter().flatten() {
         if let Some(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
             if let Ok(nostr_url_decoded) = NostrUrlDecoded::from_str(remote_url) {
-                repo_coordinates.insert(nostr_url_decoded.coordinate);
+                repo_coordinates.insert(remote_name.to_string(), nostr_url_decoded.coordinate);
             }
         }
     }
     Ok(repo_coordinates)
 }
 
-async fn get_repo_coordinates_from_maintainers_yaml(
-    git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
-) -> Result<HashSet<Coordinate>> {
-    let mut repo_coordinates = HashSet::new();
-    if let Ok(repo_config) = get_repo_config_from_yaml(git_repo) {
-        let maintainers = {
-            let mut maintainers = HashSet::new();
-            for m in &repo_config.maintainers {
-                if let Ok(maintainer) = PublicKey::parse(m) {
-                    maintainers.insert(maintainer);
-                }
-            }
-            maintainers
-        };
-        if let Some(identifier) = repo_config.identifier {
-            for public_key in maintainers {
-                repo_coordinates.insert(Coordinate {
-                    kind: Kind::GitRepoAnnouncement,
-                    public_key,
-                    identifier: identifier.clone(),
-                    relays: vec![],
-                });
-            }
-        } else {
-            // if repo_config.identifier.is_empty() {
-            // this will only apply for a few repositories created before ngit v1.3
-            // that haven't updated their maintainers.yaml
-            if let Ok(Some(current_user_npub)) = git_repo.get_git_config_item("nostr.npub", None) {
-                if let Ok(current_user) = PublicKey::parse(current_user_npub) {
-                    for m in &repo_config.maintainers {
-                        if let Ok(maintainer) = PublicKey::parse(m) {
-                            if current_user.eq(&maintainer) {
-                                println!(
-                                    "please run `ngit init` to add the repo identifier to maintainers.yaml"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            // look find all repo refs with root_commit. for identifier
-            let filter = nostr::Filter::default()
-                .kind(nostr::Kind::GitRepoAnnouncement)
-                .reference(git_repo.get_root_commit()?.to_string())
-                .authors(maintainers.clone());
-            let mut events =
-                get_events_from_local_cache(git_repo.get_path()?, vec![filter.clone()]).await?;
-            if events.is_empty() {
-                events =
-                    get_event_from_global_cache(Some(git_repo.get_path()?), vec![filter.clone()])
-                        .await?;
-            }
-            if events.is_empty() {
-                println!(
-                    "finding repository events for this repository for npubs in maintainers.yaml"
-                );
-                events = client
-                    .get_events(client.get_fallback_relays().clone(), vec![filter.clone()])
-                    .await?;
-            }
-            if let Some(e) = events.first() {
-                if let Some(identifier) = e.tags.identifier() {
-                    for m in &repo_config.maintainers {
-                        if let Ok(maintainer) = PublicKey::parse(m) {
-                            repo_coordinates.insert(Coordinate {
-                                kind: Kind::GitRepoAnnouncement,
-                                public_key: maintainer,
-                                identifier: identifier.to_string(),
-                                relays: vec![],
-                            });
-                        }
-                    }
-                }
-            } else {
-                let c = ask_for_naddr()?;
-                git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
-                repo_coordinates.insert(c);
-            }
-        }
-    }
-    Ok(repo_coordinates)
+async fn get_repo_coordinates_from_maintainers_yaml(git_repo: &Repo) -> Result<Coordinate> {
+    let repo_config = get_repo_config_from_yaml(git_repo)?;
+
+    Ok(Coordinate {
+        identifier: repo_config
+            .identifier
+            .context("maintainers.yaml doesnt list the identifier")?,
+        kind: Kind::GitRepoAnnouncement,
+        public_key: PublicKey::from_bech32(
+            repo_config
+                .maintainers
+                .first()
+                .context("maintainers.yaml doesnt list any maintainers")?,
+        )
+        .context("maintainers.yaml doesn't list the first maintainer using a valid npub")?,
+        relays: repo_config
+            .relays
+            .iter()
+            .filter_map(|url| RelayUrl::parse(url).ok())
+            .collect(),
+    })
 }
 
-fn get_repo_coordinates_from_user_prompt(git_repo: &Repo) -> Result<HashSet<Coordinate>> {
-    let mut repo_coordinates = HashSet::new();
+fn get_repo_coordinates_from_user_prompt(git_repo: &Repo) -> Result<Coordinate> {
     // TODO: present list of events filter by root_commit
     // TODO: fallback to search based on identifier
     let c = ask_for_naddr()?;
@@ -397,25 +362,28 @@ fn get_repo_coordinates_from_user_prompt(git_repo: &Repo) -> Result<HashSet<Coor
     // means next time the user won't be prompted and may not know how to
     // change the selected repo
     git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
-    repo_coordinates.insert(c);
-    Ok(repo_coordinates)
+    // TODO: prompt to add a git remote
+    Ok(c)
 }
 
 fn ask_for_naddr() -> Result<Coordinate> {
     let dim = Style::new().color256(247);
     println!(
         "{}",
-        dim.apply_to("hint: https://gitworkshop.dev/repos lists repositories and their naddr"),
+        dim.apply_to(
+            "hint: https://gitworkshop.dev/repos lists repositories and their nostr addresses"
+        ),
     );
 
     Ok(loop {
-        if let Ok(c) = Coordinate::parse(
-            Interactor::default()
-                .input(PromptInputParms::default().with_prompt("repository naddr"))?,
-        ) {
+        let input = Interactor::default()
+            .input(PromptInputParms::default().with_prompt("nostr repository"))?;
+        if let Ok(c) = Coordinate::parse(&input) {
             break c;
+        } else if let Ok(nostr_url) = NostrUrlDecoded::from_str(&input) {
+            break nostr_url.coordinate;
         }
-        println!("not a valid naddr");
+        println!("not a valid naddr or git nostr remote URL starting nostr://");
     })
 }
 
