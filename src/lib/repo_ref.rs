@@ -12,9 +12,11 @@ use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, Tag, TagStandard, To
 use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(test))]
+use crate::client::Client;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptInputParms},
-    client::sign_event,
+    client::{consolidate_fetch_reports, sign_event, Connect},
     git::{nostr_url::NostrUrlDecoded, Repo, RepoActions},
     login::user::get_user_details,
 };
@@ -240,11 +242,15 @@ impl RepoRef {
     }
 }
 
-pub async fn get_repo_coordinates_when_remote_unknown(git_repo: &Repo) -> Result<Coordinate> {
+pub async fn get_repo_coordinates_when_remote_unknown(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+) -> Result<Coordinate> {
     if let Ok(c) = try_and_get_repo_coordinates_when_remote_unknown(git_repo).await {
         Ok(c)
     } else {
-        get_repo_coordinates_from_user_prompt(git_repo)
+        get_repo_coordinate_from_user_prompt(git_repo, client).await
     }
 }
 
@@ -354,37 +360,57 @@ async fn get_repo_coordinates_from_maintainers_yaml(git_repo: &Repo) -> Result<C
     })
 }
 
-fn get_repo_coordinates_from_user_prompt(git_repo: &Repo) -> Result<Coordinate> {
+async fn get_repo_coordinate_from_user_prompt(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+) -> Result<Coordinate> {
     // TODO: present list of events filter by root_commit
     // TODO: fallback to search based on identifier
-    let c = ask_for_naddr()?;
-    // PROBLEM: we are saving this before checking whether it actually exists, which
-    // means next time the user won't be prompted and may not know how to
-    // change the selected repo
-    git_repo.save_git_config_item("nostr.repo", &c.to_bech32()?, false)?;
-    // TODO: prompt to add a git remote
-    Ok(c)
-}
-
-fn ask_for_naddr() -> Result<Coordinate> {
     let dim = Style::new().color256(247);
     println!(
         "{}",
         dim.apply_to(
-            "hint: https://gitworkshop.dev/repos lists repositories and their nostr addresses"
+            "hint: https://gitworkshop.dev/repos lists repositories and their nostr address"
         ),
     );
-
-    Ok(loop {
-        let input = Interactor::default()
-            .input(PromptInputParms::default().with_prompt("nostr repository"))?;
-        if let Ok(c) = Coordinate::parse(&input) {
-            break c;
-        } else if let Ok(nostr_url) = NostrUrlDecoded::from_str(&input) {
-            break nostr_url.coordinate;
+    let git_repo_path = git_repo.get_path()?;
+    let coordinate = {
+        loop {
+            let input = Interactor::default()
+                .input(PromptInputParms::default().with_prompt("nostr repository"))?;
+            let coordinate = if let Ok(c) = Coordinate::parse(&input) {
+                c
+            } else if let Ok(nostr_url) = NostrUrlDecoded::from_str(&input) {
+                nostr_url.coordinate
+            } else {
+                eprintln!("not a valid naddr or git nostr remote URL starting nostr://");
+                continue;
+            };
+            let term = console::Term::stderr();
+            term.write_line("searching for repository...")?;
+            let (relay_reports, progress_reporter) = client
+                .fetch_all(
+                    Some(git_repo_path),
+                    Some(&coordinate),
+                    &HashSet::from_iter(vec![coordinate.public_key]),
+                )
+                .await?;
+            let relay_errs = relay_reports.iter().any(std::result::Result::is_err);
+            let report = consolidate_fetch_reports(relay_reports);
+            if !relay_errs && !report.to_string().is_empty() {
+                let _ = progress_reporter.clear();
+            }
+            if report.to_string().is_empty() {
+                eprintln!("couldn't find repository");
+                continue;
+            } else {
+                eprintln!("repository found");
+                break coordinate;
+            }
         }
-        println!("not a valid naddr or git nostr remote URL starting nostr://");
-    })
+    };
+    Ok(coordinate)
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]

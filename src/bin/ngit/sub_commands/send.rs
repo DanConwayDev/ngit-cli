@@ -54,7 +54,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     let mut client = Client::default();
 
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo).await?;
+    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
     if !no_fetch {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
