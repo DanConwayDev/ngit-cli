@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
 use crate::client::Client;
 use crate::{
-    cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptInputParms},
-    client::{consolidate_fetch_reports, sign_event, Connect},
+    cli_interactor::{
+        Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
+    },
+    client::{consolidate_fetch_reports, get_repo_ref_from_cache, sign_event, Connect},
     git::{nostr_url::NostrUrlDecoded, Repo, RepoActions},
     login::user::get_user_details,
 };
@@ -410,7 +412,42 @@ async fn get_repo_coordinate_from_user_prompt(
             }
         }
     };
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &coordinate).await?;
+
+    if Interactor::default().confirm(
+        PromptConfirmParms::default()
+            .with_default(true)
+            .with_prompt("set git remote \"origin\" to nostr repository url?"),
+    )? {
+        set_or_create_git_remote_with_nostr_url("origin", &repo_ref, git_repo)?;
+    } else if Interactor::default().confirm(
+        PromptConfirmParms::default()
+            .with_default(true)
+            .with_prompt("set up new git remote for the nostr repository?"),
+    )? {
+        let name =
+            Interactor::default().input(PromptInputParms::default().with_prompt("remote name"))?;
+        set_or_create_git_remote_with_nostr_url(&name, &repo_ref, git_repo)?;
+    }
+    git_repo.save_git_config_item("nostr.repo", &coordinate.to_bech32()?, false)?;
     Ok(coordinate)
+}
+
+fn set_or_create_git_remote_with_nostr_url(
+    name: &str,
+    repo_ref: &RepoRef,
+    git_repo: &Repo,
+) -> Result<()> {
+    if git_repo
+        .git_repo
+        .remote_set_url(name, &repo_ref.to_nostr_git_url())
+        .is_err()
+    {
+        let url = repo_ref.to_nostr_git_url();
+        git_repo.git_repo.remote(name, &url)?;
+        eprintln!("set git remote \"{name}\" to {url}");
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
