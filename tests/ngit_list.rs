@@ -76,29 +76,48 @@ mod cannot_find_repo_event {
                 test_repo.populate()?;
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
                 p.expect(
-                    "hint: https://gitworkshop.dev/repos lists repositories and their naddr\r\n",
+                    "hint: https://gitworkshop.dev/repos lists repositories and their nostr address\r\n",
                 )?;
                 if invalid_input {
-                    let mut input = p.expect_input("repository naddr")?;
+                    let mut input = p.expect_input("nostr repository")?;
                     input.succeeds_with("dfgvfvfzadvd")?;
-                    p.expect("not a valid naddr\r\n")?;
-                    let _ = p.expect_input("repository naddr")?;
+                    p.expect("not a valid naddr or git nostr remote URL starting nostr://\r\n")?;
+                    let _ = p.expect_input("nostr repository")?;
                     p.exit()?;
                 }
                 if naddr {
-                    let mut input = p.expect_input("repository naddr")?;
-                    input.succeeds_with(
-                        &Coordinate {
-                            kind: nostr::Kind::GitRepoAnnouncement,
-                            public_key: TEST_KEY_1_KEYS.public_key(),
-                            identifier: repo_event.tags.identifier().unwrap().to_string(),
-                            relays: vec![RelayUrl::parse("ws://localhost:8056").unwrap()],
-                        }
-                        .to_bech32()?,
-                    )?;
+                    let mut input = p.expect_input("nostr repository")?;
+                    let coordinate = Coordinate {
+                        kind: nostr::Kind::GitRepoAnnouncement,
+                        public_key: TEST_KEY_1_KEYS.public_key(),
+                        identifier: repo_event.tags.identifier().unwrap().to_string(),
+                        relays: vec![RelayUrl::parse("ws://localhost:8056").unwrap()],
+                    };
+                    input.succeeds_with(&coordinate.to_bech32()?)?;
+                    p.expect("searching for repository...\r\n")?;
+                    p.expect_eventually("repository found\r\n")?;
+                    p.expect_confirm(
+                        "set git remote \"origin\" to nostr repository url?",
+                        Some(true),
+                    )?
+                    .succeeds_with(None)?;
+                    let nostr_url = format!(
+                        "nostr://{}/{}/{}",
+                        TEST_KEY_1_NPUB,
+                        // first relay in repo ann event
+                        urlencoding::encode("ws://localhost:8055"),
+                        coordinate.identifier,
+                    );
+                    p.expect(format!("set git remote \"origin\" to {}\r\n", &nostr_url))?;
                     p.expect("fetching updates...\r\n")?;
-                    p.expect_eventually("\r\n")?; // some updates listed here
+                    // no updates as they were fetched when searching for repo
+                    p.expect("no updates\r\n")?;
                     p.expect_end_with("no proposals found... create one? try `ngit send`\r\n")?;
+
+                    assert_eq!(
+                        test_repo.git_repo.find_remote("origin")?.url().unwrap(),
+                        nostr_url
+                    );
                 }
 
                 for p in [51, 52, 53, 55, 56] {
@@ -127,7 +146,7 @@ mod cannot_find_repo_event {
 
         #[tokio::test]
         #[serial]
-        async fn finds_based_on_naddr_on_embeded_relay() -> Result<()> {
+        async fn finds_based_on_naddr_on_embeded_relay_and_added_as_origin_remote() -> Result<()> {
             run_async_repo_event_ref_needed(false, true).await
         }
     }

@@ -438,15 +438,15 @@ fn set_or_create_git_remote_with_nostr_url(
     repo_ref: &RepoRef,
     git_repo: &Repo,
 ) -> Result<()> {
+    let url = repo_ref.to_nostr_git_url();
     if git_repo
         .git_repo
         .remote_set_url(name, &repo_ref.to_nostr_git_url())
         .is_err()
     {
-        let url = repo_ref.to_nostr_git_url();
         git_repo.git_repo.remote(name, &url)?;
-        eprintln!("set git remote \"{name}\" to {url}");
     }
+    eprintln!("set git remote \"{name}\" to {url}");
     Ok(())
 }
 
