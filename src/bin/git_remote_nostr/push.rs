@@ -25,7 +25,7 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded},
         oid_to_shorthand_string,
     },
-    git_events::{self, get_event_root},
+    git_events::{self, event_to_cover_letter, get_event_root},
     login::{self, get_curent_user},
     repo_ref::{self, get_repo_config_from_yaml},
     repo_state,
@@ -965,63 +965,172 @@ async fn get_merged_status_events(
             };
             let (ahead, _) =
                 git_repo.get_commits_ahead_behind(&tip_of_remote_branch, &tip_of_pushed_branch)?;
-            for commit_hash in ahead {
-                let commit = git_repo.git_repo.find_commit(sha1_to_oid(&commit_hash)?)?;
-                if commit.parent_count() > 1 {
-                    // merge commit
-                    for parent in commit.parents() {
-                        // lookup parent id
-                        let commit_events = get_events_from_local_cache(
-                            git_repo.get_path()?,
-                            vec![
-                                nostr::Filter::default()
-                                    .kind(nostr::Kind::GitPatch)
-                                    .reference(parent.id().to_string()),
-                            ],
-                        )
-                        .await?;
-                        if let Some(commit_event) = commit_events.iter().find(|e| {
-                            e.tags.iter().any(|t| {
-                                t.as_slice()[0].eq("commit")
-                                    && t.as_slice()[1].eq(&parent.id().to_string())
-                            })
-                        }) {
-                            let (proposal_id, revision_id) =
-                                get_proposal_and_revision_root_from_patch(git_repo, commit_event)
-                                    .await?;
-                            term.write_line(
-                                format!(
-                                    "merge commit {}: create nostr proposal status event",
-                                    &commit.id().to_string()[..7],
-                                )
-                                .as_str(),
-                            )?;
 
-                            events.push(
-                                create_merge_status(
-                                    signer,
-                                    repo_ref,
-                                    &get_event_from_cache_by_id(git_repo, &proposal_id).await?,
-                                    &if let Some(revision_id) = revision_id {
-                                        Some(
-                                            get_event_from_cache_by_id(git_repo, &revision_id)
-                                                .await?,
-                                        )
-                                    } else {
-                                        None
-                                    },
-                                    &commit_hash,
-                                    commit_event.id,
-                                )
-                                .await?,
-                            );
+            let commit_events = get_events_from_local_cache(
+                git_repo.get_path()?,
+                vec![
+                    nostr::Filter::default().kind(nostr::Kind::GitPatch),
+                    // TODO: limit by repo_ref
+                ],
+            )
+            .await?;
+
+            let merged_proposals_info =
+                get_merged_proposals_info(git_repo, &ahead, &commit_events).await?;
+
+            for event in
+                create_merge_events(term, git_repo, repo_ref, signer, &merged_proposals_info)
+                    .await?
+            {
+                events.push(event);
+            }
+        }
+    }
+    Ok(events)
+}
+
+/// (`proposal_id`, `revision_id`)
+type MergedProposalsInfo =
+    HashMap<EventId, (Option<EventId>, HashMap<Sha1Hash, MergedPRCommitType>)>;
+
+async fn get_merged_proposals_info(
+    git_repo: &Repo,
+    ahead: &Vec<Sha1Hash>,
+    available_patches: &[Event],
+) -> Result<MergedProposalsInfo> {
+    let mut proposals: MergedProposalsInfo = HashMap::new();
+
+    for commit_hash in ahead {
+        let commit = git_repo.git_repo.find_commit(sha1_to_oid(commit_hash)?)?;
+        // three-way merge - just to set merge commit id as the merged branch commits
+        // are in ahead
+        if commit.parent_count() > 1 {
+            for parent in commit.parents() {
+                for patch_event in available_patches
+                    .iter()
+                    .filter(|e| {
+                        e.tags.iter().any(|t| {
+                            t.as_slice()[0].eq("commit")
+                                && t.as_slice()[1].eq(&parent.id().to_string())
+                        })
+                    })
+                    .collect::<Vec<&Event>>()
+                {
+                    if let Ok((proposal_id, revision_id)) =
+                        get_proposal_and_revision_root_from_patch(git_repo, patch_event).await
+                    {
+                        let (entry_revision_id, merged_patches) =
+                            proposals.entry(proposal_id).or_default();
+                        if entry_revision_id == &revision_id {
+                            merged_patches.insert(*commit_hash, MergedPRCommitType::MergeCommit);
                         }
+                    }
+                }
+            }
+        } else {
+            // three way merge or fast forward merge commits
+            // note: ahead included commits of three-way merged branches
+            for patch_event in available_patches
+                .iter()
+                .filter(|e| {
+                    e.tags.iter().any(|t| {
+                        t.as_slice()[0].eq("commit") && t.as_slice()[1].eq(&commit_hash.to_string())
+                    })
+                })
+                .collect::<Vec<&Event>>()
+            {
+                if let Ok((proposal_id, revision_id)) =
+                    get_proposal_and_revision_root_from_patch(git_repo, patch_event).await
+                {
+                    let (entry_revision_id, merged_patches) =
+                        proposals.entry(proposal_id).or_default();
+                    // ignore revisions without all the merged commits
+                    if entry_revision_id == &revision_id {
+                        merged_patches.insert(
+                            *commit_hash,
+                            MergedPRCommitType::PatchCommit {
+                                event_id: patch_event.id,
+                            },
+                        );
                     }
                 }
             }
         }
     }
+    Ok(proposals)
+}
+
+async fn create_merge_events(
+    term: &console::Term,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    signer: &Arc<dyn NostrSigner>,
+    merged_proposals_info: &MergedProposalsInfo,
+) -> Result<Vec<Event>> {
+    let mut events = vec![];
+    for (proposal_id, (revision_id, merged_patches)) in merged_proposals_info {
+        let proposal = get_event_from_cache_by_id(git_repo, proposal_id).await?;
+
+        if merged_patches
+            .values()
+            .any(|m| *m == MergedPRCommitType::MergeCommit)
+        {
+            term.write_line(
+                format!(
+                    "merge commit {}: create nostr proposal status event",
+                    &merged_patches.keys().next().unwrap().to_string()[..7],
+                )
+                .as_str(),
+            )?;
+        } else {
+            term.write_line(
+                format!(
+                    "fast-forward merge: create nostr proposal status event for {}",
+                    event_to_cover_letter(&proposal)?.get_branch_name()?,
+                )
+                .as_str(),
+            )?;
+        }
+        events.push(
+            create_merge_status(
+                signer,
+                repo_ref,
+                &proposal,
+                &if let Some(revision_id) = revision_id {
+                    Some(get_event_from_cache_by_id(git_repo, revision_id).await?)
+                } else {
+                    None
+                },
+                if merged_patches
+                    .values()
+                    .any(|m| m == &MergedPRCommitType::MergeCommit)
+                {
+                    vec![*merged_patches.keys().next().unwrap()]
+                } else {
+                    let mut t: Vec<Sha1Hash> = merged_patches.keys().copied().collect();
+                    t.reverse();
+                    t
+                },
+                merged_patches
+                    .values()
+                    .filter_map(|m| match m {
+                        MergedPRCommitType::MergeCommit => None,
+                        MergedPRCommitType::PatchApplied { event_id }
+                        | MergedPRCommitType::PatchCommit { event_id } => Some(*event_id),
+                    })
+                    .collect(),
+            )
+            .await?,
+        );
+    }
     Ok(events)
+}
+
+#[derive(PartialEq)]
+enum MergedPRCommitType {
+    MergeCommit,
+    PatchCommit { event_id: EventId },
+    PatchApplied { event_id: EventId },
 }
 
 async fn create_merge_status(
@@ -1029,8 +1138,8 @@ async fn create_merge_status(
     repo_ref: &RepoRef,
     proposal: &Event,
     revision: &Option<Event>,
-    merge_commit: &Sha1Hash,
-    merged_patch: EventId,
+    merge_commits: Vec<Sha1Hash>,
+    merged_patches: Vec<EventId>,
 ) -> Result<Event> {
     let mut public_keys = repo_ref
         .maintainers
@@ -1056,14 +1165,20 @@ async fn create_merge_status(
                         public_key: None,
                         uppercase: false,
                     }),
-                    Tag::from_standardized(nostr::TagStandard::Event {
-                        event_id: merged_patch,
-                        relay_url: repo_ref.relays.first().cloned(),
-                        marker: Some(Marker::Mention),
-                        public_key: None,
-                        uppercase: false,
-                    }),
                 ],
+                // Tags for merged patches
+                merged_patches
+                    .iter()
+                    .map(|merged_patch| {
+                        Tag::from_standardized(nostr::TagStandard::Event {
+                            event_id: *merged_patch,
+                            relay_url: repo_ref.relays.first().cloned(),
+                            marker: Some(Marker::Mention),
+                            public_key: None,
+                            uppercase: false,
+                        })
+                    })
+                    .collect::<Vec<Tag>>(),
                 if let Some(revision) = revision {
                     vec![Tag::from_standardized(nostr::TagStandard::Event {
                         event_id: revision.id,
@@ -1085,14 +1200,22 @@ async fn create_merge_status(
                     Tag::from_standardized(nostr::TagStandard::Reference(
                         repo_ref.root_commit.to_string(),
                     )),
-                    Tag::from_standardized(nostr::TagStandard::Reference(format!(
-                        "{merge_commit}"
-                    ))),
                     Tag::custom(
                         nostr::TagKind::Custom(std::borrow::Cow::Borrowed("merge-commit-id")),
-                        vec![format!("{merge_commit}")],
+                        merge_commits
+                            .iter()
+                            .map(|merge_commit| format!("{merge_commit}"))
+                            .collect::<Vec<String>>(),
                     ),
                 ],
+                merge_commits
+                    .iter()
+                    .map(|merge_commit| {
+                        Tag::from_standardized(nostr::TagStandard::Reference(format!(
+                            "{merge_commit}"
+                        )))
+                    })
+                    .collect::<Vec<Tag>>(),
             ]
             .concat(),
         ),

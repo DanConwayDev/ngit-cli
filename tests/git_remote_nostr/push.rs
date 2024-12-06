@@ -894,7 +894,8 @@ async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> Result<()> {
+async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_issued() -> Result<()>
+{
     //
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
     let source_path = source_git_repo.dir.to_str().unwrap().to_string();
@@ -958,11 +959,14 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         r57.listen_until_close(),
     );
 
-    let (output, oid) = cli_tester_handle.join().unwrap()?;
+    let (output, merge_oid) = cli_tester_handle.join().unwrap()?;
 
     assert_eq!(
         output,
-        format!("   431b84e..{}  main -> main\r\n", &oid.to_string()[..7])
+        format!(
+            "   431b84e..{}  main -> main\r\n",
+            &merge_oid.to_string()[..7]
+        )
     );
 
     let new_events = r55
@@ -976,7 +980,7 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
 
     assert_eq!(new_events.len(), 2, "{new_events:?}");
 
-    let proposal = r55
+    let proposal_cover_letter_event = r55
         .events
         .iter()
         .find(|e| {
@@ -993,14 +997,15 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         .unwrap();
 
     assert_eq!(
-        oid.to_string(),
+        vec!["merge-commit-id".to_string(), merge_oid.to_string()],
         merge_status
             .tags
             .iter()
             .find(|t| t.as_slice()[0].eq("merge-commit-id"))
             .unwrap()
-            .as_slice()[1],
-        "status sets correct merge-commit-id tag"
+            .clone()
+            .to_vec(),
+        "status sets correct merge-commit-id tag {merge_status:?}"
     );
 
     let proposal_tip = r55
@@ -1009,7 +1014,7 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
         .filter(|e| {
             e.tags
                 .iter()
-                .any(|t| t.as_slice()[1].eq(&proposal.id.to_string()))
+                .any(|t| t.as_slice()[1].eq(&proposal_cover_letter_event.id.to_string()))
                 && e.kind.eq(&Kind::GitPatch)
         })
         .last()
@@ -1029,7 +1034,7 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
     );
 
     assert_eq!(
-        proposal.id.to_string(),
+        proposal_cover_letter_event.id.to_string(),
         merge_status
             .tags
             .iter()
@@ -1038,7 +1043,175 @@ async fn proposal_merge_commit_pushed_to_main_leads_to_status_event_issued() -> 
             .as_slice()[1],
         "status tags proposal id as root \r\nmerge status:\r\n{}\r\nproposal:\r\n{}",
         merge_status.as_json(),
-        proposal.as_json(),
+        proposal_cover_letter_event.as_json(),
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_event_issued()
+-> Result<()> {
+    //
+    let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
+    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+
+    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+        Relay::new(8051, None, None),
+        Relay::new(8052, None, None),
+        Relay::new(8053, None, None),
+        Relay::new(8055, None, None),
+        Relay::new(8056, None, None),
+        Relay::new(8057, None, None),
+    );
+    r51.events = events.clone();
+    r55.events = events.clone();
+
+    #[allow(clippy::mutable_key_type)]
+    let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
+
+    let cli_tester_handle = std::thread::spawn(move || -> Result<(String, Oid)> {
+        let branch_name = get_proposal_branch_name_from_events(&events, FEATURE_BRANCH_NAME_1)?;
+
+        let git_repo = clone_git_repo_with_nostr_url()?;
+        git_repo.checkout_remote_branch(&branch_name)?;
+        git_repo.checkout("refs/heads/main")?;
+
+        CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["merge", &branch_name, "-m", "proposal merge commit message"],
+        )
+        .expect_end_eventually_and_print()?;
+
+        let oid = git_repo.get_tip_of_local_branch("main")?;
+
+        let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
+        cli_expect_nostr_fetch(&mut p)?;
+        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect("list: connecting...\r\n")?;
+        p.expect_eventually(format!(
+            "fast-forward merge: create nostr proposal status event for {branch_name}\r\n"
+        ))?;
+        // status updates printed here
+        p.expect_eventually(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        let output = p.expect_end_eventually()?;
+
+        for p in [51, 52, 53, 55, 56, 57] {
+            relay::shutdown_relay(8000 + p)?;
+        }
+
+        Ok((output, oid))
+    });
+    // launch relays
+    let _ = join!(
+        r51.listen_until_close(),
+        r52.listen_until_close(),
+        r53.listen_until_close(),
+        r55.listen_until_close(),
+        r56.listen_until_close(),
+        r57.listen_until_close(),
+    );
+
+    let (output, tip_oid) = cli_tester_handle.join().unwrap()?;
+
+    assert_eq!(
+        output,
+        format!(
+            "   431b84e..{}  main -> main\r\n",
+            &tip_oid.to_string()[..7]
+        )
+    );
+
+    let new_events = r55
+        .events
+        .iter()
+        .cloned()
+        .collect::<HashSet<Event>>()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<Event>>();
+
+    assert_eq!(new_events.len(), 2, "{new_events:?}");
+
+    let proposal_cover_letter_event = r55
+        .events
+        .iter()
+        .find(|e| {
+            e.tags
+                .iter()
+                .find(|t| t.as_slice()[0].eq("branch-name"))
+                .is_some_and(|t| t.as_slice()[1].eq(FEATURE_BRANCH_NAME_1))
+        })
+        .unwrap();
+
+    let proposal_patches: Vec<&Event> = r55
+        .events
+        .iter()
+        .filter(|e| {
+            e.kind == Kind::GitPatch
+                && e.tags
+                    .iter()
+                    .any(|t| t.as_slice()[1].eq(&proposal_cover_letter_event.id.to_string()))
+        })
+        .collect();
+
+    let merge_status = new_events
+        .iter()
+        .find(|e| e.kind.eq(&Kind::GitStatusApplied))
+        .unwrap();
+    // println!("{:?}", proposal_cover_letter_event);
+    // println!("merge status");
+    // println!("{:?}", merge_status);
+
+    let patch_commit_ids = proposal_patches
+        .iter()
+        .map(|e| {
+            e.tags
+                .iter()
+                .find(|t| t.as_slice()[0].eq("commit"))
+                .unwrap()
+                .as_slice()[1]
+                .to_string()
+        })
+        .collect::<Vec<String>>();
+    assert_eq!(
+        [vec!["merge-commit-id".to_string()], patch_commit_ids].concat(),
+        merge_status
+            .tags
+            .iter()
+            .find(|t| t.as_slice()[0].eq("merge-commit-id"))
+            .unwrap()
+            .clone()
+            .to_vec(),
+        "status sets correct merge-commit-id tag {merge_status:?}"
+    );
+
+    for patch_id in proposal_patches
+        .iter()
+        .map(|e| e.id.to_string())
+        .collect::<Vec<String>>()
+    {
+        assert!(
+            merge_status.tags.iter().any(|t| t.as_slice().len().eq(&4)
+                && t.as_slice()[1] == patch_id
+                && t.as_slice()[3].eq("mention")),
+            "merge status doesnt mention proposal patch {patch_id}  \r\nmerge status:\r\n{}",
+            merge_status.as_json(),
+        );
+    }
+
+    assert_eq!(
+        proposal_cover_letter_event.id.to_string(),
+        merge_status
+            .tags
+            .iter()
+            .find(|t| t.is_root())
+            .unwrap()
+            .as_slice()[1],
+        "status tags proposal id as root \r\nmerge status:\r\n{}\r\nproposal:\r\n{}",
+        merge_status.as_json(),
+        proposal_cover_letter_event.as_json(),
     );
 
     Ok(())
