@@ -2,8 +2,10 @@ use core::fmt;
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use nostr::nips::nip01::Coordinate;
+use nostr::nips::{nip01::Coordinate, nip05};
 use nostr_sdk::{PublicKey, RelayUrl, ToBech32, Url};
+
+use super::{get_git_config_item, save_git_config_item, Repo};
 
 #[derive(Debug, PartialEq, Default, Clone)]
 pub enum ServerProtocol {
@@ -59,6 +61,7 @@ pub struct NostrUrlDecoded {
     pub coordinate: Coordinate,
     pub protocol: Option<ServerProtocol>,
     pub user: Option<String>,
+    pub nip05: Option<String>,
 }
 
 impl fmt::Display for NostrUrlDecoded {
@@ -89,10 +92,8 @@ impl fmt::Display for NostrUrlDecoded {
 
 static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format. try nostr://naddr123 or nostr://npub123/my-repo or nostr://ssh/npub123/relay.damus.io/my-repo";
 
-impl std::str::FromStr for NostrUrlDecoded {
-    type Err = anyhow::Error;
-
-    fn from_str(url: &str) -> Result<Self> {
+impl NostrUrlDecoded {
+    pub async fn parse_and_resolve(url: &str, git_repo: &Option<&Repo>) -> Result<Self> {
         let mut protocol = None;
         let mut user = None;
         let mut relays = vec![];
@@ -154,6 +155,7 @@ impl std::str::FromStr for NostrUrlDecoded {
         }
         // extract naddr npub/<optional-relays>/identifer
         let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
+        let mut nip05 = None;
         // naddr used
         let coordinate = if let Ok(coordinate) = Coordinate::parse(part) {
             if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
@@ -161,8 +163,9 @@ impl std::str::FromStr for NostrUrlDecoded {
             } else {
                 bail!("naddr doesnt point to a git repository announcement");
             }
-        // npub/<optional-relays>/identifer used
-        } else if let Ok(public_key) = PublicKey::parse(part) {
+        // <npub|nip05_address>/<optional-relays>/identifer used
+        } else {
+            let npub_or_nip05 = part.to_owned();
             parts.remove(0);
             let identifier = parts
                 .pop()
@@ -179,14 +182,41 @@ impl std::str::FromStr for NostrUrlDecoded {
                     RelayUrl::parse(&decoded).context("could not parse relays in nostr git url")?;
                 relays.push(url);
             }
+            let public_key = match PublicKey::parse(npub_or_nip05) {
+                Ok(public_key) => public_key,
+                Err(_) => {
+                    nip05 = Some(npub_or_nip05.to_string());
+                    if let Ok(public_key) =
+                        resolve_nip05_from_git_config_cache(npub_or_nip05, git_repo)
+                    {
+                        public_key
+                    } else {
+                        // TODO eprint loading message
+                        let res = nip05::profile(npub_or_nip05, None)
+                            .await
+                            .context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
+                        // TODO clear loading message
+                        nip05 = Some(npub_or_nip05.to_string());
+                        let _ = save_nip05_to_git_config_cache(
+                            npub_or_nip05,
+                            &res.public_key,
+                            git_repo,
+                        );
+                        if relays.is_empty() {
+                            for r in res.relays {
+                                relays.push(r);
+                            }
+                        }
+                        res.public_key
+                    }
+                }
+            };
             Coordinate {
                 identifier,
                 public_key,
                 kind: nostr_sdk::Kind::GitRepoAnnouncement,
                 relays,
             }
-        } else {
-            bail!(INCORRECT_NOSTR_URL_FORMAT_ERROR);
         };
 
         Ok(Self {
@@ -194,7 +224,40 @@ impl std::str::FromStr for NostrUrlDecoded {
             coordinate,
             protocol,
             user,
+            nip05,
         })
+    }
+}
+
+fn resolve_nip05_from_git_config_cache(nip05: &str, git_repo: &Option<&Repo>) -> Result<PublicKey> {
+    let stored_value = get_git_config_item(
+        git_repo,
+        &format!("nostr.nip05.{}", urlencoding::encode(nip05)),
+    )?
+    .context("not in cache")?;
+    PublicKey::parse(stored_value)
+        .context("stored nip05 resolution value did not parse as public key")
+}
+
+fn save_nip05_to_git_config_cache(
+    nip05: &str,
+    public_key: &PublicKey,
+    git_repo: &Option<&Repo>,
+) -> Result<()> {
+    if save_git_config_item(
+        git_repo,
+        &format!("nostr.nip05.{}", urlencoding::encode(nip05)),
+        &public_key.to_bech32()?,
+    )
+    .is_err()
+    {
+        save_git_config_item(
+            &None,
+            &format!("nostr.nip05.{}", urlencoding::encode(nip05)),
+            &public_key.to_bech32()?,
+        )
+    } else {
+        Ok(())
     }
 }
 

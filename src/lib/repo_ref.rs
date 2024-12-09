@@ -41,6 +41,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
     type Error = anyhow::Error;
 
     fn try_from((event, trusted_maintainer): (nostr::Event, Option<PublicKey>)) -> Result<Self> {
+        // TODO: turn trusted maintainer into NostrUrlDecoded
         if !event.kind.eq(&Kind::GitRepoAnnouncement) {
             bail!("incorrect kind");
         }
@@ -239,6 +240,7 @@ impl RepoRef {
                 coordinate: self.coordinate_with_hint(),
                 protocol: None,
                 user: None,
+                nip05: None, // TODO: if nip05 for pubkey saved in local git config use it.
             }
         )
     }
@@ -259,7 +261,7 @@ pub async fn get_repo_coordinates_when_remote_unknown(
 pub async fn try_and_get_repo_coordinates_when_remote_unknown(
     git_repo: &Repo,
 ) -> Result<Coordinate> {
-    let remote_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo)?;
+    let remote_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo).await?;
     if remote_coordinates.is_empty() {
         if let Ok(c) = get_repo_coordinates_from_git_config(git_repo) {
             Ok(c)
@@ -327,11 +329,15 @@ fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Coordinate> {
     .context("git config item \"nostr.repo\" is not an naddr")
 }
 
-fn get_repo_coordinates_from_nostr_remotes(git_repo: &Repo) -> Result<HashMap<String, Coordinate>> {
+async fn get_repo_coordinates_from_nostr_remotes(
+    git_repo: &Repo,
+) -> Result<HashMap<String, Coordinate>> {
     let mut repo_coordinates = HashMap::new();
     for remote_name in git_repo.git_repo.remotes()?.iter().flatten() {
         if let Some(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
-            if let Ok(nostr_url_decoded) = NostrUrlDecoded::from_str(remote_url) {
+            if let Ok(nostr_url_decoded) =
+                NostrUrlDecoded::parse_and_resolve(remote_url, &Some(git_repo)).await
+            {
                 repo_coordinates.insert(remote_name.to_string(), nostr_url_decoded.coordinate);
             }
         }
@@ -383,7 +389,9 @@ async fn get_repo_coordinate_from_user_prompt(
                 .input(PromptInputParms::default().with_prompt("nostr repository"))?;
             let coordinate = if let Ok(c) = Coordinate::parse(&input) {
                 c
-            } else if let Ok(nostr_url) = NostrUrlDecoded::from_str(&input) {
+            } else if let Ok(nostr_url) =
+                NostrUrlDecoded::parse_and_resolve(&input, &Some(git_repo)).await
+            {
                 nostr_url.coordinate
             } else {
                 eprintln!("not a valid naddr or git nostr remote URL starting nostr://");
