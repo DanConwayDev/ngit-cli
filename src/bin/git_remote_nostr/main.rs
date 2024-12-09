@@ -36,8 +36,17 @@ async fn main() -> Result<()> {
 
     let mut client = Client::default();
 
-    if let Ok((signer, _, _)) =
-        load_existing_login(&Some(&git_repo), &None, &None, &None, None, true, false).await
+    if let Ok((signer, _, _)) = load_existing_login(
+        &Some(&git_repo),
+        &None,
+        &None,
+        &None,
+        None,
+        true,
+        false,
+        false,
+    )
+    .await
     {
         // signer for to respond to relay auth request
         client.set_signer(signer).await;

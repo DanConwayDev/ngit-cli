@@ -60,8 +60,23 @@ pub async fn get_user_details(
     #[cfg(not(test))] client: Option<&Client>,
     git_repo_path: Option<&Path>,
     cache_only: bool,
+    fetch_profile_updates: bool,
 ) -> Result<UserRef> {
     if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
+        if fetch_profile_updates {
+            if let Some(client) = client {
+                let term = console::Term::stderr();
+                term.write_line("searching for profile updates...")?;
+                let (reports, progress_reporter) = client
+                    .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
+                    .await?;
+                if !reports.iter().any(|r| r.is_err()) {
+                    progress_reporter.clear()?;
+                    term.clear_last_lines(1)?;
+                }
+                return get_user_ref_from_cache(git_repo_path, public_key).await;
+            }
+        }
         Ok(user_ref)
     } else {
         let empty = UserRef {

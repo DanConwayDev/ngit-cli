@@ -308,7 +308,7 @@ async fn get_nostr_git_remote_selection_labels(
     for (remote, c) in remote_coordinates {
         res.push(format!(
             "{remote} - {}/{}",
-            get_user_details(&c.public_key, None, Some(git_repo.get_path()?), true)
+            get_user_details(&c.public_key, None, Some(git_repo.get_path()?), true, false)
                 .await?
                 .metadata
                 .name,

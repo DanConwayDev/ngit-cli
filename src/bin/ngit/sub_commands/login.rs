@@ -64,8 +64,17 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
     } else {
         vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]
     } {
-        if let Ok((_, user_ref, source)) =
-            load_existing_login(&git_repo, &None, &None, &Some(source), None, true, false).await
+        if let Ok((_, user_ref, source)) = load_existing_login(
+            &git_repo,
+            &None,
+            &None,
+            &Some(source),
+            None,
+            true,
+            false,
+            false,
+        )
+        .await
         {
             match Interactor::default().choice(
                 PromptChoiceParms::default()

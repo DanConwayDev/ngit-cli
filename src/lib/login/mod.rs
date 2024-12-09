@@ -24,9 +24,19 @@ pub async fn login_or_signup(
     password: &Option<String>,
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
+    fetch_profile_updates: bool,
 ) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
-    let res =
-        load_existing_login(git_repo, signer_info, password, &None, client, false, true).await;
+    let res = load_existing_login(
+        git_repo,
+        signer_info,
+        password,
+        &None,
+        client,
+        false,
+        true,
+        fetch_profile_updates,
+    )
+    .await;
     if res.is_ok() {
         res
     } else {

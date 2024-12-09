@@ -181,6 +181,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         &extract_signer_cli_arguments(cli_args).unwrap_or(None),
         &cli_args.password,
         Some(&client),
+        true,
     )
     .await?;
 

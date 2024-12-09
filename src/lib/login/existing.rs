@@ -27,6 +27,7 @@ use crate::{
 /// - `client`: include client to fetch profiles from relays that are missing
 ///   from cache
 /// - `silent`: do not print outcome in termianl
+#[allow(clippy::too_many_arguments)]
 pub async fn load_existing_login(
     git_repo: &Option<&Repo>,
     signer_info: &Option<SignerInfo>,
@@ -36,6 +37,7 @@ pub async fn load_existing_login(
     #[cfg(not(test))] client: Option<&Client>,
     silent: bool,
     prompt_for_password: bool,
+    fetch_profile_updates: bool,
 ) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
     let (signer_info, source) = get_signer_info(git_repo, signer_info, password, source)?;
 
@@ -50,6 +52,7 @@ pub async fn load_existing_login(
             None
         },
         silent,
+        fetch_profile_updates,
     )
     .await?;
 

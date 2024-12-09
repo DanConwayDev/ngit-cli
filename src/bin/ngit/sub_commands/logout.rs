@@ -26,8 +26,17 @@ async fn logout(git_repo: Option<&Repo>) -> Result<()> {
     } else {
         vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]
     } {
-        if let Ok((_, user_ref, source)) =
-            load_existing_login(&git_repo, &None, &None, &Some(source), None, true, false).await
+        if let Ok((_, user_ref, source)) = load_existing_login(
+            &git_repo,
+            &None,
+            &None,
+            &Some(source),
+            None,
+            true,
+            false,
+            false,
+        )
+        .await
         {
             for item in [
                 "nostr.nsec",

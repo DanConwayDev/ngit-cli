@@ -46,6 +46,7 @@ pub async fn fresh_login_or_signup(
                 client,
                 true,
                 true,
+                false,
             )
             .await?;
             break (signer, user_ref.public_key, signer_info, source);
@@ -101,6 +102,7 @@ pub async fn fresh_login_or_signup(
         } else {
             None
         },
+        false,
         false,
     )
     .await?;
@@ -549,6 +551,7 @@ async fn save_to_git_config(
                             None,
                             true,
                             true,
+                            false,
                         )
                         .await
                         {

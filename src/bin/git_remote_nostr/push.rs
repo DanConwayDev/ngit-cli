@@ -127,7 +127,7 @@ pub async fn run_push(
     }
 
     let (signer, user_ref, _) =
-        login::login_or_signup(&Some(git_repo), &None, &None, Some(client)).await?;
+        login::login_or_signup(&Some(git_repo), &None, &None, Some(client), true).await?;
 
     if !repo_ref.maintainers.contains(&user_ref.public_key) {
         for refspec in &git_server_refspecs {

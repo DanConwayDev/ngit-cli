@@ -28,6 +28,7 @@ pub async fn launch() -> Result<()> {
             None,
             true,
             false,
+            false,
         )
         .await
         {
