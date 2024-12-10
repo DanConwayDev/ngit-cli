@@ -19,7 +19,10 @@ use crate::{
         Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
     },
     client::{consolidate_fetch_reports, get_repo_ref_from_cache, sign_event, Connect},
-    git::{nostr_url::NostrUrlDecoded, Repo, RepoActions},
+    git::{
+        nostr_url::{use_nip05_git_config_cache_to_find_nip05_from_public_key, NostrUrlDecoded},
+        Repo, RepoActions,
+    },
     login::user::get_user_details,
 };
 
@@ -232,15 +235,20 @@ impl RepoRef {
             .collect::<Vec<(Coordinate, Option<Timestamp>)>>()
     }
 
-    pub fn to_nostr_git_url(&self) -> String {
+    pub fn to_nostr_git_url(&self, git_repo: &Option<&Repo>) -> String {
+        let c = self.coordinate_with_hint();
         format!(
             "{}",
             NostrUrlDecoded {
                 original_string: String::new(),
-                coordinate: self.coordinate_with_hint(),
+                nip05: use_nip05_git_config_cache_to_find_nip05_from_public_key(
+                    &c.public_key,
+                    git_repo,
+                )
+                .unwrap_or_default(),
+                coordinate: c,
                 protocol: None,
                 user: None,
-                nip05: None, // TODO: if nip05 for pubkey saved in local git config use it.
             }
         )
     }
@@ -446,10 +454,10 @@ fn set_or_create_git_remote_with_nostr_url(
     repo_ref: &RepoRef,
     git_repo: &Repo,
 ) -> Result<()> {
-    let url = repo_ref.to_nostr_git_url();
+    let url = repo_ref.to_nostr_git_url(&Some(git_repo));
     if git_repo
         .git_repo
-        .remote_set_url(name, &repo_ref.to_nostr_git_url())
+        .remote_set_url(name, &repo_ref.to_nostr_git_url(&Some(git_repo)))
         .is_err()
     {
         git_repo.git_repo.remote(name, &url)?;

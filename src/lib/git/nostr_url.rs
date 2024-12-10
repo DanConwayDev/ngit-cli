@@ -237,6 +237,16 @@ fn resolve_nip05_from_git_config_cache(nip05: &str, git_repo: &Option<&Repo>) ->
     }
 }
 
+pub fn use_nip05_git_config_cache_to_find_nip05_from_public_key(
+    public_key: &PublicKey,
+    git_repo: &Option<&Repo>,
+) -> Result<Option<String>> {
+    let h = load_nip_cache(git_repo)?;
+    Ok(h.iter()
+        .find_map(|(k, v)| if *v == *public_key { Some(k) } else { None })
+        .cloned())
+}
+
 fn save_nip05_to_git_config_cache(
     nip05: &str,
     public_key: &PublicKey,
