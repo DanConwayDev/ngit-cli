@@ -1,5 +1,5 @@
 use core::fmt;
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use nostr::nips::{nip01::Coordinate, nip05};
@@ -230,13 +230,11 @@ impl NostrUrlDecoded {
 }
 
 fn resolve_nip05_from_git_config_cache(nip05: &str, git_repo: &Option<&Repo>) -> Result<PublicKey> {
-    let stored_value = get_git_config_item(
-        git_repo,
-        &format!("nostr.nip05.{}", urlencoding::encode(nip05)),
-    )?
-    .context("not in cache")?;
-    PublicKey::parse(stored_value)
-        .context("stored nip05 resolution value did not parse as public key")
+    if let Some(public_key) = load_nip_cache(git_repo)?.get(nip05) {
+        Ok(*public_key)
+    } else {
+        bail!("nip05 not stored in local git config cache")
+    }
 }
 
 fn save_nip05_to_git_config_cache(
@@ -244,21 +242,32 @@ fn save_nip05_to_git_config_cache(
     public_key: &PublicKey,
     git_repo: &Option<&Repo>,
 ) -> Result<()> {
-    if save_git_config_item(
-        git_repo,
-        &format!("nostr.nip05.{}", urlencoding::encode(nip05)),
-        &public_key.to_bech32()?,
-    )
-    .is_err()
-    {
-        save_git_config_item(
-            &None,
-            &format!("nostr.nip05.{}", urlencoding::encode(nip05)),
-            &public_key.to_bech32()?,
-        )
-    } else {
-        Ok(())
+    let mut h = load_nip_cache(git_repo)?;
+    h.insert(nip05.to_string(), *public_key);
+
+    let s = h
+        .into_iter()
+        .map(|(nip05, public_key)| format!("{nip05}:{}", public_key.to_hex()))
+        .collect::<Vec<String>>()
+        .join(",");
+
+    save_git_config_item(git_repo, "nostr.nip05", s.as_str())
+        .context("could not save nip05 cache in git config")
+}
+
+fn load_nip_cache(git_repo: &Option<&Repo>) -> Result<HashMap<String, PublicKey>> {
+    let mut h = HashMap::new();
+    let stored_value = get_git_config_item(git_repo, "nostr.nip05")?
+        .context("no nip05s in local git config cache so retun empty cache")
+        .unwrap_or_default();
+    for pair in stored_value.split(',') {
+        if let Some((cached_nip05, pubkey)) = pair.split_once(':') {
+            if let Ok(public_key) = PublicKey::parse(pubkey) {
+                h.insert(cached_nip05.to_string(), public_key);
+            }
+        }
     }
+    Ok(h)
 }
 
 #[derive(Debug, PartialEq, Default)]
