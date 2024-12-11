@@ -136,7 +136,9 @@ impl NostrUrlDecoded {
         // extract optional protocol
         if protocol.is_none() {
             let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
-            let protocol_str = if let Some(at_index) = part.find('@') {
+            let protocol_str = if part.contains('.') {
+                part
+            } else if let Some(at_index) = part.find('@') {
                 user = Some(part[..at_index].to_string());
                 &part[at_index + 1..]
             } else {
@@ -147,7 +149,7 @@ impl NostrUrlDecoded {
                 "https" => Some(ServerProtocol::Https),
                 "http" => Some(ServerProtocol::Http),
                 "git" => Some(ServerProtocol::Git),
-                _ => protocol,
+                _ => None,
             };
             if protocol.is_some() {
                 parts.remove(0);
