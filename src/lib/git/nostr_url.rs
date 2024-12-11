@@ -191,11 +191,16 @@ impl NostrUrlDecoded {
                     {
                         public_key
                     } else {
-                        // TODO eprint loading message
+                        let term = console::Term::stderr();
+                        let domain = {
+                            let s = npub_or_nip05.split('@').collect::<Vec<&str>>();
+                            if s.len() == 2 { s[1] } else { s[0] }
+                        };
+                        term.write_line(&format!("fetching pubic key info from {domain}..."))?;
                         let res = nip05::profile(npub_or_nip05, None)
                             .await
                             .context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
-                        // TODO clear loading message
+                        term.clear_last_lines(1)?;
                         nip05 = Some(npub_or_nip05.to_string());
                         let _ = save_nip05_to_git_config_cache(
                             npub_or_nip05,
