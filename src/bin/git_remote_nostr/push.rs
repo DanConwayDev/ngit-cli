@@ -1110,6 +1110,7 @@ async fn create_merge_events(
                 {
                     vec![*commit]
                 } else {
+                    // child commits were added to merged_patches first so we reverse it
                     let mut t: Vec<Sha1Hash> = merged_patches.keys().copied().collect();
                     t.reverse();
                     t

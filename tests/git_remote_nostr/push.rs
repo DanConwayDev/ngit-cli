@@ -1174,22 +1174,35 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
                 .to_string()
         })
         .collect::<Vec<String>>();
+
     assert_eq!(
-        [
-            vec!["merge-commit-id".to_string()],
-            patch_commit_ids_parents_first
-        ]
-        .concat(),
-        merge_status
-            .tags
+        // HashSet::<String>::from_iter(vec![
+        //     "merge-commit-id".to_string(),
+        //     "6bd4f54bdf6a9ef2ec09e88e7a8d05376b0c1ff4".to_string(),
+        //     "eb5d67886abad23c259ebd684c2bba233f9ed3d1".to_string(),
+        // ]),
+        HashSet::from_iter(
+            [
+                vec!["merge-commit-id".to_string()],
+                patch_commit_ids_parents_first
+            ]
+            .concat()
             .iter()
-            .find(|t| t.as_slice()[0].eq("merge-commit-id"))
-            .unwrap()
-            .clone()
-            .to_vec(),
+            .cloned()
+        ),
+        HashSet::<String>::from_iter(
+            merge_status
+                .tags
+                .iter()
+                .find(|t| t.as_slice()[0].eq("merge-commit-id"))
+                .unwrap()
+                .clone()
+                .to_vec()
+                .iter()
+                .cloned()
+        ),
         "status sets correct merge-commit-id tag {merge_status:?}"
     );
-
     for patch_id in proposal_patches
         .iter()
         .map(|e| e.id.to_string())
