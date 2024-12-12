@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use console::Style;
@@ -443,7 +443,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         .map(std::string::ToString::to_string)
         .collect::<Vec<String>>();
 
-    prompt_to_set_nostr_url_as_origin(&repo_ref, &git_repo)?;
+    prompt_to_set_nostr_url_as_origin(&repo_ref, &git_repo).await?;
 
     // TODO: if no state event exists and there is currently a remote called
     // "origin", automtically push rather than waiting for the next commit
@@ -484,7 +484,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     Ok(())
 }
 
-fn prompt_to_set_nostr_url_as_origin(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
+async fn prompt_to_set_nostr_url_as_origin(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
     println!(
         "starting from your next commit, when you `git push` to a remote that uses your nostr url, it will store your repository state on nostr and update the state of the git server(s) you just listed."
     );
@@ -494,7 +494,9 @@ fn prompt_to_set_nostr_url_as_origin(repo_ref: &RepoRef, git_repo: &Repo) -> Res
 
     if let Ok(origin_remote) = git_repo.git_repo.find_remote("origin") {
         if let Some(origin_url) = origin_remote.url() {
-            if let Ok(nostr_url) = NostrUrlDecoded::from_str(origin_url) {
+            if let Ok(nostr_url) =
+                NostrUrlDecoded::parse_and_resolve(origin_url, &Some(git_repo)).await
+            {
                 if nostr_url.coordinate.identifier == repo_ref.identifier {
                     if nostr_url.coordinate.public_key == repo_ref.trusted_maintainer {
                         return Ok(());
@@ -521,7 +523,7 @@ fn prompt_to_set_nostr_url_as_origin(repo_ref: &RepoRef, git_repo: &Repo) -> Res
         }
     }
     println!("contributors can clone your repository by installing ngit and using this clone url:");
-    println!("{}", repo_ref.to_nostr_git_url());
+    println!("{}", repo_ref.to_nostr_git_url(&Some(git_repo)));
 
     Ok(())
 }
@@ -534,7 +536,7 @@ fn ask_to_set_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
     )? {
         git_repo
             .git_repo
-            .remote_set_url("origin", &repo_ref.to_nostr_git_url())?;
+            .remote_set_url("origin", &repo_ref.to_nostr_git_url(&Some(git_repo)))?;
     }
     Ok(())
 }
@@ -547,7 +549,7 @@ fn ask_to_create_new_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Resul
     )? {
         git_repo
             .git_repo
-            .remote("origin", &repo_ref.to_nostr_git_url())?;
+            .remote("origin", &repo_ref.to_nostr_git_url(&Some(git_repo)))?;
     }
     Ok(())
 }

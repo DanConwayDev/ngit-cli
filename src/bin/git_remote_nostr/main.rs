@@ -9,7 +9,6 @@ use std::{
     collections::HashSet,
     env, io,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 
 use anyhow::{bail, Context, Result};
@@ -28,7 +27,7 @@ mod utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let Some((decoded_nostr_url, git_repo)) = process_args()? else {
+    let Some((decoded_nostr_url, git_repo)) = process_args().await? else {
         return Ok(());
     };
 
@@ -118,7 +117,7 @@ async fn main() -> Result<()> {
     }
 }
 
-fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
+async fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
     let args = env::args();
     let args = args.skip(1).take(2).collect::<Vec<_>>();
 
@@ -144,12 +143,13 @@ fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
         return Ok(None);
     };
 
-    let decoded_nostr_url =
-        NostrUrlDecoded::from_str(nostr_remote_url).context("invalid nostr url")?;
-
     let git_repo = Repo::from_path(&PathBuf::from(
         std::env::var("GIT_DIR").context("git should set GIT_DIR when remote helper is called")?,
     ))?;
+
+    let decoded_nostr_url = NostrUrlDecoded::parse_and_resolve(nostr_remote_url, &Some(&git_repo))
+        .await
+        .context("invalid nostr url")?;
 
     Ok(Some((decoded_nostr_url, git_repo)))
 }

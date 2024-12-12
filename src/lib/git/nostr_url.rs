@@ -1,9 +1,11 @@
 use core::fmt;
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use nostr::nips::nip01::Coordinate;
+use nostr::nips::{nip01::Coordinate, nip05};
 use nostr_sdk::{PublicKey, RelayUrl, ToBech32, Url};
+
+use super::{get_git_config_item, save_git_config_item, Repo};
 
 #[derive(Debug, PartialEq, Default, Clone)]
 pub enum ServerProtocol {
@@ -59,6 +61,7 @@ pub struct NostrUrlDecoded {
     pub coordinate: Coordinate,
     pub protocol: Option<ServerProtocol>,
     pub user: Option<String>,
+    pub nip05: Option<String>,
 }
 
 impl fmt::Display for NostrUrlDecoded {
@@ -89,10 +92,8 @@ impl fmt::Display for NostrUrlDecoded {
 
 static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format. try nostr://naddr123 or nostr://npub123/my-repo or nostr://ssh/npub123/relay.damus.io/my-repo";
 
-impl std::str::FromStr for NostrUrlDecoded {
-    type Err = anyhow::Error;
-
-    fn from_str(url: &str) -> Result<Self> {
+impl NostrUrlDecoded {
+    pub async fn parse_and_resolve(url: &str, git_repo: &Option<&Repo>) -> Result<Self> {
         let mut protocol = None;
         let mut user = None;
         let mut relays = vec![];
@@ -135,7 +136,9 @@ impl std::str::FromStr for NostrUrlDecoded {
         // extract optional protocol
         if protocol.is_none() {
             let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
-            let protocol_str = if let Some(at_index) = part.find('@') {
+            let protocol_str = if part.contains('.') {
+                part
+            } else if let Some(at_index) = part.find('@') {
                 user = Some(part[..at_index].to_string());
                 &part[at_index + 1..]
             } else {
@@ -146,7 +149,7 @@ impl std::str::FromStr for NostrUrlDecoded {
                 "https" => Some(ServerProtocol::Https),
                 "http" => Some(ServerProtocol::Http),
                 "git" => Some(ServerProtocol::Git),
-                _ => protocol,
+                _ => None,
             };
             if protocol.is_some() {
                 parts.remove(0);
@@ -154,6 +157,7 @@ impl std::str::FromStr for NostrUrlDecoded {
         }
         // extract naddr npub/<optional-relays>/identifer
         let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
+        let mut nip05 = None;
         // naddr used
         let coordinate = if let Ok(coordinate) = Coordinate::parse(part) {
             if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
@@ -161,8 +165,9 @@ impl std::str::FromStr for NostrUrlDecoded {
             } else {
                 bail!("naddr doesnt point to a git repository announcement");
             }
-        // npub/<optional-relays>/identifer used
-        } else if let Ok(public_key) = PublicKey::parse(part) {
+        // <npub|nip05_address>/<optional-relays>/identifer used
+        } else {
+            let npub_or_nip05 = part.to_owned();
             parts.remove(0);
             let identifier = parts
                 .pop()
@@ -179,14 +184,46 @@ impl std::str::FromStr for NostrUrlDecoded {
                     RelayUrl::parse(&decoded).context("could not parse relays in nostr git url")?;
                 relays.push(url);
             }
+            let public_key = match PublicKey::parse(npub_or_nip05) {
+                Ok(public_key) => public_key,
+                Err(_) => {
+                    nip05 = Some(npub_or_nip05.to_string());
+                    if let Ok(public_key) =
+                        resolve_nip05_from_git_config_cache(npub_or_nip05, git_repo)
+                    {
+                        public_key
+                    } else {
+                        let term = console::Term::stderr();
+                        let domain = {
+                            let s = npub_or_nip05.split('@').collect::<Vec<&str>>();
+                            if s.len() == 2 { s[1] } else { s[0] }
+                        };
+                        term.write_line(&format!("fetching pubic key info from {domain}..."))?;
+                        let res = nip05::profile(npub_or_nip05, None)
+                            .await
+                            .context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
+                        term.clear_last_lines(1)?;
+                        nip05 = Some(npub_or_nip05.to_string());
+                        let _ = save_nip05_to_git_config_cache(
+                            npub_or_nip05,
+                            &res.public_key,
+                            git_repo,
+                        );
+                        if relays.is_empty() {
+                            for r in res.relays {
+                                relays.push(r);
+                            }
+                        }
+                        res.public_key
+                    }
+                }
+            };
             Coordinate {
                 identifier,
                 public_key,
                 kind: nostr_sdk::Kind::GitRepoAnnouncement,
                 relays,
             }
-        } else {
-            bail!(INCORRECT_NOSTR_URL_FORMAT_ERROR);
         };
 
         Ok(Self {
@@ -194,8 +231,60 @@ impl std::str::FromStr for NostrUrlDecoded {
             coordinate,
             protocol,
             user,
+            nip05,
         })
     }
+}
+
+fn resolve_nip05_from_git_config_cache(nip05: &str, git_repo: &Option<&Repo>) -> Result<PublicKey> {
+    if let Some(public_key) = load_nip_cache(git_repo)?.get(nip05) {
+        Ok(*public_key)
+    } else {
+        bail!("nip05 not stored in local git config cache")
+    }
+}
+
+pub fn use_nip05_git_config_cache_to_find_nip05_from_public_key(
+    public_key: &PublicKey,
+    git_repo: &Option<&Repo>,
+) -> Result<Option<String>> {
+    let h = load_nip_cache(git_repo)?;
+    Ok(h.iter()
+        .find_map(|(k, v)| if *v == *public_key { Some(k) } else { None })
+        .cloned())
+}
+
+fn save_nip05_to_git_config_cache(
+    nip05: &str,
+    public_key: &PublicKey,
+    git_repo: &Option<&Repo>,
+) -> Result<()> {
+    let mut h = load_nip_cache(git_repo)?;
+    h.insert(nip05.to_string(), *public_key);
+
+    let s = h
+        .into_iter()
+        .map(|(nip05, public_key)| format!("{nip05}:{}", public_key.to_hex()))
+        .collect::<Vec<String>>()
+        .join(",");
+
+    save_git_config_item(git_repo, "nostr.nip05", s.as_str())
+        .context("could not save nip05 cache in git config")
+}
+
+fn load_nip_cache(git_repo: &Option<&Repo>) -> Result<HashMap<String, PublicKey>> {
+    let mut h = HashMap::new();
+    let stored_value = get_git_config_item(git_repo, "nostr.nip05")?
+        .context("no nip05s in local git config cache so retun empty cache")
+        .unwrap_or_default();
+    for pair in stored_value.split(',') {
+        if let Some((cached_nip05, pubkey)) = pair.split_once(':') {
+            if let Ok(public_key) = PublicKey::parse(pubkey) {
+                h.insert(cached_nip05.to_string(), public_key);
+            }
+        }
+    }
+    Ok(h)
 }
 
 #[derive(Debug, PartialEq, Default)]
@@ -887,6 +976,7 @@ mod tests {
                         },
                         protocol: None,
                         user: None,
+                        nip05: None,
                     }
                 ),
                 "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
@@ -912,6 +1002,7 @@ mod tests {
                         },
                         protocol: None,
                         user: None,
+                        nip05: None,
                     }
                 ),
                 "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit",
@@ -937,6 +1028,7 @@ mod tests {
                         },
                         protocol: Some(ServerProtocol::Ssh),
                         user: None,
+                        nip05: None,
                     }
                 ),
                 "nostr://ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
@@ -962,6 +1054,7 @@ mod tests {
                         },
                         protocol: Some(ServerProtocol::Ssh),
                         user: Some("bla".to_string()),
+                        nip05: None,
                     }
                 ),
                 "nostr://bla@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
@@ -971,8 +1064,6 @@ mod tests {
     }
 
     mod nostr_url_decoded_paramemters_from_str {
-        use std::str::FromStr;
-
         use super::*;
 
         fn get_model_coordinate(relays: bool) -> Coordinate {
@@ -991,11 +1082,11 @@ mod tests {
             }
         }
 
-        #[test]
-        fn from_naddr() -> Result<()> {
+        #[tokio::test]
+        async fn from_naddr() -> Result<()> {
             let url = "nostr://naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqvzqqqrhnym0k2qj".to_string();
             assert_eq!(
-                NostrUrlDecoded::from_str(&url)?,
+                NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                 NostrUrlDecoded {
                     original_string: url.clone(),
                     coordinate: Coordinate {
@@ -1010,6 +1101,7 @@ mod tests {
                     },
                     protocol: None,
                     user: None,
+                    nip05: None,
                 },
             );
             Ok(())
@@ -1018,18 +1110,19 @@ mod tests {
         mod from_npub_slash_identifier {
             use super::*;
 
-            #[test]
-            fn without_relay() -> Result<()> {
+            #[tokio::test]
+            async fn without_relay() -> Result<()> {
                 let url =
                     "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit"
                         .to_string();
                 assert_eq!(
-                    NostrUrlDecoded::from_str(&url)?,
+                    NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
                         coordinate: get_model_coordinate(false),
                         protocol: None,
                         user: None,
+                        nip05: None,
                     },
                 );
                 Ok(())
@@ -1038,48 +1131,50 @@ mod tests {
             mod with_url_parameters {
                 use super::*;
 
-                #[test]
-                fn with_relay_without_scheme_defaults_to_wss() -> Result<()> {
+                #[tokio::test]
+                async fn with_relay_without_scheme_defaults_to_wss() -> Result<()> {
                     let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay=nos.lol".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
+                            nip05: None,
                         },
                     );
                     Ok(())
                 }
 
-                #[test]
-                fn with_encoded_relay() -> Result<()> {
+                #[tokio::test]
+                async fn with_encoded_relay() -> Result<()> {
                     let url = format!(
                         "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}",
                         urlencoding::encode("wss://nos.lol")
                     );
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
+                            nip05: None,
                         },
                     );
                     Ok(())
                 }
 
-                #[test]
-                fn with_multiple_encoded_relays() -> Result<()> {
+                #[tokio::test]
+                async fn with_multiple_encoded_relays() -> Result<()> {
                     let url = format!(
                         "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}&relay1={}",
                         urlencoding::encode("wss://nos.lol/"),
                         urlencoding::encode("wss://relay.damus.io/"),
                     );
                     assert_eq!(
-                    NostrUrlDecoded::from_str(&url)?,
+                    NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
                         coordinate: Coordinate {
@@ -1096,36 +1191,39 @@ mod tests {
                         },
                         protocol: None,
                         user: None,
+                        nip05: None,
                     },
                 );
                     Ok(())
                 }
 
-                #[test]
-                fn with_server_protocol() -> Result<()> {
+                #[tokio::test]
+                async fn with_server_protocol() -> Result<()> {
                     let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: None,
+                            nip05: None,
                         },
                     );
                     Ok(())
                 }
 
-                #[test]
-                fn with_server_protocol_and_user() -> Result<()> {
+                #[tokio::test]
+                async fn with_server_protocol_and_user() -> Result<()> {
                     let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh&user=fred".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: Some("fred".to_string()),
+                            nip05: None,
                         },
                     );
                     Ok(())
@@ -1135,48 +1233,50 @@ mod tests {
             mod with_parameters_embedded_with_slashes {
                 use super::*;
 
-                #[test]
-                fn with_relay_without_scheme_defaults_to_wss() -> Result<()> {
+                #[tokio::test]
+                async fn with_relay_without_scheme_defaults_to_wss() -> Result<()> {
                     let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
+                            nip05: None,
                         },
                     );
                     Ok(())
                 }
 
-                #[test]
-                fn with_encoded_relay() -> Result<()> {
+                #[tokio::test]
+                async fn with_encoded_relay() -> Result<()> {
                     let url = format!(
                         "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/{}/ngit",
                         urlencoding::encode("wss://nos.lol")
                     );
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
                             user: None,
+                            nip05: None,
                         },
                     );
                     Ok(())
                 }
 
-                #[test]
-                fn with_multiple_encoded_relays() -> Result<()> {
+                #[tokio::test]
+                async fn with_multiple_encoded_relays() -> Result<()> {
                     let url = format!(
                         "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/{}/{}/ngit",
                         urlencoding::encode("wss://nos.lol/"),
                         urlencoding::encode("wss://relay.damus.io/"),
                     );
                     assert_eq!(
-                    NostrUrlDecoded::from_str(&url)?,
+                    NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
                         coordinate: Coordinate {
@@ -1193,36 +1293,39 @@ mod tests {
                         },
                         protocol: None,
                         user: None,
+                        nip05: None,
                     },
                 );
                     Ok(())
                 }
 
-                #[test]
-                fn with_server_protocol() -> Result<()> {
+                #[tokio::test]
+                async fn with_server_protocol() -> Result<()> {
                     let url = "nostr://ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: None,
+                            nip05: None,
                         },
                     );
                     Ok(())
                 }
 
-                #[test]
-                fn with_server_protocol_and_user() -> Result<()> {
+                #[tokio::test]
+                async fn with_server_protocol_and_user() -> Result<()> {
                     let url = "nostr://fred@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit".to_string();
                     assert_eq!(
-                        NostrUrlDecoded::from_str(&url)?,
+                        NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
                             user: Some("fred".to_string()),
+                            nip05: None,
                         },
                     );
                     Ok(())
