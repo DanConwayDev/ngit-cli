@@ -1104,11 +1104,11 @@ async fn create_merge_events(
                 } else {
                     None
                 },
-                if merged_patches
-                    .values()
-                    .any(|m| m == &MergedPRCommitType::MergeCommit)
+                if let Some((commit, _)) = merged_patches
+                    .iter()
+                    .find(|(_, m)| **m == MergedPRCommitType::MergeCommit)
                 {
-                    vec![*merged_patches.keys().next().unwrap()]
+                    vec![*commit]
                 } else {
                     let mut t: Vec<Sha1Hash> = merged_patches.keys().copied().collect();
                     t.reverse();

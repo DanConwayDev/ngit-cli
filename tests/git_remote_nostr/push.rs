@@ -896,7 +896,6 @@ async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
 #[serial]
 async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_issued() -> Result<()>
 {
-    //
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
     let source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
@@ -1164,7 +1163,7 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
     // println!("merge status");
     // println!("{:?}", merge_status);
 
-    let patch_commit_ids = proposal_patches
+    let patch_commit_ids_parents_first = proposal_patches
         .iter()
         .map(|e| {
             e.tags
@@ -1176,7 +1175,11 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
         })
         .collect::<Vec<String>>();
     assert_eq!(
-        [vec!["merge-commit-id".to_string()], patch_commit_ids].concat(),
+        [
+            vec!["merge-commit-id".to_string()],
+            patch_commit_ids_parents_first
+        ]
+        .concat(),
         merge_status
             .tags
             .iter()
