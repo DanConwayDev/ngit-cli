@@ -1031,7 +1031,7 @@ async fn get_merged_proposals_info(
         } else {
             // three way merge or fast forward merge commits
             // note: ahead included commits of three-way merged branches
-            for patch_event in available_patches
+            let mut matching_patches = available_patches
                 .iter()
                 .filter(|e| {
                     e.tags.iter().any(|t| {
@@ -1040,8 +1040,8 @@ async fn get_merged_proposals_info(
                             && t.as_slice()[1].eq(&commit_hash.to_string())
                     })
                 })
-                .collect::<Vec<&Event>>()
-            {
+                .collect::<Vec<&Event>>();
+            for patch_event in &matching_patches {
                 if let Ok((proposal_id, revision_id)) =
                     get_proposal_and_revision_root_from_patch(git_repo, patch_event).await
                 {
@@ -1058,9 +1058,57 @@ async fn get_merged_proposals_info(
                     }
                 }
             }
+            // applied commits - this is done after so that merged revisions take priority
+            if matching_patches.is_empty() {
+                let author = git_repo.get_commit_author(commit_hash)?;
+                matching_patches = available_patches
+                    .iter()
+                    .filter(|e| {
+                        if let Ok(patch_author) = get_patch_author(e) {
+                            patch_author == author
+                        } else {
+                            false
+                        }
+                    })
+                    .collect::<Vec<&Event>>();
+                for patch_event in matching_patches {
+                    if let Ok((proposal_id, revision_id)) =
+                        get_proposal_and_revision_root_from_patch(git_repo, patch_event).await
+                    {
+                        let (entry_revision_id, merged_patches) =
+                            proposals.entry(proposal_id).or_default();
+                        // ignore revisions without all the applied commits
+                        if entry_revision_id == &revision_id {
+                            merged_patches.insert(
+                                *commit_hash,
+                                MergedPRCommitType::PatchApplied {
+                                    event_id: patch_event.id,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(proposals)
+}
+
+fn get_patch_author(event: &Event) -> Result<Vec<String>> {
+    for t in event.tags.clone() {
+        match t.as_slice() {
+            [tag, name, email, unixtime, offset] if tag == "author" => {
+                return Ok(vec![
+                    name.to_string(),
+                    email.to_string(),
+                    unixtime.to_string(),
+                    offset.to_string(),
+                ]);
+            }
+            _ => (),
+        }
+    }
+    bail!("could not find valid author tag")
 }
 
 async fn create_merge_events(
@@ -1082,6 +1130,17 @@ async fn create_merge_events(
                 format!(
                     "merge commit {}: create nostr proposal status event",
                     &merged_patches.keys().next().unwrap().to_string()[..7],
+                )
+                .as_str(),
+            )?;
+        } else if merged_patches
+            .values()
+            .any(|m| matches!(m, MergedPRCommitType::PatchApplied { .. }))
+        {
+            term.write_line(
+                format!(
+                    "applied commits from proposal: create nostr proposal status event for {}",
+                    event_to_cover_letter(&proposal)?.get_branch_name()?,
                 )
                 .as_str(),
             )?;
@@ -1123,6 +1182,12 @@ async fn create_merge_events(
                         | MergedPRCommitType::PatchCommit { event_id } => Some(*event_id),
                     })
                     .collect(),
+                !merged_patches
+                    .iter()
+                    .any(|(_, m)| *m == MergedPRCommitType::MergeCommit)
+                    && merged_patches
+                        .values()
+                        .any(|m| matches!(m, MergedPRCommitType::PatchApplied { .. })),
             )
             .await?,
         );
@@ -1130,7 +1195,7 @@ async fn create_merge_events(
     Ok(events)
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum MergedPRCommitType {
     MergeCommit,
     PatchCommit { event_id: EventId },
@@ -1144,6 +1209,7 @@ async fn create_merge_status(
     revision: &Option<Event>,
     merge_commits: Vec<Sha1Hash>,
     merged_patches: Vec<EventId>,
+    applied: bool,
 ) -> Result<Event> {
     let mut public_keys = repo_ref
         .maintainers
@@ -1205,7 +1271,11 @@ async fn create_merge_status(
                         repo_ref.root_commit.to_string(),
                     )),
                     Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("merge-commit-id")),
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed(if applied {
+                            "applied-as-commits"
+                        } else {
+                            "merge-commit-id"
+                        })),
                         merge_commits
                             .iter()
                             .map(|merge_commit| format!("{merge_commit}"))
