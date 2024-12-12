@@ -77,9 +77,9 @@ pub async fn launch() -> Result<()> {
             .iter()
             .filter(|e| {
                 status_kinds().contains(&e.kind)
-                    && e.tags
-                        .iter()
-                        .any(|t| t.as_slice()[1].eq(&proposal.id.to_string()))
+                    && e.tags.iter().any(|t| {
+                        t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
+                    })
             })
             .collect::<Vec<&nostr::Event>>()
             .first()

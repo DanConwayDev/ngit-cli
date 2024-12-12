@@ -18,7 +18,7 @@ pub fn tag_value(event: &Event, tag_name: &str) -> Result<String> {
     Ok(event
         .tags
         .iter()
-        .find(|t| t.as_slice()[0].eq(tag_name))
+        .find(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq(tag_name))
         .context(format!("tag '{tag_name}'not present"))?
         .as_slice()[1]
         .clone())
@@ -59,7 +59,11 @@ pub fn status_kinds() -> Vec<Kind> {
 }
 
 pub fn event_is_patch_set_root(event: &Event) -> bool {
-    event.kind.eq(&Kind::GitPatch) && event.tags.iter().any(|t| t.as_slice()[1].eq("root"))
+    event.kind.eq(&Kind::GitPatch)
+        && event
+            .tags
+            .iter()
+            .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("root"))
 }
 
 pub fn event_is_revision_root(event: &Event) -> bool {
@@ -67,7 +71,7 @@ pub fn event_is_revision_root(event: &Event) -> bool {
         && event
             .tags
             .iter()
-            .any(|t| t.as_slice()[1].eq("revision-root"))
+            .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("revision-root"))
 }
 
 pub fn patch_supports_commit_ids(event: &Event) -> bool {
@@ -75,7 +79,7 @@ pub fn patch_supports_commit_ids(event: &Event) -> bool {
         && event
             .tags
             .iter()
-            .any(|t| t.as_slice()[0].eq("commit-pgp-sig"))
+            .any(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq("commit-pgp-sig"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -473,11 +477,14 @@ pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
     //   [PATCH v1 0/n ] or
     //   [PATCH subsystem v2 0/n ]
     event.kind.eq(&Kind::GitPatch)
-        && event.tags.iter().any(|t| t.as_slice()[1].eq("root"))
         && event
             .tags
             .iter()
-            .any(|t| t.as_slice()[1].eq("cover-letter"))
+            .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("root"))
+        && event
+            .tags
+            .iter()
+            .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("cover-letter"))
 }
 
 pub fn commit_msg_from_patch(patch: &nostr::Event) -> Result<String> {

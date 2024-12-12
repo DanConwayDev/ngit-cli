@@ -850,7 +850,7 @@ fn git_sig_to_tag_vec(sig: &git2::Signature) -> Vec<String> {
 fn extract_sig_from_patch_tags<'a>(tags: &'a Tags, tag_name: &str) -> Result<git2::Signature<'a>> {
     let v = tags
         .iter()
-        .find(|t| t.as_slice()[0].eq(tag_name))
+        .find(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq(tag_name))
         .context(format!("tag '{tag_name}' not present in patch"))?
         .as_slice();
     if v.len() != 5 {

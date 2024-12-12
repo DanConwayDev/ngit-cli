@@ -187,10 +187,11 @@ pub fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event
                 .tags
                 .iter()
                 .filter(|t| {
-                    t.kind()
-                        .eq(&nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(
-                            Alphabet::R,
-                        )))
+                    t.as_slice().len() > 1
+                        && t.kind()
+                            .eq(&nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(
+                                Alphabet::R,
+                            )))
                 })
                 .map(|t| UserRelayRef {
                     url: t.as_slice()[1].clone(),

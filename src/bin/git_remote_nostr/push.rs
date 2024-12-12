@@ -1010,7 +1010,8 @@ async fn get_merged_proposals_info(
                     .iter()
                     .filter(|e| {
                         e.tags.iter().any(|t| {
-                            t.as_slice()[0].eq("commit")
+                            t.as_slice().len() > 1
+                                && t.as_slice()[0].eq("commit")
                                 && t.as_slice()[1].eq(&parent.id().to_string())
                         })
                     })
@@ -1034,7 +1035,9 @@ async fn get_merged_proposals_info(
                 .iter()
                 .filter(|e| {
                     e.tags.iter().any(|t| {
-                        t.as_slice()[0].eq("commit") && t.as_slice()[1].eq(&commit_hash.to_string())
+                        t.as_slice().len() > 1
+                            && t.as_slice()[0].eq("commit")
+                            && t.as_slice()[1].eq(&commit_hash.to_string())
                     })
                 })
                 .collect::<Vec<&Event>>()
@@ -1228,7 +1231,11 @@ async fn get_proposal_and_revision_root_from_patch(
     git_repo: &Repo,
     patch: &Event,
 ) -> Result<(EventId, Option<EventId>)> {
-    let proposal_or_revision = if patch.tags.iter().any(|t| t.as_slice()[1].eq("root")) {
+    let proposal_or_revision = if patch
+        .tags
+        .iter()
+        .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("root"))
+    {
         patch.clone()
     } else {
         let proposal_or_revision_id = EventId::parse(
@@ -1260,7 +1267,7 @@ async fn get_proposal_and_revision_root_from_patch(
     if proposal_or_revision
         .tags
         .iter()
-        .any(|t| t.as_slice()[1].eq("revision-root"))
+        .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("revision-root"))
     {
         Ok((
             EventId::parse(
