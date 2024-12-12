@@ -10,6 +10,7 @@ use anyhow::{bail, ensure, Context, Result};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use futures::executor::block_on;
 use git::GitTestRepo;
+use git2::{Signature, Time};
 use nostr::{self, nips::nip65::RelayMetadata, Kind, Tag};
 use nostr_database::NostrEventsDatabase;
 use nostr_lmdb::NostrLMDB;
@@ -1226,19 +1227,62 @@ pub fn create_and_populate_branch(
     test_repo.checkout("main")?;
     test_repo.create_branch(branch_name)?;
     test_repo.checkout(branch_name)?;
-    std::fs::write(
-        test_repo.dir.join(format!("{}3.md", prefix)),
-        "some content",
+    let file_name = format!("{}3.md", prefix);
+    std::fs::write(test_repo.dir.join(&file_name), "some content")?;
+    test_repo.stage_and_commit_custom_signature(
+        &format!("add {}3.md", prefix),
+        Some(
+            &Signature::new(
+                "Joe Bloggs",
+                "joe.bloggs@pm.me",
+                &Time::new(deterministic_timestamp(&file_name), 0),
+            )
+            .unwrap(),
+        ),
+        None,
     )?;
-    test_repo.stage_and_commit(format!("add {}3.md", prefix).as_str())?;
     if !only_one_commit {
-        std::fs::write(
-            test_repo.dir.join(format!("{}4.md", prefix)),
-            "some content",
+        let file_name = format!("{}4.md", prefix);
+        std::fs::write(test_repo.dir.join(&file_name), "some content")?;
+        test_repo.stage_and_commit_custom_signature(
+            &format!("add {}4.md", prefix),
+            Some(
+                &Signature::new(
+                    "Joe Bloggs",
+                    "joe.bloggs@pm.me",
+                    &Time::new(deterministic_timestamp(&file_name), 0),
+                )
+                .unwrap(),
+            ),
+            None,
         )?;
-        test_repo.stage_and_commit(format!("add {}4.md", prefix).as_str())?;
     }
     Ok(())
+}
+
+use sha2::{Digest, Sha256};
+
+fn deterministic_timestamp(input: &str) -> i64 {
+    // Create a SHA-256 hasher
+    let mut hasher = Sha256::new();
+
+    // Hash the input string
+    hasher.update(input);
+
+    // Get the hash result
+    let result = hasher.finalize();
+
+    // Convert the first 8 bytes of the hash to an i64
+    let timestamp_bytes = &result[..8];
+    let timestamp = i64::from_be_bytes(
+        timestamp_bytes
+            .try_into()
+            .expect("slice with incorrect length"),
+    );
+
+    // Normalize the timestamp to a valid Unix timestamp
+    // You can adjust this to fit your needs, e.g., adding a base timestamp
+    timestamp.abs() % 1_000_000_000 // Keep it within a reasonable range
 }
 
 pub fn cli_tester_create_proposal(

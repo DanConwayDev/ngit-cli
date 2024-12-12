@@ -21,3 +21,4 @@ simple-websockets = { git = "https://github.com/DanConwayDev/simple-websockets",
 strip-ansi-escapes = "0.2.0"
 tokio = { version = "1.40.0", features = ["full"] }
 tungstenite = "0.20.1"
+sha2 = "0.10"

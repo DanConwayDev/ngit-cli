@@ -1179,7 +1179,7 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
         // HashSet::<String>::from_iter(vec![
         //     "merge-commit-id".to_string(),
         //     "6bd4f54bdf6a9ef2ec09e88e7a8d05376b0c1ff4".to_string(),
-        //     "eb5d67886abad23c259ebd684c2bba233f9ed3d1".to_string(),
+        //     "f1d302586abad23c259ebd684c2bba233f9ed3d1".to_string(),
         // ]),
         HashSet::from_iter(
             [
@@ -1292,7 +1292,7 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
 
     assert_eq!(
         output,
-        format!("   eb5d678..7de5e41  {branch_name} -> {branch_name}\r\n").as_str(),
+        format!("   2d1b467..9d83ff4  {branch_name} -> {branch_name}\r\n").as_str(),
     );
 
     let new_events = r55
@@ -1447,7 +1447,7 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
 
     assert_eq!(
         output,
-        format!(" + eb5d678...8a296c8 {branch_name} -> {branch_name} (forced update)\r\n").as_str(),
+        format!(" + 2d1b467...ead85e0 {branch_name} -> {branch_name} (forced update)\r\n").as_str(),
     );
 
     let new_events = r55

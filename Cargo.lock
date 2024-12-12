@@ -3314,6 +3314,7 @@ dependencies = [
  "once_cell",
  "rand",
  "rexpect",
+ "sha2",
  "simple-websockets",
  "strip-ansi-escapes",
  "tokio",
