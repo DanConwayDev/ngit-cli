@@ -126,6 +126,7 @@ pub async fn run_push(
     let (rejected_proposal_refspecs, rejected) = create_and_publish_events(
         git_repo,
         repo_ref,
+        decoded_nostr_url,
         &git_server_refspecs,
         &proposal_refspecs,
         client,
@@ -173,9 +174,11 @@ pub async fn run_push(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_and_publish_events(
     git_repo: &Repo,
     repo_ref: &RepoRef,
+    decoded_nostr_url: &NostrUrlDecoded,
     git_server_refspecs: &Vec<String>,
     proposal_refspecs: &Vec<String>,
     client: &Client,
@@ -216,15 +219,28 @@ async fn create_and_publish_events(
             events.push(new_repo_state.event);
         }
 
-        for event in
-            get_merged_status_events(term, repo_ref, git_repo, &signer, git_server_refspecs).await?
+        for event in get_merged_status_events(
+            term,
+            decoded_nostr_url,
+            repo_ref,
+            git_repo,
+            &signer,
+            git_server_refspecs,
+        )
+        .await?
         {
             events.push(event);
         }
 
-        if let Ok(Some(repo_ref_event)) =
-            get_maintainers_yaml_update(term, repo_ref, git_repo, &signer, git_server_refspecs)
-                .await
+        if let Ok(Some(repo_ref_event)) = get_maintainers_yaml_update(
+            term,
+            decoded_nostr_url,
+            repo_ref,
+            git_repo,
+            &signer,
+            git_server_refspecs,
+        )
+        .await
         {
             events.push(repo_ref_event);
         }
@@ -914,6 +930,7 @@ fn generate_updated_state(
 
 async fn get_maintainers_yaml_update(
     term: &console::Term,
+    decoded_nostr_url: &NostrUrlDecoded,
     repo_ref: &RepoRef,
     git_repo: &Repo,
     signer: &Arc<dyn NostrSigner>,
@@ -927,7 +944,7 @@ async fn get_maintainers_yaml_update(
                 git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
                     &git_repo.git_repo,
                     refspec,
-                    &repo_ref.to_nostr_git_url(&Some(git_repo)),
+                    &decoded_nostr_url.original_string,
                 )?)?;
             let diff = git_repo.git_repo.diff_tree_to_tree(
                 Some(
@@ -982,6 +999,7 @@ async fn get_maintainers_yaml_update(
 
 async fn get_merged_status_events(
     term: &console::Term,
+    decoded_nostr_url: &NostrUrlDecoded,
     repo_ref: &RepoRef,
     git_repo: &Repo,
     signer: &Arc<dyn NostrSigner>,
@@ -996,7 +1014,7 @@ async fn get_merged_status_events(
                 git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
                     &git_repo.git_repo,
                     refspec,
-                    &repo_ref.to_nostr_git_url(&Some(git_repo)),
+                    &decoded_nostr_url.original_string,
                 )?)
             else {
                 // branch not on remote
