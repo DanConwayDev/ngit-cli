@@ -1,3 +1,5 @@
+use git2::Signature;
+
 use super::*;
 
 #[tokio::test]
@@ -1159,9 +1161,6 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
         .iter()
         .find(|e| e.kind.eq(&Kind::GitStatusApplied))
         .unwrap();
-    // println!("{:?}", proposal_cover_letter_event);
-    // println!("merge status");
-    // println!("{:?}", merge_status);
 
     let patch_commit_ids_parents_first = proposal_patches
         .iter()
@@ -1203,6 +1202,176 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
         ),
         "status sets correct merge-commit-id tag {merge_status:?}"
     );
+    for patch_id in proposal_patches
+        .iter()
+        .map(|e| e.id.to_string())
+        .collect::<Vec<String>>()
+    {
+        assert!(
+            merge_status.tags.iter().any(|t| t.as_slice().len().eq(&4)
+                && t.as_slice()[1] == patch_id
+                && t.as_slice()[3].eq("mention")),
+            "merge status doesnt mention proposal patch {patch_id}  \r\nmerge status:\r\n{}",
+            merge_status.as_json(),
+        );
+    }
+
+    assert_eq!(
+        proposal_cover_letter_event.id.to_string(),
+        merge_status
+            .tags
+            .iter()
+            .find(|t| t.is_root())
+            .unwrap()
+            .as_slice()[1],
+        "status tags proposal id as root \r\nmerge status:\r\n{}\r\nproposal:\r\n{}",
+        merge_status.as_json(),
+        proposal_cover_letter_event.as_json(),
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn proposal_commits_applied_and_pushed_to_main_leads_to_status_event_issued() -> Result<()> {
+    //
+    let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
+    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+        Relay::new(8051, None, None),
+        Relay::new(8052, None, None),
+        Relay::new(8053, None, None),
+        Relay::new(8055, None, None),
+        Relay::new(8056, None, None),
+        Relay::new(8057, None, None),
+    );
+    r51.events = events.clone();
+    r55.events = events.clone();
+
+    #[allow(clippy::mutable_key_type)]
+    let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
+
+    let cli_tester_handle = std::thread::spawn(move || -> Result<(String, Oid, Oid)> {
+        let branch_name = get_proposal_branch_name_from_events(&events, FEATURE_BRANCH_NAME_1)?;
+
+        let git_repo = clone_git_repo_with_nostr_url()?;
+        create_and_populate_branch(
+            &git_repo,
+            "tmptmp",
+            "a",
+            false,
+            Some(&Signature::now("Different User", "other.user@nostr.com")?),
+        )?;
+        let applied_proposal_tip = git_repo.get_tip_of_local_branch("tmptmp")?;
+
+        git_repo.git_repo.branch(
+            "main",
+            &git_repo.git_repo.find_commit(applied_proposal_tip)?,
+            true,
+        )?;
+        let main_oid = git_repo.checkout("refs/heads/main")?;
+        assert_eq!(applied_proposal_tip, main_oid);
+
+        let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
+        cli_expect_nostr_fetch(&mut p)?;
+        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect("list: connecting...\r\n")?;
+        p.expect_eventually(format!(
+            "applied commits from proposal: create nostr proposal status event for {branch_name}\r\n" ))?;
+        // status updates printed here
+        p.expect_eventually(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        let output = p.expect_end_eventually()?;
+
+        for p in [51, 52, 53, 55, 56, 57] {
+            relay::shutdown_relay(8000 + p)?;
+        }
+
+        let first_applied_commit_oid = git_repo
+            .git_repo
+            .find_commit(applied_proposal_tip)?
+            .parent(0)?
+            .id();
+        Ok((output, first_applied_commit_oid, applied_proposal_tip))
+    });
+    // launch relays
+    let _ = join!(
+        r51.listen_until_close(),
+        r52.listen_until_close(),
+        r53.listen_until_close(),
+        r55.listen_until_close(),
+        r56.listen_until_close(),
+        r57.listen_until_close(),
+    );
+
+    let (output, first_oid, tip_oid) = cli_tester_handle.join().unwrap()?;
+
+    assert_eq!(
+        output,
+        format!(
+            "   431b84e..{}  main -> main\r\n",
+            &tip_oid.to_string()[..7]
+        )
+    );
+
+    let new_events = r55
+        .events
+        .iter()
+        .cloned()
+        .collect::<HashSet<Event>>()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<Event>>();
+
+    assert_eq!(new_events.len(), 2, "{new_events:?}");
+
+    let proposal_cover_letter_event = r55
+        .events
+        .iter()
+        .find(|e| {
+            e.tags
+                .iter()
+                .find(|t| t.as_slice()[0].eq("branch-name"))
+                .is_some_and(|t| t.as_slice()[1].eq(FEATURE_BRANCH_NAME_1))
+        })
+        .unwrap();
+
+    let proposal_patches: Vec<&Event> = r55
+        .events
+        .iter()
+        .filter(|e| {
+            e.kind == Kind::GitPatch
+                && e.tags
+                    .iter()
+                    .any(|t| t.as_slice()[1].eq(&proposal_cover_letter_event.id.to_string()))
+        })
+        .collect();
+
+    let merge_status = new_events
+        .iter()
+        .find(|e| e.kind.eq(&Kind::GitStatusApplied))
+        .unwrap();
+
+    assert_eq!(
+        HashSet::<String>::from_iter(vec![
+            "applied-as-commits".to_string(),
+            first_oid.to_string(),
+            tip_oid.to_string(),
+        ]),
+        HashSet::<String>::from_iter(
+            merge_status
+                .tags
+                .iter()
+                .find(|t| t.as_slice()[0].eq("applied-as-commits"))
+                .unwrap()
+                .clone()
+                .to_vec()
+                .iter()
+                .cloned(),
+        ),
+        "status sets correct applied-as-commits tag {merge_status:?}"
+    );
+
     for patch_id in proposal_patches
         .iter()
         .map(|e| e.id.to_string())

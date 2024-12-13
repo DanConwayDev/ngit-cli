@@ -1212,9 +1212,9 @@ pub fn cli_tester_create_proposals() -> Result<GitTestRepo> {
 pub fn cli_tester_create_proposal_branches_ready_to_send() -> Result<GitTestRepo> {
     let git_repo = GitTestRepo::default();
     git_repo.populate()?;
-    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_1, "a", false)?;
-    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_2, "b", false)?;
-    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_3, "c", false)?;
+    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_1, "a", false, None)?;
+    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_2, "b", false, None)?;
+    create_and_populate_branch(&git_repo, FEATURE_BRANCH_NAME_3, "c", false, None)?;
     Ok(git_repo)
 }
 
@@ -1223,6 +1223,7 @@ pub fn create_and_populate_branch(
     branch_name: &str,
     prefix: &str,
     only_one_commit: bool,
+    commiter: Option<&Signature>,
 ) -> Result<()> {
     test_repo.checkout("main")?;
     test_repo.create_branch(branch_name)?;
@@ -1239,7 +1240,7 @@ pub fn create_and_populate_branch(
             )
             .unwrap(),
         ),
-        None,
+        commiter,
     )?;
     if !only_one_commit {
         let file_name = format!("{}4.md", prefix);
@@ -1254,7 +1255,7 @@ pub fn create_and_populate_branch(
                 )
                 .unwrap(),
             ),
-            None,
+            commiter,
         )?;
     }
     Ok(())
@@ -1292,7 +1293,7 @@ pub fn cli_tester_create_proposal(
     cover_letter_title_and_description: Option<(&str, &str)>,
     in_reply_to: Option<String>,
 ) -> Result<()> {
-    create_and_populate_branch(test_repo, branch_name, prefix, false)?;
+    create_and_populate_branch(test_repo, branch_name, prefix, false, None)?;
     std::thread::sleep(std::time::Duration::from_millis(1000));
     if let Some(in_reply_to) = in_reply_to {
         let mut p = CliTester::new_from_dir(
