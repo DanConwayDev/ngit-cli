@@ -26,7 +26,7 @@ use ngit::{
         oid_to_shorthand_string,
     },
     git_events::{self, event_to_cover_letter, get_event_root},
-    login::{self, get_curent_user},
+    login::{self, get_curent_user, user::UserRef},
     repo_ref::{self, get_repo_config_from_yaml},
     repo_state,
 };
@@ -49,7 +49,6 @@ use crate::{
     },
 };
 
-#[allow(clippy::too_many_lines)]
 pub async fn run_push(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -118,34 +117,91 @@ pub async fn run_push(
         }
     });
 
-    let mut events = vec![];
-
     if git_server_refspecs.is_empty() && proposal_refspecs.is_empty() {
         // all refspecs rejected
         println!();
         return Ok(());
     }
 
+    let (rejected_proposal_refspecs, rejected) = create_and_publish_events(
+        git_repo,
+        repo_ref,
+        &git_server_refspecs,
+        &proposal_refspecs,
+        client,
+        existing_state,
+        &term,
+    )
+    .await?;
+
+    if !rejected {
+        for refspec in &[git_server_refspecs.clone(), proposal_refspecs.clone()].concat() {
+            if rejected_proposal_refspecs.contains(refspec) {
+                continue;
+            }
+            let (_, to) = refspec_to_from_to(refspec)?;
+            println!("ok {to}");
+            update_remote_refs_pushed(
+                &git_repo.git_repo,
+                refspec,
+                &decoded_nostr_url.original_string,
+            )
+            .context("could not update remote_ref locally")?;
+        }
+
+        // TODO make async - check gitlib2 callbacks work async
+
+        for (git_server_url, remote_refspecs) in remote_refspecs {
+            let remote_refspecs = remote_refspecs
+                .iter()
+                .filter(|refspec| git_server_refspecs.contains(refspec))
+                .cloned()
+                .collect::<Vec<String>>();
+            if !refspecs.is_empty() {
+                let _ = push_to_remote(
+                    git_repo,
+                    &git_server_url,
+                    decoded_nostr_url,
+                    &remote_refspecs,
+                    &term,
+                );
+            }
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+async fn create_and_publish_events(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    git_server_refspecs: &Vec<String>,
+    proposal_refspecs: &Vec<String>,
+    client: &Client,
+    existing_state: HashMap<String, String>,
+    term: &Term,
+) -> Result<(Vec<String>, bool)> {
     let (signer, user_ref, _) =
         login::login_or_signup(&Some(git_repo), &None, &None, Some(client), true).await?;
 
     if !repo_ref.maintainers.contains(&user_ref.public_key) {
-        for refspec in &git_server_refspecs {
+        for refspec in git_server_refspecs {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
-            println!(
+            eprintln!(
                 "error {to} your nostr account {} isn't listed as a maintainer of the repo",
                 user_ref.metadata.name
             );
         }
-        git_server_refspecs.clear();
         if proposal_refspecs.is_empty() {
-            println!();
-            return Ok(());
+            return Ok((vec![], true));
         }
     }
 
+    let mut events = vec![];
+
     if !git_server_refspecs.is_empty() {
-        let new_state = generate_updated_state(git_repo, &existing_state, &git_server_refspecs)?;
+        let new_state = generate_updated_state(git_repo, &existing_state, git_server_refspecs)?;
 
         let store_state =
             if let Ok(Some(nostate)) = git_repo.get_git_config_item("nostr.nostate", None) {
@@ -160,152 +216,31 @@ pub async fn run_push(
             events.push(new_repo_state.event);
         }
 
-        for event in get_merged_status_events(
-            &term,
-            repo_ref,
-            git_repo,
-            &decoded_nostr_url.original_string,
-            &signer,
-            &git_server_refspecs,
-        )
-        .await?
+        for event in
+            get_merged_status_events(term, repo_ref, git_repo, &signer, git_server_refspecs).await?
         {
             events.push(event);
         }
 
-        if let Ok(Some(repo_ref_event)) = get_maintainers_yaml_update(
-            &term,
-            repo_ref,
-            git_repo,
-            &decoded_nostr_url.original_string,
-            &signer,
-            &git_server_refspecs,
-        )
-        .await
+        if let Ok(Some(repo_ref_event)) =
+            get_maintainers_yaml_update(term, repo_ref, git_repo, &signer, git_server_refspecs)
+                .await
         {
             events.push(repo_ref_event);
         }
     }
 
-    let mut rejected_proposal_refspecs = vec![];
-    if !proposal_refspecs.is_empty() {
-        let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
-        let current_user = get_curent_user(git_repo)?;
-
-        for refspec in &proposal_refspecs {
-            let (from, to) = refspec_to_from_to(refspec).unwrap();
-            let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-
-            if let Some((_, (proposal, patches))) =
-                find_proposal_and_patches_by_branch_name(to, &all_proposals, &current_user)
-            {
-                if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
-                    .concat()
-                    .contains(&user_ref.public_key)
-                {
-                    if refspec.starts_with('+') {
-                        // force push
-                        let (_, main_tip) = git_repo.get_main_or_master_branch()?;
-                        let (mut ahead, _) =
-                            git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
-                        ahead.reverse();
-                        for patch in generate_cover_letter_and_patch_events(
-                            None,
-                            git_repo,
-                            &ahead,
-                            &signer,
-                            repo_ref,
-                            &Some(proposal.id.to_string()),
-                            &[],
-                        )
-                        .await?
-                        {
-                            events.push(patch);
-                        }
-                    } else {
-                        // fast forward push
-                        let tip_patch = patches.first().unwrap();
-                        let tip_of_proposal = get_commit_id_from_patch(tip_patch)?;
-                        let tip_of_proposal_commit =
-                            git_repo.get_commit_or_tip_of_reference(&tip_of_proposal)?;
-
-                        let (mut ahead, behind) = git_repo.get_commits_ahead_behind(
-                            &tip_of_proposal_commit,
-                            &tip_of_pushed_branch,
-                        )?;
-                        if behind.is_empty() {
-                            let thread_id = if let Ok(root_event_id) = get_event_root(tip_patch) {
-                                root_event_id
-                            } else {
-                                // tip patch is the root proposal
-                                tip_patch.id
-                            };
-                            let mut parent_patch = tip_patch.clone();
-                            ahead.reverse();
-                            for (i, commit) in ahead.iter().enumerate() {
-                                let new_patch = generate_patch_event(
-                                    git_repo,
-                                    &git_repo.get_root_commit()?,
-                                    commit,
-                                    Some(thread_id),
-                                    &signer,
-                                    repo_ref,
-                                    Some(parent_patch.id),
-                                    Some((
-                                        (patches.len() + i + 1).try_into().unwrap(),
-                                        (patches.len() + ahead.len()).try_into().unwrap(),
-                                    )),
-                                    None,
-                                    &None,
-                                    &[],
-                                )
-                                .await
-                                .context("failed to make patch event from commit")?;
-                                events.push(new_patch.clone());
-                                parent_patch = new_patch;
-                            }
-                        } else {
-                            // we shouldn't get here
-                            term.write_line(
-                                format!(
-                                    "WARNING: failed to push {from} as nostr proposal. Try and force push ",
-                                )
-                                .as_str(),
-                            )
-                            .unwrap();
-                            println!(
-                                "error {to} failed to fastforward as newer patches found on proposal"
-                            );
-                            rejected_proposal_refspecs.push(refspec.to_string());
-                        }
-                    }
-                } else {
-                    println!(
-                        "error {to} permission denied. you are not the proposal author or a repo maintainer"
-                    );
-                    rejected_proposal_refspecs.push(refspec.to_string());
-                }
-            } else {
-                // TODO new proposal / couldn't find exisiting proposal
-                let (_, main_tip) = git_repo.get_main_or_master_branch()?;
-                let (mut ahead, _) =
-                    git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
-                ahead.reverse();
-                for patch in generate_cover_letter_and_patch_events(
-                    None,
-                    git_repo,
-                    &ahead,
-                    &signer,
-                    repo_ref,
-                    &None,
-                    &[],
-                )
-                .await?
-                {
-                    events.push(patch);
-                }
-            }
-        }
+    let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
+        git_repo,
+        repo_ref,
+        proposal_refspecs,
+        &user_ref,
+        &signer,
+        term,
+    )
+    .await?;
+    for e in proposal_events {
+        events.push(e);
     }
 
     // TODO check whether tip of each branch pushed is on at least one git server
@@ -323,41 +258,140 @@ pub async fn run_push(
         )
         .await?;
     }
+    Ok((rejected_proposal_refspecs, false))
+}
 
-    for refspec in &[git_server_refspecs.clone(), proposal_refspecs.clone()].concat() {
-        if rejected_proposal_refspecs.contains(refspec) {
-            continue;
-        }
-        let (_, to) = refspec_to_from_to(refspec)?;
-        println!("ok {to}");
-        update_remote_refs_pushed(
-            &git_repo.git_repo,
-            refspec,
-            &decoded_nostr_url.original_string,
-        )
-        .context("could not update remote_ref locally")?;
+#[allow(clippy::too_many_lines)]
+async fn process_proposal_refspecs(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    proposal_refspecs: &Vec<String>,
+    user_ref: &UserRef,
+    signer: &Arc<dyn NostrSigner>,
+    term: &Term,
+) -> Result<(Vec<Event>, Vec<String>)> {
+    let mut events = vec![];
+    let mut rejected_proposal_refspecs = vec![];
+    if proposal_refspecs.is_empty() {
+        return Ok((events, rejected_proposal_refspecs));
     }
+    let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
+    let current_user = get_curent_user(git_repo)?;
 
-    // TODO make async - check gitlib2 callbacks work async
+    for refspec in proposal_refspecs {
+        let (from, to) = refspec_to_from_to(refspec).unwrap();
+        let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
 
-    for (git_server_url, remote_refspecs) in remote_refspecs {
-        let remote_refspecs = remote_refspecs
-            .iter()
-            .filter(|refspec| git_server_refspecs.contains(refspec))
-            .cloned()
-            .collect::<Vec<String>>();
-        if !refspecs.is_empty() {
-            let _ = push_to_remote(
+        if let Some((_, (proposal, patches))) =
+            find_proposal_and_patches_by_branch_name(to, &all_proposals, &current_user)
+        {
+            if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
+                .concat()
+                .contains(&user_ref.public_key)
+            {
+                if refspec.starts_with('+') {
+                    // force push
+                    let (_, main_tip) = git_repo.get_main_or_master_branch()?;
+                    let (mut ahead, _) =
+                        git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
+                    ahead.reverse();
+                    for patch in generate_cover_letter_and_patch_events(
+                        None,
+                        git_repo,
+                        &ahead,
+                        signer,
+                        repo_ref,
+                        &Some(proposal.id.to_string()),
+                        &[],
+                    )
+                    .await?
+                    {
+                        events.push(patch);
+                    }
+                } else {
+                    // fast forward push
+                    let tip_patch = patches.first().unwrap();
+                    let tip_of_proposal = get_commit_id_from_patch(tip_patch)?;
+                    let tip_of_proposal_commit =
+                        git_repo.get_commit_or_tip_of_reference(&tip_of_proposal)?;
+
+                    let (mut ahead, behind) = git_repo
+                        .get_commits_ahead_behind(&tip_of_proposal_commit, &tip_of_pushed_branch)?;
+                    if behind.is_empty() {
+                        let thread_id = if let Ok(root_event_id) = get_event_root(tip_patch) {
+                            root_event_id
+                        } else {
+                            // tip patch is the root proposal
+                            tip_patch.id
+                        };
+                        let mut parent_patch = tip_patch.clone();
+                        ahead.reverse();
+                        for (i, commit) in ahead.iter().enumerate() {
+                            let new_patch = generate_patch_event(
+                                git_repo,
+                                &git_repo.get_root_commit()?,
+                                commit,
+                                Some(thread_id),
+                                signer,
+                                repo_ref,
+                                Some(parent_patch.id),
+                                Some((
+                                    (patches.len() + i + 1).try_into().unwrap(),
+                                    (patches.len() + ahead.len()).try_into().unwrap(),
+                                )),
+                                None,
+                                &None,
+                                &[],
+                            )
+                            .await
+                            .context("failed to make patch event from commit")?;
+                            events.push(new_patch.clone());
+                            parent_patch = new_patch;
+                        }
+                    } else {
+                        // we shouldn't get here
+                        term.write_line(
+                                format!(
+                                    "WARNING: failed to push {from} as nostr proposal. Try and force push ",
+                                )
+                                .as_str(),
+                            )
+                            .unwrap();
+                        println!(
+                            "error {to} failed to fastforward as newer patches found on proposal"
+                        );
+                        rejected_proposal_refspecs.push(refspec.to_string());
+                    }
+                }
+            } else {
+                println!(
+                    "error {to} permission denied. you are not the proposal author or a repo maintainer"
+                );
+                rejected_proposal_refspecs.push(refspec.to_string());
+            }
+        } else {
+            // TODO new proposal / couldn't find exisiting proposal
+            let (_, main_tip) = git_repo.get_main_or_master_branch()?;
+            let (mut ahead, _) =
+                git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
+            ahead.reverse();
+            for patch in generate_cover_letter_and_patch_events(
+                None,
                 git_repo,
-                &git_server_url,
-                decoded_nostr_url,
-                &remote_refspecs,
-                &term,
-            );
+                &ahead,
+                signer,
+                repo_ref,
+                &None,
+                &[],
+            )
+            .await?
+            {
+                events.push(patch);
+            }
         }
     }
-    println!();
-    Ok(())
+
+    Ok((events, rejected_proposal_refspecs))
 }
 
 fn push_to_remote(
@@ -882,7 +916,6 @@ async fn get_maintainers_yaml_update(
     term: &console::Term,
     repo_ref: &RepoRef,
     git_repo: &Repo,
-    remote_nostr_url: &str,
     signer: &Arc<dyn NostrSigner>,
     refspecs_to_git_server: &Vec<String>,
 ) -> Result<Option<Event>> {
@@ -890,9 +923,12 @@ async fn get_maintainers_yaml_update(
         let (from, to) = refspec_to_from_to(refspec)?;
         if to.eq("refs/heads/main") || to.eq("refs/heads/master") {
             let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-            let tip_of_remote_branch = git_repo.get_commit_or_tip_of_reference(
-                &refspec_remote_ref_name(&git_repo.git_repo, refspec, remote_nostr_url)?,
-            )?;
+            let tip_of_remote_branch =
+                git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
+                    &git_repo.git_repo,
+                    refspec,
+                    &repo_ref.to_nostr_git_url(&Some(git_repo)),
+                )?)?;
             let diff = git_repo.git_repo.diff_tree_to_tree(
                 Some(
                     &git_repo
@@ -948,7 +984,6 @@ async fn get_merged_status_events(
     term: &console::Term,
     repo_ref: &RepoRef,
     git_repo: &Repo,
-    remote_nostr_url: &str,
     signer: &Arc<dyn NostrSigner>,
     refspecs_to_git_server: &Vec<String>,
 ) -> Result<Vec<Event>> {
@@ -957,9 +992,13 @@ async fn get_merged_status_events(
         let (from, to) = refspec_to_from_to(refspec)?;
         if to.eq("refs/heads/main") || to.eq("refs/heads/master") {
             let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-            let Ok(tip_of_remote_branch) = git_repo.get_commit_or_tip_of_reference(
-                &refspec_remote_ref_name(&git_repo.git_repo, refspec, remote_nostr_url)?,
-            ) else {
+            let Ok(tip_of_remote_branch) =
+                git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
+                    &git_repo.git_repo,
+                    refspec,
+                    &repo_ref.to_nostr_git_url(&Some(git_repo)),
+                )?)
+            else {
                 // branch not on remote
                 continue;
             };
