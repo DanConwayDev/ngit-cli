@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use console::Style;
-use ngit::{cli_interactor::PromptConfirmParms, git::nostr_url::NostrUrlDecoded};
-use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
+use ngit::{cli_interactor::PromptConfirmParms, git::nostr_url::{save_nip05_to_git_config_cache, NostrUrlDecoded}};
+use nostr::{nips::{nip01::Coordinate, nip05::{self}}, FromBech32, PublicKey, ToBech32};
 use nostr_sdk::{Kind, RelayUrl};
 
 use crate::{
@@ -398,7 +398,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     println!("publishing repostory reference...");
 
-    let repo_ref = RepoRef {
+    let mut repo_ref = RepoRef {
         identifier: identifier.clone(),
         name,
         description,
@@ -424,6 +424,32 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         false,
     )
     .await?;
+
+    // Fetch nip05 profile, check if NIP-05 relays intersect with repo relays.
+    if let Some(nip05) = user_ref.metadata.nip05 {
+        let nprofile = nip05::profile(nip05.clone(), None).await.unwrap();  // TODO better error handling
+        let _ = save_nip05_to_git_config_cache(&nip05, &nprofile.public_key, &Some(&git_repo));
+
+        // Normalize URLs before doing the intersection.
+        let repo_relays: HashSet<RelayUrl> =
+                relays
+                .iter()
+                .map(|r| {RelayUrl::parse(r.as_str_without_trailing_slash()).unwrap()})
+                .collect();
+        let nip05_relays: HashSet<RelayUrl> =
+                nprofile.relays
+                .iter()
+                .map(|r| {RelayUrl::parse(r.as_str_without_trailing_slash()).unwrap()})
+                .collect();
+        let mut inter = repo_relays.intersection(&nip05_relays);
+        // Repurpose repo_ref.relays to hold the relay hint that goes into the nostr remote URL.
+        if inter.next().is_some() {
+            repo_ref.relays = vec![];
+        } else {
+            repo_ref.relays = vec![repo_relays.iter().next().unwrap().clone()];
+            println!("Note: Point your NIP-05 relays to one of the repo relays for a cleaner nostr:// remote URL.");
+        }
+    }
 
     // TODO - does this git config item do more harm than good?
     git_repo.save_git_config_item(
