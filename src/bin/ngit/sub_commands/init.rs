@@ -1,9 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use console::Style;
-use ngit::{cli_interactor::PromptConfirmParms, git::nostr_url::NostrUrlDecoded};
-use nostr::{FromBech32, PublicKey, ToBech32, nips::nip01::Coordinate};
+use console::{Style, Term};
+use ngit::{
+    cli_interactor::PromptConfirmParms,
+    git::nostr_url::{NostrUrlDecoded, save_nip05_to_git_config_cache},
+};
+use nostr::{
+    FromBech32, PublicKey, ToBech32,
+    nips::{
+        nip01::Coordinate,
+        nip05::{self},
+    },
+};
 use nostr_sdk::{Kind, RelayUrl};
 
 use crate::{
@@ -397,7 +406,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     println!("publishing repostory reference...");
 
-    let repo_ref = RepoRef {
+    let mut repo_ref = RepoRef {
         identifier: identifier.clone(),
         name,
         description,
@@ -408,6 +417,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         trusted_maintainer: user_ref.public_key,
         maintainers: maintainers.clone(),
         events: HashMap::new(),
+        nostr_git_url: None,
     };
     let repo_event = repo_ref.to_event(&signer).await?;
 
@@ -437,12 +447,61 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         false,
     )?;
 
-    let relays = relays
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<String>>();
+    // if nip05 valid, set nostr git url to use that format
+    let hint_for_nip05_address = {
+        if let Some(nip05) = user_ref.metadata.nip05 {
+            let term = Term::stdout();
+            term.write_line(&format!("fetching nip05 details for {nip05}..."))?;
+            if let Ok(nprofile) = nip05::profile(nip05.clone(), None).await {
+                let _ = term.clear_last_lines(1);
+                let _ =
+                    save_nip05_to_git_config_cache(&nip05, &nprofile.public_key, &Some(&git_repo));
+                // Normalize URLs before doing the intersection.
+                let repo_relays: HashSet<RelayUrl> = relays
+                    .iter()
+                    .map(|r| RelayUrl::parse(r.as_str_without_trailing_slash()).unwrap())
+                    .collect();
+                let nip05_relays: HashSet<RelayUrl> = nprofile
+                    .relays
+                    .iter()
+                    .map(|r| RelayUrl::parse(r.as_str_without_trailing_slash()).unwrap())
+                    .collect();
+                let mut inter = repo_relays.intersection(&nip05_relays);
+
+                repo_ref.set_nostr_git_url(NostrUrlDecoded {
+                    original_string: String::new(),
+                    nip05: Some(nip05.clone()),
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: user_ref.public_key,
+                        identifier: repo_ref.identifier.clone(),
+                        relays: if inter.next().is_some() || relays.is_empty() {
+                            vec![]
+                        } else {
+                            vec![relays.first().unwrap().clone()]
+                        },
+                    },
+                    protocol: None,
+                    user: None,
+                });
+                if inter.next().is_some() {
+                    "note: point your NIP-05 relays to one of the repo relays for a cleaner nostr:// remote URL.".to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                "note: could not validate your nip05 address {nip05} which could be used for a shorter nostr:// remote URL.".to_string()
+            }
+        } else {
+            String::new()
+        }
+    };
 
     prompt_to_set_nostr_url_as_origin(&repo_ref, &git_repo).await?;
+
+    if !hint_for_nip05_address.is_empty() {
+        println!("{hint_for_nip05_address}");
+    }
 
     // TODO: if no state event exists and there is currently a remote called
     // "origin", automtically push rather than waiting for the next commit
@@ -450,6 +509,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     // no longer create a new maintainers.yaml file - its too confusing for users
     // as it falls out of sync with data in nostr event . update if it already
     // exists
+    let relays = relays
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<String>>();
     if match &repo_config_result {
         Ok(config) => {
             !<std::option::Option<std::string::String> as Clone>::clone(&config.identifier)

@@ -55,7 +55,7 @@ impl FromStr for ServerProtocol {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct NostrUrlDecoded {
     pub original_string: String,
     pub coordinate: Coordinate,
@@ -73,7 +73,11 @@ impl fmt::Display for NostrUrlDecoded {
         if let Some(protocol) = &self.protocol {
             write!(f, "{}/", protocol)?;
         }
-        write!(f, "{}/", self.coordinate.public_key.to_bech32().unwrap())?;
+        if let Some(nip05) = &self.nip05 {
+            write!(f, "{}/", nip05)?;
+        } else {
+            write!(f, "{}/", self.coordinate.public_key.to_bech32().unwrap())?;
+        }
         if let Some(relay) = self.coordinate.relays.first() {
             write!(
                 f,
@@ -97,6 +101,7 @@ impl NostrUrlDecoded {
         let mut protocol = None;
         let mut user = None;
         let mut relays = vec![];
+        let mut nip05 = None;
 
         if !url.starts_with("nostr://") {
             bail!("nostr git url must start with nostr://");
@@ -157,7 +162,6 @@ impl NostrUrlDecoded {
         }
         // extract naddr npub/<optional-relays>/identifer
         let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
-        let mut nip05 = None;
         // naddr used
         let coordinate = if let Ok(coordinate) = Coordinate::parse(part) {
             if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
@@ -254,7 +258,7 @@ pub fn use_nip05_git_config_cache_to_find_nip05_from_public_key(
         .cloned())
 }
 
-fn save_nip05_to_git_config_cache(
+pub fn save_nip05_to_git_config_cache(
     nip05: &str,
     public_key: &PublicKey,
     git_repo: &Option<&Repo>,

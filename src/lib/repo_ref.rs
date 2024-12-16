@@ -38,6 +38,7 @@ pub struct RepoRef {
     pub maintainers: Vec<PublicKey>,
     pub trusted_maintainer: PublicKey,
     pub events: HashMap<Coordinate, nostr::Event>,
+    pub nostr_git_url: Option<NostrUrlDecoded>,
 }
 
 impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
@@ -60,6 +61,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
             maintainers: Vec::new(),
             trusted_maintainer: trusted_maintainer.unwrap_or(event.pubkey),
             events: HashMap::new(),
+            nostr_git_url: None,
         };
 
         for tag in event.tags.iter() {
@@ -235,7 +237,14 @@ impl RepoRef {
             .collect::<Vec<(Coordinate, Option<Timestamp>)>>()
     }
 
+    pub fn set_nostr_git_url(&mut self, nostr_git_url: NostrUrlDecoded) {
+        self.nostr_git_url = Some(nostr_git_url)
+    }
+
     pub fn to_nostr_git_url(&self, git_repo: &Option<&Repo>) -> String {
+        if let Some(nostr_git_url) = &self.nostr_git_url {
+            return nostr_git_url.original_string.clone();
+        }
         let c = self.coordinate_with_hint();
         format!("{}", NostrUrlDecoded {
             original_string: String::new(),
@@ -550,6 +559,7 @@ mod tests {
             trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             events: HashMap::new(),
+            nostr_git_url: None,
         }
         .to_event(&TEST_KEY_1_SIGNER)
         .await

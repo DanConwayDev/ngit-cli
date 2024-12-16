@@ -22,6 +22,7 @@ pub struct UserRef {
 pub struct UserMetadata {
     pub name: String,
     pub created_at: Timestamp,
+    pub nip05: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -149,7 +150,7 @@ pub fn extract_user_metadata(
     };
 
     Ok(UserMetadata {
-        name: if let Some(metadata) = metadata {
+        name: if let Some(metadata) = metadata.clone() {
             if let Some(n) = metadata.name {
                 n
             } else if let Some(n) = metadata.custom.get("displayName") {
@@ -166,6 +167,11 @@ pub fn extract_user_metadata(
             }
         } else {
             public_key.to_bech32()?
+        },
+        nip05: if let Some(metadata) = metadata {
+            metadata.nip05
+        } else {
+            None
         },
         created_at: if let Some(event) = event {
             event.created_at
