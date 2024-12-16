@@ -364,34 +364,33 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.web.clone()
     };
 
-    let earliest_unique_commit = match &args.earliest_unique_commit {
-        Some(t) => t.clone(),
-        None => {
-            let mut earliest_unique_commit = if let Some(repo_ref) = &repo_ref {
-                repo_ref.root_commit.clone()
+    let earliest_unique_commit = if let Some(t) = &args.earliest_unique_commit {
+        t.clone()
+    } else {
+        let mut earliest_unique_commit = if let Some(repo_ref) = &repo_ref {
+            repo_ref.root_commit.clone()
+        } else {
+            root_commit.to_string()
+        };
+        println!(
+            "the earliest unique commit helps with discoverability. It defaults to the root commit. Only change this if your repo has completely forked off an has formed its own identity."
+        );
+        loop {
+            earliest_unique_commit = Interactor::default().input(
+                PromptInputParms::default()
+                    .with_prompt("earliest unique commit (to help with discoverability)")
+                    .with_default(earliest_unique_commit.clone()),
+            )?;
+            if let Ok(exists) = git_repo.does_commit_exist(&earliest_unique_commit) {
+                if exists {
+                    break earliest_unique_commit;
+                }
+                println!("commit does not exist on current repository");
             } else {
-                root_commit.to_string()
-            };
-            println!(
-                "the earliest unique commit helps with discoverability. It defaults to the root commit. Only change this if your repo has completely forked off an has formed its own identity."
-            );
-            loop {
-                earliest_unique_commit = Interactor::default().input(
-                    PromptInputParms::default()
-                        .with_prompt("earliest unique commit (to help with discoverability)")
-                        .with_default(earliest_unique_commit.clone()),
-                )?;
-                if let Ok(exists) = git_repo.does_commit_exist(&earliest_unique_commit) {
-                    if exists {
-                        break earliest_unique_commit;
-                    }
-                    println!("commit does not exist on current repository");
-                } else {
-                    println!("commit id not formatted correctly");
-                }
-                if earliest_unique_commit.len().ne(&40) {
-                    println!("commit id must be 40 characters long");
-                }
+                println!("commit id not formatted correctly");
+            }
+            if earliest_unique_commit.len().ne(&40) {
+                println!("commit id must be 40 characters long");
             }
         }
     };

@@ -141,9 +141,11 @@ async fn fetch_proposals(
         let current_user = get_curent_user(git_repo)?;
 
         for refstr in proposal_refs.keys() {
-            if let Some((_, (_, patches))) =
-                find_proposal_and_patches_by_branch_name(refstr, &open_proposals, &current_user)
-            {
+            if let Some((_, (_, patches))) = find_proposal_and_patches_by_branch_name(
+                refstr,
+                &open_proposals,
+                current_user.as_ref(),
+            ) {
                 if let Err(error) = make_commits_for_proposal(git_repo, repo_ref, patches) {
                     term.write_line(
                         format!("WARNING: failed to create branch for {refstr}, error: {error}",)
@@ -234,7 +236,7 @@ pub fn fetch_from_git_server(
 fn report_on_transfer_progress(
     progress_stats: &Progress<'_>,
     start_time: &Instant,
-    end_time: &Option<Instant>,
+    end_time: Option<&Instant>,
 ) -> Vec<String> {
     let mut report = vec![];
     let total = progress_stats.total_objects() as f64;
@@ -378,8 +380,11 @@ impl<'a> FetchReporter<'a> {
             self.start_time = Some(Instant::now());
         }
         let existing_lines = self.just_count_transfer_progress();
-        let updated =
-            report_on_transfer_progress(progress_stats, &self.start_time.unwrap(), &self.end_time);
+        let updated = report_on_transfer_progress(
+            progress_stats,
+            &self.start_time.unwrap(),
+            self.end_time.as_ref(),
+        );
         if self.transfer_progress_msgs.len() <= updated.len() {
             if self.end_time.is_none() && updated.first().is_some_and(|f| f.contains("100%")) {
                 self.end_time = Some(Instant::now());

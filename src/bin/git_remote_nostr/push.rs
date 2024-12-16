@@ -299,7 +299,7 @@ async fn process_proposal_refspecs(
         let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
 
         if let Some((_, (proposal, patches))) =
-            find_proposal_and_patches_by_branch_name(to, &all_proposals, &current_user)
+            find_proposal_and_patches_by_branch_name(to, &all_proposals, current_user.as_ref())
         {
             if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
                 .concat()
@@ -576,7 +576,7 @@ fn report_on_transfer_progress(
     total: usize,
     bytes: usize,
     start_time: &Instant,
-    end_time: &Option<Instant>,
+    end_time: Option<&Instant>,
 ) -> Option<String> {
     if total == 0 {
         return None;
@@ -688,7 +688,7 @@ impl<'a> PushReporter<'a> {
             total,
             bytes,
             &self.start_time.unwrap(),
-            &self.end_time,
+            self.end_time.as_ref(),
         ) {
             let existing_lines = self.count_all_existing_lines();
             if report.contains("100%") {
@@ -1215,11 +1215,12 @@ async fn create_merge_events(
                 signer,
                 repo_ref,
                 &proposal,
-                &if let Some(revision_id) = revision_id {
+                if let Some(revision_id) = revision_id {
                     Some(get_event_from_cache_by_id(git_repo, revision_id).await?)
                 } else {
                     None
-                },
+                }
+                .as_ref(),
                 if let Some((commit, _)) = merged_patches
                     .iter()
                     .find(|(_, m)| **m == MergedPRCommitType::MergeCommit)
@@ -1263,7 +1264,7 @@ async fn create_merge_status(
     signer: &Arc<dyn NostrSigner>,
     repo_ref: &RepoRef,
     proposal: &Event,
-    revision: &Option<Event>,
+    revision: Option<&Event>,
     merge_commits: Vec<Sha1Hash>,
     merged_patches: Vec<EventId>,
     applied: bool,
