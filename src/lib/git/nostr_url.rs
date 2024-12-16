@@ -55,7 +55,7 @@ impl FromStr for ServerProtocol {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct NostrUrlDecoded {
     pub original_string: String,
     pub coordinate: Coordinate,
