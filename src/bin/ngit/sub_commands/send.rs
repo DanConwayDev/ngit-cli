@@ -1,23 +1,23 @@
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use console::Style;
 use ngit::{client::send_events, git_events::generate_cover_letter_and_patch_events};
 use nostr::{
-    nips::{nip10::Marker, nip19::Nip19Event},
     ToBech32,
+    nips::{nip10::Marker, nip19::Nip19Event},
 };
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 use crate::{
-    cli::{extract_signer_cli_arguments, Cli},
+    cli::{Cli, extract_signer_cli_arguments},
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
     },
     client::{
-        fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache, Client, Connect,
+        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
     },
-    git::{identify_ahead_behind, Repo, RepoActions},
+    git::{Repo, RepoActions, identify_ahead_behind},
     git_events::{event_is_patch_set_root, event_tag_from_nip19_or_hex},
     login,
     repo_ref::get_repo_coordinates_when_remote_unknown,
@@ -369,10 +369,9 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
                 public_key: _,
                 uppercase: false,
             }) => {
-                let events = get_events_from_local_cache(
-                    git_repo_path,
-                    vec![nostr::Filter::new().id(*event_id)],
-                )
+                let events = get_events_from_local_cache(git_repo_path, vec![
+                    nostr::Filter::new().id(*event_id),
+                ])
                 .await?;
 
                 if let Some(first) = events.iter().find(|e| e.id.eq(event_id)) {

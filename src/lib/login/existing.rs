@@ -1,15 +1,15 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use nostr::nips::nip46::NostrConnectURI;
 use nostr_connect::client::NostrConnect;
 use nostr_sdk::{NostrSigner, PublicKey};
 
 use super::{
+    SignerInfo, SignerInfoSource,
     key_encryption::decrypt_key,
     print_logged_in_as,
-    user::{get_user_details, UserRef},
-    SignerInfo, SignerInfoSource,
+    user::{UserRef, get_user_details},
 };
 #[cfg(not(test))]
 use crate::client::Client;
@@ -18,7 +18,7 @@ use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptPasswordParms},
     client::fetch_public_key,
-    git::{get_git_config_item, Repo, RepoActions},
+    git::{Repo, RepoActions, get_git_config_item},
 };
 
 /// load signer from git config and UserProfile from cache or relays

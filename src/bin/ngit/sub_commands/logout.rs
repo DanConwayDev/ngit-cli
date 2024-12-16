@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ngit::{
     git::remove_git_config_item,
-    login::{existing::load_existing_login, SignerInfoSource},
+    login::{SignerInfoSource, existing::load_existing_login},
 };
 
 use crate::{

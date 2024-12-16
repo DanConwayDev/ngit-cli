@@ -3,18 +3,18 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use console::Style;
 use ngit::{cli_interactor::PromptConfirmParms, git::nostr_url::NostrUrlDecoded};
-use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, ToBech32};
+use nostr::{FromBech32, PublicKey, ToBech32, nips::nip01::Coordinate};
 use nostr_sdk::{Kind, RelayUrl};
 
 use crate::{
-    cli::{extract_signer_cli_arguments, Cli},
+    cli::{Cli, extract_signer_cli_arguments},
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::{fetching_with_report, get_repo_ref_from_cache, send_events, Client, Connect},
-    git::{nostr_url::convert_clone_url_to_https, Repo, RepoActions},
+    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache, send_events},
+    git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
     login,
     repo_ref::{
-        extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
-        try_and_get_repo_coordinates_when_remote_unknown, RepoRef,
+        RepoRef, extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
+        try_and_get_repo_coordinates_when_remote_unknown,
     },
 };
 

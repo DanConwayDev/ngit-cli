@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use nostr::PublicKey;
 use nostr_sdk::{Alphabet, JsonUtil, Kind, SingleLetterTag, Timestamp, ToBech32};
 use serde::{self, Deserialize, Serialize};
@@ -9,7 +9,7 @@ use serde::{self, Deserialize, Serialize};
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
-use crate::client::{get_event_from_global_cache, Connect};
+use crate::client::{Connect, get_event_from_global_cache};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRef {

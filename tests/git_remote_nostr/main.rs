@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use futures::join;
 use git2::Oid;
 use nostr::nips::nip01::Coordinate;
-use nostr_sdk::{secp256k1::rand, Event, JsonUtil, Kind, RelayUrl, ToBech32};
+use nostr_sdk::{Event, JsonUtil, Kind, RelayUrl, ToBech32, secp256k1::rand};
 use relay::Relay;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};

@@ -6,27 +6,21 @@ use test_utils::*;
 static EXPECTED_NSEC_PROMPT: &str = "nsec";
 
 fn show_first_time_login_choices(p: &mut CliTester) -> Result<CliTesterChoicePrompt> {
-    p.expect_choice(
-        "login to nostr",
-        vec![
-            "secret key (nsec / ncryptsec)".to_string(),
-            "nostr connect (remote signer)".to_string(),
-            "create account".to_string(),
-            "help".to_string(),
-        ],
-    )
+    p.expect_choice("login to nostr", vec![
+        "secret key (nsec / ncryptsec)".to_string(),
+        "nostr connect (remote signer)".to_string(),
+        "create account".to_string(),
+        "help".to_string(),
+    ])
 }
 
 fn first_time_login_choices_succeeds_with_nsec(p: &mut CliTester, nsec: &str) -> Result<()> {
-    p.expect_choice(
-        "login to nostr",
-        vec![
-            "secret key (nsec / ncryptsec)".to_string(),
-            "nostr connect (remote signer)".to_string(),
-            "create account".to_string(),
-            "help".to_string(),
-        ],
-    )?
+    p.expect_choice("login to nostr", vec![
+        "secret key (nsec / ncryptsec)".to_string(),
+        "nostr connect (remote signer)".to_string(),
+        "create account".to_string(),
+        "help".to_string(),
+    ])?
     .succeeds_with(0, false, Some(0))?;
 
     p.expect_input(EXPECTED_NSEC_PROMPT)?
@@ -49,7 +43,7 @@ fn standard_first_time_login_with_nsec() -> Result<CliTester> {
 mod with_relays {
     use anyhow::Ok;
     use futures::join;
-    use test_utils::relay::{shutdown_relay, ListenerReqFunc, Relay};
+    use test_utils::relay::{ListenerReqFunc, Relay, shutdown_relay};
 
     use super::*;
 
@@ -137,25 +131,17 @@ mod with_relays {
                 async fn when_latest_metadata_and_relay_list_on_all_relays() -> Result<()> {
                     run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event("fred"),
-                                    generate_test_key_1_relay_list_event_same_as_fallback(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event_same_as_fallback(),
+                            ])?;
                             Ok(())
                         }),
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event("fred"),
-                                    generate_test_key_1_relay_list_event_same_as_fallback(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event_same_as_fallback(),
+                            ])?;
                             Ok(())
                         }),
                     )
@@ -170,18 +156,14 @@ mod with_relays {
                     async fn when_metadata_contains_only_display_name() -> Result<()> {
                         run_test_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        nostr::event::EventBuilder::metadata(
-                                            &nostr::Metadata::new().display_name("fred"),
-                                        )
-                                        .sign_with_keys(&TEST_KEY_1_KEYS)
-                                        .unwrap(),
-                                        generate_test_key_1_relay_list_event_same_as_fallback(),
-                                    ],
-                                )?;
+                                relay.respond_events(client_id, &subscription_id, &vec![
+                                    nostr::event::EventBuilder::metadata(
+                                        &nostr::Metadata::new().display_name("fred"),
+                                    )
+                                    .sign_with_keys(&TEST_KEY_1_KEYS)
+                                    .unwrap(),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ])?;
                                 Ok(())
                             }),
                             None,
@@ -207,19 +189,14 @@ mod with_relays {
 
                         run_test_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        nostr::event::EventBuilder::metadata(
-                                            &nostr::Metadata::new()
-                                                .custom_field("displayName", "fred"),
-                                        )
-                                        .sign_with_keys(&TEST_KEY_1_KEYS)
-                                        .unwrap(),
-                                        generate_test_key_1_relay_list_event_same_as_fallback(),
-                                    ],
-                                )?;
+                                relay.respond_events(client_id, &subscription_id, &vec![
+                                    nostr::event::EventBuilder::metadata(
+                                        &nostr::Metadata::new().custom_field("displayName", "fred"),
+                                    )
+                                    .sign_with_keys(&TEST_KEY_1_KEYS)
+                                    .unwrap(),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ])?;
                                 Ok(())
                             }),
                             None,
@@ -233,18 +210,14 @@ mod with_relays {
                     -> Result<()> {
                         run_test_displays_fallback_to_npub(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        nostr::event::EventBuilder::metadata(
-                                            &nostr::Metadata::new().about("other info in metadata"),
-                                        )
-                                        .sign_with_keys(&TEST_KEY_1_KEYS)
-                                        .unwrap(),
-                                        generate_test_key_1_relay_list_event_same_as_fallback(),
-                                    ],
-                                )?;
+                                relay.respond_events(client_id, &subscription_id, &vec![
+                                    nostr::event::EventBuilder::metadata(
+                                        &nostr::Metadata::new().about("other info in metadata"),
+                                    )
+                                    .sign_with_keys(&TEST_KEY_1_KEYS)
+                                    .unwrap(),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ])?;
                                 Ok(())
                             }),
                             None,
@@ -259,14 +232,10 @@ mod with_relays {
                 -> Result<()> {
                     run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event("fred"),
-                                    generate_test_key_1_relay_list_event_same_as_fallback(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event_same_as_fallback(),
+                            ])?;
                             Ok(())
                         }),
                         None,
@@ -280,19 +249,15 @@ mod with_relays {
                 {
                     run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![generate_test_key_1_metadata_event("fred")],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                            ])?;
                             Ok(())
                         }),
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![generate_test_key_1_relay_list_event_same_as_fallback()],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_relay_list_event_same_as_fallback(),
+                            ])?;
                             Ok(())
                         }),
                     )
@@ -304,22 +269,16 @@ mod with_relays {
                 async fn when_some_relays_return_old_metadata_event() -> Result<()> {
                     run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event("fred"),
-                                    generate_test_key_1_relay_list_event_same_as_fallback(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event_same_as_fallback(),
+                            ])?;
                             Ok(())
                         }),
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![generate_test_key_1_metadata_event_old("fred old")],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event_old("fred old"),
+                            ])?;
                             Ok(())
                         }),
                     )
@@ -331,22 +290,16 @@ mod with_relays {
                 async fn when_some_relays_return_other_users_metadata() -> Result<()> {
                     run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![generate_test_key_2_metadata_event("carole")],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_2_metadata_event("carole"),
+                            ])?;
                             Ok(())
                         }),
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event_old("fred"),
-                                    generate_test_key_1_relay_list_event_same_as_fallback(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event_old("fred"),
+                                generate_test_key_1_relay_list_event_same_as_fallback(),
+                            ])?;
                             Ok(())
                         }),
                     )
@@ -359,22 +312,16 @@ mod with_relays {
                     run_test_displays_correct_name(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
                             let event = generate_test_key_1_kind_event(nostr::Kind::TextNote);
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![make_event_old_or_change_user(event, &TEST_KEY_1_KEYS, 0)],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                make_event_old_or_change_user(event, &TEST_KEY_1_KEYS, 0),
+                            ])?;
                             Ok(())
                         }),
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event_old("fred"),
-                                    generate_test_key_1_relay_list_event_same_as_fallback(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event_old("fred"),
+                                generate_test_key_1_relay_list_event_same_as_fallback(),
+                            ])?;
                             Ok(())
                         }),
                     )
@@ -389,14 +336,10 @@ mod with_relays {
                     async fn displays_correct_name() -> Result<()> {
                         run_test_when_specifying_command_line_nsec_only_displays_correct_name(
                             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                                relay.respond_events(
-                                    client_id,
-                                    &subscription_id,
-                                    &vec![
-                                        generate_test_key_1_metadata_event("fred"),
-                                        generate_test_key_1_relay_list_event_same_as_fallback(),
-                                    ],
-                                )?;
+                                relay.respond_events(client_id, &subscription_id, &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event_same_as_fallback(),
+                                ])?;
                                 Ok(())
                             }),
                             None,
@@ -414,10 +357,12 @@ mod with_relays {
 
                         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                             let test_repo = GitTestRepo::default();
-                            let mut p = CliTester::new_from_dir(
-                                &test_repo.dir,
-                                ["account", "login", "--nsec", TEST_KEY_1_NSEC],
-                            );
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, [
+                                "account",
+                                "login",
+                                "--nsec",
+                                TEST_KEY_1_NSEC,
+                            ]);
 
                             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
@@ -489,11 +434,9 @@ mod with_relays {
                 async fn warm_user_and_displays_name() -> Result<()> {
                     run_test_when_no_relay_list_found_warns_user_and_uses_npub(
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![generate_test_key_1_metadata_event("fred")],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                            ])?;
                             Ok(())
                         }),
                         None,
@@ -584,25 +527,17 @@ mod with_relays {
             async fn displays_correct_name() -> Result<()> {
                 run_test_displays_correct_name(
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event_old("Fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
+                        relay.respond_events(client_id, &subscription_id, &vec![
+                            generate_test_key_1_metadata_event_old("Fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ])?;
                         Ok(())
                     }),
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
+                        relay.respond_events(client_id, &subscription_id, &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ])?;
                         Ok(())
                     }),
                 )
@@ -674,10 +609,10 @@ mod with_offline_flag {
                             true,
                         )?;
 
-                    p.expect_choice(
-                        "login to nostr",
-                        vec!["try again with nsec".to_string(), "back".to_string()],
-                    )?
+                    p.expect_choice("login to nostr", vec![
+                        "try again with nsec".to_string(),
+                        "back".to_string(),
+                    ])?
                     .succeeds_with(0, false, Some(0))?;
                 }
 
@@ -697,10 +632,13 @@ mod with_offline_flag {
         #[test]
         fn valid_nsec_param_succeeds_without_prompts() -> Result<()> {
             let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(
-                &test_repo.dir,
-                ["account", "login", "--offline", "--nsec", TEST_KEY_1_NSEC],
-            );
+            let mut p = CliTester::new_from_dir(&test_repo.dir, [
+                "account",
+                "login",
+                "--offline",
+                "--nsec",
+                TEST_KEY_1_NSEC,
+            ]);
 
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
@@ -712,10 +650,13 @@ mod with_offline_flag {
         #[test]
         fn invalid_nsec_param_fails_without_prompts() -> Result<()> {
             let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(
-                &test_repo.dir,
-                ["account", "login", "--offline", "--nsec", TEST_INVALID_NSEC],
-            );
+            let mut p = CliTester::new_from_dir(&test_repo.dir, [
+                "account",
+                "login",
+                "--offline",
+                "--nsec",
+                TEST_INVALID_NSEC,
+            ]);
 
             p.expect_end_with(
                 "Error: invalid nsec parameter\r\n\r\nCaused by:\r\n    Invalid secret key\r\n",
@@ -729,18 +670,15 @@ mod with_offline_flag {
         #[test]
         fn valid_nsec_param_succeeds_without_prompts() -> Result<()> {
             let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(
-                &test_repo.dir,
-                [
-                    "account",
-                    "login",
-                    "--offline",
-                    "--nsec",
-                    TEST_KEY_1_NSEC,
-                    "--password",
-                    TEST_PASSWORD,
-                ],
-            );
+            let mut p = CliTester::new_from_dir(&test_repo.dir, [
+                "account",
+                "login",
+                "--offline",
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+            ]);
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
             p.expect_end_with(
@@ -751,18 +689,15 @@ mod with_offline_flag {
         #[test]
         fn parameters_can_be_called_globally() -> Result<()> {
             let test_repo = GitTestRepo::default();
-            let mut p = CliTester::new_from_dir(
-                &test_repo.dir,
-                [
-                    "--nsec",
-                    TEST_KEY_1_NSEC,
-                    "--password",
-                    TEST_PASSWORD,
-                    "account",
-                    "login",
-                    "--offline",
-                ],
-            );
+            let mut p = CliTester::new_from_dir(&test_repo.dir, [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "account",
+                "login",
+                "--offline",
+            ]);
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
             p.expect_end_with(
@@ -777,18 +712,15 @@ mod with_offline_flag {
             fn valid_nsec_param_succeeds_without_prompts_and_logs_in() -> Result<()> {
                 standard_first_time_login_with_nsec()?.exit()?;
                 let test_repo = GitTestRepo::default();
-                let mut p = CliTester::new_from_dir(
-                    &test_repo.dir,
-                    [
-                        "account",
-                        "login",
-                        "--offline",
-                        "--nsec",
-                        TEST_KEY_2_NSEC,
-                        "--password",
-                        TEST_PASSWORD,
-                    ],
-                );
+                let mut p = CliTester::new_from_dir(&test_repo.dir, [
+                    "account",
+                    "login",
+                    "--offline",
+                    "--nsec",
+                    TEST_KEY_2_NSEC,
+                    "--password",
+                    TEST_PASSWORD,
+                ]);
                 p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
                 p.expect_end_with(

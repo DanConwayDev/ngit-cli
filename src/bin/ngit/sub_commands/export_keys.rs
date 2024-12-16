@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
     login::{
+        SignerInfo, SignerInfoSource,
         existing::{get_signer_info, load_existing_login},
         fresh::generate_qr,
-        SignerInfo, SignerInfoSource,
     },
 };
 

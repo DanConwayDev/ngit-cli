@@ -84,14 +84,10 @@ mod when_repo_not_previously_claimed {
                     8051,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(
-                            client_id,
-                            &subscription_id,
-                            &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ],
-                        )?;
+                        relay.respond_events(client_id, &subscription_id, &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ])?;
                         Ok(())
                     }),
                 ),
@@ -211,14 +207,10 @@ mod when_repo_not_previously_claimed {
                         8051,
                         None,
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event("fred"),
-                                    generate_test_key_1_relay_list_event(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ])?;
                             Ok(())
                         }),
                     ),
@@ -471,14 +463,10 @@ mod when_repo_not_previously_claimed {
                         8051,
                         None,
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(
-                                client_id,
-                                &subscription_id,
-                                &vec![
-                                    generate_test_key_1_metadata_event("fred"),
-                                    generate_test_key_1_relay_list_event(),
-                                ],
-                            )?;
+                            relay.respond_events(client_id, &subscription_id, &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ])?;
                             Ok(())
                         }),
                     ),

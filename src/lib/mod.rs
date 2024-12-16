@@ -6,7 +6,7 @@ pub mod login;
 pub mod repo_ref;
 pub mod repo_state;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
 
 pub fn get_dirs() -> Result<ProjectDirs> {

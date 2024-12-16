@@ -1,6 +1,6 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::nips::{nip05, nip46::NostrConnectURI};
@@ -10,11 +10,11 @@ use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
 use super::{
+    SignerInfo, SignerInfoSource,
     existing::load_existing_login,
     key_encryption::decrypt_key,
     print_logged_in_as,
-    user::{get_user_details, UserRef},
-    SignerInfo, SignerInfoSource,
+    user::{UserRef, get_user_details},
 };
 #[cfg(not(test))]
 use crate::client::Client;
@@ -25,8 +25,8 @@ use crate::{
         Interactor, InteractorPrompt, Printer, PromptChoiceParms, PromptConfirmParms,
         PromptInputParms, PromptPasswordParms,
     },
-    client::{send_events, Connect},
-    git::{remove_git_config_item, save_git_config_item, Repo, RepoActions},
+    client::{Connect, send_events},
+    git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
 };
 
 pub async fn fresh_login_or_signup(

@@ -6,9 +6,9 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use console::Style;
-use nostr::{nips::nip01::Coordinate, FromBech32, PublicKey, Tag, TagStandard, ToBech32};
+use nostr::{FromBech32, PublicKey, Tag, TagStandard, ToBech32, nips::nip01::Coordinate};
 use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -18,10 +18,10 @@ use crate::{
     cli_interactor::{
         Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
     },
-    client::{consolidate_fetch_reports, get_repo_ref_from_cache, sign_event, Connect},
+    client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache, sign_event},
     git::{
-        nostr_url::{use_nip05_git_config_cache_to_find_nip05_from_public_key, NostrUrlDecoded},
         Repo, RepoActions,
+        nostr_url::{NostrUrlDecoded, use_nip05_git_config_cache_to_find_nip05_from_public_key},
     },
     login::user::get_user_details,
 };
@@ -237,20 +237,17 @@ impl RepoRef {
 
     pub fn to_nostr_git_url(&self, git_repo: &Option<&Repo>) -> String {
         let c = self.coordinate_with_hint();
-        format!(
-            "{}",
-            NostrUrlDecoded {
-                original_string: String::new(),
-                nip05: use_nip05_git_config_cache_to_find_nip05_from_public_key(
-                    &c.public_key,
-                    git_repo,
-                )
-                .unwrap_or_default(),
-                coordinate: c,
-                protocol: None,
-                user: None,
-            }
-        )
+        format!("{}", NostrUrlDecoded {
+            original_string: String::new(),
+            nip05: use_nip05_git_config_cache_to_find_nip05_from_public_key(
+                &c.public_key,
+                git_repo,
+            )
+            .unwrap_or_default(),
+            coordinate: c,
+            protocol: None,
+            user: None,
+        })
     }
 }
 
@@ -521,14 +518,11 @@ pub fn save_repo_config_to_yaml(
                 .context("failed to convert public key into npub")?,
         );
     }
-    serde_yaml::to_writer(
-        file,
-        &RepoConfigYaml {
-            identifier: Some(identifier),
-            maintainers: maintainers_npubs,
-            relays,
-        },
-    )
+    serde_yaml::to_writer(file, &RepoConfigYaml {
+        identifier: Some(identifier),
+        maintainers: maintainers_npubs,
+        relays,
+    })
     .context("failed to write maintainers to maintainers.yaml file serde_yaml")
 }
 

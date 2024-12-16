@@ -1,7 +1,7 @@
 use core::str;
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use auth_git2::GitAuthenticator;
 use client::get_state_from_cache;
 use git::RepoActions;
@@ -22,9 +22,9 @@ use crate::{
     fetch::{fetch_from_git_server, make_commits_for_proposal},
     git::Repo,
     utils::{
-        fetch_or_list_error_is_not_authentication_failure, get_open_proposals,
+        Direction, fetch_or_list_error_is_not_authentication_failure, get_open_proposals,
         get_read_protocols_to_try, get_short_git_server_name, join_with_and,
-        set_protocol_preference, Direction,
+        set_protocol_preference,
     },
 };
 
