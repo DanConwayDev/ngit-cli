@@ -22,7 +22,7 @@ use crate::{
     fetch::{fetch_from_git_server, make_commits_for_proposal},
     git::Repo,
     utils::{
-        Direction, fetch_or_list_error_is_not_authentication_failure, get_open_proposals,
+        Direction, fetch_or_list_error_is_not_authentication_failure, get_open_or_draft_proposals,
         get_read_protocols_to_try, get_short_git_server_name, join_with_and,
         set_protocol_preference,
     },
@@ -93,7 +93,7 @@ pub async fn run_list(
     state.retain(|k, _| !k.starts_with("refs/heads/pr/"));
 
     let proposals_state =
-        get_open_proposals_state(&term, git_repo, repo_ref, &remote_states).await?;
+        get_open_and_draft_proposals_state(&term, git_repo, repo_ref, &remote_states).await?;
 
     state.extend(proposals_state);
 
@@ -113,7 +113,7 @@ pub async fn run_list(
     Ok(remote_states)
 }
 
-async fn get_open_proposals_state(
+async fn get_open_and_draft_proposals_state(
     term: &console::Term,
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -145,9 +145,9 @@ async fn get_open_proposals_state(
     }
 
     let mut state = HashMap::new();
-    let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+    let open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
     let current_user = get_curent_user(git_repo)?;
-    for (_, (proposal, patches)) in open_proposals {
+    for (_, (proposal, patches)) in open_and_draft_proposals {
         if let Ok(cl) = event_to_cover_letter(&proposal) {
             if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
                 branch_name = if let Some(public_key) = current_user {

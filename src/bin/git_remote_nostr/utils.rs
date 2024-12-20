@@ -94,7 +94,7 @@ pub fn read_line<'a>(stdin: &io::Stdin, line: &'a mut String) -> io::Result<Vec<
     Ok(tokens)
 }
 
-pub async fn get_open_proposals(
+pub async fn get_open_or_draft_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
 ) -> Result<HashMap<EventId, (Event, Vec<Event>)>> {
@@ -118,7 +118,7 @@ pub async fn get_open_proposals(
         statuses.reverse();
         statuses
     };
-    let mut open_proposals = HashMap::new();
+    let mut open_or_draft_proposals = HashMap::new();
 
     for proposal in proposals {
         let status = if let Some(e) = statuses
@@ -136,7 +136,7 @@ pub async fn get_open_proposals(
         } else {
             Kind::GitStatusOpen
         };
-        if status.eq(&Kind::GitStatusOpen) {
+        if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status) {
             if let Ok(commits_events) =
                 get_all_proposal_patch_events_from_cache(git_repo_path, repo_ref, &proposal.id)
                     .await
@@ -144,13 +144,13 @@ pub async fn get_open_proposals(
                 if let Ok(most_recent_proposal_patch_chain) =
                     get_most_recent_patch_with_ancestors(commits_events.clone())
                 {
-                    open_proposals
+                    open_or_draft_proposals
                         .insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
                 }
             }
         }
     }
-    Ok(open_proposals)
+    Ok(open_or_draft_proposals)
 }
 
 pub async fn get_all_proposals(

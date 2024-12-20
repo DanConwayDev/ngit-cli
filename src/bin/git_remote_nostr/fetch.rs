@@ -25,8 +25,8 @@ use nostr_sdk::{Event, ToBech32};
 
 use crate::utils::{
     Direction, fetch_or_list_error_is_not_authentication_failure,
-    find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch, get_open_proposals,
-    get_read_protocols_to_try, join_with_and, set_protocol_preference,
+    find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch,
+    get_open_or_draft_proposals, get_read_protocols_to_try, join_with_and, set_protocol_preference,
 };
 
 pub async fn run_fetch(
@@ -79,7 +79,7 @@ pub async fn run_fetch(
 
     fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/pr/"));
 
-    fetch_proposals(git_repo, &term, repo_ref, &fetch_batch).await?;
+    fetch_open_or_draft_proposals(git_repo, &term, repo_ref, &fetch_batch).await?;
     term.flush()?;
     println!();
     Ok(())
@@ -128,21 +128,21 @@ pub fn make_commits_for_proposal(
     Ok(tip_commit_id)
 }
 
-async fn fetch_proposals(
+async fn fetch_open_or_draft_proposals(
     git_repo: &Repo,
     term: &console::Term,
     repo_ref: &RepoRef,
     proposal_refs: &HashMap<String, String>,
 ) -> Result<()> {
     if !proposal_refs.is_empty() {
-        let open_proposals = get_open_proposals(git_repo, repo_ref).await?;
+        let open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
 
         let current_user = get_curent_user(git_repo)?;
 
         for refstr in proposal_refs.keys() {
             if let Some((_, (_, patches))) = find_proposal_and_patches_by_branch_name(
                 refstr,
-                &open_proposals,
+                &open_and_draft_proposals,
                 current_user.as_ref(),
             ) {
                 if let Err(error) = make_commits_for_proposal(git_repo, repo_ref, patches) {
