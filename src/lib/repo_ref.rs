@@ -241,12 +241,12 @@ impl RepoRef {
         self.nostr_git_url = Some(nostr_git_url)
     }
 
-    pub fn to_nostr_git_url(&self, git_repo: &Option<&Repo>) -> String {
+    pub fn to_nostr_git_url(&self, git_repo: &Option<&Repo>) -> NostrUrlDecoded {
         if let Some(nostr_git_url) = &self.nostr_git_url {
-            return nostr_git_url.original_string.clone();
+            return nostr_git_url.clone();
         }
         let c = self.coordinate_with_hint();
-        format!("{}", NostrUrlDecoded {
+        NostrUrlDecoded {
             original_string: String::new(),
             nip05: use_nip05_git_config_cache_to_find_nip05_from_public_key(
                 &c.public_key,
@@ -256,7 +256,7 @@ impl RepoRef {
             coordinate: c,
             protocol: None,
             user: None,
-        })
+        }
     }
 }
 
@@ -460,12 +460,8 @@ fn set_or_create_git_remote_with_nostr_url(
     repo_ref: &RepoRef,
     git_repo: &Repo,
 ) -> Result<()> {
-    let url = repo_ref.to_nostr_git_url(&Some(git_repo));
-    if git_repo
-        .git_repo
-        .remote_set_url(name, &repo_ref.to_nostr_git_url(&Some(git_repo)))
-        .is_err()
-    {
+    let url = repo_ref.to_nostr_git_url(&Some(git_repo)).to_string();
+    if git_repo.git_repo.remote_set_url(name, &url).is_err() {
         git_repo.git_repo.remote(name, &url)?;
     }
     eprintln!("set git remote \"{name}\" to {url}");

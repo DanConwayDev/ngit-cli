@@ -53,8 +53,10 @@ async fn main() -> Result<()> {
 
     fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinate).await?;
 
-    let repo_ref =
+    let mut repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
+
+    repo_ref.set_nostr_git_url(decoded_nostr_url.clone());
 
     let stdin = io::stdin();
     let mut line = String::new();
@@ -77,21 +79,12 @@ async fn main() -> Result<()> {
                 println!("unsupported");
             }
             ["fetch", oid, refstr] => {
-                fetch::run_fetch(
-                    &git_repo,
-                    &repo_ref,
-                    &decoded_nostr_url,
-                    &stdin,
-                    oid,
-                    refstr,
-                )
-                .await?;
+                fetch::run_fetch(&git_repo, &repo_ref, &stdin, oid, refstr).await?;
             }
             ["push", refspec] => {
                 push::run_push(
                     &git_repo,
                     &repo_ref,
-                    &decoded_nostr_url,
                     &stdin,
                     refspec,
                     &client,
@@ -100,12 +93,10 @@ async fn main() -> Result<()> {
                 .await?;
             }
             ["list"] => {
-                list_outputs =
-                    Some(list::run_list(&git_repo, &repo_ref, &decoded_nostr_url, false).await?);
+                list_outputs = Some(list::run_list(&git_repo, &repo_ref, false).await?);
             }
             ["list", "for-push"] => {
-                list_outputs =
-                    Some(list::run_list(&git_repo, &repo_ref, &decoded_nostr_url, true).await?);
+                list_outputs = Some(list::run_list(&git_repo, &repo_ref, true).await?);
             }
             [] => {
                 return Ok(());

@@ -53,7 +53,6 @@ use crate::{
 pub async fn run_push(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    decoded_nostr_url: &NostrUrlDecoded,
     stdin: &Stdin,
     initial_refspec: &str,
     client: &Client,
@@ -75,16 +74,18 @@ pub async fn run_push(
 
     let term = console::Term::stderr();
 
-    let list_outputs = match list_outputs {
-        Some(outputs) => outputs,
-        _ => list_from_remotes(&term, git_repo, &repo_ref.git_server, decoded_nostr_url),
-    };
-
-    let nostr_state = get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await;
+    let list_outputs = list_outputs.unwrap_or_else(|| {
+        list_from_remotes(
+            &term,
+            git_repo,
+            &repo_ref.git_server,
+            &repo_ref.to_nostr_git_url(&None),
+        )
+    });
 
     let existing_state = {
         // if no state events - create from first git server listed
-        if let Ok(nostr_state) = &nostr_state {
+        if let Ok(nostr_state) = &get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await {
             nostr_state.state.clone()
         } else if let Some(url) = repo_ref
             .git_server
@@ -118,55 +119,51 @@ pub async fn run_push(
         }
     });
 
-    if git_server_refspecs.is_empty() && proposal_refspecs.is_empty() {
-        // all refspecs rejected
-        println!();
-        return Ok(());
-    }
+    // all refspecs aren't rejected
+    if !(git_server_refspecs.is_empty() && proposal_refspecs.is_empty()) {
+        let (rejected_proposal_refspecs, rejected) = create_and_publish_events(
+            git_repo,
+            repo_ref,
+            &git_server_refspecs,
+            &proposal_refspecs,
+            client,
+            existing_state,
+            &term,
+        )
+        .await?;
 
-    let (rejected_proposal_refspecs, rejected) = create_and_publish_events(
-        git_repo,
-        repo_ref,
-        decoded_nostr_url,
-        &git_server_refspecs,
-        &proposal_refspecs,
-        client,
-        existing_state,
-        &term,
-    )
-    .await?;
-
-    if !rejected {
-        for refspec in &[git_server_refspecs.clone(), proposal_refspecs.clone()].concat() {
-            if rejected_proposal_refspecs.contains(refspec) {
-                continue;
+        if !rejected {
+            for refspec in git_server_refspecs.iter().chain(proposal_refspecs.iter()) {
+                if rejected_proposal_refspecs.contains(refspec) {
+                    continue;
+                }
+                let (_, to) = refspec_to_from_to(refspec)?;
+                println!("ok {to}");
+                update_remote_refs_pushed(
+                    &git_repo.git_repo,
+                    refspec,
+                    &repo_ref.to_nostr_git_url(&None).to_string(),
+                )
+                .context("could not update remote_ref locally")?;
             }
-            let (_, to) = refspec_to_from_to(refspec)?;
-            println!("ok {to}");
-            update_remote_refs_pushed(
-                &git_repo.git_repo,
-                refspec,
-                &decoded_nostr_url.original_string,
-            )
-            .context("could not update remote_ref locally")?;
-        }
 
-        // TODO make async - check gitlib2 callbacks work async
+            // TODO make async - check gitlib2 callbacks work async
 
-        for (git_server_url, remote_refspecs) in remote_refspecs {
-            let remote_refspecs = remote_refspecs
-                .iter()
-                .filter(|refspec| git_server_refspecs.contains(refspec))
-                .cloned()
-                .collect::<Vec<String>>();
-            if !refspecs.is_empty() {
-                let _ = push_to_remote(
-                    git_repo,
-                    &git_server_url,
-                    decoded_nostr_url,
-                    &remote_refspecs,
-                    &term,
-                );
+            for (git_server_url, remote_refspecs) in remote_refspecs {
+                let remote_refspecs = remote_refspecs
+                    .iter()
+                    .filter(|refspec| git_server_refspecs.contains(refspec))
+                    .cloned()
+                    .collect::<Vec<String>>();
+                if !refspecs.is_empty() {
+                    let _ = push_to_remote(
+                        git_repo,
+                        &git_server_url,
+                        &repo_ref.to_nostr_git_url(&None),
+                        &remote_refspecs,
+                        &term,
+                    );
+                }
             }
         }
     }
@@ -175,11 +172,9 @@ pub async fn run_push(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn create_and_publish_events(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    decoded_nostr_url: &NostrUrlDecoded,
     git_server_refspecs: &Vec<String>,
     proposal_refspecs: &Vec<String>,
     client: &Client,
@@ -222,7 +217,7 @@ async fn create_and_publish_events(
 
         for event in get_merged_status_events(
             term,
-            decoded_nostr_url,
+            &repo_ref.to_nostr_git_url(&None),
             repo_ref,
             git_repo,
             &signer,
@@ -235,7 +230,7 @@ async fn create_and_publish_events(
 
         if let Ok(Some(repo_ref_event)) = get_maintainers_yaml_update(
             term,
-            decoded_nostr_url,
+            &repo_ref.to_nostr_git_url(&None),
             repo_ref,
             git_repo,
             &signer,

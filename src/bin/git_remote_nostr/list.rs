@@ -31,7 +31,6 @@ use crate::{
 pub async fn run_list(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    decoded_nostr_url: &NostrUrlDecoded,
     for_push: bool,
 ) -> Result<HashMap<String, HashMap<String, String>>> {
     let nostr_state =
@@ -43,7 +42,12 @@ pub async fn run_list(
 
     let term = console::Term::stderr();
 
-    let remote_states = list_from_remotes(&term, git_repo, &repo_ref.git_server, decoded_nostr_url);
+    let remote_states = list_from_remotes(
+        &term,
+        git_repo,
+        &repo_ref.git_server,
+        &repo_ref.to_nostr_git_url(&None),
+    );
 
     let mut state = if let Some(nostr_state) = nostr_state {
         for (name, value) in &nostr_state.state {
@@ -89,8 +93,7 @@ pub async fn run_list(
     state.retain(|k, _| !k.starts_with("refs/heads/pr/"));
 
     let proposals_state =
-        get_open_proposals_state(&term, git_repo, repo_ref, decoded_nostr_url, &remote_states)
-            .await?;
+        get_open_proposals_state(&term, git_repo, repo_ref, &remote_states).await?;
 
     state.extend(proposals_state);
 
@@ -114,7 +117,6 @@ async fn get_open_proposals_state(
     term: &console::Term,
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    decoded_nostr_url: &NostrUrlDecoded,
     remote_states: &HashMap<String, HashMap<String, String>>,
 ) -> Result<HashMap<String, String>> {
     // we cannot use commit_id in the latest patch in a proposal because:
@@ -133,7 +135,7 @@ async fn get_open_proposals_state(
                 .cloned()
                 .collect::<Vec<String>>(),
             git_server_url,
-            decoded_nostr_url,
+            &repo_ref.to_nostr_git_url(&None),
             term,
         )
         .is_ok()

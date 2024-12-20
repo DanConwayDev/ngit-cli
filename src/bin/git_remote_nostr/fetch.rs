@@ -32,7 +32,6 @@ use crate::utils::{
 pub async fn run_fetch(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    decoded_nostr_url: &NostrUrlDecoded,
     stdin: &Stdin,
     oid: &str,
     refstr: &str,
@@ -54,7 +53,7 @@ pub async fn run_fetch(
             git_repo,
             &oids_from_git_servers,
             git_server_url,
-            decoded_nostr_url,
+            &repo_ref.to_nostr_git_url(&None),
             &term,
         ) {
             errors.push(error);

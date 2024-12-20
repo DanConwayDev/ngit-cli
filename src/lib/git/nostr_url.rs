@@ -66,6 +66,9 @@ pub struct NostrUrlDecoded {
 
 impl fmt::Display for NostrUrlDecoded {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if !self.original_string.is_empty() {
+            return write!(f, "{}", self.original_string);
+        }
         write!(f, "nostr://")?;
         if let Some(user) = &self.user {
             write!(f, "{}@", user)?;

@@ -596,9 +596,10 @@ fn ask_to_set_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
             .with_default(true)
             .with_prompt("set remote \"origin\" to the nostr url of your repository?"),
     )? {
-        git_repo
-            .git_repo
-            .remote_set_url("origin", &repo_ref.to_nostr_git_url(&Some(git_repo)))?;
+        git_repo.git_repo.remote_set_url(
+            "origin",
+            &repo_ref.to_nostr_git_url(&Some(git_repo)).to_string(),
+        )?;
     }
     Ok(())
 }
@@ -609,9 +610,10 @@ fn ask_to_create_new_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Resul
             .with_default(true)
             .with_prompt("set remote \"origin\" to the nostr url of your repository?"),
     )? {
-        git_repo
-            .git_repo
-            .remote("origin", &repo_ref.to_nostr_git_url(&Some(git_repo)))?;
+        git_repo.git_repo.remote(
+            "origin",
+            &repo_ref.to_nostr_git_url(&Some(git_repo)).to_string(),
+        )?;
     }
     Ok(())
 }
