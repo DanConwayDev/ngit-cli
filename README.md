@@ -2,7 +2,7 @@
 
 nostr plugin for git
 
-- clone a nostr repository, or add as a remote, by using the url format nostr://pub123/identifier
+- clone a nostr repository, or add as a remote, by using the url format nostr://<pub123|nip05-address>/<identifier>
 - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs
 - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options
 - publish a repository to nostr with `ngit init`
@@ -23,7 +23,7 @@ run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in you
 
 [gitworkshop.dev/repos/ngit](gitworkshop.dev/r/naddr1qqzxuemfwsq3gamnwvaz7tmjv4kxz7fwv3sk6atn9e5k7q3q5qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exsxpqqqpmejawq4qj) to report issues and see PRs
 
-use ngit to submit PRs with clone url: `nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.damus.io/ngit`
+use ngit to submit PRs with clone url: `nostr://dan@gitworkshop.dev/relay.damus.io/ngit`
 
 ## primer
 
