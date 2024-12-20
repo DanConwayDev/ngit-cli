@@ -149,10 +149,10 @@ async fn get_open_proposals_state(
     let current_user = get_curent_user(git_repo)?;
     for (_, (proposal, patches)) in open_proposals {
         if let Ok(cl) = event_to_cover_letter(&proposal) {
-            if let Ok(mut branch_name) = cl.get_branch_name() {
+            if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
                 branch_name = if let Some(public_key) = current_user {
                     if proposal.pubkey.eq(&public_key) {
-                        format!("pr/{}", cl.branch_name)
+                        format!("pr/{}", cl.branch_name_without_id_or_prefix)
                     } else {
                         branch_name
                     }

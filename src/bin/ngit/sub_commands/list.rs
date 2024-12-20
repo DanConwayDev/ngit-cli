@@ -261,11 +261,15 @@ pub async fn launch() -> Result<()> {
             .get_local_branch_names()
             .context("gitlib2 will not show a list of local branch names")?
             .iter()
-            .any(|n| n.eq(&cover_letter.get_branch_name().unwrap()));
+            .any(|n| {
+                n.eq(&cover_letter
+                    .get_branch_name_with_pr_prefix_and_shorthand_id()
+                    .unwrap())
+            });
 
         let checked_out_proposal_branch = git_repo
             .get_checked_out_branch_name()?
-            .eq(&cover_letter.get_branch_name()?);
+            .eq(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?);
 
         let proposal_base_commit = str_to_sha1(&tag_value(
             most_recent_proposal_patch_chain.last().context(
@@ -327,14 +331,14 @@ pub async fn launch() -> Result<()> {
                     check_clean(&git_repo)?;
                     let _ = git_repo
                         .apply_patch_chain(
-                            &cover_letter.get_branch_name()?,
+                            &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                             most_recent_proposal_patch_chain,
                         )
                         .context("failed to apply patch chain")?;
 
                     println!(
                         "checked out proposal as '{}' branch",
-                        cover_letter.get_branch_name()?
+                        cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
                     );
                     Ok(())
                 }
@@ -347,7 +351,8 @@ pub async fn launch() -> Result<()> {
             };
         }
 
-        let local_branch_tip = git_repo.get_tip_of_branch(&cover_letter.get_branch_name()?)?;
+        let local_branch_tip = git_repo
+            .get_tip_of_branch(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?)?;
 
         // up-to-date
         if proposal_tip.eq(&local_branch_tip) {
@@ -382,10 +387,12 @@ pub async fn launch() -> Result<()> {
             )? {
                 0 => {
                     check_clean(&git_repo)?;
-                    git_repo.checkout(&cover_letter.get_branch_name()?)?;
+                    git_repo.checkout(
+                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                    )?;
                     println!(
                         "checked out proposal as '{}' branch",
-                        cover_letter.get_branch_name()?
+                        cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
                     );
                     Ok(())
                 }
@@ -419,10 +426,12 @@ pub async fn launch() -> Result<()> {
             )? {
                 0 => {
                     check_clean(&git_repo)?;
-                    git_repo.checkout(&cover_letter.get_branch_name()?)?;
+                    git_repo.checkout(
+                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                    )?;
                     let _ = git_repo
                         .apply_patch_chain(
-                            &cover_letter.get_branch_name()?,
+                            &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                             most_recent_proposal_patch_chain,
                         )
                         .context("failed to apply patch chain")?;
@@ -472,14 +481,16 @@ pub async fn launch() -> Result<()> {
                 0 => {
                     check_clean(&git_repo)?;
                     git_repo.create_branch_at_commit(
-                        &cover_letter.get_branch_name()?,
+                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                         &proposal_base_commit.to_string(),
                     )?;
-                    git_repo.checkout(&cover_letter.get_branch_name()?)?;
+                    git_repo.checkout(
+                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                    )?;
                     let chain_length = most_recent_proposal_patch_chain.len();
                     let _ = git_repo
                         .apply_patch_chain(
-                            &cover_letter.get_branch_name()?,
+                            &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                             most_recent_proposal_patch_chain,
                         )
                         .context("failed to apply patch chain")?;
@@ -494,7 +505,9 @@ pub async fn launch() -> Result<()> {
                 }
                 1 => {
                     check_clean(&git_repo)?;
-                    git_repo.checkout(&cover_letter.get_branch_name()?)?;
+                    git_repo.checkout(
+                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                    )?;
                     println!(
                         "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
                         local_ahead_of_main.len(),
@@ -537,7 +550,9 @@ pub async fn launch() -> Result<()> {
                     ]),
             )? {
                 0 => {
-                    git_repo.checkout(&cover_letter.get_branch_name()?)?;
+                    git_repo.checkout(
+                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                    )?;
                     println!(
                         "checked out proposal branch with {} unpublished commits ({} ahead {} behind '{main_branch_name}')",
                         local_ahead_of_proposal.len(),
@@ -604,7 +619,8 @@ pub async fn launch() -> Result<()> {
         )? {
             0 => {
                 check_clean(&git_repo)?;
-                git_repo.checkout(&cover_letter.get_branch_name()?)?;
+                git_repo
+                    .checkout(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?)?;
                 println!(
                     "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
                     local_ahead_of_main.len(),
@@ -615,18 +631,19 @@ pub async fn launch() -> Result<()> {
             1 => {
                 check_clean(&git_repo)?;
                 git_repo.create_branch_at_commit(
-                    &cover_letter.get_branch_name()?,
+                    &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     &proposal_base_commit.to_string(),
                 )?;
                 let chain_length = most_recent_proposal_patch_chain.len();
                 let _ = git_repo
                     .apply_patch_chain(
-                        &cover_letter.get_branch_name()?,
+                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                         most_recent_proposal_patch_chain,
                     )
                     .context("failed to apply patch chain")?;
 
-                git_repo.checkout(&cover_letter.get_branch_name()?)?;
+                git_repo
+                    .checkout(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?)?;
                 println!(
                     "checked out latest version of proposal ({} ahead {} behind '{main_branch_name}'), replacing unpublished version ({} ahead {} behind '{main_branch_name}')",
                     chain_length,

@@ -453,15 +453,15 @@ pub async fn generate_cover_letter_and_patch_events(
 pub struct CoverLetter {
     pub title: String,
     pub description: String,
-    pub branch_name: String,
+    pub branch_name_without_id_or_prefix: String,
     pub event_id: Option<nostr::EventId>,
 }
 
 impl CoverLetter {
-    pub fn get_branch_name(&self) -> Result<String> {
+    pub fn get_branch_name_with_pr_prefix_and_shorthand_id(&self) -> Result<String> {
         Ok(format!(
             "pr/{}({})",
-            self.branch_name,
+            self.branch_name_without_id_or_prefix,
             &self
                 .event_id
                 .context("proposal root event_id must be know to get it's branch name")?
@@ -520,37 +520,31 @@ pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
     Ok(CoverLetter {
         title: title.clone(),
         description,
-        // TODO should this be prefixed by format!("{}-"e.id.to_string()[..5]?)
-        branch_name: if let Ok(name) = match tag_value(event, "branch-name") {
-            Ok(name) => {
-                if !name.eq("main") && !name.eq("master") {
-                    Ok(name.chars().take(60).collect::<String>())
-                } else {
-                    Err(())
-                }
+        branch_name_without_id_or_prefix: if let Ok(name) = tag_value(event, "branch-name") {
+            if !name.eq("main") && !name.eq("master") {
+                safe_branch_name_for_pr(&name)
+            } else {
+                safe_branch_name_for_pr(&title)
             }
-            _ => Err(()),
-        } {
-            name
         } else {
-            let s = title
-                .replace(' ', "-")
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c.eq(&'/') {
-                        c
-                    } else {
-                        '-'
-                    }
-                })
-                .collect();
-            s
-        }
-        .chars()
-        .take(60)
-        .collect(),
+            safe_branch_name_for_pr(&title)
+        },
         event_id: Some(event.id),
     })
+}
+
+fn safe_branch_name_for_pr(s: &str) -> String {
+    s.replace(' ', "-")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c.eq(&'/') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(60)
+        .collect()
 }
 
 pub fn get_most_recent_patch_with_ancestors(
@@ -622,9 +616,10 @@ pub fn is_event_proposal_root_for_branch(
     let branch_name = branch_name_or_refstr.replace("refs/heads/", "");
     Ok(event_to_cover_letter(e).is_ok_and(|cl| {
         (logged_in_user.is_some_and(|public_key| e.pubkey.eq(public_key))
-            && (branch_name.eq(&format!("pr/{}", cl.branch_name))
-                || cl.branch_name.eq(&branch_name)))
-            || cl.get_branch_name().is_ok_and(|s| s.eq(&branch_name))
+            && branch_name.eq(&format!("pr/{}", cl.branch_name_without_id_or_prefix)))
+            || cl
+                .get_branch_name_with_pr_prefix_and_shorthand_id()
+                .is_ok_and(|s| s.eq(&branch_name))
     }) && !event_is_revision_root(e))
 }
 

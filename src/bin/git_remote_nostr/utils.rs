@@ -184,10 +184,10 @@ pub async fn get_all_proposals(
 
 pub fn find_proposal_and_patches_by_branch_name<'a>(
     refstr: &'a str,
-    open_proposals: &'a HashMap<EventId, (Event, Vec<Event>)>,
+    proposals: &'a HashMap<EventId, (Event, Vec<Event>)>,
     current_user: Option<&PublicKey>,
 ) -> Option<(&'a EventId, &'a (Event, Vec<Event>))> {
-    open_proposals.iter().find(|(_, (proposal, _))| {
+    proposals.iter().find(|(_, (proposal, _))| {
         is_event_proposal_root_for_branch(proposal, refstr, current_user).unwrap_or(false)
     })
 }

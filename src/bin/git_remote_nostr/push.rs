@@ -1184,7 +1184,8 @@ async fn create_merge_events(
             term.write_line(
                 format!(
                     "applied commits from proposal: create nostr proposal status event for {}",
-                    event_to_cover_letter(&proposal)?.get_branch_name()?,
+                    event_to_cover_letter(&proposal)?
+                        .get_branch_name_with_pr_prefix_and_shorthand_id()?,
                 )
                 .as_str(),
             )?;
@@ -1192,7 +1193,8 @@ async fn create_merge_events(
             term.write_line(
                 format!(
                     "fast-forward merge: create nostr proposal status event for {}",
-                    event_to_cover_letter(&proposal)?.get_branch_name()?,
+                    event_to_cover_letter(&proposal)?
+                        .get_branch_name_with_pr_prefix_and_shorthand_id()?,
                 )
                 .as_str(),
             )?;
