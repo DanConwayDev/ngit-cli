@@ -26,7 +26,7 @@ use ngit::{
         oid_to_shorthand_string,
     },
     git_events::{self, event_to_cover_letter, get_event_root},
-    login::{self, get_curent_user, user::UserRef},
+    login::{self, user::UserRef},
     repo_ref::{self, get_repo_config_from_yaml},
     repo_state,
 };
@@ -288,14 +288,15 @@ async fn process_proposal_refspecs(
         return Ok((events, rejected_proposal_refspecs));
     }
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
-    let current_user = get_curent_user(git_repo)?;
+    let current_user = &user_ref.public_key;
 
     for refspec in proposal_refspecs {
         let (from, to) = refspec_to_from_to(refspec).unwrap();
         let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
 
+        // this failed to find existing PR from user
         if let Some((_, (proposal, patches))) =
-            find_proposal_and_patches_by_branch_name(to, &all_proposals, current_user.as_ref())
+            find_proposal_and_patches_by_branch_name(to, &all_proposals, Some(current_user))
         {
             if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
                 .concat()
