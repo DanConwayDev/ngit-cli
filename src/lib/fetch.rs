@@ -1,4 +1,6 @@
 use std::{
+    path::PathBuf,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -44,18 +46,28 @@ pub fn fetch_from_git_server(
             format!("fetching {} over {protocol}...", server_url.short_name(),).as_str(),
         )?;
 
-        let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
+        let formatted_url = server_url.format_as(protocol)?;
         let res = fetch_from_git_server_url(
             &git_repo.git_repo,
             oids,
             &formatted_url,
             [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol),
+            decoded_nostr_url.ssh_key_file_path().as_ref(),
             term,
         );
         if let Err(error) = res {
-            term.write_line(
-                format!("fetch: {formatted_url} failed over {protocol}: {error}").as_str(),
-            )?;
+            term.write_line(&format!(
+                "fetch: {formatted_url} failed over {protocol}{}: {error}",
+                if protocol == &ServerProtocol::Ssh {
+                    if let Some(ssh_key_file) = &decoded_nostr_url.ssh_key_file_path() {
+                        format!(" with ssh key from {ssh_key_file}")
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            ))?;
             failed_protocols.push(protocol);
         } else {
             success = true;
@@ -89,6 +101,7 @@ fn fetch_from_git_server_url(
     oids: &[String],
     git_server_url: &str,
     dont_authenticate: bool,
+    ssh_key_file: Option<&String>,
     term: &console::Term,
 ) -> Result<()> {
     if git_server_url.parse::<CloneUrl>()?.protocol() == ServerProtocol::Ssh && !check_ssh_keys() {
@@ -96,7 +109,20 @@ fn fetch_from_git_server_url(
     }
     let git_config = git_repo.config()?;
     let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;
-    let auth = GitAuthenticator::default();
+    let auth = {
+        if dont_authenticate {
+            GitAuthenticator::default()
+        } else if git_server_url.contains("git@") {
+            if let Some(ssh_key_file) = ssh_key_file {
+                GitAuthenticator::default()
+                    .add_ssh_key_from_file(PathBuf::from_str(ssh_key_file)?, None)
+            } else {
+                GitAuthenticator::default()
+            }
+        } else {
+            GitAuthenticator::default()
+        }
+    };
     let mut fetch_options = git2::FetchOptions::new();
     let mut remote_callbacks = git2::RemoteCallbacks::new();
     let fetch_reporter = Arc::new(Mutex::new(FetchReporter::new(term)));

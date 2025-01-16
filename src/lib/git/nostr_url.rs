@@ -2,6 +2,7 @@ use core::fmt;
 use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
+use directories::BaseDirs;
 use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
 use nostr_sdk::{FromBech32, PublicKey, RelayUrl, ToBech32, Url};
 
@@ -61,7 +62,7 @@ pub struct NostrUrlDecoded {
     pub original_string: String,
     pub coordinate: Nip19Coordinate,
     pub protocol: Option<ServerProtocol>,
-    pub user: Option<String>,
+    pub ssh_key_file: Option<String>,
     pub nip05: Option<String>,
 }
 
@@ -71,8 +72,8 @@ impl fmt::Display for NostrUrlDecoded {
             return write!(f, "{}", self.original_string);
         }
         write!(f, "nostr://")?;
-        if let Some(user) = &self.user {
-            write!(f, "{user}@")?;
+        if let Some(ssh_key_file) = &self.ssh_key_file {
+            write!(f, "{ssh_key_file}@")?;
         }
         if let Some(protocol) = &self.protocol {
             write!(f, "{protocol}/")?;
@@ -103,7 +104,7 @@ static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format.
 impl NostrUrlDecoded {
     pub async fn parse_and_resolve(url: &str, git_repo: &Option<&Repo>) -> Result<Self> {
         let mut protocol = None;
-        let mut user = None;
+        let mut ssh_key_file = None;
         let mut relays = vec![];
         let mut nip05 = None;
 
@@ -130,8 +131,8 @@ impl NostrUrlDecoded {
                     "git" => Some(ServerProtocol::Git),
                     _ => None,
                 };
-            } else if name == "user" {
-                user = Some(value.to_string());
+            } else if name == "ssh_key_file" {
+                ssh_key_file = Some(value.to_string());
             }
         }
 
@@ -148,7 +149,7 @@ impl NostrUrlDecoded {
             let protocol_str = if part.contains('.') {
                 part
             } else if let Some(at_index) = part.find('@') {
-                user = Some(part[..at_index].to_string());
+                ssh_key_file = Some(part[..at_index].to_string());
                 &part[at_index + 1..]
             } else {
                 part
@@ -240,9 +241,29 @@ impl NostrUrlDecoded {
             original_string: url.to_string(),
             coordinate,
             protocol,
-            user,
+            ssh_key_file,
             nip05,
         })
+    }
+
+    pub fn ssh_key_file_path(&self) -> Option<String> {
+        if let Some(ssh_key_file) = &self.ssh_key_file {
+            if !ssh_key_file.is_empty() {
+                // checking if path exists would make unit tests harder
+                if is_absoute_or_relative_path(ssh_key_file) {
+                    return Some(ssh_key_file.clone());
+                } else if let Some(dirs) = BaseDirs::new() {
+                    return Some(
+                        dirs.home_dir()
+                            .join(".ssh")
+                            .join(ssh_key_file)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
+        None
     }
 }
 
@@ -297,6 +318,13 @@ fn load_nip_cache(git_repo: &Option<&Repo>) -> Result<HashMap<String, PublicKey>
     Ok(h)
 }
 
+fn is_absoute_or_relative_path(input: &str) -> bool {
+    ["~", "/", "./", "../", ".\\", "..\\"]
+        .iter()
+        .any(|s| input.starts_with(s))
+        || input.chars().nth(1).unwrap() == ':'
+}
+
 #[derive(Debug, PartialEq, Default)]
 pub struct CloneUrl {
     original_string: String,
@@ -324,7 +352,7 @@ impl FromStr for CloneUrl {
         let url_str = if s.contains("://") {
             s.to_string() // Use the original string
         } else {
-            let protocol = // Check for the SSH format user@host:path and convert to ssh://
+            let protocol = // Check for the SSH format git@host:path and convert to ssh://
                 if s.contains('@') && s
                 .split('@')
                 .nth(0)
@@ -395,7 +423,7 @@ fn contains_port(s: &str) -> bool {
 }
 
 impl CloneUrl {
-    pub fn format_as(&self, protocol: &ServerProtocol, user: &Option<String>) -> Result<String> {
+    pub fn format_as(&self, protocol: &ServerProtocol) -> Result<String> {
         // Check for incompatible protocol conversions
         if *protocol == ServerProtocol::Filesystem {
             if self.protocol == ServerProtocol::Filesystem {
@@ -450,10 +478,7 @@ impl CloneUrl {
         let mut formatted_url = url.to_string();
 
         if *protocol == ServerProtocol::Ssh {
-            formatted_url = formatted_url.replace(
-                "ssh://",
-                format!("{}@", user.as_deref().unwrap_or("git")).as_str(),
-            );
+            formatted_url = formatted_url.replace("ssh://", "git@");
             if url.port().is_some() {
                 formatted_url = format!("ssh://{formatted_url}");
             } else {
@@ -543,7 +568,7 @@ fn strip_credentials(url: &str) -> String {
             return format!("{}{}", protocol, rest_parts[1]);
         }
     } else if let Some(at_pos) = url.find('@') {
-        // Handle user@host:path format
+        // Handle git@host:path format
         let (_, rest) = url.split_at(at_pos);
         // This is a git@ syntax
         let host_and_repo = &rest[1..]; // Skip the ':'
@@ -565,52 +590,12 @@ mod tests {
     mod clone_url_from_str_format_as {
         use super::*;
 
-        mod when_user_specified {
-            use super::*;
-
-            mod but_not_in_original_url {
-                use super::*;
-
-                #[test]
-                fn https_to_https_ignores_user() {
-                    let result = "https://github.com/user/repo.git"
-                        .parse::<CloneUrl>()
-                        .unwrap()
-                        .format_as(&ServerProtocol::Https, &Some("user1".to_string()))
-                        .unwrap();
-                    assert_eq!(result, "https://github.com/user/repo.git");
-                }
-                #[test]
-                fn https_to_ssh_uses_specified_user() {
-                    let result = "https://github.com/user/repo.git"
-                        .parse::<CloneUrl>()
-                        .unwrap()
-                        .format_as(&ServerProtocol::Ssh, &Some("user1".to_string()))
-                        .unwrap();
-                    assert_eq!(result, "user1@github.com:user/repo.git");
-                }
-            }
-            mod and_a_different_user_in_original_url {
-                use super::*;
-
-                #[test]
-                fn ssh_uses_specified_user() {
-                    let result = "user2@github.com/user/repo.git"
-                        .parse::<CloneUrl>()
-                        .unwrap()
-                        .format_as(&ServerProtocol::Ssh, &Some("user1".to_string()))
-                        .unwrap();
-                    assert_eq!(result, "user1@github.com:user/repo.git");
-                }
-            }
-        }
-
         #[test]
         fn format_as_ssh_defaults_to_git_user() {
             let result = "https://github.com/user/repo.git"
                 .parse::<CloneUrl>()
                 .unwrap()
-                .format_as(&ServerProtocol::Ssh, &None)
+                .format_as(&ServerProtocol::Ssh)
                 .unwrap();
             assert_eq!(result, "git@github.com:user/repo.git");
         }
@@ -623,7 +608,7 @@ mod tests {
                 let result = "https://github.com:1000/user/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Https, &None)
+                    .format_as(&ServerProtocol::Https)
                     .unwrap();
                 assert_eq!(result, "https://github.com:1000/user/repo.git");
             }
@@ -633,7 +618,7 @@ mod tests {
                 let result = "https://github.com:1000/user/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Ssh, &None)
+                    .format_as(&ServerProtocol::Ssh)
                     .unwrap();
                 assert_eq!(result, "git@github.com:user/repo.git");
             }
@@ -644,7 +629,7 @@ mod tests {
                 let result = "ssh://git@github.com:29418/user/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Ssh, &None)
+                    .format_as(&ServerProtocol::Ssh)
                     .unwrap();
                 // need this format
                 assert_eq!(result, "ssh://git@github.com:29418/user/repo.git");
@@ -655,7 +640,7 @@ mod tests {
                 let result = "ssh://git@github.com:29418/user/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Https, &None)
+                    .format_as(&ServerProtocol::Https)
                     .unwrap();
                 // need this format
                 assert_eq!(result, "https://github.com/user/repo.git");
@@ -667,7 +652,7 @@ mod tests {
                 let result = "git@github.com:29418/user/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Ssh, &None)
+                    .format_as(&ServerProtocol::Ssh)
                     .unwrap();
                 // need this format
                 assert_eq!(result, "ssh://git@github.com:29418/user/repo.git");
@@ -679,7 +664,7 @@ mod tests {
             let result = "https://github.com/user/repo.git"
                 .parse::<CloneUrl>()
                 .unwrap()
-                .format_as(&ServerProtocol::Unspecified, &None)
+                .format_as(&ServerProtocol::Unspecified)
                 .unwrap();
             assert_eq!(result, "github.com/user/repo.git");
         }
@@ -692,7 +677,7 @@ mod tests {
                 let result = "https://github.com/user/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Https, &None)
+                    .format_as(&ServerProtocol::Https)
                     .unwrap();
                 assert_eq!(result, "https://github.com/user/repo.git");
             }
@@ -705,7 +690,7 @@ mod tests {
                     let result = "github.com:1000/user/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git");
                 }
@@ -715,7 +700,7 @@ mod tests {
                     let result = "github.com:user/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git");
                 }
@@ -725,7 +710,7 @@ mod tests {
                     let result = "github.com/user/repo.git#readme"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git#readme");
                 }
@@ -735,7 +720,7 @@ mod tests {
                     let result = "github.com/user/repo.git?ref=main"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git?ref=main");
                 }
@@ -745,7 +730,7 @@ mod tests {
                     let result = "github.com:2222/repo.git?version=1.0#section1"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/repo.git?version=1.0#section1");
                 }
@@ -759,7 +744,7 @@ mod tests {
                     let result = "https://username:password@github.com/user/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git");
                 }
@@ -769,7 +754,7 @@ mod tests {
                     let result = "https://github.com:1000/user/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com:1000/user/repo.git");
                 }
@@ -779,7 +764,7 @@ mod tests {
                     let result = "https://github.com/user/repo.git#readme"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git#readme");
                 }
@@ -789,7 +774,7 @@ mod tests {
                     let result = "https://github.com/user/repo.git?ref=main"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git?ref=main");
                 }
@@ -799,7 +784,7 @@ mod tests {
                     let result = "https://github.com:2222/repo.git?version=1.0#section1"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(
                         result,
@@ -813,7 +798,7 @@ mod tests {
                 let result = "http://github.com/user/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Https, &None)
+                    .format_as(&ServerProtocol::Https)
                     .unwrap();
                 assert_eq!(result, "https://github.com/user/repo.git");
             }
@@ -826,56 +811,47 @@ mod tests {
                     let result = "git@github.com:user/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git");
                 }
 
                 #[test]
-                fn test_user_at_url() {
-                    let result = "user1@github.com:user/repo.git"
-                        .parse::<CloneUrl>()
-                        .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
-                        .unwrap();
-                    assert_eq!(result, "https://github.com/user/repo.git");
-                }
-                #[test]
                 fn path_has_colon_slash_prefix() {
-                    let result = "user1@github.com:/user/repo.git"
+                    let result = "git@github.com:/user/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git");
                 }
 
                 #[test]
                 fn path_with_fragment() {
-                    let result = "user1@github.com:/user/repo.git#readme"
+                    let result = "git@github.com:/user/repo.git#readme"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git#readme");
                 }
 
                 #[test]
                 fn path_with_parameters() {
-                    let result = "user@github.com:/user/repo.git?ref=main"
+                    let result = "git@github.com:/user/repo.git?ref=main"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/user/repo.git?ref=main");
                 }
 
                 #[test]
                 fn port_with_parameters_and_fragment_ssh() {
-                    let result = "user@github.com:2222/repo.git?version=1.0#section1"
+                    let result = "git@github.com:2222/repo.git?version=1.0#section1"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Ssh, &None)
+                        .format_as(&ServerProtocol::Ssh)
                         .unwrap();
                     assert_eq!(
                         result,
@@ -884,10 +860,10 @@ mod tests {
                 }
                 #[test]
                 fn port_with_parameters_and_fragment_https() {
-                    let result = "user@github.com:2222/repo.git?version=1.0#section1"
+                    let result = "git@github.com:2222/repo.git?version=1.0#section1"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None)
+                        .format_as(&ServerProtocol::Https)
                         .unwrap();
                     assert_eq!(result, "https://github.com/repo.git?version=1.0#section1");
                 }
@@ -898,7 +874,7 @@ mod tests {
                 let result = "ftp://example.com/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Https, &None)
+                    .format_as(&ServerProtocol::Https)
                     .unwrap();
                 assert_eq!(result, "https://example.com/repo.git");
             }
@@ -908,7 +884,7 @@ mod tests {
                 let result = "git://example.com/repo.git"
                     .parse::<CloneUrl>()
                     .unwrap()
-                    .format_as(&ServerProtocol::Https, &None)
+                    .format_as(&ServerProtocol::Https)
                     .unwrap();
                 assert_eq!(result, "https://example.com/repo.git");
             }
@@ -925,7 +901,7 @@ mod tests {
                     let result = "/path/to/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None);
+                        .format_as(&ServerProtocol::Https);
                     assert!(result.is_err()); // Expecting an error when converting to HTTPS
                 }
 
@@ -934,7 +910,7 @@ mod tests {
                     let result = "./path/to/repo.git"
                         .parse::<CloneUrl>()
                         .unwrap()
-                        .format_as(&ServerProtocol::Https, &None);
+                        .format_as(&ServerProtocol::Https);
                     assert!(result.is_err()); // Expecting an error when converting to HTTPS
                 }
             }
@@ -967,13 +943,6 @@ mod tests {
         #[test]
         fn test_git_at_url() {
             let url = "git@github.com:user/repo.git";
-            let result = convert_clone_url_to_https(url).unwrap();
-            assert_eq!(result, "https://github.com/user/repo.git");
-        }
-
-        #[test]
-        fn test_user_at_url() {
-            let url = "user1@github.com:user/repo.git";
             let result = convert_clone_url_to_https(url).unwrap();
             assert_eq!(result, "https://github.com/user/repo.git");
         }
@@ -1030,7 +999,7 @@ mod tests {
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
                     protocol: None,
-                    user: None,
+                    ssh_key_file: None,
                     nip05: None,
                 }),
                 "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
@@ -1055,7 +1024,7 @@ mod tests {
                         relays: vec![],
                     },
                     protocol: None,
-                    user: None,
+                    ssh_key_file: None,
                     nip05: None,
                 }),
                 "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit",
@@ -1080,7 +1049,7 @@ mod tests {
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
                     protocol: Some(ServerProtocol::Ssh),
-                    user: None,
+                    ssh_key_file: None,
                     nip05: None,
                 }),
                 "nostr://ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
@@ -1089,7 +1058,7 @@ mod tests {
         }
 
         #[test]
-        fn with_protocol_and_user() -> Result<()> {
+        fn with_protocol_and_ssh_key_file() -> Result<()> {
             assert_eq!(
                 format!("{}", NostrUrlDecoded {
                     original_string: String::new(),
@@ -1105,7 +1074,7 @@ mod tests {
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
                     protocol: Some(ServerProtocol::Ssh),
-                    user: Some("bla".to_string()),
+                    ssh_key_file: Some("bla".to_string()), 
                     nip05: None,
                 }),
                 "nostr://bla@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol/ngit",
@@ -1114,26 +1083,26 @@ mod tests {
         }
     }
 
+    fn get_model_coordinate(relays: bool) -> Nip19Coordinate {
+        Nip19Coordinate {
+            coordinate: Coordinate {
+                identifier: "ngit".to_string(),
+                public_key: PublicKey::parse(
+                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                )
+                .unwrap(),
+                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+            },
+            relays: if relays {
+                vec![RelayUrl::parse("wss://nos.lol").unwrap()]
+            } else {
+                vec![]
+            },
+        }
+    }
+
     mod nostr_url_decoded_paramemters_from_str {
         use super::*;
-
-        fn get_model_coordinate(relays: bool) -> Nip19Coordinate {
-            Nip19Coordinate {
-                coordinate: Coordinate {
-                    identifier: "ngit".to_string(),
-                    public_key: PublicKey::parse(
-                        "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                    )
-                    .unwrap(),
-                    kind: nostr_sdk::Kind::GitRepoAnnouncement,
-                },
-                relays: if relays {
-                    vec![RelayUrl::parse("wss://nos.lol").unwrap()]
-                } else {
-                    vec![]
-                },
-            }
-        }
 
         #[tokio::test]
         async fn from_naddr() -> Result<()> {
@@ -1155,7 +1124,7 @@ mod tests {
                                                                                   * slash */
                     },
                     protocol: None,
-                    user: None,
+                    ssh_key_file: None,
                     nip05: None,
                 },
             );
@@ -1176,7 +1145,7 @@ mod tests {
                         original_string: url.clone(),
                         coordinate: get_model_coordinate(false),
                         protocol: None,
-                        user: None,
+                        ssh_key_file: None,
                         nip05: None,
                     },
                 );
@@ -1195,7 +1164,7 @@ mod tests {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
-                            user: None,
+                            ssh_key_file: None,
                             nip05: None,
                         },
                     );
@@ -1214,7 +1183,7 @@ mod tests {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
-                            user: None,
+                            ssh_key_file: None,
                             nip05: None,
                         },
                     );
@@ -1247,7 +1216,7 @@ mod tests {
                             ],
                         },
                         protocol: None,
-                        user: None,
+                        ssh_key_file: None,
                         nip05: None,
                     },
                 );
@@ -1263,7 +1232,7 @@ mod tests {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
-                            user: None,
+                            ssh_key_file: None,
                             nip05: None,
                         },
                     );
@@ -1271,15 +1240,15 @@ mod tests {
                 }
 
                 #[tokio::test]
-                async fn with_server_protocol_and_user() -> Result<()> {
-                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh&user=fred".to_string();
+                async fn with_server_protocol_and_ssh_key_file() -> Result<()> {
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?protocol=ssh&ssh_key_file=fred".to_string();
                     assert_eq!(
                         NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                         NostrUrlDecoded {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
-                            user: Some("fred".to_string()),
+                            ssh_key_file: Some("fred".to_string()),
                             nip05: None,
                         },
                     );
@@ -1299,7 +1268,7 @@ mod tests {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
-                            user: None,
+                            ssh_key_file: None,
                             nip05: None,
                         },
                     );
@@ -1318,7 +1287,7 @@ mod tests {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(true),
                             protocol: None,
-                            user: None,
+                            ssh_key_file: None,
                             nip05: None,
                         },
                     );
@@ -1351,7 +1320,7 @@ mod tests {
                             ],
                         },
                         protocol: None,
-                        user: None,
+                        ssh_key_file: None,
                         nip05: None,
                     },
                 );
@@ -1367,7 +1336,7 @@ mod tests {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
-                            user: None,
+                            ssh_key_file: None,
                             nip05: None,
                         },
                     );
@@ -1375,7 +1344,7 @@ mod tests {
                 }
 
                 #[tokio::test]
-                async fn with_server_protocol_and_user() -> Result<()> {
+                async fn with_server_protocol_and_ssh_key_file() -> Result<()> {
                     let url = "nostr://fred@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit".to_string();
                     assert_eq!(
                         NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
@@ -1383,13 +1352,47 @@ mod tests {
                             original_string: url.clone(),
                             coordinate: get_model_coordinate(false),
                             protocol: Some(ServerProtocol::Ssh),
-                            user: Some("fred".to_string()),
+                            ssh_key_file: Some("fred".to_string()),
                             nip05: None,
                         },
                     );
                     Ok(())
                 }
             }
+        }
+    }
+    mod nostr_url_ssh_key_file_path {
+        use super::*;
+
+        #[tokio::test]
+        async fn when_full_file_path_not_detected_default_ssh_dir_is_preppended() -> Result<()> {
+            let url = "nostr://fred@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit".to_string();
+            let decoded = NostrUrlDecoded {
+                original_string: url.clone(),
+                coordinate: get_model_coordinate(false),
+                protocol: Some(ServerProtocol::Ssh),
+                ssh_key_file: Some("fred".to_string()),
+                nip05: None,
+            };
+            assert!(decoded.ssh_key_file_path().unwrap().ends_with("/.ssh/fred"));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn when_full_file_path_detected_default_ssh_dir_is_not_preppended() -> Result<()> {
+            let url = "nostr://~/other/fred@ssh/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit".to_string();
+            let decoded = NostrUrlDecoded {
+                original_string: url.clone(),
+                coordinate: get_model_coordinate(false),
+                protocol: Some(ServerProtocol::Ssh),
+                ssh_key_file: Some("~/other/fred".to_string()),
+                nip05: None,
+            };
+            assert_eq!(
+                decoded.ssh_key_file_path(),
+                Some("~/other/fred".to_string())
+            );
+            Ok(())
         }
     }
 }

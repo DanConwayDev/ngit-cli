@@ -660,7 +660,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             },
         },
         protocol: None,
-        user: None,
+        ssh_key_file: None,
         nip05: None,
     }
     .to_string()

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
     thread,
@@ -25,7 +26,7 @@ use crate::{
     client::{Connect, get_repo_ref_from_cache, send_events, sign_draft_event, sign_event},
     git::{
         Repo, RepoActions,
-        nostr_url::{CloneUrl, NostrUrlDecoded},
+        nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
         oid_to_shorthand_string,
     },
     git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
@@ -60,12 +61,30 @@ pub fn push_to_remote(
     for protocol in &protocols_to_attempt {
         term.write_line(format!("push: {} over {protocol}...", server_url.short_name(),).as_str())?;
 
-        let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
+        let formatted_url = server_url.format_as(protocol)?;
 
-        match push_to_remote_url(git_repo, &formatted_url, remote_refspecs, term) {
+        match push_to_remote_url(
+            git_repo,
+            &formatted_url,
+            decoded_nostr_url.ssh_key_file_path().as_ref(),
+            remote_refspecs,
+            term,
+        ) {
             Err(error) => {
                 term.write_line(
-                    format!("push: {formatted_url} failed over {protocol}: {error}").as_str(),
+                    format!(
+                        "push: {formatted_url} failed over {protocol}{}: {error}",
+                        if protocol == &ServerProtocol::Ssh {
+                            if let Some(ssh_key_file) = &decoded_nostr_url.ssh_key_file_path() {
+                                format!(" with ssh key from {ssh_key_file}")
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        }
+                    )
+                    .as_str(),
                 )?;
                 failed_protocols.push(protocol);
             }
@@ -127,12 +146,24 @@ pub fn push_to_remote(
 pub fn push_to_remote_url(
     git_repo: &Repo,
     git_server_url: &str,
+    ssh_key_file: Option<&String>,
     remote_refspecs: &[String],
     term: &Term,
 ) -> Result<HashMap<String, Option<String>>> {
     let git_config = git_repo.git_repo.config()?;
     let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
-    let auth = GitAuthenticator::default();
+    let auth = {
+        if git_server_url.contains("git@") {
+            if let Some(ssh_key_file) = ssh_key_file {
+                GitAuthenticator::default()
+                    .add_ssh_key_from_file(PathBuf::from_str(ssh_key_file)?, None)
+            } else {
+                GitAuthenticator::default()
+            }
+        } else {
+            GitAuthenticator::default()
+        }
+    };
     let mut push_options = git2::PushOptions::new();
     let mut remote_callbacks = git2::RemoteCallbacks::new();
     let push_reporter = Arc::new(Mutex::new(PushReporter::new(term)));
@@ -716,7 +747,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
         let refspec = format!("{tip}:{git_ref_used}");
 
         let res = if is_grasp_server_clone_url(clone_url) {
-            push_to_remote_url(git_repo, clone_url, &[refspec], term)
+            push_to_remote_url(git_repo, clone_url, None, &[refspec], term)
         } else {
             // anticipated only when pushing to user's own repo or a personal-fork with
             // non-grasp git servers. this is used to extract prefered protocols / ssh
