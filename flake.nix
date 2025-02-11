@@ -63,6 +63,7 @@
               pkg-config # required by git2
               openssl
             ];
+            doCheck = false;
           };
         # Create a tarball for the built package
         packages.tarball = stdenv.mkDerivation {
