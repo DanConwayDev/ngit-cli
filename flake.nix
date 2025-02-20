@@ -9,13 +9,9 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
+        pkgs = import nixpkgs { inherit system overlays; };
         manifest = pkgs.lib.importTOML ./Cargo.toml;
-      in
-      with pkgs;
-      {
+      in with pkgs; {
         devShells.default = mkShell {
 
           nativeBuildInputs = [
@@ -45,34 +41,36 @@
         };
         # Create packages for each binary defined in Cargo.toml
         packages.default = pkgs.rustPlatform.buildRustPackage {
-            pname = manifest.package.name;
-            version = manifest.package.version;
-            src = ./.;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              outputHashes = {
-                "rexpect-0.5.0" = "0amxyp81r90gfqlx5dnfjsmd403kf5hcw0crzpcmsbaviavxff4y";
-                "simple-websockets-0.1.6" = "0910bbl7p3by18w3wks8gbgdg8879hn2c39z1bkr5pcvfkcxmaf3";
-              };
+          pname = manifest.package.name;
+          version = manifest.package.version;
+          src = ./.;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "rexpect-0.5.0" =
+                "0amxyp81r90gfqlx5dnfjsmd403kf5hcw0crzpcmsbaviavxff4y";
+              "simple-websockets-0.1.6" =
+                "0910bbl7p3by18w3wks8gbgdg8879hn2c39z1bkr5pcvfkcxmaf3";
             };
-            buildInputs = [
-              pkg-config # required by git2
-              openssl
-            ];
-            nativeBuildInputs = [
-              pkg-config # required by git2
-              openssl
-            ];
-            doCheck = false;
           };
+          buildInputs = [
+            pkg-config # required by git2
+            openssl
+          ];
+          nativeBuildInputs = [
+            pkg-config # required by git2
+            openssl
+          ];
+          doCheck = false;
+        };
         # Create a tarball for the built package
         packages.tarball = stdenv.mkDerivation {
-          name = "${manifest.package.name}-${manifest.package.version}-${system}.tar.gz";
+          name =
+            "${manifest.package.name}-${manifest.package.version}-${system}.tar.gz";
           buildInputs = [ coreutils ];
           buildPhase = ''
             tar -czf $out/${manifest.package.name}-${manifest.package.version}-${system}.tar.gz -C $out .
           '';
         };
-      }
-    );
+      });
 }
