@@ -238,7 +238,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     if root_proposal_id.is_none() {
         if let Some(event) = events.first() {
             let event_bech32 = if let Some(relay) = repo_ref.relays.first() {
-                Nip19Event::new(event.id, vec![relay.to_string()]).to_bech32()?
+                Nip19Event {
+                    event_id: event.id,
+                    relays: vec![relay.clone()],
+                    author: None,
+                    kind: None,
+                }
+                .to_bech32()?
             } else {
                 event.id.to_bech32()?
             };

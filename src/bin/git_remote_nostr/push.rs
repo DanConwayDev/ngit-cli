@@ -32,7 +32,7 @@ use ngit::{
 };
 use nostr::nips::nip10::Marker;
 use nostr_sdk::{
-    Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, Tag,
+    Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, Tag, TagStandard,
     hashes::sha1::Hash as Sha1Hash,
 };
 use repo_ref::RepoRef;
@@ -1312,7 +1312,13 @@ async fn create_merge_status(
                 repo_ref
                     .coordinates()
                     .iter()
-                    .map(|c| Tag::coordinate(c.clone()))
+                    .map(|c| {
+                        Tag::from_standardized(TagStandard::Coordinate {
+                            coordinate: c.coordinate.clone(),
+                            relay_url: c.relays.first().cloned(),
+                            uppercase: false,
+                        })
+                    })
                     .collect::<Vec<Tag>>(),
                 vec![
                     Tag::from_standardized(nostr::TagStandard::Reference(
@@ -1358,7 +1364,7 @@ async fn get_proposal_and_revision_root_from_patch(
         patch.clone()
     } else {
         let proposal_or_revision_id = EventId::parse(
-            if let Some(t) = patch.tags.iter().find(|t| t.is_root()) {
+            &if let Some(t) = patch.tags.iter().find(|t| t.is_root()) {
                 t.clone()
             } else if let Some(t) = patch.tags.iter().find(|t| t.is_reply()) {
                 t.clone()
@@ -1389,13 +1395,12 @@ async fn get_proposal_and_revision_root_from_patch(
     {
         Ok((
             EventId::parse(
-                proposal_or_revision
+                &proposal_or_revision
                     .tags
                     .iter()
                     .find(|t| t.is_reply())
                     .unwrap()
-                    .as_slice()[1]
-                    .clone(),
+                    .as_slice()[1],
             )?,
             Some(proposal_or_revision.id),
         ))

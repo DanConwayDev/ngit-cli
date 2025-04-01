@@ -115,7 +115,7 @@ pub fn make_commits_for_proposal(
                     author: Some(patch.pubkey),
                     kind: Some(patch.kind),
                     relays: if let Some(relay) = repo_ref.relays.first() {
-                        vec![relay.to_string()]
+                        vec![relay.to_owned()]
                     } else {
                         vec![]
                     },

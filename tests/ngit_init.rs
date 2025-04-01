@@ -194,7 +194,7 @@ mod when_repo_not_previously_claimed {
 
         mod git_config_updated {
 
-            use nostr::nips::nip01::Coordinate;
+            use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
             use nostr_sdk::ToBech32;
 
             use super::*;
@@ -236,10 +236,12 @@ mod when_repo_not_previously_claimed {
                             .get_entry("nostr.repo")?
                             .value()
                             .unwrap(),
-                        Coordinate {
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
-                            identifier: "example-identifier".to_string(),
-                            public_key: TEST_KEY_1_KEYS.public_key(),
+                        Nip19Coordinate {
+                            coordinate: Coordinate {
+                                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                                identifier: "example-identifier".to_string(),
+                                public_key: TEST_KEY_1_KEYS.public_key(),
+                            },
                             relays: vec![],
                         }
                         .to_bech32()?,

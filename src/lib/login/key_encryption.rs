@@ -7,7 +7,7 @@ pub fn decrypt_key(encrypted_key: &str, password: &str) -> Result<nostr::Keys> {
     if encrypted_key.log_n() > 14 {
         println!("this may take a few seconds...");
     }
-    Ok(nostr::Keys::new(encrypted_key.to_secret_key(password)?))
+    Ok(nostr::Keys::new(encrypted_key.decrypt(password)?))
 }
 
 #[cfg(test)]

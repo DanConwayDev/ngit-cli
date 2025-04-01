@@ -3,7 +3,7 @@ use std::{collections::HashSet, env::current_dir};
 use anyhow::{Context, Result};
 use futures::join;
 use git2::Oid;
-use nostr::nips::nip01::Coordinate;
+use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
 use nostr_sdk::{Event, JsonUtil, Kind, RelayUrl, ToBech32, secp256k1::rand};
 use relay::Relay;
 use serial_test::serial;
@@ -18,10 +18,12 @@ static STATE_KIND: nostr::Kind = Kind::Custom(30618);
 
 fn get_nostr_remote_url() -> Result<String> {
     let repo_event = generate_repo_ref_event();
-    let naddr = Coordinate {
-        kind: Kind::GitRepoAnnouncement,
-        public_key: repo_event.pubkey,
-        identifier: repo_event.tags.identifier().unwrap().to_string(),
+    let naddr = Nip19Coordinate {
+        coordinate: Coordinate {
+            kind: Kind::GitRepoAnnouncement,
+            public_key: repo_event.pubkey,
+            identifier: repo_event.tags.identifier().unwrap().to_string(),
+        },
         relays: vec![
             RelayUrl::parse("ws://localhost:8055").unwrap(),
             RelayUrl::parse("ws://localhost:8056").unwrap(),

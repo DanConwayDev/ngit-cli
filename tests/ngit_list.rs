@@ -49,7 +49,10 @@ async fn prep_proposals_repo_and_repo_with_proposal_pulled_and_checkedout(
 mod cannot_find_repo_event {
     use super::*;
     mod cli_prompts {
-        use nostr::{ToBech32, nips::nip01::Coordinate};
+        use nostr::{
+            ToBech32,
+            nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+        };
         use nostr_sdk::RelayUrl;
 
         use super::*;
@@ -87,10 +90,12 @@ mod cannot_find_repo_event {
                 }
                 if naddr {
                     let mut input = p.expect_input("nostr repository")?;
-                    let coordinate = Coordinate {
-                        kind: nostr::Kind::GitRepoAnnouncement,
-                        public_key: TEST_KEY_1_KEYS.public_key(),
-                        identifier: repo_event.tags.identifier().unwrap().to_string(),
+                    let coordinate = Nip19Coordinate {
+                        coordinate: Coordinate {
+                            kind: nostr::Kind::GitRepoAnnouncement,
+                            public_key: TEST_KEY_1_KEYS.public_key(),
+                            identifier: repo_event.tags.identifier().unwrap().to_string(),
+                        },
                         relays: vec![RelayUrl::parse("ws://localhost:8056").unwrap()],
                     };
                     input.succeeds_with(&coordinate.to_bech32()?)?;

@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use console::Style;
-use nostr::{FromBech32, PublicKey, Tag, TagStandard, ToBech32, nips::nip01::Coordinate};
+use nostr::{
+    FromBech32, PublicKey, Tag, TagStandard, ToBech32,
+    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+};
 use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +40,7 @@ pub struct RepoRef {
     pub relays: Vec<RelayUrl>,
     pub maintainers: Vec<PublicKey>,
     pub trusted_maintainer: PublicKey,
-    pub events: HashMap<Coordinate, nostr::Event>,
+    pub events: HashMap<Nip19Coordinate, nostr::Event>,
     pub nostr_git_url: Option<NostrUrlDecoded>,
 }
 
@@ -119,10 +122,12 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
         }
         r.events = HashMap::new();
         r.events.insert(
-            Coordinate {
-                kind: event.kind,
-                identifier: event.tags.identifier().unwrap().to_string(),
-                public_key: event.pubkey,
+            Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: event.kind,
+                    identifier: event.tags.identifier().unwrap().to_string(),
+                    public_key: event.pubkey,
+                },
                 relays: vec![],
             },
             event,
@@ -195,20 +200,24 @@ impl RepoRef {
         .context("failed to create repository reference event")
     }
     /// coordinates without relay hints
-    pub fn coordinates(&self) -> HashSet<Coordinate> {
+    pub fn coordinates(&self) -> HashSet<Nip19Coordinate> {
         let mut res = HashSet::new();
-        res.insert(Coordinate {
-            kind: Kind::GitRepoAnnouncement,
-            public_key: self.trusted_maintainer,
-            identifier: self.identifier.clone(),
+        res.insert(Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: self.trusted_maintainer,
+                identifier: self.identifier.clone(),
+            },
             relays: vec![],
         });
 
         for m in &self.maintainers {
-            res.insert(Coordinate {
-                kind: Kind::GitRepoAnnouncement,
-                public_key: *m,
-                identifier: self.identifier.clone(),
+            res.insert(Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: *m,
+                    identifier: self.identifier.clone(),
+                },
                 relays: vec![],
             });
         }
@@ -216,11 +225,13 @@ impl RepoRef {
     }
 
     /// coordinates without relay hints
-    pub fn coordinate_with_hint(&self) -> Coordinate {
-        Coordinate {
-            kind: Kind::GitRepoAnnouncement,
-            public_key: self.trusted_maintainer,
-            identifier: self.identifier.clone(),
+    pub fn coordinate_with_hint(&self) -> Nip19Coordinate {
+        Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: self.trusted_maintainer,
+                identifier: self.identifier.clone(),
+            },
             relays: if let Some(relay) = self.relays.first() {
                 vec![relay.clone()]
             } else {
@@ -230,11 +241,11 @@ impl RepoRef {
     }
 
     /// coordinates without relay hints
-    pub fn coordinates_with_timestamps(&self) -> Vec<(Coordinate, Option<Timestamp>)> {
+    pub fn coordinates_with_timestamps(&self) -> Vec<(Nip19Coordinate, Option<Timestamp>)> {
         self.coordinates()
             .iter()
             .map(|c| (c.clone(), self.events.get(c).map(|e| e.created_at)))
-            .collect::<Vec<(Coordinate, Option<Timestamp>)>>()
+            .collect::<Vec<(Nip19Coordinate, Option<Timestamp>)>>()
     }
 
     pub fn set_nostr_git_url(&mut self, nostr_git_url: NostrUrlDecoded) {
@@ -264,7 +275,7 @@ pub async fn get_repo_coordinates_when_remote_unknown(
     git_repo: &Repo,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-) -> Result<Coordinate> {
+) -> Result<Nip19Coordinate> {
     if let Ok(c) = try_and_get_repo_coordinates_when_remote_unknown(git_repo).await {
         Ok(c)
     } else {
@@ -274,7 +285,7 @@ pub async fn get_repo_coordinates_when_remote_unknown(
 
 pub async fn try_and_get_repo_coordinates_when_remote_unknown(
     git_repo: &Repo,
-) -> Result<Coordinate> {
+) -> Result<Nip19Coordinate> {
     let remote_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo).await?;
     if remote_coordinates.is_empty() {
         if let Ok(c) = get_repo_coordinates_from_git_config(git_repo) {
@@ -318,7 +329,7 @@ pub async fn try_and_get_repo_coordinates_when_remote_unknown(
 
 async fn get_nostr_git_remote_selection_labels(
     git_repo: &Repo,
-    remote_coordinates: &HashMap<String, Coordinate>,
+    remote_coordinates: &HashMap<String, Nip19Coordinate>,
 ) -> Result<Vec<String>> {
     let mut res = vec![];
     for (remote, c) in remote_coordinates {
@@ -334,9 +345,9 @@ async fn get_nostr_git_remote_selection_labels(
     Ok(res)
 }
 
-fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Coordinate> {
-    Coordinate::parse(
-        git_repo
+fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Nip19Coordinate> {
+    Nip19Coordinate::from_bech32(
+        &git_repo
             .get_git_config_item("nostr.repo", Some(false))?
             .context("git config item \"nostr.repo\" is not set in local repository")?,
     )
@@ -345,7 +356,7 @@ fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Coordinate> {
 
 async fn get_repo_coordinates_from_nostr_remotes(
     git_repo: &Repo,
-) -> Result<HashMap<String, Coordinate>> {
+) -> Result<HashMap<String, Nip19Coordinate>> {
     let mut repo_coordinates = HashMap::new();
     for remote_name in git_repo.git_repo.remotes()?.iter().flatten() {
         if let Some(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
@@ -359,21 +370,23 @@ async fn get_repo_coordinates_from_nostr_remotes(
     Ok(repo_coordinates)
 }
 
-async fn get_repo_coordinates_from_maintainers_yaml(git_repo: &Repo) -> Result<Coordinate> {
+async fn get_repo_coordinates_from_maintainers_yaml(git_repo: &Repo) -> Result<Nip19Coordinate> {
     let repo_config = get_repo_config_from_yaml(git_repo)?;
 
-    Ok(Coordinate {
-        identifier: repo_config
-            .identifier
-            .context("maintainers.yaml doesnt list the identifier")?,
-        kind: Kind::GitRepoAnnouncement,
-        public_key: PublicKey::from_bech32(
-            repo_config
-                .maintainers
-                .first()
-                .context("maintainers.yaml doesnt list any maintainers")?,
-        )
-        .context("maintainers.yaml doesn't list the first maintainer using a valid npub")?,
+    Ok(Nip19Coordinate {
+        coordinate: Coordinate {
+            identifier: repo_config
+                .identifier
+                .context("maintainers.yaml doesnt list the identifier")?,
+            kind: Kind::GitRepoAnnouncement,
+            public_key: PublicKey::from_bech32(
+                repo_config
+                    .maintainers
+                    .first()
+                    .context("maintainers.yaml doesnt list any maintainers")?,
+            )
+            .context("maintainers.yaml doesn't list the first maintainer using a valid npub")?,
+        },
         relays: repo_config
             .relays
             .iter()
@@ -386,7 +399,7 @@ async fn get_repo_coordinate_from_user_prompt(
     git_repo: &Repo,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-) -> Result<Coordinate> {
+) -> Result<Nip19Coordinate> {
     // TODO: present list of events filter by root_commit
     // TODO: fallback to search based on identifier
     let dim = Style::new().color256(247);
@@ -401,7 +414,7 @@ async fn get_repo_coordinate_from_user_prompt(
         loop {
             let input = Interactor::default()
                 .input(PromptInputParms::default().with_prompt("nostr repository"))?;
-            let coordinate = if let Ok(c) = Coordinate::parse(&input) {
+            let coordinate = if let Ok(c) = Nip19Coordinate::from_bech32(&input) {
                 c
             } else if let Ok(nostr_url) =
                 NostrUrlDecoded::parse_and_resolve(&input, &Some(git_repo)).await
@@ -491,7 +504,7 @@ pub fn extract_pks(pk_strings: Vec<String>) -> Result<Vec<PublicKey>> {
     let mut pks: Vec<PublicKey> = vec![];
     for s in pk_strings {
         pks.push(
-            nostr_sdk::prelude::PublicKey::from_bech32(s.clone()).context(format!(
+            nostr_sdk::prelude::PublicKey::from_bech32(&s).context(format!(
                 "failed to convert {s} into a valid nostr public key"
             ))?,
         );

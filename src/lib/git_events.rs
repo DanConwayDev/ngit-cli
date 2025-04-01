@@ -3,7 +3,7 @@ use std::{str::FromStr, sync::Arc};
 use anyhow::{Context, Result, bail};
 use nostr::nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19};
 use nostr_sdk::{
-    Event, EventBuilder, EventId, FromBech32, Kind, NostrSigner, PublicKey, RelayUrl, Tag, TagKind,
+    Event, EventBuilder, EventId, FromBech32, Kind, NostrSigner, PublicKey, Tag, TagKind,
     TagStandard, hashes::sha1::Hash as Sha1Hash,
 };
 
@@ -115,11 +115,14 @@ pub async fn generate_patch_event(
                     .maintainers
                     .iter()
                     .map(|m| {
-                        Tag::coordinate(Coordinate {
-                            kind: nostr::Kind::GitRepoAnnouncement,
-                            public_key: *m,
-                            identifier: repo_ref.identifier.to_string(),
-                            relays: repo_ref.relays.clone(),
+                        Tag::from_standardized(TagStandard::Coordinate {
+                            coordinate: Coordinate {
+                                kind: nostr::Kind::GitRepoAnnouncement,
+                                public_key: *m,
+                                identifier: repo_ref.identifier.to_string(),
+                            },
+                            relay_url: repo_ref.relays.first().cloned(),
+                            uppercase: false,
                         })
                     })
                     .collect::<Vec<Tag>>(),
@@ -257,12 +260,12 @@ pub fn event_tag_from_nip19_or_hex(
                 PromptInputParms::default().with_prompt(format!("{reference_name} reference")),
             )?;
         }
-        if let Ok(nip19) = Nip19::from_bech32(bech32.clone()) {
+        if let Ok(nip19) = Nip19::from_bech32(&bech32) {
             match nip19 {
                 Nip19::Event(n) => {
                     break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                         event_id: n.event_id,
-                        relay_url: n.relays.first().and_then(|url| RelayUrl::parse(url).ok()),
+                        relay_url: n.relays.first().cloned(),
                         marker: Some(marker),
                         public_key: None,
                         uppercase: false,
@@ -278,7 +281,11 @@ pub fn event_tag_from_nip19_or_hex(
                     }));
                 }
                 Nip19::Coordinate(coordinate) => {
-                    break Ok(Tag::coordinate(coordinate));
+                    break Ok(Tag::from_standardized(TagStandard::Coordinate {
+                        coordinate: coordinate.coordinate,
+                        relay_url: coordinate.relays.first().cloned(),
+                        uppercase: false,
+                    }));
                 }
                 Nip19::Profile(profile) => {
                     if allow_npub_reference {
@@ -338,12 +345,17 @@ pub async fn generate_cover_letter_and_patch_events(
         ))
         .tags(
         [
-            repo_ref.maintainers.iter().map(|m| Tag::coordinate(Coordinate {
-                kind: nostr::Kind::GitRepoAnnouncement,
-                public_key: *m,
-                identifier: repo_ref.identifier.to_string(),
-                relays: repo_ref.relays.clone(),
-            })).collect::<Vec<Tag>>(),
+            repo_ref.maintainers.iter().map(|m|
+                Tag::from_standardized(TagStandard::Coordinate {
+                    coordinate: Coordinate {
+                        kind: nostr::Kind::GitRepoAnnouncement,
+                        public_key: *m,
+                        identifier: repo_ref.identifier.to_string(),
+                    },
+                    relay_url: repo_ref.relays.first().cloned(),
+                    uppercase: false,
+                })
+            ).collect::<Vec<Tag>>(),
             vec![
                 Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
                 Tag::hashtag("cover-letter"),

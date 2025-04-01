@@ -1141,7 +1141,7 @@ mod tests {
             fn test(time: git2::Time) -> Result<()> {
                 assert_eq!(
                     extract_sig_from_patch_tags(
-                        &Tags::new(vec![nostr::Tag::custom(
+                        &Tags::from_list(vec![nostr::Tag::custom(
                             nostr::TagKind::Custom("author".to_string().into()),
                             prep(&time)?,
                         )]),

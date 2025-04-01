@@ -11,6 +11,7 @@ use nostr::{
     nips::{
         nip01::Coordinate,
         nip05::{self},
+        nip19::Nip19Coordinate,
     },
 };
 use nostr_sdk::{Kind, RelayUrl};
@@ -437,10 +438,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     // TODO - does this git config item do more harm than good?
     git_repo.save_git_config_item(
         "nostr.repo",
-        &Coordinate {
-            kind: Kind::GitRepoAnnouncement,
-            public_key: user_ref.public_key,
-            identifier: identifier.clone(),
+        &Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: user_ref.public_key,
+                identifier: identifier.clone(),
+            },
             relays: vec![],
         }
         .to_bech32()?,
@@ -471,10 +474,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 repo_ref.set_nostr_git_url(NostrUrlDecoded {
                     original_string: String::new(),
                     nip05: Some(nip05.clone()),
-                    coordinate: Coordinate {
-                        kind: Kind::GitRepoAnnouncement,
-                        public_key: user_ref.public_key,
-                        identifier: repo_ref.identifier.clone(),
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            kind: Kind::GitRepoAnnouncement,
+                            public_key: user_ref.public_key,
+                            identifier: repo_ref.identifier.clone(),
+                        },
                         relays: if inter.next().is_some() || relays.is_empty() {
                             vec![]
                         } else {

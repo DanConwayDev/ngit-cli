@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
     str::FromStr,
@@ -8,13 +9,13 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use dialoguer::theme::{ColorfulTheme, Theme};
-use futures::executor::block_on;
+use futures::{executor::block_on, future::join_all};
 use git::GitTestRepo;
 use git2::{Signature, Time};
 use nostr::{self, Kind, Tag, nips::nip65::RelayMetadata};
 use nostr_database::NostrEventsDatabase;
 use nostr_lmdb::NostrLMDB;
-use nostr_sdk::{Client, NostrSigner, TagStandard, serde_json};
+use nostr_sdk::{Client, Event, NostrSigner, TagStandard, serde_json};
 use once_cell::sync::Lazy;
 use rexpect::session::{Options, PtySession};
 use strip_ansi_escapes::strip_str;
@@ -139,7 +140,7 @@ pub fn make_event_old_or_change_user(
         &keys.public_key(),
         &unsigned.created_at,
         &unsigned.kind,
-        &unsigned.tags.clone().to_vec(),
+        &unsigned.tags.clone(),
         &unsigned.content,
     ));
 
@@ -1107,14 +1108,24 @@ pub async fn get_events_from_cache(
     git_repo_path: &Path,
     filters: Vec<nostr::Filter>,
 ) -> Result<Vec<nostr::Event>> {
-    Ok(get_local_cache_database(git_repo_path)
-        .await?
-        .query(filters.clone())
-        .await
-        .context(
+    let db = get_local_cache_database(git_repo_path).await?;
+
+    let query_results = join_all(filters.into_iter().map(|filter| async {
+        db.query(filter).await.context(
             "failed to execute query on opened git repo nostr cache database .git/nostr-cache.lmdb",
-        )?
-        .to_vec())
+        )
+    }))
+    .await;
+
+    // no Event is being mutated, just new items added to the set
+    #[allow(clippy::mutable_key_type)]
+    let mut events: HashSet<Event> = HashSet::new();
+
+    for result in query_results {
+        events.extend(result?);
+    }
+
+    Ok(events.into_iter().collect())
 }
 
 pub fn get_proposal_branch_name(
@@ -1436,19 +1447,18 @@ fn get_first_proposal_event_id() -> Result<nostr::EventId> {
     Handle::current().block_on(client.add_relay("ws://localhost:8055"))?;
     Handle::current().block_on(client.connect_relay("ws://localhost:8055"))?;
     let proposals = Handle::current()
-        .block_on(client.fetch_events(
-            vec![
-                    nostr::Filter::default()
-                        .kind(nostr::Kind::GitPatch)
-                        .custom_tag(
-                            nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
-                            vec!["root"],
-                        ),
-                ],
-            Some(Duration::from_millis(500)),
-        ))?
+        .block_on(
+            client.fetch_events(
+                nostr::Filter::default()
+                    .kind(nostr::Kind::GitPatch)
+                    .custom_tags(nostr::SingleLetterTag::lowercase(nostr::Alphabet::T), vec![
+                        "root",
+                    ]),
+                Duration::from_millis(500),
+            ),
+        )?
         .to_vec();
-    Handle::current().block_on(client.disconnect())?;
+    Handle::current().block_on(client.disconnect());
 
     let proposal_1_id = proposals
         .iter()

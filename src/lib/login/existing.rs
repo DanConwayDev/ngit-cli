@@ -208,7 +208,7 @@ async fn get_signer(
                 Duration::from_secs(10 * 60),
                 None,
             )?;
-            if let Some(public_key) = npub.clone().and_then(|npub| PublicKey::parse(npub).ok()) {
+            if let Some(public_key) = npub.clone().and_then(|npub| PublicKey::parse(&npub).ok()) {
                 s.non_secure_set_user_public_key(public_key)?;
                 let signer: Arc<dyn NostrSigner> = Arc::new(s);
                 Ok((signer, public_key))

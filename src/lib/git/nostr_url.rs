@@ -2,8 +2,8 @@ use core::fmt;
 use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
-use nostr::nips::{nip01::Coordinate, nip05};
-use nostr_sdk::{PublicKey, RelayUrl, ToBech32, Url};
+use nostr::nips::{nip01::Coordinate, nip05, nip19::Nip19Coordinate};
+use nostr_sdk::{FromBech32, PublicKey, RelayUrl, ToBech32, Url};
 
 use super::{Repo, get_git_config_item, save_git_config_item};
 
@@ -58,7 +58,7 @@ impl FromStr for ServerProtocol {
 #[derive(Debug, PartialEq, Clone)]
 pub struct NostrUrlDecoded {
     pub original_string: String,
-    pub coordinate: Coordinate,
+    pub coordinate: Nip19Coordinate,
     pub protocol: Option<ServerProtocol>,
     pub user: Option<String>,
     pub nip05: Option<String>,
@@ -166,7 +166,7 @@ impl NostrUrlDecoded {
         // extract naddr npub/<optional-relays>/identifer
         let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
         // naddr used
-        let coordinate = if let Ok(coordinate) = Coordinate::parse(part) {
+        let coordinate = if let Ok(coordinate) = Nip19Coordinate::from_bech32(part) {
             if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
                 coordinate
             } else {
@@ -225,10 +225,12 @@ impl NostrUrlDecoded {
                     }
                 }
             };
-            Coordinate {
-                identifier,
-                public_key,
-                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+            Nip19Coordinate {
+                coordinate: Coordinate {
+                    identifier,
+                    public_key,
+                    kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                },
                 relays,
             }
         };
@@ -959,7 +961,7 @@ mod tests {
         }
     }
     mod nostr_git_url_format {
-        use nostr::nips::nip01::Coordinate;
+        use nostr::nips::nip19::Nip19Coordinate;
         use nostr_sdk::PublicKey;
 
         use super::*;
@@ -970,13 +972,15 @@ mod tests {
             assert_eq!(
                 format!("{}", NostrUrlDecoded {
                     original_string: String::new(),
-                    coordinate: Coordinate {
-                        identifier: "ngit".to_string(),
-                        public_key: PublicKey::parse(
-                            "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                        )
-                        .unwrap(),
-                        kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
                     protocol: None,
@@ -993,13 +997,15 @@ mod tests {
             assert_eq!(
                 format!("{}", NostrUrlDecoded {
                     original_string: String::new(),
-                    coordinate: Coordinate {
-                        identifier: "ngit".to_string(),
-                        public_key: PublicKey::parse(
-                            "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                        )
-                        .unwrap(),
-                        kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        },
                         relays: vec![],
                     },
                     protocol: None,
@@ -1016,13 +1022,15 @@ mod tests {
             assert_eq!(
                 format!("{}", NostrUrlDecoded {
                     original_string: String::new(),
-                    coordinate: Coordinate {
-                        identifier: "ngit".to_string(),
-                        public_key: PublicKey::parse(
-                            "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                        )
-                        .unwrap(),
-                        kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
                     protocol: Some(ServerProtocol::Ssh),
@@ -1039,13 +1047,15 @@ mod tests {
             assert_eq!(
                 format!("{}", NostrUrlDecoded {
                     original_string: String::new(),
-                    coordinate: Coordinate {
-                        identifier: "ngit".to_string(),
-                        public_key: PublicKey::parse(
-                            "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                        )
-                        .unwrap(),
-                        kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
                     protocol: Some(ServerProtocol::Ssh),
@@ -1061,14 +1071,16 @@ mod tests {
     mod nostr_url_decoded_paramemters_from_str {
         use super::*;
 
-        fn get_model_coordinate(relays: bool) -> Coordinate {
-            Coordinate {
-                identifier: "ngit".to_string(),
-                public_key: PublicKey::parse(
-                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                )
-                .unwrap(),
-                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+        fn get_model_coordinate(relays: bool) -> Nip19Coordinate {
+            Nip19Coordinate {
+                coordinate: Coordinate {
+                    identifier: "ngit".to_string(),
+                    public_key: PublicKey::parse(
+                        "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                    )
+                    .unwrap(),
+                    kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                },
                 relays: if relays {
                     vec![RelayUrl::parse("wss://nos.lol").unwrap()]
                 } else {
@@ -1084,13 +1096,15 @@ mod tests {
                 NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                 NostrUrlDecoded {
                     original_string: url.clone(),
-                    coordinate: Coordinate {
-                        identifier: "ngit".to_string(),
-                        public_key: PublicKey::parse(
-                            "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                        )
-                        .unwrap(),
-                        kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()], /* wont add the
                                                                                   * slash */
                     },
@@ -1172,13 +1186,15 @@ mod tests {
                     NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
-                        coordinate: Coordinate {
-                            identifier: "ngit".to_string(),
-                            public_key: PublicKey::parse(
-                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                            )
-                            .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        coordinate: Nip19Coordinate {
+                            coordinate: Coordinate {
+                                identifier: "ngit".to_string(),
+                                public_key: PublicKey::parse(
+                                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                                )
+                                .unwrap(),
+                                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            },
                             relays: vec![
                                 RelayUrl::parse("wss://nos.lol/").unwrap(),
                                 RelayUrl::parse("wss://relay.damus.io/").unwrap(),
@@ -1274,13 +1290,15 @@ mod tests {
                     NostrUrlDecoded::parse_and_resolve(&url, &None).await?,
                     NostrUrlDecoded {
                         original_string: url.clone(),
-                        coordinate: Coordinate {
-                            identifier: "ngit".to_string(),
-                            public_key: PublicKey::parse(
-                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
-                            )
-                            .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        coordinate: Nip19Coordinate {
+                            coordinate: Coordinate {
+                                identifier: "ngit".to_string(),
+                                public_key: PublicKey::parse(
+                                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                                )
+                                .unwrap(),
+                                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            },
                             relays: vec![
                                 RelayUrl::parse("wss://nos.lol/").unwrap(),
                                 RelayUrl::parse("wss://relay.damus.io/").unwrap(),
