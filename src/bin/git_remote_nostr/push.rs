@@ -823,7 +823,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                 {
                     let (ahead, behind) =
                         git_repo.get_commits_ahead_behind(&from_tip, &remote_value_tip)?;
-                    if behind.is_empty() {
+                    if ahead.is_empty() {
                         // can soft push
                         refspecs_for_remote.push(refspec.clone());
                     } else {
