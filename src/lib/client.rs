@@ -1834,11 +1834,12 @@ pub async fn send_events(
                 Err(e) => {
                     pb.set_style(pb_after_style_failed.clone());
                     pb.finish_with_message(
-                        console::style(
+                        console::style(format!(
+                            "error: {}",
                             e.to_string()
-                                .replace("relay pool error:", "error:")
-                                .replace("event not published: ", "error: "),
-                        )
+                                .replace("relay pool error:", "")
+                                .replace("event not published: ", "")
+                        ))
                         .for_stderr()
                         .red()
                         .to_string(),
