@@ -23,8 +23,18 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
+          - ubuntu-24.04
+          - ubuntu-22.04
+          - ubuntu-20.04
+          - ubuntu-24.04-arm
+          - ubuntu-22.04-arm
           - macos-latest
+          - macos-15
+          - macos-14
+          - macos-13
           - windows-latest
+          - windows-2022
+          - windows-2019
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
