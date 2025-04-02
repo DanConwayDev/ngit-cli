@@ -1147,12 +1147,14 @@ pub fn get_proposal_branch_name_from_events(
     let mut events = events.to_owned();
     events.reverse();
     for event in events {
-        if event.tags.iter().any(|t| {
-            !t.as_slice()[1].eq("revision-root")
-                && event.tags.iter().any(|t| {
-                    t.as_slice()[0].eq("branch-name") && t.as_slice()[1].eq(branch_name_in_event)
-                })
-        }) {
+        if !event
+            .tags
+            .iter()
+            .any(|t| t.as_slice()[1].eq("revision-root"))
+            && event.tags.iter().any(|t| {
+                t.as_slice()[0].eq("branch-name") && t.as_slice()[1].eq(branch_name_in_event)
+            })
+        {
             return Ok(format!(
                 "pr/{}({})",
                 branch_name_in_event,
