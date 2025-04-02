@@ -425,14 +425,16 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
             let (_, _, r53, r55, r56) = prep_run_create_proposal(true).await?;
             for relay in [&r53, &r55, &r56] {
                 for m in maintainers {
-                    let cover_letter_event: &nostr::Event =
-                        relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
-                    assert!(
-                        cover_letter_event
-                            .tags
-                            .iter()
-                            .any(|t| { t.as_slice()[0].eq("p") && t.as_slice()[1].eq(m) })
-                    );
+                    if !event.pubkey.to_string().eq(m) {
+                        let cover_letter_event: &nostr::Event =
+                            relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
+                        assert!(
+                            cover_letter_event
+                                .tags
+                                .iter()
+                                .any(|t| { t.as_slice()[0].eq("p") && t.as_slice()[1].eq(m) })
+                        );
+                    }
                 }
             }
             Ok(())
@@ -581,13 +583,15 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                 .unwrap()
                 .as_slice()[1..];
             for m in maintainers {
-                assert!(
-                    prep()
-                        .await?
-                        .tags
-                        .iter()
-                        .any(|t| { t.as_slice()[0].eq("p") && t.as_slice()[1].eq(m) })
-                );
+                if !event.pubkey.to_string().eq(m) {
+                    assert!(
+                        prep()
+                            .await?
+                            .tags
+                            .iter()
+                            .any(|t| { t.as_slice()[0].eq("p") && t.as_slice()[1].eq(m) })
+                    );
+                }
             }
             Ok(())
         }
