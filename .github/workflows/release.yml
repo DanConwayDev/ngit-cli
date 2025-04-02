@@ -23,8 +23,18 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
+          - ubuntu-24.04
+          - ubuntu-22.04
+          - ubuntu-20.04
+          - ubuntu-24.04-arm
+          - ubuntu-22.04-arm
           - macos-latest
+          - macos-15
+          - macos-14
+          - macos-13
           - windows-latest
+          - windows-2022
+          - windows-2019
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -33,7 +43,7 @@ jobs:
           # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
           # Note that glob pattern is not supported yet.
           bin: ngit,git-remote-nostr
-          archive: ngit-$tag-$target
+          archive: ngit-$tag-${{ matrix.os }}
           # (optional) On which platform to distribute the `.tar.gz` file.
           # [default value: unix]
           # [possible values: all, unix, windows, none]
