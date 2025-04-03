@@ -241,6 +241,11 @@ pub async fn generate_patch_event(
             .concat(),
         ),
         signer,
+        if let Some((n, total)) = series_count {
+            format!("commit {n}/{total}")
+        } else {
+            "commit 1/1".to_string()
+        },
     )
     .await
     .context("failed to sign event")
@@ -407,7 +412,10 @@ pub async fn generate_cover_letter_and_patch_events(
                 .map(|pk| Tag::public_key(*pk))
                 .collect(),
         ].concat(),
-    ), signer).await
+    ),
+    signer,
+    format!("commit 0/{}",commits.len()),
+).await
     .context("failed to create cover-letter event")?);
     }
 

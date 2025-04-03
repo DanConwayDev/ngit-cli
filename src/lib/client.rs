@@ -675,10 +675,14 @@ fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event>
 pub async fn sign_event(
     event_builder: EventBuilder,
     signer: &Arc<dyn NostrSigner>,
+    description: String,
 ) -> Result<nostr::Event> {
     if signer.backend() == SignerBackend::NostrConnect {
         let term = console::Term::stderr();
-        term.write_line("signing event with remote signer...")?;
+        term.write_line(&format!(
+            "signing event ({}) with remote signer...",
+            description
+        ))?;
         let event = signer
             .sign_event(event_builder.build(signer.get_public_key().await?))
             .await

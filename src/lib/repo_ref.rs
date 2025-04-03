@@ -195,6 +195,7 @@ impl RepoRef {
                 .concat(),
             ),
             signer,
+            "repo announcement".to_string(),
         )
         .await
         .context("failed to create repository reference event")

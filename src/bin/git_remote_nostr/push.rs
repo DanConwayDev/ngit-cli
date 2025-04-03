@@ -1348,6 +1348,7 @@ async fn create_merge_status(
             .concat(),
         ),
         signer,
+        "PR merge".to_string(),
     )
     .await
 }
@@ -1536,7 +1537,12 @@ impl BuildRepoState for RepoState {
                 value.clone(),
             ]));
         }
-        let event = sign_event(EventBuilder::new(STATE_KIND, "").tags(tags), signer).await?;
+        let event = sign_event(
+            EventBuilder::new(STATE_KIND, "").tags(tags),
+            signer,
+            "git state".to_string(),
+        )
+        .await?;
         Ok(RepoState {
             identifier,
             state,
