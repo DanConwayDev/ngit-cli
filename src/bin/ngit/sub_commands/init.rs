@@ -356,15 +356,47 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     };
 
     let web: Vec<String> = if args.web.is_empty() {
+        let gitworkshop_url = NostrUrlDecoded {
+            original_string: String::new(),
+            coordinate: Nip19Coordinate {
+                coordinate: Coordinate {
+                    public_key: user_ref.public_key,
+                    kind: Kind::GitRepoAnnouncement,
+                    identifier: identifier.clone(),
+                },
+                relays: if let Some(relay) = relays.first() {
+                    vec![relay.clone()]
+                } else {
+                    vec![]
+                },
+            },
+            protocol: None,
+            user: None,
+            nip05: None,
+        }
+        .to_string()
+        .replace("nostr://", "https://gitworkshop.dev/");
         Interactor::default()
             .input(
                 PromptInputParms::default()
                     .with_prompt("repo website")
                     .optional()
                     .with_default(if let Some(repo_ref) = &repo_ref {
-                        repo_ref.web.clone().join(" ")
+                        if repo_ref
+                            .web
+                            .clone()
+                            .join(" ")
+                            // replace legacy gitworkshop.dev url format with new one
+                            .contains(
+                                format!("https://gitworkshop.dev/repo/{}", &identifier).as_str(),
+                            )
+                        {
+                            gitworkshop_url
+                        } else {
+                            repo_ref.web.clone().join(" ")
+                        }
                     } else {
-                        format!("https://gitworkshop.dev/repo/{}", &identifier)
+                        gitworkshop_url
                     }),
             )?
             .split(' ')
