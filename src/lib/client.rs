@@ -968,13 +968,7 @@ async fn create_relays_request(
     fallback_relays: HashSet<RelayUrl>,
 ) -> Result<FetchRequest> {
     let repo_ref = if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
-        if let Ok(repo_ref) =
-            get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await
-        {
-            Some(repo_ref)
-        } else {
-            None
-        }
+        (get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await).ok()
     } else {
         None
     };

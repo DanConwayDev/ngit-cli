@@ -32,12 +32,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     };
 
     let git_repo_result = Repo::discover().context("failed to find a git repository");
-    let git_repo = {
-        match git_repo_result {
-            Ok(git_repo) => Some(git_repo),
-            Err(_) => None,
-        }
-    };
+    let git_repo = { git_repo_result.ok() };
 
     let (logged_out, log_in_locally_only) = logout(git_repo.as_ref(), command_args.local).await?;
     if logged_out || log_in_locally_only {

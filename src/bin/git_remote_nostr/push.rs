@@ -792,7 +792,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                     ).as_str(),
                                 )?;
                             }
-                        };
+                        }
                     } else {
                         // remote_value oid is not present locally
                         // TODO can we download the remote reference?

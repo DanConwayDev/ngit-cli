@@ -70,21 +70,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let mut client = Client::default();
 
-    let repo_coordinate = if let Ok(repo_coordinate) =
-        try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await
-    {
-        Some(repo_coordinate)
-    } else {
-        None
-    };
+    let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
 
     let repo_ref = if let Some(repo_coordinate) = &repo_coordinate {
         fetching_with_report(git_repo_path, &client, repo_coordinate).await?;
-        if let Ok(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await {
-            Some(repo_ref)
-        } else {
-            None
-        }
+        (get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await).ok()
     } else {
         None
     };

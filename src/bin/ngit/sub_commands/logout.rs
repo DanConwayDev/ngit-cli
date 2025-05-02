@@ -11,12 +11,7 @@ use crate::{
 
 pub async fn launch() -> Result<()> {
     let git_repo_result = Repo::discover().context("failed to find a git repository");
-    let git_repo = {
-        match git_repo_result {
-            Ok(git_repo) => Some(git_repo),
-            Err(_) => None,
-        }
-    };
+    let git_repo = { git_repo_result.ok() };
     logout(git_repo.as_ref()).await
 }
 

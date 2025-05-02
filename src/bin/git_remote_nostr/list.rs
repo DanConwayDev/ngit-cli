@@ -33,12 +33,7 @@ pub async fn run_list(
     repo_ref: &RepoRef,
     for_push: bool,
 ) -> Result<HashMap<String, HashMap<String, String>>> {
-    let nostr_state =
-        if let Ok(nostr_state) = get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await {
-            Some(nostr_state)
-        } else {
-            None
-        };
+    let nostr_state = (get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await).ok();
 
     let term = console::Term::stderr();
 
@@ -169,7 +164,7 @@ async fn get_open_and_draft_proposals_state(
                                 .as_str(),
                         );
                     }
-                };
+                }
             }
         }
     }

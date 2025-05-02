@@ -327,7 +327,7 @@ impl FromStr for CloneUrl {
                 if s.contains('@') && s
                 .split('@')
                 .nth(0)
-                .map_or(false, |part| !part.contains('/')) {
+                .is_some_and(|part| !part.contains('/')) {
                     "ssh"
                 }
                 // otherwise assume unspecified

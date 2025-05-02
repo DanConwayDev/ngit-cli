@@ -1020,7 +1020,7 @@ async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_is
                 .any(|t| t.as_slice()[1].eq(&proposal_cover_letter_event.id.to_string()))
                 && e.kind.eq(&Kind::GitPatch)
         })
-        .last()
+        .next_back()
         .unwrap();
 
     assert_eq!(

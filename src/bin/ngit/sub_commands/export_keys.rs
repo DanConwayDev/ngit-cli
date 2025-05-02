@@ -12,12 +12,7 @@ use crate::git::Repo;
 
 pub async fn launch() -> Result<()> {
     let git_repo_result = Repo::discover().context("failed to find a git repository");
-    let git_repo = {
-        match git_repo_result {
-            Ok(git_repo) => Some(git_repo),
-            Err(_) => None,
-        }
-    };
+    let git_repo = { git_repo_result.ok() };
 
     if let Ok((signer_info, source)) = get_signer_info(&git_repo.as_ref(), &None, &None, &None) {
         if let Ok((_, user_ref, source)) = load_existing_login(
