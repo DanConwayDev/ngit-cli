@@ -23,7 +23,6 @@ directories = "5.0.1"
 futures = "0.3.28"
 git2 = "0.20.2"
 indicatif = "0.17.7"
-keyring = "2.0.5"
 nostr = { version = "0.41.0", features = ["nip05", "nip49"] }
 nostr-connect = "0.41.0"
 nostr-database = "0.41.0"
