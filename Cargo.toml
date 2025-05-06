@@ -44,7 +44,7 @@ assert_cmd = "2.0.12"
 duplicate = "1.0.0"
 mockall = "0.11.4"
 once_cell = "1.18.0"
-serial_test = "2.0.0"
+serial_test = "3.2.0"
 test_utils = { path = "test_utils" }
 
 [workspace]
