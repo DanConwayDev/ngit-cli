@@ -19,7 +19,7 @@ chacha20poly1305 = "0.10.1"
 clap = { version = "4.3.19", features = ["derive"] }
 console = "0.15.7"
 dialoguer = "0.10.4"
-directories = "5.0.1"
+directories = "6.0.0"
 futures = "0.3.28"
 git2 = "0.20.2"
 indicatif = "0.17.7"
