@@ -19,20 +19,21 @@ pub trait InteractorPrompt {
 }
 impl InteractorPrompt for Interactor {
     fn input(&self, parms: PromptInputParms) -> Result<String> {
-        let mut input = Input::with_theme(&self.theme);
-        input.with_prompt(parms.prompt).allow_empty(parms.optional);
+        let mut input = Input::with_theme(&self.theme)
+            .with_prompt(parms.prompt)
+            .allow_empty(parms.optional)
+            .report(parms.report);
         if !parms.default.is_empty() {
-            input.default(parms.default);
+            input = input.default(parms.default);
         }
-        input.report(parms.report);
         Ok(input.interact_text()?)
     }
     fn password(&self, parms: PromptPasswordParms) -> Result<String> {
-        let mut p = Password::with_theme(&self.theme);
-        p.with_prompt(parms.prompt);
-        p.report(parms.report);
+        let mut p = Password::with_theme(&self.theme)
+            .with_prompt(parms.prompt)
+            .report(parms.report);
         if parms.confirm {
-            p.with_confirmation("confirm password", "passwords didnt match...");
+            p = p.with_confirmation("confirm password", "passwords didnt match...");
         }
         let pass: String = p.interact()?;
         Ok(pass)
@@ -45,27 +46,25 @@ impl InteractorPrompt for Interactor {
         Ok(confirm)
     }
     fn choice(&self, parms: PromptChoiceParms) -> Result<usize> {
-        let mut choice = dialoguer::Select::with_theme(&self.theme);
-        choice
+        let mut choice = dialoguer::Select::with_theme(&self.theme)
             .with_prompt(parms.prompt)
             .report(parms.report)
             .items(&parms.choices);
         if let Some(default) = parms.default {
             if std::env::var("NGITTEST").is_err() {
-                choice.default(default);
+                choice = choice.default(default);
             }
         }
         choice.interact().context("failed to get choice")
     }
     fn multi_choice(&self, parms: PromptMultiChoiceParms) -> Result<Vec<usize>> {
         // the colorful theme is not very clear so falling back to default
-        let mut choice = dialoguer::MultiSelect::default();
-        choice
+        let mut choice = dialoguer::MultiSelect::default()
             .with_prompt(parms.prompt)
             .report(parms.report)
             .items(&parms.choices);
         if let Some(defaults) = parms.defaults {
-            choice.defaults(&defaults);
+            choice = choice.defaults(&defaults);
         }
         choice.interact().context("failed to get choice")
     }
