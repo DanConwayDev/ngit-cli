@@ -354,16 +354,6 @@ pub fn set_protocol_preference(
     )
 }
 
-/// to understand whether to try over another protocol
-pub fn fetch_or_list_error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
-    !error_might_be_authentication_related(error)
-}
-
-/// to understand whether to try over another protocol
-pub fn push_error_is_not_authentication_failure(error: &anyhow::Error) -> bool {
-    !error_might_be_authentication_related(error)
-}
-
 pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     let error_str = error.to_string();
     for s in [

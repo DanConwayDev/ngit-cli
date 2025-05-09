@@ -22,9 +22,8 @@ use crate::{
     fetch::{fetch_from_git_server, make_commits_for_proposal},
     git::Repo,
     utils::{
-        Direction, fetch_or_list_error_is_not_authentication_failure, get_open_or_draft_proposals,
-        get_read_protocols_to_try, get_short_git_server_name, join_with_and,
-        set_protocol_preference,
+        Direction, get_open_or_draft_proposals, get_read_protocols_to_try,
+        get_short_git_server_name, join_with_and, set_protocol_preference,
     },
 };
 
@@ -244,12 +243,6 @@ pub fn list_from_remote(
                     format!("list: {formatted_url} failed over {protocol}: {error}").as_str(),
                 )?;
                 failed_protocols.push(protocol);
-                if protocol == &ServerProtocol::Ssh
-                    && fetch_or_list_error_is_not_authentication_failure(&error)
-                {
-                    // authenticated by failed to complete request
-                    break;
-                }
             }
         }
     }

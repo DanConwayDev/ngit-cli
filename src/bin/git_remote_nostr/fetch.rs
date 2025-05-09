@@ -24,8 +24,7 @@ use nostr::nips::nip19;
 use nostr_sdk::{Event, ToBech32};
 
 use crate::utils::{
-    Direction, fetch_or_list_error_is_not_authentication_failure,
-    find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch,
+    Direction, find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch,
     get_open_or_draft_proposals, get_read_protocols_to_try, join_with_and, set_protocol_preference,
 };
 
@@ -196,12 +195,6 @@ pub fn fetch_from_git_server(
                 format!("fetch: {formatted_url} failed over {protocol}: {error}").as_str(),
             )?;
             failed_protocols.push(protocol);
-            if protocol == &ServerProtocol::Ssh
-                && fetch_or_list_error_is_not_authentication_failure(&error)
-            {
-                // authenticated by failed to complete request
-                break;
-            }
         } else {
             success = true;
             if !failed_protocols.is_empty() {

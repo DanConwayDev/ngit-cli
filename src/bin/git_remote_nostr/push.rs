@@ -45,8 +45,7 @@ use crate::{
     utils::{
         Direction, find_proposal_and_patches_by_branch_name, get_all_proposals,
         get_remote_name_by_url, get_short_git_server_name, get_write_protocols_to_try,
-        join_with_and, push_error_is_not_authentication_failure, read_line,
-        set_protocol_preference,
+        join_with_and, read_line, set_protocol_preference,
     },
 };
 
@@ -430,9 +429,6 @@ fn push_to_remote(
                 format!("push: {formatted_url} failed over {protocol}: {error}").as_str(),
             )?;
             failed_protocols.push(protocol);
-            if push_error_is_not_authentication_failure(&error) {
-                break;
-            }
         } else {
             success = true;
             if !failed_protocols.is_empty() {
