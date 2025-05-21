@@ -236,7 +236,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 }
             }
             if !dont_ask_for_maintainers {
-                println!("{}", &maintainers_string);
                 maintainers_string = Interactor::default().input(
                     PromptInputParms::default()
                         .with_prompt("maintainers - space seperated list of npubs")
