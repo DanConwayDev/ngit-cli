@@ -2,7 +2,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use console::Style;
-use ngit::{client::send_events, git_events::generate_cover_letter_and_patch_events};
+use ngit::{
+    client::{Params, send_events},
+    git_events::generate_cover_letter_and_patch_events,
+};
 use nostr::{
     ToBech32,
     nips::{nip10::Marker, nip19::Nip19Event},
@@ -52,7 +55,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         .get_main_or_master_branch()
         .context("the default branches (main or master) do not exist")?;
 
-    let mut client = Client::default();
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 

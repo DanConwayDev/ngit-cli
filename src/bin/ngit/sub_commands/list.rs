@@ -2,7 +2,9 @@ use std::{io::Write, ops::Add};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
-    client::{get_all_proposal_patch_events_from_cache, get_proposals_and_revisions_from_cache},
+    client::{
+        Params, get_all_proposal_patch_events_from_cache, get_proposals_and_revisions_from_cache,
+    },
     git_events::{
         get_commit_id_from_patch, get_most_recent_patch_with_ancestors, status_kinds, tag_value,
     },
@@ -31,7 +33,7 @@ pub async fn launch() -> Result<()> {
     // TODO: check for existing maintaiers file
     // TODO: check for other claims
 
-    let client = Client::default();
+    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 

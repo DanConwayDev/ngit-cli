@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use console::{Style, Term};
 use ngit::{
     cli_interactor::PromptConfirmParms,
+    client::Params,
     git::nostr_url::{NostrUrlDecoded, save_nip05_to_git_config_cache},
 };
 use nostr::{
@@ -68,7 +69,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     // TODO: check for empty repo
     // TODO: check for existing maintaiers file
 
-    let mut client = Client::default();
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
 

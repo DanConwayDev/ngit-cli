@@ -44,7 +44,7 @@ use nostr_sdk::{
 
 use crate::{
     get_dirs,
-    git::{Repo, RepoActions},
+    git::{Repo, RepoActions, get_git_config_item},
     git_events::{
         event_is_cover_letter, event_is_patch_set_root, event_is_revision_root, status_kinds,
     },
@@ -657,6 +657,46 @@ impl Default for Params {
                 vec!["wss://relay.nsec.app".to_string()]
             },
         }
+    }
+}
+impl Params {
+    pub fn with_git_config_relay_defaults(git_repo: &Option<&Repo>) -> Self {
+        let mut params = Params::default();
+        if std::env::var("NGITTEST").is_err() {
+            // ignore git config settings under test
+            if let Ok(Some(relay_defaults)) =
+                get_git_config_item(git_repo, "nostr.relay-default-set")
+            {
+                let new_default_relays: Vec<String> = relay_defaults
+                    .split(';')
+                    .filter_map(|url| RelayUrl::parse(url).ok()) // Attempt to parse and filter out errors
+                    .map(|relay_url| relay_url.to_string()) // Convert RelayUrl back to String
+                    .collect();
+                // elsewhere it is assumed this isn't empty
+                if !new_default_relays.is_empty() {
+                    params.fallback_relays = new_default_relays;
+                }
+            }
+            if let Ok(Some(relay_blasters)) =
+                get_git_config_item(git_repo, "nostr.relay-blaster-set")
+            {
+                params.blaster_relays = relay_blasters
+                    .split(';')
+                    .filter_map(|url| RelayUrl::parse(url).ok()) // Attempt to parse and filter out errors
+                    .map(|relay_url| relay_url.to_string()) // Convert RelayUrl back to String
+                    .collect();
+            }
+            if let Ok(Some(relay_signer)) =
+                get_git_config_item(git_repo, "nostr.relay-signer-fallback-set")
+            {
+                params.fallback_signer_relays = relay_signer
+                    .split(';')
+                    .filter_map(|url| RelayUrl::parse(url).ok()) // Attempt to parse and filter out errors
+                    .map(|relay_url| relay_url.to_string()) // Convert RelayUrl back to String
+                    .collect();
+            }
+        }
+        params
     }
 }
 

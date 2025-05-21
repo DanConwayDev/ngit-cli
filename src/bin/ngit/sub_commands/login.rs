@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap;
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
+    client::Params,
     git::{get_git_config_item, remove_git_config_item},
     login::{SignerInfoSource, existing::load_existing_login},
 };
@@ -25,14 +26,16 @@ pub struct SubCommandArgs {
 }
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
+    let git_repo_result = Repo::discover().context("failed to find a git repository");
+    let git_repo = { git_repo_result.ok() };
+
     let client = if command_args.offline {
         None
     } else {
-        Some(Client::default())
+        Some(Client::new(Params::with_git_config_relay_defaults(
+            &git_repo.as_ref(),
+        )))
     };
-
-    let git_repo_result = Repo::discover().context("failed to find a git repository");
-    let git_repo = { git_repo_result.ok() };
 
     let (logged_out, log_in_locally_only) = logout(git_repo.as_ref(), command_args.local).await?;
     if logged_out || log_in_locally_only {
