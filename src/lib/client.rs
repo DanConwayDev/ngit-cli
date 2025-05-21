@@ -858,6 +858,8 @@ pub async fn save_event_in_global_cache(
     }
 }
 
+// use annoucement from trusted maintainer but recursively add maintainers, git
+// servers and relays
 pub async fn get_repo_ref_from_cache(
     git_repo_path: Option<&Path>,
     repo_coordinate: &Nip19Coordinate,
@@ -907,7 +909,8 @@ pub async fn get_repo_ref_from_cache(
     repo_events.sort_by_key(|e| e.created_at);
     let repo_ref = RepoRef::try_from((
         repo_events
-            .first()
+            .iter()
+            .find(|e| e.pubkey == repo_coordinate.public_key)
             .context("no repo announcement event found at specified Nip19Coordinates. if you are the repository maintainer consider running `ngit init` to create one")?
             .clone(),
         Some(repo_coordinate.public_key),
@@ -930,10 +933,24 @@ pub async fn get_repo_ref_from_cache(
         }
     }
 
+    // use relays and git servers from all maintainer announcement event
+    let mut relays: HashSet<RelayUrl> = HashSet::from_iter(repo_ref.relays.iter().cloned());
+    let mut git_servers: HashSet<String> = HashSet::from_iter(repo_ref.git_server.iter().cloned());
+    for m in &maintainers {
+        if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
+            if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
+                relays.extend(m_repo_ref.relays);
+                git_servers.extend(m_repo_ref.git_server);
+            }
+        }
+    }
+
     Ok(RepoRef {
         // use all maintainers from all events found, not just maintainers in the most
         // recent event
         maintainers: maintainers.iter().copied().collect::<Vec<PublicKey>>(),
+        relays: relays.into_iter().collect(),
+        git_server: git_servers.into_iter().collect(),
         events,
         ..repo_ref
     })
