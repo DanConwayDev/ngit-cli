@@ -13,7 +13,7 @@ use crate::sub_commands;
 #[command(propagate_version = true)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
     /// remote signer address
     #[arg(long, global = true, hide = true)]
     pub bunker_uri: Option<String>,
@@ -29,7 +29,39 @@ pub struct Cli {
     /// disable spinner animations
     #[arg(long, action, hide = true)]
     pub disable_cli_spinners: bool,
+    /// show customization options via git config
+    #[arg(short, long, global = true)]
+    pub customize: bool,
 }
+
+pub const CUSTOMISE_TEMPLATE: &str = r"
+==========================
+      Customize ngit      
+==========================
+ngit settings are managed through the git config.
+
+Currently the only settings not not reachable through standard commands relate to default hardcoded relays:
+
+ - nostr.relay-default-set - must have at least 1 value
+ - nostr.relay-blaster-set
+ - nostr.relay-signer-fallback-set
+
+These take a string of semi-colon separated websocket URLs without spaces. For example:
+`git config --global nostr.relay-default-set 'wss://relay1.example.com;wss://relay2.example.com'`
+Or just for this repository:
+`git config nostr.relay-default-set 'wss://relay1.example.com;wss://relay2.example.com'`
+
+Other useful settings:
+ - 'nostr.nostate true' to avoid publishing a state event when pushing to a nostr remote.
+ - Login settings configured during `ngit account login`:
+   - nostr.nsec - nsec or ncryptsec
+   - nostr.npub - used for ncryptsec and remote signer
+   - nostr.bunker-uri - used for remote signer
+   - nostr.bunker-app-key - used for remote signer
+
+Other config settings are applied to the local repository but just for effiency reasons eg nostr.nip05 and nostr.protocol-push
+==========================
+";
 
 pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
     if let Some(nsec) = &args.nsec {
