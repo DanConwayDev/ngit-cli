@@ -159,7 +159,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     };
 
     let maintainers: Vec<PublicKey> = {
-        let mut dont_ask = !args.other_maintainers.is_empty();
+        let mut dont_ask_for_maintainers = !args.other_maintainers.is_empty();
         let mut maintainers_string = if !args.other_maintainers.is_empty() {
             [args.other_maintainers.clone()].concat().join(" ")
         } else if repo_ref.is_none() && repo_config_result.is_err() {
@@ -194,37 +194,48 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         };
         'outer: loop {
-            if !dont_ask && user_ref.public_key.to_bech32()?.eq(&maintainers_string) {
+            if !dont_ask_for_maintainers && user_ref.public_key.to_bech32()?.eq(&maintainers_string)
+            {
                 if Interactor::default().confirm(
                     PromptConfirmParms::default()
                         .with_prompt("are you the only maintainer?")
                         .with_default(true),
                 )? {
-                    dont_ask = true;
+                    dont_ask_for_maintainers = true;
                 } else {
-                    let mut opt_out_default = false;
+                    let mut ask_about_state = false;
                     if !Interactor::default().confirm(
                         PromptConfirmParms::default()
                             .with_prompt("are the other maintainers on nostr?")
                             .with_default(true),
                     )? {
-                        opt_out_default = true;
-                        dont_ask = true;
-                    }
-                    println!(
-                        "nostr can reduce the trust placed in git servers by storing the state of git branches and tags. if you have other maintainers not using git via nostr, the verifiable state can fall behind the git server."
-                    );
-
-                    if Interactor::default().confirm(
+                        dont_ask_for_maintainers = true;
+                        ask_about_state = true;
+                    } else if !Interactor::default().confirm(
                         PromptConfirmParms::default()
-                            .with_prompt("opt-out of storing git state on nostr and relay on git server for now? you will still receive PRs and issues via nostr")
+                            .with_prompt(
+                                "are you going to ask them to use ngit with this repository?",
+                            )
                             .with_default(true),
                     )? {
-                        git_repo.save_git_config_item("nostr.nostate", "true", opt_out_default)?;
+                        ask_about_state = true;
+                    }
+
+                    if ask_about_state {
+                        println!(
+                            "nostr can reduce the trust placed in git servers by storing the state of git branches and tags. You can also use nostr-permissioned git servers. If you have other maintainers not using git via nostr, the verifiable state can fall behind the git server."
+                        );
+                        if Interactor::default().confirm(
+                            PromptConfirmParms::default()
+                                .with_prompt("opt-out of storing git state on nostr and relay on git server for now? you will still receive PRs and issues via nostr")
+                                .with_default(true),
+                        )? {
+                            git_repo.save_git_config_item("nostr.nostate", "true", false)?;
+                        }
                     }
                 }
             }
-            if !dont_ask {
+            if !dont_ask_for_maintainers {
                 println!("{}", &maintainers_string);
                 maintainers_string = Interactor::default().input(
                     PromptInputParms::default()
@@ -238,7 +249,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     maintainers.push(m_pubkey);
                 } else {
                     println!("not a valid set of space seperated npubs");
-                    dont_ask = false;
+                    dont_ask_for_maintainers = false;
                     continue 'outer;
                 }
             }
@@ -258,7 +269,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         };
         if no_state {
             println!(
-                "you have opted out of storing git state on nostr, so a git server must be used for the state of authoritative branches, tags and related git objects."
+                "you have opted out of storing git state on nostr, so a git server must be used for the state of authoritative branches, tags and related git objects. you can run `ngit init` again to change this later."
             );
         } else {
             println!(
