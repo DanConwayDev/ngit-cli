@@ -108,64 +108,21 @@ pub trait Connect {
 #[async_trait]
 impl Connect for Client {
     fn default() -> Self {
-        let fallback_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
-            vec![
-                "ws://localhost:8051".to_string(),
-                "ws://localhost:8052".to_string(),
-            ]
-        } else {
-            vec![
-                "wss://relay.damus.io".to_string(), /* free, good reliability, have been known
-                                                     * to delete all messages */
-                "wss://nos.lol".to_string(),
-                "wss://relay.nostr.band".to_string(),
-            ]
-        };
-
-        let more_fallback_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
-            vec![
-                "ws://localhost:8055".to_string(),
-                "ws://localhost:8056".to_string(),
-            ]
-        } else {
-            vec![
-                "wss://purplerelay.com".to_string(), // free but reliability not tested
-                "wss://purplepages.es".to_string(),  // for profile events but unreliable
-                "wss://relayable.org".to_string(),   // free but not always reliable
-            ]
-        };
-
-        let blaster_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
-            vec!["ws://localhost:8057".to_string()]
-        } else {
-            vec![]
-        };
-
-        let fallback_signer_relays: Vec<String> = if std::env::var("NGITTEST").is_ok() {
-            vec!["ws://localhost:8051".to_string()]
-        } else {
-            vec!["wss://relay.nsec.app".to_string()]
-        };
-
-        Client {
-            client: nostr_sdk::ClientBuilder::new()
-                .opts(Options::new().relay_limits(RelayLimits::disable()))
-                .build(),
-            fallback_relays,
-            more_fallback_relays,
-            blaster_relays,
-            fallback_signer_relays,
-        }
+        Self::new(Params::default())
     }
+
     fn new(opts: Params) -> Self {
         Client {
-            client: nostr_sdk::ClientBuilder::new()
-                .opts(Options::new().relay_limits(RelayLimits::disable()))
-                .signer(opts.keys.unwrap_or(nostr::Keys::generate()))
-                // .database(
-                //     SQLiteDatabase::open(get_dirs()?.cache_dir().join("nostr-cache.lmdb")).
-                // await?, )
-                .build(),
+            client: if let Some(keys) = opts.keys {
+                nostr_sdk::ClientBuilder::new()
+                    .opts(Options::new().relay_limits(RelayLimits::disable()))
+                    .signer(keys)
+                    .build()
+            } else {
+                nostr_sdk::ClientBuilder::new()
+                    .opts(Options::new().relay_limits(RelayLimits::disable()))
+                    .build()
+            },
             fallback_relays: opts.fallback_relays,
             more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
@@ -651,13 +608,56 @@ async fn get_events_of(
     Ok(events.into_iter().collect())
 }
 
-#[derive(Default)]
 pub struct Params {
     pub keys: Option<nostr::Keys>,
     pub fallback_relays: Vec<String>,
     pub more_fallback_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
     pub fallback_signer_relays: Vec<String>,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Params {
+            keys: None,
+            fallback_relays: if std::env::var("NGITTEST").is_ok() {
+                vec![
+                    "ws://localhost:8051".to_string(),
+                    "ws://localhost:8052".to_string(),
+                ]
+            } else {
+                vec![
+                    "wss://relay.damus.io".to_string(), /* free, good reliability, have been
+                                                         * known
+                                                         * to delete all messages */
+                    "wss://nos.lol".to_string(),
+                    "wss://relay.nostr.band".to_string(),
+                ]
+            },
+            more_fallback_relays: if std::env::var("NGITTEST").is_ok() {
+                vec![
+                    "ws://localhost:8055".to_string(),
+                    "ws://localhost:8056".to_string(),
+                ]
+            } else {
+                vec![
+                    "wss://purplerelay.com".to_string(), // free but reliability not tested
+                    "wss://purplepages.es".to_string(),  // for profile events but unreliable
+                    "wss://relayable.org".to_string(),   // free but not always reliable
+                ]
+            },
+            blaster_relays: if std::env::var("NGITTEST").is_ok() {
+                vec!["ws://localhost:8057".to_string()]
+            } else {
+                vec![]
+            },
+            fallback_signer_relays: if std::env::var("NGITTEST").is_ok() {
+                vec!["ws://localhost:8051".to_string()]
+            } else {
+                vec!["wss://relay.nsec.app".to_string()]
+            },
+        }
+    }
 }
 
 fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event> {
