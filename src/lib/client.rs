@@ -973,14 +973,29 @@ pub async fn get_repo_ref_from_cache(
         }
     }
 
-    // use relays and git servers from all maintainer announcement event
-    let mut relays: HashSet<RelayUrl> = HashSet::from_iter(repo_ref.relays.iter().cloned());
-    let mut git_servers: HashSet<String> = HashSet::from_iter(repo_ref.git_server.iter().cloned());
+    // Use relays and git servers from all maintainer announcement events
+    // we use Vec and HashSet to remove duplicates and preserve order
+    let mut relays: Vec<RelayUrl> = repo_ref.relays.clone();
+    let mut git_server: Vec<String> = repo_ref.git_server.clone();
+    let mut seen_relays: HashSet<RelayUrl> = HashSet::from_iter(relays.iter().cloned());
+    let mut seen_git_server: HashSet<String> = git_server
+        .iter()
+        .map(|server| server.trim_end_matches('/').to_string())
+        .collect();
+
     for m in &maintainers {
         if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
             if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
-                relays.extend(m_repo_ref.relays);
-                git_servers.extend(m_repo_ref.git_server);
+                for relay in m_repo_ref.relays {
+                    if seen_relays.insert(relay.clone()) {
+                        relays.push(relay);
+                    }
+                }
+                for server in m_repo_ref.git_server {
+                    if seen_git_server.insert(server.trim_end_matches('/').to_string()) {
+                        git_server.push(server);
+                    }
+                }
             }
         }
     }
@@ -989,8 +1004,8 @@ pub async fn get_repo_ref_from_cache(
         // use all maintainers from all events found, not just maintainers in the most
         // recent event
         maintainers: maintainers.iter().copied().collect::<Vec<PublicKey>>(),
-        relays: relays.into_iter().collect(),
-        git_server: git_servers.into_iter().collect(),
+        relays,
+        git_server,
         events,
         ..repo_ref
     })
