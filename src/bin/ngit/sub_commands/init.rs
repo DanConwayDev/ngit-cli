@@ -1,30 +1,31 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::HashMap, process::{Command, Stdio}, str::FromStr, thread, time::Duration
+};
 
-use anyhow::{Context, Result};
-use console::{Style, Term};
+use anyhow::{Context, Result, bail};
+use console::Style;
+use dialoguer::theme::{ColorfulTheme, Theme};
 use ngit::{
-    cli_interactor::PromptConfirmParms,
-    client::Params,
-    git::nostr_url::{NostrUrlDecoded, save_nip05_to_git_config_cache},
+    cli_interactor::{PromptChoiceParms, PromptConfirmParms, PromptMultiChoiceParms},
+    client::{send_events, Params},
+    git::nostr_url::{CloneUrl, NostrUrlDecoded}, repo_ref::{extract_pks, save_repo_config_to_yaml},
 };
 use nostr::{
-    FromBech32, PublicKey, ToBech32,
     nips::{
         nip01::Coordinate,
-        nip05::{self},
         nip19::Nip19Coordinate,
-    },
+    }, FromBech32, PublicKey, ToBech32
 };
-use nostr_sdk::{Kind, RelayUrl};
+use nostr_sdk::{Kind, RelayUrl, Url};
 
 use crate::{
     cli::{Cli, extract_signer_cli_arguments},
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache, send_events},
+    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
     login,
     repo_ref::{
-        RepoRef, extract_pks, get_repo_config_from_yaml, save_repo_config_to_yaml,
+        RepoRef, get_repo_config_from_yaml,
         try_and_get_repo_coordinates_when_remote_unknown,
     },
 };
@@ -107,43 +108,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         )?,
     };
 
-    let identifier = match &args.identifier {
-        Some(t) => t.clone(),
-        None => Interactor::default().input(
-            PromptInputParms::default()
-                .with_prompt(
-                    "repo identifier (typically the short name with hypens instead of spaces)",
-                )
-                .with_default(if let Some(repo_ref) = &repo_ref {
-                    repo_ref.identifier.clone()
-                } else if let Some(repo_coordinate) = &repo_coordinate {
-                    repo_coordinate.identifier.clone()
-                } else {
-                    let fallback = name
-                        .clone()
-                        .replace(' ', "-")
-                        .chars()
-                        .map(|c| {
-                            if c.is_ascii_alphanumeric() || c.eq(&'/') {
-                                c
-                            } else {
-                                '-'
-                            }
-                        })
-                        .collect();
-                    if let Ok(config) = &repo_config_result {
-                        if let Some(identifier) = &config.identifier {
-                            identifier.to_string()
-                        } else {
-                            fallback
-                        }
-                    } else {
-                        fallback
-                    }
-                }),
-        )?,
-    };
-
     let description = match &args.description {
         Some(t) => t.clone(),
         None => Interactor::default().input(
@@ -158,163 +122,89 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         )?,
     };
 
-    let maintainers: Vec<PublicKey> = {
-        let mut dont_ask_for_maintainers = !args.other_maintainers.is_empty();
-        let mut maintainers_string = if !args.other_maintainers.is_empty() {
-            [args.other_maintainers.clone()].concat().join(" ")
-        } else if repo_ref.is_none() && repo_config_result.is_err() {
-            user_ref.public_key.to_bech32()?
-        } else {
-            let maintainers = if let Ok(config) = &repo_config_result {
-                config.maintainers.clone()
-            } else if let Some(repo_ref) = &repo_ref {
-                repo_ref
-                    .maintainers
-                    .clone()
-                    .iter()
-                    .map(|k| k.to_bech32().unwrap())
-                    .collect()
-            } else {
-                //unreachable
-                vec![user_ref.public_key.to_bech32()?]
-            };
-            // add current user if not present
-            if maintainers.iter().any(|m| {
-                if let Ok(m_pubkey) = PublicKey::from_bech32(m) {
-                    user_ref.public_key.eq(&m_pubkey)
-                } else {
-                    false
-                }
-            }) {
-                maintainers.join(" ")
-            } else {
-                [maintainers, vec![user_ref.public_key.to_bech32()?]]
-                    .concat()
-                    .join(" ")
-            }
-        };
-        'outer: loop {
-            if !dont_ask_for_maintainers && user_ref.public_key.to_bech32()?.eq(&maintainers_string)
-            {
-                if Interactor::default().confirm(
-                    PromptConfirmParms::default()
-                        .with_prompt("are you the only maintainer?")
-                        .with_default(true),
-                )? {
-                    dont_ask_for_maintainers = true;
-                } else {
-                    let mut ask_about_state = false;
-                    if !Interactor::default().confirm(
-                        PromptConfirmParms::default()
-                            .with_prompt("are the other maintainers on nostr?")
-                            .with_default(true),
-                    )? {
-                        dont_ask_for_maintainers = true;
-                        ask_about_state = true;
-                    } else if !Interactor::default().confirm(
-                        PromptConfirmParms::default()
-                            .with_prompt(
-                                "are you going to ask them to use ngit with this repository?",
-                            )
-                            .with_default(true),
-                    )? {
-                        ask_about_state = true;
-                    }
+    // this is important so init can be completed done without prompts
+    let has_server_and_relay_flags = !args.clone_url.is_empty() && !args.relays.is_empty();
 
-                    if ask_about_state {
-                        println!(
-                            "nostr can reduce the trust placed in git servers by storing the state of git branches and tags. You can also use nostr-permissioned git servers. If you have other maintainers not using git via nostr, the verifiable state can fall behind the git server."
-                        );
-                        if Interactor::default().confirm(
-                            PromptConfirmParms::default()
-                                .with_prompt("opt-out of storing git state on nostr and relay on git server for now? you will still receive PRs and issues via nostr")
-                                .with_default(true),
-                        )? {
-                            git_repo.save_git_config_item("nostr.nostate", "true", false)?;
-                        }
-                    }
-                }
-            }
-            if !dont_ask_for_maintainers {
-                maintainers_string = Interactor::default().input(
-                    PromptInputParms::default()
-                        .with_prompt("maintainers - space seperated list of npubs")
-                        .with_default(maintainers_string),
-                )?;
-            }
-            let mut maintainers: Vec<PublicKey> = vec![];
-            for m in maintainers_string.split(' ') {
-                if let Ok(m_pubkey) = PublicKey::from_bech32(m) {
-                    maintainers.push(m_pubkey);
-                } else {
-                    println!("not a valid set of space seperated npubs");
-                    dont_ask_for_maintainers = false;
-                    continue 'outer;
-                }
-            }
-            // add current user incase removed
-            if !maintainers.iter().any(|m| user_ref.public_key.eq(m)) {
-                maintainers.push(user_ref.public_key);
-            }
-            break maintainers;
-        }
-    };
-
-    let git_server = if args.clone_url.is_empty() {
-        let no_state = if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.nostate", None) {
-            s == "true"
-        } else {
-            false
-        };
-        if no_state {
-            println!(
-                "you have opted out of storing git state on nostr, so a git server must be used for the state of authoritative branches, tags and related git objects. you can run `ngit init` again to change this later."
-            );
-        } else {
-            println!(
-                "your repository state will be stored on nostr, but a git server is still required to store the git objects associated with this state."
-            );
-        }
-        println!(
-            "you can change this git server at any time and even configure multiple servers for redundancy. In this case, the git plugin will push to all of them when using the nostr remote."
-        );
-        println!("only maintainers need write access as PRs are sent over nostr.");
-        println!(
-            "a lightweight git server implementation for use with nostr, requiring no signup, is in development. several providers have shown interest in hosting it. for now use github, codeberg, or self-hosted song, forge, etc."
-        );
-        Interactor::default()
-            .input(
-                PromptInputParms::default()
-                    .with_prompt("git server remote url(s) (space seperated)")
-                    .with_default(if let Some(repo_ref) = &repo_ref {
-                        repo_ref.git_server.clone().join(" ")
-                    } else if let Ok(url) = git_repo.get_origin_url() {
-                        if let Ok(fetch_url) = convert_clone_url_to_https(&url) {
-                            fetch_url
-                        } else if url.starts_with("nostr://") {
-                            // nostr added as origin remote before repo announcement sent
-                            String::new()
-                        } else {
-                            // local repo or custom protocol
-                            url
-                        }
-                    } else {
-                        String::new()
-                    }),
-            )?
-            .split(' ')
-            .map(std::string::ToString::to_string)
-            .collect()
+    let simple_mode = if has_server_and_relay_flags {
+        false
     } else {
-        args.clone_url.clone()
+        Interactor::default().choice(
+            PromptChoiceParms::default()
+                .with_prompt("config mode")
+                .with_choices(vec![
+                    "simple - all you need".to_string(),
+                    "advanced - all the dials and switches".to_string(),
+                ])
+                .with_default(0),
+        )? == 0
     };
 
-    // TODO: when NIP-66 is functional, use this to reccommend relays and filter out
-    //       relays that won't accept contributors events. NIP-11 'limitations'
-    //       isn't widely used enough to be usedful.
+    let identifier_default = if let Some(repo_ref) = &repo_ref {
+        repo_ref.identifier.clone()
+    } else if let Some(repo_coordinate) = &repo_coordinate {
+        repo_coordinate.identifier.clone()
+    } else {
+        let fallback = name
+            .clone()
+            .replace(' ', "-")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c.eq(&'/') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        if let Ok(config) = &repo_config_result {
+            if let Some(identifier) = &config.identifier {
+                identifier.to_string()
+            } else {
+                fallback
+            }
+        } else {
+            fallback
+        }
+    };
 
-    let relays: Vec<RelayUrl> = {
-        let mut default = if let Ok(config) = &repo_config_result {
+    let identifier = match &args.identifier {
+        Some(t) => t.clone(),
+        None => {
+            if simple_mode {
+                identifier_default
+            } else {
+                Interactor::default().input(
+                PromptInputParms::default()
+                    .with_prompt(
+                        "repo identifier (typically the short name with hypens instead of spaces)",
+                    )
+                    .with_default(identifier_default),
+            )?
+            }
+        }
+    };
+
+    let mut git_server_defaults: Vec<String> = if !args.clone_url.is_empty() {
+        args.clone_url.clone()
+    } else if let Some(repo_ref) = &repo_ref {
+        // TODO dont default to git servers of other maintainers (?)
+        repo_ref.git_server.clone()
+    } else if let Ok(url) = git_repo.get_origin_url() {
+        if let Ok(fetch_url) = convert_clone_url_to_https(&url) {
+            vec![fetch_url]
+        } else if url.starts_with("nostr://") {
+            // nostr added as origin remote before repo announcement sent
+            vec![]
+        } else {
+            // local repo or custom protocol
+            vec![url]
+        }
+    } else {
+        vec![]
+    };
+
+    let mut relay_defaults = if args.relays.is_empty() {
+        if let Ok(config) = &repo_config_result {
             config.relays.clone()
         } else if let Some(repo_ref) = &repo_ref {
             repo_ref
@@ -327,82 +217,333 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         } else {
             user_ref.relays.read().clone()
         }
-        .join(" ");
-        'outer: loop {
-            let relays: Vec<String> = if args.relays.is_empty() {
-                Interactor::default()
-                    .input(
-                        PromptInputParms::default()
-                            .with_prompt("relays")
-                            .with_default(default),
-                    )?
-                    .split(' ')
-                    .map(std::string::ToString::to_string)
-                    .collect()
+    } else {
+        args.relays.clone()
+    };
+
+
+    let selected_ngit_relays = if has_server_and_relay_flags {
+        // ignore so a script running `ngit init` can contiue without prompts
+        vec![]
+    } else {
+        let mut options: Vec<String> = guess_at_existing_ngit_relays(
+            repo_ref.as_ref(),
+            &args.relays,
+            &args.clone_url,
+            &identifier,
+        );
+        let mut selections: Vec<bool> = vec![true; options.len()]; // Initialize selections based on existing options
+        let empty = options.is_empty();
+        let fallbacks = vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()];
+        for fallback in fallbacks {
+            // Check if any option contains the fallback as a substring
+            if !options.iter().any(|option| option.contains(&fallback)) {
+                options.push(fallback.clone()); // Add fallback if not found
+                selections.push(empty); // mark as selected if no existing ngit relay otherwise not
+            }
+        }
+        let selected = multi_select_with_custom_value(
+            "ngit-relays (ideally use between 2-4)",
+            "ngit-relay",
+            options,
+            selections,
+            normalize_ngit_relay_url,
+        )?;
+        show_multi_input_prompt_success("ngit-relays", &selected);
+        selected
+    };
+
+    // ensure ngit relays are added as git server, relay and blossom entries
+    for ngit_relay in &selected_ngit_relays {
+        if args.clone_url.is_empty() {
+            let clone_url = format_ngit_relay_url_as_clone_url(ngit_relay, &user_ref.public_key, &identifier)?;
+            if !git_server_defaults.contains(&clone_url) {
+                git_server_defaults.push(clone_url);
+            }
+        }
+        if args.clone_url.is_empty() {
+            let relay_url = format_ngit_relay_url_as_relay_url(ngit_relay)?;
+            if !relay_defaults.contains(&relay_url) {
+                relay_defaults.push(relay_url);
+            }
+        }
+        // TODO blossom
+    }
+
+    let no_state = if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.nostate", None) {
+        s == "true"
+    } else {
+        false
+    };
+    if no_state && Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt("store state on nostr? required for nostr-permissioned git servers")
+                .with_default(true),
+        )?{
+        // TODO check if ngit-relays in use and if so turn this off:
+        if git_repo.get_git_config_item("nostr.nostate",Some(true)).unwrap_or(None).is_some() {
+            git_repo.remove_git_config_item("nostr.nostate", true)?;
+        } else {
+            git_repo.remove_git_config_item("nostr.nostate", false)?;
+        }
+    }
+
+    let git_server = if args.clone_url.is_empty() {
+        let ngit_relay_git_servers: Vec<String> = git_server_defaults.iter().filter(|s| selected_ngit_relays.iter().any(|r|s.contains(r))).cloned().collect();
+        let mut additional_server_options: Vec<String> = git_server_defaults.iter().filter(|s| ngit_relay_git_servers.iter().any(|r|s.eq(&r))).cloned().collect();
+
+        if simple_mode && !selected_ngit_relays.is_empty() {
+            if additional_server_options.is_empty() {
+                // additional git servers were listed
+                let selected = loop {
+                    let selections: Vec<bool> = vec![true; additional_server_options.len()];
+                    let selected = multi_select_with_custom_value(
+                        "additional git server(s) on top of ngit-relays",
+                        "git server remote url",
+                        additional_server_options,
+                        selections,
+                        |s| {
+                            CloneUrl::from_str(s)
+                                .map(|_| s.to_string())
+                                .context(format!("Invalid git server URL format: {s}"))
+                        },
+                    )?;
+
+                    if !selected.is_empty() || Interactor::default().choice(
+                    PromptChoiceParms::default()
+                        .with_prompt("if you or another maintainer start pushing directly to these, nostr will be out of date")
+                        .dont_report()
+                        .with_choices(vec![
+                            "I'll always push to the nostr remote".to_string(),
+                            "change setup".to_string(),
+                        ])
+                        .with_default(0),
+                        )? == 1 {
+                        additional_server_options = selected;
+                        continue
+                    }
+                    break selected
+                };
+                show_multi_input_prompt_success("git servers", &selected);
+                let mut combined = ngit_relay_git_servers;
+                combined.extend(selected);
+                combined
             } else {
-                args.relays.clone()
-            };
-            let mut relay_urls = vec![];
-            for r in &relays {
-                if let Ok(r) = RelayUrl::parse(r) {
-                    relay_urls.push(r);
-                } else {
-                    eprintln!("{r} is not a valid relay url");
-                    default = relays.join(" ");
-                    continue 'outer;
+                git_server_defaults
+            }
+        } else {
+            // show all git servers
+            let selections: Vec<bool> = vec![true; git_server_defaults.len()];
+
+            let selected = multi_select_with_custom_value(
+                "git server remote url(s)",
+                "git server remote url",
+                git_server_defaults,
+                selections,
+                |s| {
+                    CloneUrl::from_str(s)
+                        .map(|_| s.to_string())
+                        .context(format!("Invalid git server URL format: {s}"))
+                },
+            )?;
+            show_multi_input_prompt_success("git servers", &selected);
+            selected
+        }
+    } else {
+        git_server_defaults
+    };
+
+    let relays: Vec<RelayUrl> = {
+        if simple_mode {
+            let formatted_selected_ngit_relays: Vec<String> = selected_ngit_relays.iter()
+                .filter_map(|r| format_ngit_relay_url_as_relay_url(r).ok())
+                .collect();
+            let mut options: Vec<String> = relay_defaults.iter()
+                .filter(|s| !formatted_selected_ngit_relays.iter().any(|r| s.as_str() == r))
+                .cloned()
+                .collect();
+
+            let mut selections: Vec<bool> = vec![true; options.len()];
+
+            // add fallback relays as options
+            for relay in client.get_fallback_relays().clone() {
+                if !options.iter().any(|r|r.contains(&relay)) && !formatted_selected_ngit_relays.iter().any(|r|relay.contains(r)) {
+                    options.push(relay);
+                    selections.push(selections.is_empty());
                 }
             }
-            break relay_urls;
+
+            let selected = multi_select_with_custom_value(
+                "additional nostr relays on top of nostr-relays - 1 or 2 public relays are reccomended",
+                "nostr relay",
+                options,
+                selections,
+                |s| {
+                    parse_relay_url(s)
+                        .map(|_| s.to_string())
+                        .context(format!("Invalid relay URL format: {s}"))
+                },
+            )?;
+            show_multi_input_prompt_success("additional nostr relays", &selected);
+            selected.iter()
+                .filter_map(|r| parse_relay_url(r).ok())
+                .collect()
+        } else {
+
+            let selections: Vec<bool> = vec![true; relay_defaults.len()];
+            if args.relays.is_empty() {
+                let selected = multi_select_with_custom_value(
+                    "nostr relays",
+                    "nostr relay",
+                    relay_defaults,
+                    selections,
+                    |s| {
+                        parse_relay_url(s)
+                            .map(|_| s.to_string())
+                            .context(format!("Invalid relay URL format: {s}"))
+                    },
+                )?;
+                show_multi_input_prompt_success("nostr relays", &selected);
+                selected.iter()
+                    .filter_map(|r| parse_relay_url(r).ok())
+                    .collect()
+            } else {
+                relay_defaults
+                    .iter()
+                    .filter_map(|r| parse_relay_url(r).ok())
+                    .collect()
+            }
         }
     };
 
-    let web: Vec<String> = if args.web.is_empty() {
-        let gitworkshop_url = NostrUrlDecoded {
-            original_string: String::new(),
-            coordinate: Nip19Coordinate {
-                coordinate: Coordinate {
-                    public_key: user_ref.public_key,
-                    kind: Kind::GitRepoAnnouncement,
-                    identifier: identifier.clone(),
-                },
-                relays: if let Some(relay) = relays.first() {
-                    vec![relay.clone()]
-                } else {
-                    vec![]
-                },
-            },
-            protocol: None,
-            user: None,
-            nip05: None,
+    let default_maintainers = {
+        let mut maintainers = vec![user_ref.public_key];
+        if args.other_maintainers.is_empty() {
+            if let Some(repo_ref) = &repo_ref {
+                for m in &repo_ref.maintainers {
+                    if !maintainers.contains(m) {
+                        maintainers.push(*m);
+                    }
+                }
+            }
+        } else {
+            for m in &args.other_maintainers {
+                if let Ok(pubkey) = PublicKey::from_bech32(m).context("invalid npub") {
+                    if !maintainers.contains(&pubkey) {
+                        maintainers.push(pubkey);
+                    }
+                }
+            }
         }
+        maintainers
+    };
+
+    let maintainers: Vec<PublicKey> = if args.other_maintainers.is_empty() {
+        if default_maintainers.len() == 1
+            && Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_prompt("add other maintainers now?")
+                    .dont_report()
+                    .with_choices(vec![
+                        "maybe later".to_string(),
+                        "add maintainers".to_string(),
+                    ])
+                    .with_default(0),
+            )? == 0
+        {
+            default_maintainers
+        } else {
+            let selections: Vec<bool> = vec![true; default_maintainers.len()];
+
+            let selected = multi_select_with_custom_value(
+                "maintainers",
+                "maintainer npub",
+                default_maintainers
+                    .iter()
+                    .filter_map(|m| m.to_bech32().ok())
+                    .collect(),
+                selections,
+                |s| {
+                    extract_npub(s)
+                        .map(|_| s.to_string())
+                        .context(format!("Invalid npub: {s}"))
+                },
+            )?;
+            show_multi_input_prompt_success("maintainers", &selected);
+            selected.iter()
+            .filter_map(|npub| PublicKey::parse(npub).ok())
+            .collect()
+        }
+    } else {
+        default_maintainers
+    };
+
+    if selected_ngit_relays.is_empty() && git_server.iter().any(|s| s.contains("github.com") || s.contains("codeberg.org")) && Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt("you have listed github / codeberg. Are you or other maintainers planning on pushing directly to github / codeberg rather than using your shiny new nostr clone url which will do this for you?")
+                .with_default(false),
+        )? {
+        println!("This means people using the nostr URL won't get your latest branch updates.");
+        if Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt("opt-out of storing git state on nostr and relay on github for now? you will still receive PRs and issues via nostr")
+                .with_default(true),
+        )? {
+            git_repo.save_git_config_item("nostr.nostate", "true", false)?;
+        }   
+    }
+
+    let gitworkshop_url = NostrUrlDecoded {
+        original_string: String::new(),
+        coordinate: Nip19Coordinate {
+            coordinate: Coordinate {
+                public_key: user_ref.public_key,
+                kind: Kind::GitRepoAnnouncement,
+                identifier: identifier.clone(),
+            },
+            relays: if let Some(relay) = relays.first() {
+                vec![relay.clone()]
+            } else {
+                vec![]
+            },
+        },
+        protocol: None,
+        user: None,
+        nip05: None,
+    }
         .to_string()
         .replace("nostr://", "https://gitworkshop.dev/");
-        Interactor::default()
-            .input(
+
+    let web: Vec<String> = if args.web.is_empty() {
+        let web_default = if let Some(repo_ref) = &repo_ref {
+            if repo_ref
+                .web
+                .clone()
+                .join(" ")
+                // replace legacy gitworkshop.dev url format with new one
+                .contains(format!("https://gitworkshop.dev/repo/{}", &identifier).as_str())
+            {
+                gitworkshop_url.clone()
+            } else {
+                repo_ref.web.clone().join(" ")
+            }
+        } else {
+            gitworkshop_url.clone()
+        };
+
+        if simple_mode {
+            web_default
+        } else {
+            Interactor::default().input(
                 PromptInputParms::default()
                     .with_prompt("repo website")
                     .optional()
-                    .with_default(if let Some(repo_ref) = &repo_ref {
-                        if repo_ref
-                            .web
-                            .clone()
-                            .join(" ")
-                            // replace legacy gitworkshop.dev url format with new one
-                            .contains(
-                                format!("https://gitworkshop.dev/repo/{}", &identifier).as_str(),
-                            )
-                        {
-                            gitworkshop_url
-                        } else {
-                            repo_ref.web.clone().join(" ")
-                        }
-                    } else {
-                        gitworkshop_url
-                    }),
+                    .with_default(web_default),
             )?
-            .split(' ')
-            .map(std::string::ToString::to_string)
-            .collect()
+        }
+        .split(' ')
+        .map(std::string::ToString::to_string)
+        .collect()
     } else {
         args.web.clone()
     };
@@ -415,32 +556,36 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         } else {
             root_commit.to_string()
         };
-        println!(
-            "the earliest unique commit helps with discoverability. It defaults to the root commit. Only change this if your repo has completely forked off an has formed its own identity."
-        );
-        loop {
-            earliest_unique_commit = Interactor::default().input(
-                PromptInputParms::default()
-                    .with_prompt("earliest unique commit (to help with discoverability)")
-                    .with_default(earliest_unique_commit.clone()),
-            )?;
-            if let Ok(exists) = git_repo.does_commit_exist(&earliest_unique_commit) {
-                if exists {
-                    break earliest_unique_commit;
+        if simple_mode {
+            earliest_unique_commit
+        } else {
+            println!(
+                "the earliest unique commit helps with discoverability. It defaults to the root commit. Only change this if your repo has completely forked off an has formed its own identity."
+            );
+            loop {
+                earliest_unique_commit = Interactor::default().input(
+                    PromptInputParms::default()
+                        .with_prompt("earliest unique commit (to help with discoverability)")
+                        .with_default(earliest_unique_commit.clone()),
+                )?;
+                if let Ok(exists) = git_repo.does_commit_exist(&earliest_unique_commit) {
+                    if exists {
+                        break earliest_unique_commit;
+                    }
+                    println!("commit does not exist on current repository");
+                } else {
+                    println!("commit id not formatted correctly");
                 }
-                println!("commit does not exist on current repository");
-            } else {
-                println!("commit id not formatted correctly");
-            }
-            if earliest_unique_commit.len().ne(&40) {
-                println!("commit id must be 40 characters long");
+                if earliest_unique_commit.len().ne(&40) {
+                    println!("commit id must be 40 characters long");
+                }
             }
         }
     };
 
     println!("publishing repostory reference...");
 
-    let mut repo_ref = RepoRef {
+    let repo_ref = RepoRef {
         identifier: identifier.clone(),
         name,
         description,
@@ -483,70 +628,34 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         false,
     )?;
 
-    // if nip05 valid, set nostr git url to use that format
-    let hint_for_nip05_address = {
-        if let Some(nip05) = user_ref.metadata.nip05 {
-            let term = Term::stdout();
-            term.write_line(&format!("fetching nip05 details for {nip05}..."))?;
-            if let Ok(nprofile) = nip05::profile(nip05.clone(), None).await {
-                let _ = term.clear_last_lines(1);
-                let _ =
-                    save_nip05_to_git_config_cache(&nip05, &nprofile.public_key, &Some(&git_repo));
-                // Normalize URLs before doing the intersection.
-                let repo_relays: HashSet<RelayUrl> = relays
-                    .iter()
-                    .map(|r| RelayUrl::parse(r.as_str_without_trailing_slash()).unwrap())
-                    .collect();
-                let nip05_relays: HashSet<RelayUrl> = nprofile
-                    .relays
-                    .iter()
-                    .map(|r| RelayUrl::parse(r.as_str_without_trailing_slash()).unwrap())
-                    .collect();
-                let mut inter = repo_relays.intersection(&nip05_relays);
+    // set origin remote
+    let nostr_url = repo_ref.to_nostr_git_url(&Some(&git_repo)).to_string();
 
-                repo_ref.set_nostr_git_url(NostrUrlDecoded {
-                    original_string: String::new(),
-                    nip05: Some(nip05.clone()),
-                    coordinate: Nip19Coordinate {
-                        coordinate: Coordinate {
-                            kind: Kind::GitRepoAnnouncement,
-                            public_key: user_ref.public_key,
-                            identifier: repo_ref.identifier.clone(),
-                        },
-                        relays: if inter.next().is_some() || relays.is_empty() {
-                            vec![]
-                        } else {
-                            vec![relays.first().unwrap().clone()]
-                        },
-                    },
-                    protocol: None,
-                    user: None,
-                });
-                if inter.next().is_some() {
-                    "note: point your NIP-05 relays to one of the repo relays for a cleaner nostr:// remote URL.".to_string()
-                } else {
-                    String::new()
-                }
-            } else {
-                "note: could not validate your nip05 address {nip05} which could be used for a shorter nostr:// remote URL.".to_string()
-            }
-        } else {
-            String::new()
+    if git_repo.git_repo.find_remote("origin").is_ok() {
+        git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
+    } else {
+        git_repo.git_repo.remote("origin",&nostr_url)?;
+    }
+    thread::sleep(Duration::new(1, 0)); // wait for annoucment event to be receieved and processed by ngit-relays 
+
+    if std::env::var("NGITTEST").is_err() { // ignore during tests as git-remote-nostr isn't installed during ngit binary tests
+        if let Err(err) = push_main_or_master_branch(&git_repo) {
+            println!("your repository announcement was published to nostr but git push exited with an error: {err}");
         }
-    };
-
-    prompt_to_set_nostr_url_as_origin(&repo_ref, &git_repo).await?;
-
-    if !hint_for_nip05_address.is_empty() {
-        println!("{hint_for_nip05_address}");
     }
 
-    // TODO: if no state event exists and there is currently a remote called
-    // "origin", automtically push rather than waiting for the next commit
+    // println!(
+    //     "any remote branches beginning with `pr/` are open PRs from contributors. they can submit these by simply pushing a branch with this `pr/` prefix."
+    // );
+    println!("share your repository: {gitworkshop_url}" );
+    println!("clone url: {nostr_url}");
+
 
     // no longer create a new maintainers.yaml file - its too confusing for users
     // as it falls out of sync with data in nostr event . update if it already
     // exists
+
+
     let relays = relays
         .iter()
         .map(std::string::ToString::to_string)
@@ -584,74 +693,308 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     Ok(())
 }
 
-async fn prompt_to_set_nostr_url_as_origin(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
-    println!(
-        "starting from your next commit, when you `git push` to a remote that uses your nostr url, it will store your repository state on nostr and update the state of the git server(s) you just listed."
-    );
-    println!(
-        "in addition, any remote branches beginning with `pr/` are open PRs from contributors. they can submit these by simply pushing a branch with this `pr/` prefix."
-    );
+fn multi_select_with_custom_value<F>(
+    prompt: &str,
+    custom_choice_prompt: &str,
+    mut choices: Vec<String>,
+    mut defaults: Vec<bool>,
+    validate_choice: F,
+) -> Result<Vec<String>>
+where
+    F: Fn(&str) -> Result<String>,
+{
+    let mut selected_choices = vec![];
 
-    if let Ok(origin_remote) = git_repo.git_repo.find_remote("origin") {
-        if let Some(origin_url) = origin_remote.url() {
-            if let Ok(nostr_url) =
-                NostrUrlDecoded::parse_and_resolve(origin_url, &Some(git_repo)).await
-            {
-                if nostr_url.coordinate.identifier == repo_ref.identifier {
-                    if nostr_url.coordinate.public_key == repo_ref.trusted_maintainer {
-                        return Ok(());
-                    }
-                    // origin is set to a different trusted maintainer
-                    println!(
-                        "warning: currently git remote 'origin' is set to a different trusted maintainer with the same identifier"
-                    );
-                    ask_to_set_origin_remote(repo_ref, git_repo)?;
-                } else {
-                    // origin is linked to a different identifier
-                    println!(
-                        "warning: currently git remote 'origin' is set to a different repository identifier"
-                    );
-                    ask_to_set_origin_remote(repo_ref, git_repo)?;
+    // Loop to allow users to add more choices
+    loop {
+        // Add 'add another' option at the end of the choices
+        let mut current_choices = choices.clone();
+        current_choices.push(if current_choices.is_empty() {
+            "add".to_string()
+        } else {
+            "add another".to_string()
+        });
+
+        // Create default selections based on the provided defaults
+        let mut current_defaults = defaults.clone();
+        current_defaults.push(current_choices.len() == 1); // 'add another' should not be selected by default
+
+        // Prompt for selections
+        let selected_indices: Vec<usize> = Interactor::default().multi_choice(
+            PromptMultiChoiceParms::default()
+                .with_prompt(prompt)
+                .dont_report()
+                .with_choices(current_choices.clone())
+                .with_defaults(current_defaults),
+        )?;
+
+        // Collect selected choices
+        selected_choices.clear(); // Clear previous selections to update
+        for &index in &selected_indices {
+            if index < choices.len() {
+                // Exclude 'add another' option
+                selected_choices.push(choices[index].clone());
+            }
+        }
+
+        // Check if 'add another' was selected
+        if selected_indices.contains(&(choices.len())) {
+            // Last index is 'add another'
+            let mut new_choice: String;
+            loop {
+                new_choice = Interactor::default().input(
+                    PromptInputParms::default()
+                        .with_prompt(custom_choice_prompt)
+                        .dont_report()
+                        .optional(),
+                )?;
+
+                if new_choice.is_empty() {
+                    break;
                 }
-            } else {
-                // remote is non-nostr url
-                ask_to_set_origin_remote(repo_ref, git_repo)?;
+                // Validate the new choice
+                match validate_choice(&new_choice) {
+                    Ok(valid_choice) => {
+                        new_choice = valid_choice; // Use the fixed version of the input
+                        break; // Valid choice, exit the loop
+                    }
+                    Err(err) => {
+                        // Inform the user about the validation error
+                        println!("Error: {err}");
+                    }
+                }
+            }
+
+            // Add the new choice to the choices vector
+            if !new_choice.is_empty() {
+                choices.push(new_choice.clone()); // Add new choice to the end of the list
+                selected_choices.push(new_choice); // Automatically select the new choice
+                defaults.push(true); // Set the new choice as selected by default
             }
         } else {
-            // no origin remote
-            ask_to_create_new_origin_remote(repo_ref, git_repo)?;
+            // Exit the loop if 'add another' was not selected
+            break;
         }
     }
-    println!("contributors can clone your repository by installing ngit and using this clone url:");
-    println!("{}", repo_ref.to_nostr_git_url(&Some(git_repo)));
 
-    Ok(())
+    Ok(selected_choices)
 }
 
-fn ask_to_set_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
-    if Interactor::default().confirm(
-        PromptConfirmParms::default()
-            .with_default(true)
-            .with_prompt("set remote \"origin\" to the nostr url of your repository?"),
-    )? {
-        git_repo.git_repo.remote_set_url(
-            "origin",
-            &repo_ref.to_nostr_git_url(&Some(git_repo)).to_string(),
-        )?;
+fn guess_at_existing_ngit_relays(
+    repo_ref: Option<&RepoRef>,
+    args_relays: &[String],
+    args_clone_url: &[String],
+    identifier: &str,
+) -> Vec<String> {
+    // Collect clone URLs from arguments or repo_ref
+    let clone_urls: Vec<String> = if !args_clone_url.is_empty() {
+        args_clone_url.to_vec()
+    } else if let Some(repo) = repo_ref {
+        repo.git_server.clone()
+    } else {
+        Vec::new()
+    };
+
+    // Collect relays from arguments or repo_ref
+    let relays: Vec<RelayUrl> = if !args_relays.is_empty() {
+        args_relays
+            .iter()
+            .filter_map(|r| RelayUrl::parse(r).ok())
+            .collect()
+    } else if let Some(repo) = repo_ref {
+        repo.relays.clone()
+    } else {
+        Vec::new()
+    };
+
+    let mut existing_ngit_relays = Vec::new();
+    for url in &clone_urls {
+        if let Ok(npub) = extract_npub(url) {
+            let postfix = format!("/{npub}/{identifier}.git");
+            if url.contains(&postfix) {
+                if let Ok(ngit_relay_url) = normalize_ngit_relay_url(url) {
+                    let is_also_relay = relays.iter()
+                        .any(|r| normalize_ngit_relay_url(&r.to_string()).is_ok_and(|r| r.eq(&ngit_relay_url)));
+                    if !existing_ngit_relays.contains(&ngit_relay_url) && is_also_relay {
+                        existing_ngit_relays.push(ngit_relay_url);
+
+                    }
+                }
+            }
+        }
     }
-    Ok(())
+    existing_ngit_relays
 }
 
-fn ask_to_create_new_origin_remote(repo_ref: &RepoRef, git_repo: &Repo) -> Result<()> {
-    if Interactor::default().confirm(
-        PromptConfirmParms::default()
-            .with_default(true)
-            .with_prompt("set remote \"origin\" to the nostr url of your repository?"),
-    )? {
-        git_repo.git_repo.remote(
-            "origin",
-            &repo_ref.to_nostr_git_url(&Some(git_repo)).to_string(),
-        )?;
+fn normalize_ngit_relay_url(url: &str) -> Result<String> {
+    // Parse the URL and handle errors
+    let mut parsed = Url::parse(url)
+        .or_else(|_| Url::parse(&format!("https://{url}")))
+        .context(format!("{url} not a valid ngit relay URL"))?;
+    if parsed.host_str().is_none() {
+        // so sub.domain.org gets identifier as host in "sub.domain.org"
+        parsed = Url::parse(&format!("https://{url}"))?;
     }
-    Ok(())
+
+    // Extract the scheme, host, port, and path
+    let scheme = parsed.scheme();
+    let host = parsed.host_str().context(format!(
+        "{url} not a ngit relay url reference: missing host in URL {parsed}"
+    ))?;
+    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let path = parsed.path();
+
+    // Normalize the URL based on the scheme and path
+    let mut normalized_url = match scheme {
+        "ws" | "http" => format!("http://{host}{port}{path}"),
+        _ => format!("{host}{port}{path}"),
+    };
+
+    // If the normalized URL contains "npub1", remove "npub1" and everything after
+    // it
+    if let Some(pos) = normalized_url.find("npub1") {
+        normalized_url.truncate(pos); // Keep everything before "npub1"
+    }
+    // Return the normalized URL
+    Ok(normalized_url.trim_end_matches('/').to_string())
+}
+
+fn format_ngit_relay_url_as_clone_url(url:&str, public_key:&PublicKey, identifier: &str) -> Result<String> {
+    let ngit_relay_url = normalize_ngit_relay_url(url)?;
+    if ngit_relay_url.contains("http://") {
+        return Ok(format!("{ngit_relay_url}/{}/{identifier}.git", public_key.to_bech32()?))
+    }
+    Ok(format!("https://{ngit_relay_url}/{}/{identifier}.git", public_key.to_bech32()?))
+}
+
+fn format_ngit_relay_url_as_relay_url(url:&str) -> Result<String> {
+    let ngit_relay_url = normalize_ngit_relay_url(url)?;
+    if ngit_relay_url.contains("http://") {
+        return Ok(ngit_relay_url.replace("http://", "ws://"))
+    }
+    Ok(format!("wss://{ngit_relay_url}"))
+}
+
+fn extract_npub(s: &str) -> Result<&str> {
+    // Find the starting index of "npub1"
+    if let Some(start) = s.find("npub1") {
+        let mut end = start + 5; // Start after "npub1"
+
+        // Move the end index to include valid characters (0-9, a-z)
+        while end < s.len() && s[end..=end].chars().all(|c| c.is_ascii_alphanumeric()) {
+            end += 1;
+        }
+        // Extract the npub substring
+        let npub = &s[start..end];
+        // Attempt to create a PublicKey from the extracted npub
+        PublicKey::from_bech32(npub).context("invalid npub")?;
+        Ok(npub)
+    } else {
+        bail!("No npub found")
+    }
+}
+
+fn parse_relay_url(s: &str) -> Result<RelayUrl> {
+    // Attempt to parse the original string
+    match RelayUrl::parse(s) {
+        Ok(url) => Ok(url),
+        Err(original_err) => {
+            // If parsing fails, prefix with "wss://" and try again
+            let prefixed = format!("wss://{s}");
+            RelayUrl::parse(&prefixed).map_err(|_| original_err)
+        }
+    }
+    .context(format!("failed to parse relay url: {s}"))
+}
+
+pub fn show_multi_input_prompt_success(label: &str, values: &[String]) {
+    let values_str: Vec<&str> = values.iter().map(std::string::String::as_str).collect();
+    eprintln!("{}", {
+        let mut s = String::new();
+        let _ = ColorfulTheme::default().format_multi_select_prompt_selection(&mut s, label, &values_str);
+        s
+    });
+}
+
+fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
+    let main_branch_name = {
+        let local_branches = git_repo
+            .get_local_branch_names()
+            .context("failed to find any local branches")?;
+        if local_branches.contains(&"main".to_string()) {
+            "main"
+        } else if local_branches.contains(&"master".to_string()) {
+            "master"
+        } else {
+            bail!("set remote origin to nostr url and tried to push main or master branch but they dont exist yet")
+        }
+    };
+
+    println!("set remote origin to nostr url and pushing {main_branch_name} branch.");
+
+    let command = "git";
+    let args = ["push", "origin", "-u", main_branch_name];
+
+    // Spawn the process
+    let mut child = Command::new(command)
+        .args(args)
+        .stdout(Stdio::inherit()) // Redirect stdout to the console
+        .stderr(Stdio::inherit()) // Redirect stderr to the console
+        .spawn()
+        .context("Failed to start git push process")?;
+
+    // Wait for the process to finish
+    let exit_status = child.wait().context("Failed to start git push process")?;
+
+    // Check the exit status
+    if exit_status.success() {
+        Ok(())
+    } else {
+        bail!("git push process exited with an error: {}", exit_status);
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+
+    #[test]
+    fn normalize_ngit_relay_url_all_checks() -> Result<()> {
+        let test_cases = vec![
+            ("https://sub.domain.org", "sub.domain.org"),
+            ("wss://sub.domain.org", "sub.domain.org"),
+            ("sub.domain.org", "sub.domain.org"),
+            ("http://sub.domain.org", "http://sub.domain.org"),
+            ("ws://sub.domain.org", "http://sub.domain.org"),
+            ("http://localhost", "http://localhost"),
+            ("localhost", "localhost"),
+            ("https://sub.domain.org:8080", "sub.domain.org:8080"),
+            ("http://sub.domain.org:8080", "http://sub.domain.org:8080"),
+            ("sub.domain.org:8080", "sub.domain.org:8080"),
+            ("https://sub.domain.org/path/to", "sub.domain.org/path/to"),
+            (
+                "https://sub.domain.org:8080/path/to",
+                "sub.domain.org:8080/path/to",
+            ),
+            (
+                "https://sub.domain.org/npub143675782648/to.git",
+                "sub.domain.org",
+            ),
+            (
+                "https://sub.domain.org/path/npub143675782648/to.git",
+                "sub.domain.org/path",
+            ),
+            ("https://sub.domain.org/", "sub.domain.org"),
+            ("http://sub.domain.org/", "http://sub.domain.org"),
+        ];
+
+        for (input, expected) in test_cases {
+            let normalized = normalize_ngit_relay_url(input)?;
+            assert_eq!(normalized, expected);
+        }
+        Ok(())
+    }
 }

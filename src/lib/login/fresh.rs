@@ -210,7 +210,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
     }
 }
 
-fn show_prompt_success(label: &str, value: &str) {
+pub fn show_prompt_success(label: &str, value: &str) {
     eprintln!("{}", {
         let mut s = String::new();
         let _ = ColorfulTheme::default().format_input_prompt_selection(&mut s, label, value);
