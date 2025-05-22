@@ -1,5 +1,9 @@
 use std::{
-    collections::HashMap, process::{Command, Stdio}, str::FromStr, thread, time::Duration
+    collections::HashMap,
+    process::{Command, Stdio},
+    str::FromStr,
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -7,14 +11,13 @@ use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use ngit::{
     cli_interactor::{PromptChoiceParms, PromptConfirmParms, PromptMultiChoiceParms},
-    client::{send_events, Params},
-    git::nostr_url::{CloneUrl, NostrUrlDecoded}, repo_ref::{extract_pks, save_repo_config_to_yaml},
+    client::{Params, send_events},
+    git::nostr_url::{CloneUrl, NostrUrlDecoded},
+    repo_ref::{extract_pks, save_repo_config_to_yaml},
 };
 use nostr::{
-    nips::{
-        nip01::Coordinate,
-        nip19::Nip19Coordinate,
-    }, FromBech32, PublicKey, ToBech32
+    FromBech32, PublicKey, ToBech32,
+    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
 use nostr_sdk::{Kind, RelayUrl, Url};
 
@@ -25,8 +28,7 @@ use crate::{
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
     login,
     repo_ref::{
-        RepoRef, get_repo_config_from_yaml,
-        try_and_get_repo_coordinates_when_remote_unknown,
+        RepoRef, get_repo_config_from_yaml, try_and_get_repo_coordinates_when_remote_unknown,
     },
 };
 
@@ -224,7 +226,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.relays.clone()
     };
 
-
     let mut blossoms_defaults = if args.blossoms.is_empty() {
         if let Some(repo_ref) = &repo_ref {
             repo_ref
@@ -241,7 +242,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     } else {
         args.blossoms.clone()
     };
-
 
     let selected_ngit_relays = if has_server_and_relay_flags {
         // ignore so a script running `ngit init` can contiue without prompts
@@ -277,7 +277,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     // ensure ngit relays are added as git server, relay and blossom entries
     for ngit_relay in &selected_ngit_relays {
         if args.clone_url.is_empty() {
-            let clone_url = format_ngit_relay_url_as_clone_url(ngit_relay, &user_ref.public_key, &identifier)?;
+            let clone_url =
+                format_ngit_relay_url_as_clone_url(ngit_relay, &user_ref.public_key, &identifier)?;
             if !git_server_defaults.contains(&clone_url) {
                 git_server_defaults.push(clone_url);
             }
@@ -301,13 +302,19 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     } else {
         false
     };
-    if no_state && Interactor::default().confirm(
+    if no_state
+        && Interactor::default().confirm(
             PromptConfirmParms::default()
                 .with_prompt("store state on nostr? required for nostr-permissioned git servers")
                 .with_default(true),
-        )?{
+        )?
+    {
         // TODO check if ngit-relays in use and if so turn this off:
-        if git_repo.get_git_config_item("nostr.nostate",Some(true)).unwrap_or(None).is_some() {
+        if git_repo
+            .get_git_config_item("nostr.nostate", Some(true))
+            .unwrap_or(None)
+            .is_some()
+        {
             git_repo.remove_git_config_item("nostr.nostate", true)?;
         } else {
             git_repo.remove_git_config_item("nostr.nostate", false)?;
@@ -315,8 +322,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     }
 
     let git_server = if args.clone_url.is_empty() {
-        let ngit_relay_git_servers: Vec<String> = git_server_defaults.iter().filter(|s| selected_ngit_relays.iter().any(|r|s.contains(r))).cloned().collect();
-        let mut additional_server_options: Vec<String> = git_server_defaults.iter().filter(|s| ngit_relay_git_servers.iter().any(|r|s.eq(&r))).cloned().collect();
+        let ngit_relay_git_servers: Vec<String> = git_server_defaults
+            .iter()
+            .filter(|s| selected_ngit_relays.iter().any(|r| s.contains(r)))
+            .cloned()
+            .collect();
+        let mut additional_server_options: Vec<String> = git_server_defaults
+            .iter()
+            .filter(|s| ngit_relay_git_servers.iter().any(|r| s.eq(&r)))
+            .cloned()
+            .collect();
 
         if simple_mode && !selected_ngit_relays.is_empty() {
             if additional_server_options.is_empty() {
@@ -348,7 +363,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                         additional_server_options = selected;
                         continue
                     }
-                    break selected
+                    break selected;
                 };
                 show_multi_input_prompt_success("git servers", &selected);
                 let mut combined = ngit_relay_git_servers;
@@ -381,11 +396,17 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let relays: Vec<RelayUrl> = {
         if simple_mode {
-            let formatted_selected_ngit_relays: Vec<String> = selected_ngit_relays.iter()
+            let formatted_selected_ngit_relays: Vec<String> = selected_ngit_relays
+                .iter()
                 .filter_map(|r| format_ngit_relay_url_as_relay_url(r).ok())
                 .collect();
-            let mut options: Vec<String> = relay_defaults.iter()
-                .filter(|s| !formatted_selected_ngit_relays.iter().any(|r| s.as_str() == r))
+            let mut options: Vec<String> = relay_defaults
+                .iter()
+                .filter(|s| {
+                    !formatted_selected_ngit_relays
+                        .iter()
+                        .any(|r| s.as_str() == r)
+                })
                 .cloned()
                 .collect();
 
@@ -393,7 +414,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
             // add fallback relays as options
             for relay in client.get_fallback_relays().clone() {
-                if !options.iter().any(|r|r.contains(&relay)) && !formatted_selected_ngit_relays.iter().any(|r|relay.contains(r)) {
+                if !options.iter().any(|r| r.contains(&relay))
+                    && !formatted_selected_ngit_relays
+                        .iter()
+                        .any(|r| relay.contains(r))
+                {
                     options.push(relay);
                     selections.push(selections.is_empty());
                 }
@@ -411,11 +436,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 },
             )?;
             show_multi_input_prompt_success("additional nostr relays", &selected);
-            selected.iter()
+            selected
+                .iter()
                 .filter_map(|r| parse_relay_url(r).ok())
                 .collect()
         } else {
-
             let selections: Vec<bool> = vec![true; relay_defaults.len()];
             if args.relays.is_empty() {
                 let selected = multi_select_with_custom_value(
@@ -430,7 +455,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     },
                 )?;
                 show_multi_input_prompt_success("nostr relays", &selected);
-                selected.iter()
+                selected
+                    .iter()
                     .filter_map(|r| parse_relay_url(r).ok())
                     .collect()
             } else {
@@ -445,7 +471,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let blossoms: Vec<Url> = {
         if simple_mode || has_server_and_relay_flags {
             blossoms_defaults
-            .iter().filter_map(|b| Url::parse(b).ok()).collect()
+                .iter()
+                .filter_map(|b| Url::parse(b).ok())
+                .collect()
         } else {
             let selections: Vec<bool> = vec![true; blossoms_defaults.len()];
             if args.blossoms.is_empty() {
@@ -463,11 +491,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 show_multi_input_prompt_success("nostr relays", &selected);
                 selected.iter().filter_map(|b| Url::parse(b).ok()).collect()
             } else {
-                blossoms_defaults.iter().filter_map(|b| Url::parse(b).ok()).collect()
+                blossoms_defaults
+                    .iter()
+                    .filter_map(|b| Url::parse(b).ok())
+                    .collect()
             }
         }
     };
-
 
     let default_maintainers = {
         let mut maintainers = vec![user_ref.public_key];
@@ -523,9 +553,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 },
             )?;
             show_multi_input_prompt_success("maintainers", &selected);
-            selected.iter()
-            .filter_map(|npub| PublicKey::parse(npub).ok())
-            .collect()
+            selected
+                .iter()
+                .filter_map(|npub| PublicKey::parse(npub).ok())
+                .collect()
         }
     } else {
         default_maintainers
@@ -543,7 +574,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .with_default(true),
         )? {
             git_repo.save_git_config_item("nostr.nostate", "true", false)?;
-        }   
+        }
     }
 
     let gitworkshop_url = NostrUrlDecoded {
@@ -564,8 +595,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         user: None,
         nip05: None,
     }
-        .to_string()
-        .replace("nostr://", "https://gitworkshop.dev/");
+    .to_string()
+    .replace("nostr://", "https://gitworkshop.dev/");
 
     let web: Vec<String> = if args.web.is_empty() {
         let web_default = if let Some(repo_ref) = &repo_ref {
@@ -688,27 +719,30 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     if git_repo.git_repo.find_remote("origin").is_ok() {
         git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
     } else {
-        git_repo.git_repo.remote("origin",&nostr_url)?;
+        git_repo.git_repo.remote("origin", &nostr_url)?;
     }
     thread::sleep(Duration::new(1, 0)); // wait for annoucment event to be receieved and processed by ngit-relays 
 
-    if std::env::var("NGITTEST").is_err() { // ignore during tests as git-remote-nostr isn't installed during ngit binary tests
+    if std::env::var("NGITTEST").is_err() {
+        // ignore during tests as git-remote-nostr isn't installed during ngit binary
+        // tests
         if let Err(err) = push_main_or_master_branch(&git_repo) {
-            println!("your repository announcement was published to nostr but git push exited with an error: {err}");
+            println!(
+                "your repository announcement was published to nostr but git push exited with an error: {err}"
+            );
         }
     }
 
     // println!(
-    //     "any remote branches beginning with `pr/` are open PRs from contributors. they can submit these by simply pushing a branch with this `pr/` prefix."
+    //     "any remote branches beginning with `pr/` are open PRs from contributors.
+    // they can submit these by simply pushing a branch with this `pr/` prefix."
     // );
-    println!("share your repository: {gitworkshop_url}" );
+    println!("share your repository: {gitworkshop_url}");
     println!("clone url: {nostr_url}");
-
 
     // no longer create a new maintainers.yaml file - its too confusing for users
     // as it falls out of sync with data in nostr event . update if it already
     // exists
-
 
     let relays = relays
         .iter()
@@ -867,11 +901,12 @@ fn guess_at_existing_ngit_relays(
             let postfix = format!("/{npub}/{identifier}.git");
             if url.contains(&postfix) {
                 if let Ok(ngit_relay_url) = normalize_ngit_relay_url(url) {
-                    let is_also_relay = relays.iter()
-                        .any(|r| normalize_ngit_relay_url(&r.to_string()).is_ok_and(|r| r.eq(&ngit_relay_url)));
+                    let is_also_relay = relays.iter().any(|r| {
+                        normalize_ngit_relay_url(&r.to_string())
+                            .is_ok_and(|r| r.eq(&ngit_relay_url))
+                    });
                     if !existing_ngit_relays.contains(&ngit_relay_url) && is_also_relay {
                         existing_ngit_relays.push(ngit_relay_url);
-
                     }
                 }
             }
@@ -913,26 +948,36 @@ fn normalize_ngit_relay_url(url: &str) -> Result<String> {
     Ok(normalized_url.trim_end_matches('/').to_string())
 }
 
-fn format_ngit_relay_url_as_clone_url(url:&str, public_key:&PublicKey, identifier: &str) -> Result<String> {
+fn format_ngit_relay_url_as_clone_url(
+    url: &str,
+    public_key: &PublicKey,
+    identifier: &str,
+) -> Result<String> {
     let ngit_relay_url = normalize_ngit_relay_url(url)?;
     if ngit_relay_url.contains("http://") {
-        return Ok(format!("{ngit_relay_url}/{}/{identifier}.git", public_key.to_bech32()?))
+        return Ok(format!(
+            "{ngit_relay_url}/{}/{identifier}.git",
+            public_key.to_bech32()?
+        ));
     }
-    Ok(format!("https://{ngit_relay_url}/{}/{identifier}.git", public_key.to_bech32()?))
+    Ok(format!(
+        "https://{ngit_relay_url}/{}/{identifier}.git",
+        public_key.to_bech32()?
+    ))
 }
 
-fn format_ngit_relay_url_as_relay_url(url:&str) -> Result<String> {
+fn format_ngit_relay_url_as_relay_url(url: &str) -> Result<String> {
     let ngit_relay_url = normalize_ngit_relay_url(url)?;
     if ngit_relay_url.contains("http://") {
-        return Ok(ngit_relay_url.replace("http://", "ws://"))
+        return Ok(ngit_relay_url.replace("http://", "ws://"));
     }
     Ok(format!("wss://{ngit_relay_url}"))
 }
 
-fn format_ngit_blossom_url_as_relay_url(url:&str) -> Result<String> {
+fn format_ngit_blossom_url_as_relay_url(url: &str) -> Result<String> {
     let ngit_relay_url = normalize_ngit_relay_url(url)?;
     if ngit_relay_url.contains("http://") {
-        return Ok(ngit_relay_url.to_string())
+        return Ok(ngit_relay_url.to_string());
     }
     Ok(format!("https://{ngit_relay_url}"))
 }
@@ -973,7 +1018,11 @@ pub fn show_multi_input_prompt_success(label: &str, values: &[String]) {
     let values_str: Vec<&str> = values.iter().map(std::string::String::as_str).collect();
     eprintln!("{}", {
         let mut s = String::new();
-        let _ = ColorfulTheme::default().format_multi_select_prompt_selection(&mut s, label, &values_str);
+        let _ = ColorfulTheme::default().format_multi_select_prompt_selection(
+            &mut s,
+            label,
+            &values_str,
+        );
         s
     });
 }
@@ -988,7 +1037,9 @@ fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
         } else if local_branches.contains(&"master".to_string()) {
             "master"
         } else {
-            bail!("set remote origin to nostr url and tried to push main or master branch but they dont exist yet")
+            bail!(
+                "set remote origin to nostr url and tried to push main or master branch but they dont exist yet"
+            )
         }
     };
 
@@ -1015,7 +1066,6 @@ fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
         bail!("git push process exited with an error: {}", exit_status);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
