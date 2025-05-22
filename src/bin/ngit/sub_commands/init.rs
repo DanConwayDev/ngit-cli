@@ -48,6 +48,9 @@ pub struct SubCommandArgs {
     /// relays contributors push patches and comments to
     relays: Vec<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
+    /// blossom servers
+    blossoms: Vec<String>,
+    #[clap(short, long, value_parser, num_args = 1..)]
     /// npubs of other maintainers
     other_maintainers: Vec<String>,
     #[clap(long)]
@@ -222,6 +225,24 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     };
 
 
+    let mut blossoms_defaults = if args.blossoms.is_empty() {
+        if let Some(repo_ref) = &repo_ref {
+            repo_ref
+                .blossoms
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<String>>()
+        // } else if user_ref.blossoms.read().is_empty() {
+        //     client.get_fallback_relays().clone()
+        } else {
+            vec![]
+            // user_ref.relays.read().clone()
+        }
+    } else {
+        args.blossoms.clone()
+    };
+
+
     let selected_ngit_relays = if has_server_and_relay_flags {
         // ignore so a script running `ngit init` can contiue without prompts
         vec![]
@@ -261,13 +282,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 git_server_defaults.push(clone_url);
             }
         }
-        if args.clone_url.is_empty() {
+        if args.relays.is_empty() {
             let relay_url = format_ngit_relay_url_as_relay_url(ngit_relay)?;
             if !relay_defaults.contains(&relay_url) {
                 relay_defaults.push(relay_url);
             }
         }
-        // TODO blossom
+        if args.blossoms.is_empty() {
+            let blossom = format_ngit_blossom_url_as_relay_url(ngit_relay)?;
+            if !blossoms_defaults.contains(&blossom) {
+                blossoms_defaults.push(blossom);
+            }
+        }
     }
 
     let no_state = if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.nostate", None) {
@@ -415,6 +441,33 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         }
     };
+
+    let blossoms: Vec<Url> = {
+        if simple_mode || has_server_and_relay_flags {
+            blossoms_defaults
+            .iter().filter_map(|b| Url::parse(b).ok()).collect()
+        } else {
+            let selections: Vec<bool> = vec![true; blossoms_defaults.len()];
+            if args.blossoms.is_empty() {
+                let selected = multi_select_with_custom_value(
+                    "blossom servers",
+                    "blossom server",
+                    blossoms_defaults,
+                    selections,
+                    |s| {
+                        Url::parse(s)
+                            .map(|_| s.to_string())
+                            .context(format!("Invalid blossom URL format: {s}"))
+                    },
+                )?;
+                show_multi_input_prompt_success("nostr relays", &selected);
+                selected.iter().filter_map(|b| Url::parse(b).ok()).collect()
+            } else {
+                blossoms_defaults.iter().filter_map(|b| Url::parse(b).ok()).collect()
+            }
+        }
+    };
+
 
     let default_maintainers = {
         let mut maintainers = vec![user_ref.public_key];
@@ -593,6 +646,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         git_server,
         web,
         relays: relays.clone(),
+        blossoms,
         trusted_maintainer: user_ref.public_key,
         maintainers: maintainers.clone(),
         events: HashMap::new(),
@@ -873,6 +927,14 @@ fn format_ngit_relay_url_as_relay_url(url:&str) -> Result<String> {
         return Ok(ngit_relay_url.replace("http://", "ws://"))
     }
     Ok(format!("wss://{ngit_relay_url}"))
+}
+
+fn format_ngit_blossom_url_as_relay_url(url:&str) -> Result<String> {
+    let ngit_relay_url = normalize_ngit_relay_url(url)?;
+    if ngit_relay_url.contains("http://") {
+        return Ok(ngit_relay_url.to_string())
+    }
+    Ok(format!("https://{ngit_relay_url}"))
 }
 
 fn extract_npub(s: &str) -> Result<&str> {

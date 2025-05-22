@@ -12,7 +12,7 @@ use nostr::{
     FromBech32, PublicKey, Tag, TagStandard, ToBech32,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp};
+use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp, Url};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -38,6 +38,7 @@ pub struct RepoRef {
     pub git_server: Vec<String>,
     pub web: Vec<String>,
     pub relays: Vec<RelayUrl>,
+    pub blossoms: Vec<Url>,
     pub maintainers: Vec<PublicKey>,
     pub trusted_maintainer: PublicKey,
     pub events: HashMap<Nip19Coordinate, nostr::Event>,
@@ -61,6 +62,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
             git_server: Vec::new(),
             web: Vec::new(),
             relays: Vec::new(),
+            blossoms: Vec::new(),
             maintainers: Vec::new(),
             trusted_maintainer: trusted_maintainer.unwrap_or(event.pubkey),
             events: HashMap::new(),
@@ -97,6 +99,13 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                     for relay in relays {
                         if let Ok(relay_url) = RelayUrl::parse(relay) {
                             r.relays.push(relay_url);
+                        }
+                    }
+                }
+                [t, blossoms @ ..] if t == "blossoms" => {
+                    for b in blossoms {
+                        if let Ok(b) = Url::parse(b) {
+                            r.blossoms.push(b);
                         }
                     }
                 }
@@ -190,6 +199,14 @@ impl RepoRef {
                             vec![format!("git repository: {}", self.name.clone())],
                         ),
                     ],
+                    if self.blossoms.is_empty() {
+                        vec![]
+                    } else {
+                        vec![Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("blossoms")),
+                            self.blossoms.iter().map(|r| r.to_string()),
+                        )]
+                    },
                     // code languages and hashtags
                 ]
                 .concat(),
@@ -566,6 +583,7 @@ mod tests {
                 RelayUrl::parse("ws://relay1.io").unwrap(),
                 RelayUrl::parse("ws://relay2.io").unwrap(),
             ],
+            blossoms: vec![],
             trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             events: HashMap::new(),
