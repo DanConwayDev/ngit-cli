@@ -221,10 +221,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<String>>()
-        } else if user_ref.relays.read().is_empty() {
-            client.get_fallback_relays().clone()
         } else {
-            user_ref.relays.read().clone()
+            client.get_fallback_relays().clone()
         }
     } else {
         args.relays.clone()
