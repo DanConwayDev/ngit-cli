@@ -76,6 +76,11 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                 [t, name, ..] if t == "name" => r.name = name.clone(),
                 [t, description, ..] if t == "description" => r.description = description.clone(),
                 [t, clone @ ..] if t == "clone" => {
+                    for git_server in clone {
+                        if !r.git_server.contains(git_server) {
+                            r.git_server.push(git_server.clone());
+                        }
+                    }
                     r.git_server = clone.to_vec();
                 }
                 [t, web @ ..] if t == "web" => {
@@ -99,14 +104,18 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                 [t, relays @ ..] if t == "relays" => {
                     for relay in relays {
                         if let Ok(relay_url) = RelayUrl::parse(relay) {
-                            r.relays.push(relay_url);
+                            if !r.relays.contains(&relay_url) {
+                                r.relays.push(relay_url);
+                            }
                         }
                     }
                 }
                 [t, blossoms @ ..] if t == "blossoms" => {
                     for b in blossoms {
                         if let Ok(b) = Url::parse(b) {
-                            r.blossoms.push(b);
+                            if !r.blossoms.contains(&b) {
+                                r.blossoms.push(b);
+                            }
                         }
                     }
                 }
