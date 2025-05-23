@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use anyhow::{Context, Result};
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
@@ -7,6 +9,7 @@ use ngit::{
         fresh::generate_qr,
     },
 };
+use nostr_sdk::ToBech32;
 
 use crate::git::Repo;
 
@@ -50,23 +53,45 @@ pub async fn launch() -> Result<()> {
                 SignerInfo::Nsec {
                     nsec,
                     password: _,
-                    npub: _,
+                    npub,
                 } => {
                     match Interactor::default().choice(
                         PromptChoiceParms::default()
                             .with_default(0)
                             .with_prompt(logged_in_msg)
                             .with_choices(vec![
+                                "print npub".to_string(),
+                                "show QR code of npub".to_string(),
                                 "print nsec".to_string(),
                                 "show QR code of nsec".to_string(),
                                 "cancel".to_string(),
                             ]),
                     )? {
                         0 => {
-                            println!("{nsec}");
+                            let npub = if let Some(npub) = npub {
+                                npub
+                            } else {
+                                nostr::Keys::from_str(&nsec)?.public_key().to_bech32()?
+                            };
+                            println!("{npub}");
                             return Ok(());
                         }
                         1 => {
+                            let npub = if let Some(npub) = npub {
+                                npub
+                            } else {
+                                nostr::Keys::from_str(&nsec)?.public_key().to_bech32()?
+                            };
+                            for line in generate_qr(&npub)? {
+                                println!("{line}");
+                            }
+                            return Ok(());
+                        }
+                        2 => {
+                            println!("{nsec}");
+                            return Ok(());
+                        }
+                        3 => {
                             for line in generate_qr(&nsec)? {
                                 println!("{line}");
                             }
