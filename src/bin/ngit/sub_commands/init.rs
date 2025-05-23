@@ -441,10 +441,17 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 },
             )?;
             show_multi_input_prompt_success("additional nostr relays", &selected);
-            selected
-                .iter()
-                .filter_map(|r| parse_relay_url(r).ok())
-                .collect()
+            [
+                formatted_selected_ngit_relays
+                    .iter()
+                    .filter_map(|r| parse_relay_url(r).ok())
+                    .collect::<Vec<RelayUrl>>(),
+                selected
+                    .iter()
+                    .filter_map(|r| parse_relay_url(r).ok())
+                    .collect::<Vec<RelayUrl>>(),
+            ]
+            .concat()
         } else {
             let selections: Vec<bool> = vec![true; relay_defaults.len()];
             if args.relays.is_empty() {
