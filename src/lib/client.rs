@@ -39,7 +39,7 @@ use nostr_lmdb::NostrLMDB;
 use nostr_relay_pool::relay::ReqExitPolicy;
 use nostr_sdk::{
     EventBuilder, EventId, Kind, NostrSigner, Options, PublicKey, RelayUrl, SingleLetterTag,
-    Timestamp, prelude::RelayLimits,
+    Timestamp, Url, prelude::RelayLimits,
 };
 
 use crate::{
@@ -973,15 +973,17 @@ pub async fn get_repo_ref_from_cache(
         }
     }
 
-    // Use relays and git servers from all maintainer announcement events
+    // Use relays, git and blossom servers from all maintainer announcement events
     // we use Vec and HashSet to remove duplicates and preserve order
     let mut relays: Vec<RelayUrl> = repo_ref.relays.clone();
     let mut git_server: Vec<String> = repo_ref.git_server.clone();
+    let mut blossoms: Vec<Url> = repo_ref.blossoms.clone();
     let mut seen_relays: HashSet<RelayUrl> = HashSet::from_iter(relays.iter().cloned());
     let mut seen_git_server: HashSet<String> = git_server
         .iter()
         .map(|server| server.trim_end_matches('/').to_string())
         .collect();
+    let mut seen_blossoms: HashSet<Url> = HashSet::from_iter(blossoms.iter().cloned());
 
     for m in &maintainers {
         if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
@@ -994,6 +996,11 @@ pub async fn get_repo_ref_from_cache(
                 for server in m_repo_ref.git_server {
                     if seen_git_server.insert(server.trim_end_matches('/').to_string()) {
                         git_server.push(server);
+                    }
+                }
+                for blossom in m_repo_ref.blossoms {
+                    if seen_blossoms.insert(blossom.clone()) {
+                        blossoms.push(blossom);
                     }
                 }
             }
