@@ -248,10 +248,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         // ignore so a script running `ngit init` can contiue without prompts
         vec![]
     } else {
-        let mut options: Vec<String> = guess_at_existing_ngit_relays(
+        let mut options: Vec<String> = detect_existing_ngit_relays(
             repo_ref.as_ref(),
             &args.relays,
             &args.clone_url,
+            &args.blossoms,
             &identifier,
         );
         let mut selections: Vec<bool> = vec![true; options.len()]; // Initialize selections based on existing options
@@ -868,10 +869,11 @@ where
     Ok(selected_choices)
 }
 
-fn guess_at_existing_ngit_relays(
+fn detect_existing_ngit_relays(
     repo_ref: Option<&RepoRef>,
     args_relays: &[String],
     args_clone_url: &[String],
+    args_blossoms: &[String],
     identifier: &str,
 ) -> Vec<String> {
     // Collect clone URLs from arguments or repo_ref
@@ -895,22 +897,52 @@ fn guess_at_existing_ngit_relays(
         Vec::new()
     };
 
+    // Collect blossom server URLs from arguments or repo_ref
+    let blossoms: Vec<Url> = if !args_blossoms.is_empty() {
+        args_blossoms
+            .iter()
+            .filter_map(|r| Url::parse(r).ok())
+            .collect()
+    } else if let Some(repo) = repo_ref {
+        repo.blossoms.clone()
+    } else {
+        Vec::new()
+    };
+
     let mut existing_ngit_relays = Vec::new();
     for url in &clone_urls {
-        if let Ok(npub) = extract_npub(url) {
-            let postfix = format!("/{npub}/{identifier}.git");
-            if url.contains(&postfix) {
-                if let Ok(ngit_relay_url) = normalize_ngit_relay_url(url) {
-                    let is_also_relay = relays.iter().any(|r| {
-                        normalize_ngit_relay_url(&r.to_string())
-                            .is_ok_and(|r| r.eq(&ngit_relay_url))
-                    });
-                    if !existing_ngit_relays.contains(&ngit_relay_url) && is_also_relay {
-                        existing_ngit_relays.push(ngit_relay_url);
-                    }
-                }
-            }
+        let Ok(formatted_as_ngit_relay_url) = normalize_ngit_relay_url(url) else {
+            continue;
+        };
+        if existing_ngit_relays.contains(&formatted_as_ngit_relay_url) {
+            continue;
         }
+
+        let clone_url_is_ngit_relay_format = if let Ok(npub) = extract_npub(url) {
+            url.contains(&format!("/{npub}/{identifier}.git"))
+        } else {
+            false
+        };
+        if !clone_url_is_ngit_relay_format {
+            continue;
+        }
+
+        let matches_relay = relays.iter().any(|r| {
+            normalize_ngit_relay_url(&r.to_string())
+                .is_ok_and(|r| r.eq(&formatted_as_ngit_relay_url))
+        });
+        if !matches_relay {
+            continue;
+        }
+
+        let matches_blossoms = blossoms.iter().any(|r| {
+            normalize_ngit_relay_url(r.as_str()).is_ok_and(|r| r.eq(&formatted_as_ngit_relay_url))
+        });
+        if !matches_blossoms {
+            continue;
+        }
+
+        existing_ngit_relays.push(formatted_as_ngit_relay_url);
     }
     existing_ngit_relays
 }
