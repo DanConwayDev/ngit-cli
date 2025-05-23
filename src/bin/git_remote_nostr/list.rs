@@ -31,7 +31,7 @@ pub async fn run_list(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     for_push: bool,
-) -> Result<HashMap<String, HashMap<String, String>>> {
+) -> Result<HashMap<String, (HashMap<String, String>, bool)>> {
     let nostr_state = (get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await).ok();
 
     let term = console::Term::stderr();
@@ -46,7 +46,7 @@ pub async fn run_list(
 
     let mut state = if let Some(nostr_state) = nostr_state {
         for (name, value) in &nostr_state.state {
-            for (url, remote_state) in &remote_states {
+            for (url, (remote_state, _is_ngit_relay)) in &remote_states {
                 let remote_name = get_short_git_server_name(git_repo, url);
                 if let Some(remote_value) = remote_state.get(name) {
                     if value.ne(remote_value) {
@@ -74,15 +74,16 @@ pub async fn run_list(
         }
         nostr_state.state
     } else {
-        repo_ref
+        let (state, _is_ngit_relay) = repo_ref
             .git_server
             .iter()
             .filter_map(|server| remote_states.get(server))
             .cloned()
-            .collect::<Vec<HashMap<String, String>>>()
+            .collect::<Vec<(HashMap<String, String>, bool)>>()
             .first()
             .context("failed to get refs from git server")?
-            .clone()
+            .clone();
+        state
     };
 
     state.retain(|k, _| !k.starts_with("refs/heads/pr/"));
@@ -112,7 +113,7 @@ async fn get_open_and_draft_proposals_state(
     term: &console::Term,
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    remote_states: &HashMap<String, HashMap<String, String>>,
+    remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
 ) -> Result<HashMap<String, String>> {
     // we cannot use commit_id in the latest patch in a proposal because:
     // 1) the `commit` tag is optional
@@ -121,7 +122,7 @@ async fn get_open_and_draft_proposals_state(
 
     // without trusting commit_id we must apply each patch which requires the oid of
     // the parent so we much do a fetch
-    for (git_server_url, oids_from_git_servers) in remote_states {
+    for (git_server_url, (oids_from_git_servers, is_ngit_relay)) in remote_states {
         if fetch_from_git_server(
             git_repo,
             &oids_from_git_servers
@@ -132,7 +133,7 @@ async fn get_open_and_draft_proposals_state(
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             term,
-            is_ngit_relay(git_server_url, &repo_ref.ngit_relays()),
+            *is_ngit_relay,
         )
         .is_ok()
         {
@@ -178,22 +179,17 @@ pub fn list_from_remotes(
     git_servers: &Vec<String>,
     decoded_nostr_url: &NostrUrlDecoded,
     ngit_relays: &[String],
-) -> HashMap<String, HashMap<String, String>> {
+) -> HashMap<String, (HashMap<String, String>, bool)> {
     let mut remote_states = HashMap::new();
     let mut errors = HashMap::new();
     for url in git_servers {
-        match list_from_remote(
-            term,
-            git_repo,
-            url,
-            decoded_nostr_url,
-            is_ngit_relay(url, ngit_relays),
-        ) {
+        let is_ngit_relay = is_ngit_relay(url, ngit_relays);
+        match list_from_remote(term, git_repo, url, decoded_nostr_url, is_ngit_relay) {
             Err(error) => {
                 errors.insert(url, error);
             }
             Ok(state) => {
-                remote_states.insert(url.to_string(), state);
+                remote_states.insert(url.to_string(), (state, is_ngit_relay));
             }
         }
     }

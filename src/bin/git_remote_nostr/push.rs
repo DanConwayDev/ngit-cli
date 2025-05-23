@@ -50,13 +50,14 @@ use crate::{
 };
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::type_complexity)]
 pub async fn run_push(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     stdin: &Stdin,
     initial_refspec: &str,
     client: &Client,
-    list_outputs: Option<HashMap<String, HashMap<String, String>>>,
+    list_outputs: Option<HashMap<String, (HashMap<String, String>, bool)>>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
 
@@ -93,7 +94,8 @@ pub async fn run_push(
             .iter()
             .find(|&url| list_outputs.contains_key(url))
         {
-            list_outputs.get(url).unwrap().to_owned()
+            let (state, _is_ngit_relay) = list_outputs.get(url).unwrap().to_owned();
+            state
         } else {
             bail!(
                 "failed to connect to git servers: {}",
@@ -706,13 +708,14 @@ fn create_rejected_refspecs_and_remotes_refspecs(
     git_repo: &Repo,
     refspecs: &Vec<String>,
     nostr_state: &HashMap<String, String>,
-    list_outputs: &HashMap<String, HashMap<String, String>>,
+    list_outputs: &HashMap<String, (HashMap<String, String>, bool)>,
 ) -> Result<(HashMapUrlRefspecs, HashMapUrlRefspecs)> {
     let mut refspecs_for_remotes = HashMap::new();
 
     let mut rejected_refspecs: HashMapUrlRefspecs = HashMap::new();
 
-    for (url, remote_state) in list_outputs {
+    for (url, (remote_state, is_ngit_relay)) in list_outputs {
+        let is_ngit_relay = is_ngit_relay.to_owned();
         let short_name = get_short_git_server_name(git_repo, url);
         let mut refspecs_for_remote = vec![];
         for refspec in refspecs {
@@ -747,12 +750,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                         if is_remote_tip_ancestor_of_commit {
                             refspecs_for_remote.push(refspec.clone());
                         } else {
-                            // this is a force push so we need to force push to git server too
-                            if refspec.starts_with('+') {
-                                refspecs_for_remote.push(refspec.clone());
-                            } else {
-                                refspecs_for_remote.push(format!("+{refspec}"));
-                            }
+                            refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                         }
                     } else if let Ok(remote_value_tip) =
                         git_repo.get_commit_or_tip_of_reference(remote_value)
@@ -778,6 +776,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             if ahead_of_nostr.is_empty() {
                                 // ancestor of nostr and we are force pushing anyway...
                                 refspecs_for_remote.push(refspec.clone());
+                            } else if is_ngit_relay {
+                                // an ngit-relay can only be pushed to via nostr so can force push
+                                refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                             } else {
                                 rejected_refspecs
                                     .entry(refspec.to_string())
@@ -794,6 +795,8 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 )?;
                             }
                         }
+                    } else if is_ngit_relay {
+                        refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                     } else {
                         // remote_value oid is not present locally
                         // TODO can we download the remote reference?
@@ -827,6 +830,8 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                     if ahead.is_empty() {
                         // can soft push
                         refspecs_for_remote.push(refspec.clone());
+                    } else if is_ngit_relay {
+                        refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                     } else {
                         // cant soft push
                         rejected_refspecs
@@ -841,6 +846,8 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                     ).as_str(),
                                 )?;
                     }
+                } else if is_ngit_relay {
+                    refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                 } else {
                     // havn't fetched oid from remote
                     // TODO fetch oid from remote
@@ -876,6 +883,15 @@ fn create_rejected_refspecs_and_remotes_refspecs(
         );
     }
     Ok((rejected_refspecs, remotes_refspecs_without_rejected))
+}
+
+fn ensure_force_push_refspec(refspec: &str) -> String {
+    // Check if the refspec starts with '+' or ':'
+    if refspec.starts_with('+') || refspec.starts_with(':') {
+        refspec.to_string() // Return as is
+    } else {
+        format!("+{refspec}") // Add '+' prefix
+    }
 }
 
 fn generate_updated_state(
