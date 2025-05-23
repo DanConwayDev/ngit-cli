@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
 use crate::client::Client;
 use crate::{
+    UrlWithoutSlash,
     cli_interactor::{
         Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
     },
@@ -204,7 +205,9 @@ impl RepoRef {
                     } else {
                         vec![Tag::custom(
                             nostr::TagKind::Custom(std::borrow::Cow::Borrowed("blossoms")),
-                            self.blossoms.iter().map(|r| r.to_string()),
+                            self.blossoms
+                                .iter()
+                                .map(|r| r.to_string_without_trailing_slash()),
                         )]
                     },
                     // code languages and hashtags

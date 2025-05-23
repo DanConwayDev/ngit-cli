@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use ngit::{
+    UrlWithoutSlash,
     cli_interactor::{PromptChoiceParms, PromptConfirmParms, PromptMultiChoiceParms},
     client::{Params, send_events},
     git::nostr_url::{CloneUrl, NostrUrlDecoded},
@@ -231,7 +232,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             repo_ref
                 .blossoms
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(UrlWithoutSlash::to_string_without_trailing_slash)
                 .collect::<Vec<String>>()
         // } else if user_ref.blossoms.read().is_empty() {
         //     client.get_fallback_relays().clone()
@@ -290,7 +291,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         }
         if args.blossoms.is_empty() {
-            let blossom = format_ngit_blossom_url_as_relay_url(ngit_relay)?;
+            let blossom = format_ngit_relay_url_as_blossom_url(ngit_relay)?;
             if !blossoms_defaults.contains(&blossom) {
                 blossoms_defaults.push(blossom);
             }
@@ -483,8 +484,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     blossoms_defaults,
                     selections,
                     |s| {
-                        Url::parse(s)
-                            .map(|_| s.to_string())
+                        format_ngit_relay_url_as_blossom_url(s)
                             .context(format!("Invalid blossom URL format: {s}"))
                     },
                 )?;
@@ -974,10 +974,10 @@ fn format_ngit_relay_url_as_relay_url(url: &str) -> Result<String> {
     Ok(format!("wss://{ngit_relay_url}"))
 }
 
-fn format_ngit_blossom_url_as_relay_url(url: &str) -> Result<String> {
+fn format_ngit_relay_url_as_blossom_url(url: &str) -> Result<String> {
     let ngit_relay_url = normalize_ngit_relay_url(url)?;
     if ngit_relay_url.contains("http://") {
-        return Ok(ngit_relay_url.to_string());
+        return Ok(ngit_relay_url);
     }
     Ok(format!("https://{ngit_relay_url}"))
 }
