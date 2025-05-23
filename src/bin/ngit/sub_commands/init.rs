@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     process::{Command, Stdio},
     str::FromStr,
     thread,
@@ -111,6 +112,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     repo_ref.name.clone()
                 } else if let Some(coordinate) = &repo_coordinate {
                     coordinate.identifier.clone()
+                } else if let Ok(path) = env::current_dir() {
+                    if let Some(current_dir_name) = path.file_name() {
+                        current_dir_name.to_string_lossy().to_string()
+                    } else {
+                        String::new()
+                    }
                 } else {
                     String::new()
                 }),
