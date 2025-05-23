@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use console::Style;
+use console::{Style, Term};
 use dialoguer::theme::{ColorfulTheme, Theme};
 use ngit::{
     UrlWithoutSlash,
@@ -671,7 +671,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         }
     };
 
-    println!("publishing repostory reference...");
+    println!("publishing repostory announcement to nostr...");
 
     let repo_ref = RepoRef {
         identifier: identifier.clone(),
@@ -725,11 +725,28 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     } else {
         git_repo.git_repo.remote("origin", &nostr_url)?;
     }
-    thread::sleep(Duration::new(1, 0)); // wait for annoucment event to be receieved and processed by ngit-relays 
+    println!("set remote origin to nostr url");
 
     if std::env::var("NGITTEST").is_err() {
         // ignore during tests as git-remote-nostr isn't installed during ngit binary
         // tests
+
+        if selected_ngit_relays.is_empty() {
+            println!("running `git push` to publish your repository data");
+        } else {
+            let countdown_start = 5;
+            println!(
+                "waiting {countdown_start}s for ngit-relay servers to create your repo before we push your data"
+            );
+            let term = Term::stdout();
+            for i in (1..=countdown_start).rev() {
+                term.write_line(format!("\rrunning `git push` in {i}s").as_str())?;
+                thread::sleep(Duration::new(1, 0)); // Sleep for 1 second
+                term.clear_last_lines(1)?;
+            }
+            term.flush().unwrap(); // Ensure the output is flushed to the terminal
+        }
+
         if let Err(err) = push_main_or_master_branch(&git_repo) {
             println!(
                 "your repository announcement was published to nostr but git push exited with an error: {err}"
@@ -948,7 +965,9 @@ fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
         }
     };
 
-    println!("set remote origin to nostr url and pushing {main_branch_name} branch.");
+    println!("========================================");
+    println!("            GIT PUSH COMMAND            ");
+    println!("========================================");
 
     let command = "git";
     let args = ["push", "origin", "-u", main_branch_name];
@@ -963,6 +982,10 @@ fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
 
     // Wait for the process to finish
     let exit_status = child.wait().context("Failed to start git push process")?;
+
+    println!("========================================");
+    println!("        END OF GIT PUSH OUTPUT");
+    println!("========================================");
 
     // Check the exit status
     if exit_status.success() {
