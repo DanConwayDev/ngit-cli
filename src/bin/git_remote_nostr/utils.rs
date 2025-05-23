@@ -216,8 +216,15 @@ pub fn get_read_protocols_to_try(
     git_repo: &Repo,
     server_url: &CloneUrl,
     decoded_nostr_url: &NostrUrlDecoded,
+    is_ngit_relay: bool,
 ) -> Vec<ServerProtocol> {
-    if server_url.protocol() == ServerProtocol::Filesystem {
+    if is_ngit_relay {
+        if server_url.protocol() == ServerProtocol::Http {
+            vec![(ServerProtocol::UnauthHttp)]
+        } else {
+            vec![(ServerProtocol::UnauthHttps)]
+        }
+    } else if server_url.protocol() == ServerProtocol::Filesystem {
         vec![(ServerProtocol::Filesystem)]
     } else if let Some(protocol) = &decoded_nostr_url.protocol {
         vec![protocol.clone()]
@@ -254,8 +261,15 @@ pub fn get_write_protocols_to_try(
     git_repo: &Repo,
     server_url: &CloneUrl,
     decoded_nostr_url: &NostrUrlDecoded,
+    is_ngit_relay: bool,
 ) -> Vec<ServerProtocol> {
-    if server_url.protocol() == ServerProtocol::Filesystem {
+    if is_ngit_relay {
+        if server_url.protocol() == ServerProtocol::Http {
+            vec![(ServerProtocol::UnauthHttp)]
+        } else {
+            vec![(ServerProtocol::UnauthHttps)]
+        }
+    } else if server_url.protocol() == ServerProtocol::Filesystem {
         vec![(ServerProtocol::Filesystem)]
     } else if let Some(protocol) = &decoded_nostr_url.protocol {
         vec![protocol.clone()]

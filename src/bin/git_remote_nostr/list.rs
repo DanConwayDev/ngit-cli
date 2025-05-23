@@ -13,7 +13,7 @@ use ngit::{
     },
     git_events::event_to_cover_letter,
     login::get_curent_user,
-    repo_ref,
+    repo_ref::{self, is_ngit_relay},
 };
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use repo_ref::RepoRef;
@@ -41,6 +41,7 @@ pub async fn run_list(
         git_repo,
         &repo_ref.git_server,
         &repo_ref.to_nostr_git_url(&None),
+        &repo_ref.ngit_relays(),
     );
 
     let mut state = if let Some(nostr_state) = nostr_state {
@@ -131,6 +132,7 @@ async fn get_open_and_draft_proposals_state(
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             term,
+            is_ngit_relay(git_server_url, &repo_ref.ngit_relays()),
         )
         .is_ok()
         {
@@ -174,12 +176,19 @@ pub fn list_from_remotes(
     term: &console::Term,
     git_repo: &Repo,
     git_servers: &Vec<String>,
-    decoded_nostr_url: &NostrUrlDecoded, // Add this parameter
+    decoded_nostr_url: &NostrUrlDecoded,
+    ngit_relays: &[String],
 ) -> HashMap<String, HashMap<String, String>> {
     let mut remote_states = HashMap::new();
     let mut errors = HashMap::new();
     for url in git_servers {
-        match list_from_remote(term, git_repo, url, decoded_nostr_url) {
+        match list_from_remote(
+            term,
+            git_repo,
+            url,
+            decoded_nostr_url,
+            is_ngit_relay(url, ngit_relays),
+        ) {
             Err(error) => {
                 errors.insert(url, error);
             }
@@ -195,10 +204,12 @@ pub fn list_from_remote(
     term: &console::Term,
     git_repo: &Repo,
     git_server_url: &str,
-    decoded_nostr_url: &NostrUrlDecoded, // Add this parameter
+    decoded_nostr_url: &NostrUrlDecoded,
+    is_ngit_relay: bool,
 ) -> Result<HashMap<String, String>> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
-    let protocols_to_attempt = get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url);
+    let protocols_to_attempt =
+        get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_ngit_relay);
 
     let mut failed_protocols = vec![];
     let mut remote_state: Option<HashMap<String, String>> = None;

@@ -27,7 +27,7 @@ use ngit::{
     },
     git_events::{self, event_to_cover_letter, get_event_root},
     login::{self, user::UserRef},
-    repo_ref::{self, get_repo_config_from_yaml},
+    repo_ref::{self, get_repo_config_from_yaml, is_ngit_relay},
     repo_state,
 };
 use nostr::nips::nip10::Marker;
@@ -49,6 +49,7 @@ use crate::{
     },
 };
 
+#[allow(clippy::too_many_lines)]
 pub async fn run_push(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -79,6 +80,7 @@ pub async fn run_push(
             git_repo,
             &repo_ref.git_server,
             &repo_ref.to_nostr_git_url(&None),
+            &repo_ref.ngit_relays(),
         )
     });
 
@@ -161,6 +163,7 @@ pub async fn run_push(
                         &repo_ref.to_nostr_git_url(&None),
                         &remote_refspecs,
                         &term,
+                        is_ngit_relay(&git_server_url, &repo_ref.ngit_relays()),
                     );
                 }
             }
@@ -412,9 +415,11 @@ fn push_to_remote(
     decoded_nostr_url: &NostrUrlDecoded,
     remote_refspecs: &[String],
     term: &Term,
+    is_ngit_relay: bool,
 ) -> Result<()> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
-    let protocols_to_attempt = get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url);
+    let protocols_to_attempt =
+        get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_ngit_relay);
 
     let mut failed_protocols = vec![];
     let mut success = false;

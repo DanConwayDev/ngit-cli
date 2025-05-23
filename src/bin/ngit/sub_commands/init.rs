@@ -14,7 +14,10 @@ use ngit::{
     cli_interactor::{PromptChoiceParms, PromptConfirmParms, PromptMultiChoiceParms},
     client::{Params, send_events},
     git::nostr_url::{CloneUrl, NostrUrlDecoded},
-    repo_ref::{extract_pks, save_repo_config_to_yaml},
+    repo_ref::{
+        detect_existing_ngit_relays, extract_npub, extract_pks, normalize_ngit_relay_url,
+        save_repo_config_to_yaml,
+    },
 };
 use nostr::{
     FromBech32, PublicKey, ToBech32,
@@ -869,117 +872,6 @@ where
     Ok(selected_choices)
 }
 
-fn detect_existing_ngit_relays(
-    repo_ref: Option<&RepoRef>,
-    args_relays: &[String],
-    args_clone_url: &[String],
-    args_blossoms: &[String],
-    identifier: &str,
-) -> Vec<String> {
-    // Collect clone URLs from arguments or repo_ref
-    let clone_urls: Vec<String> = if !args_clone_url.is_empty() {
-        args_clone_url.to_vec()
-    } else if let Some(repo) = repo_ref {
-        repo.git_server.clone()
-    } else {
-        Vec::new()
-    };
-
-    // Collect relays from arguments or repo_ref
-    let relays: Vec<RelayUrl> = if !args_relays.is_empty() {
-        args_relays
-            .iter()
-            .filter_map(|r| RelayUrl::parse(r).ok())
-            .collect()
-    } else if let Some(repo) = repo_ref {
-        repo.relays.clone()
-    } else {
-        Vec::new()
-    };
-
-    // Collect blossom server URLs from arguments or repo_ref
-    let blossoms: Vec<Url> = if !args_blossoms.is_empty() {
-        args_blossoms
-            .iter()
-            .filter_map(|r| Url::parse(r).ok())
-            .collect()
-    } else if let Some(repo) = repo_ref {
-        repo.blossoms.clone()
-    } else {
-        Vec::new()
-    };
-
-    let mut existing_ngit_relays = Vec::new();
-    for url in &clone_urls {
-        let Ok(formatted_as_ngit_relay_url) = normalize_ngit_relay_url(url) else {
-            continue;
-        };
-        if existing_ngit_relays.contains(&formatted_as_ngit_relay_url) {
-            continue;
-        }
-
-        let clone_url_is_ngit_relay_format = if let Ok(npub) = extract_npub(url) {
-            url.contains(&format!("/{npub}/{identifier}.git"))
-        } else {
-            false
-        };
-        if !clone_url_is_ngit_relay_format {
-            continue;
-        }
-
-        let matches_relay = relays.iter().any(|r| {
-            normalize_ngit_relay_url(&r.to_string())
-                .is_ok_and(|r| r.eq(&formatted_as_ngit_relay_url))
-        });
-        if !matches_relay {
-            continue;
-        }
-
-        let matches_blossoms = blossoms.iter().any(|r| {
-            normalize_ngit_relay_url(r.as_str()).is_ok_and(|r| r.eq(&formatted_as_ngit_relay_url))
-        });
-        if !matches_blossoms {
-            continue;
-        }
-
-        existing_ngit_relays.push(formatted_as_ngit_relay_url);
-    }
-    existing_ngit_relays
-}
-
-fn normalize_ngit_relay_url(url: &str) -> Result<String> {
-    // Parse the URL and handle errors
-    let mut parsed = Url::parse(url)
-        .or_else(|_| Url::parse(&format!("https://{url}")))
-        .context(format!("{url} not a valid ngit relay URL"))?;
-    if parsed.host_str().is_none() {
-        // so sub.domain.org gets identifier as host in "sub.domain.org"
-        parsed = Url::parse(&format!("https://{url}"))?;
-    }
-
-    // Extract the scheme, host, port, and path
-    let scheme = parsed.scheme();
-    let host = parsed.host_str().context(format!(
-        "{url} not a ngit relay url reference: missing host in URL {parsed}"
-    ))?;
-    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
-    let path = parsed.path();
-
-    // Normalize the URL based on the scheme and path
-    let mut normalized_url = match scheme {
-        "ws" | "http" => format!("http://{host}{port}{path}"),
-        _ => format!("{host}{port}{path}"),
-    };
-
-    // If the normalized URL contains "npub1", remove "npub1" and everything after
-    // it
-    if let Some(pos) = normalized_url.find("npub1") {
-        normalized_url.truncate(pos); // Keep everything before "npub1"
-    }
-    // Return the normalized URL
-    Ok(normalized_url.trim_end_matches('/').to_string())
-}
-
 fn format_ngit_relay_url_as_clone_url(
     url: &str,
     public_key: &PublicKey,
@@ -1012,25 +904,6 @@ fn format_ngit_relay_url_as_blossom_url(url: &str) -> Result<String> {
         return Ok(ngit_relay_url);
     }
     Ok(format!("https://{ngit_relay_url}"))
-}
-
-fn extract_npub(s: &str) -> Result<&str> {
-    // Find the starting index of "npub1"
-    if let Some(start) = s.find("npub1") {
-        let mut end = start + 5; // Start after "npub1"
-
-        // Move the end index to include valid characters (0-9, a-z)
-        while end < s.len() && s[end..=end].chars().all(|c| c.is_ascii_alphanumeric()) {
-            end += 1;
-        }
-        // Extract the npub substring
-        let npub = &s[start..end];
-        // Attempt to create a PublicKey from the extracted npub
-        PublicKey::from_bech32(npub).context("invalid npub")?;
-        Ok(npub)
-    } else {
-        bail!("No npub found")
-    }
 }
 
 fn parse_relay_url(s: &str) -> Result<RelayUrl> {
@@ -1096,49 +969,5 @@ fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
         Ok(())
     } else {
         bail!("git push process exited with an error: {}", exit_status);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::Result;
-
-    use super::*;
-
-    #[test]
-    fn normalize_ngit_relay_url_all_checks() -> Result<()> {
-        let test_cases = vec![
-            ("https://sub.domain.org", "sub.domain.org"),
-            ("wss://sub.domain.org", "sub.domain.org"),
-            ("sub.domain.org", "sub.domain.org"),
-            ("http://sub.domain.org", "http://sub.domain.org"),
-            ("ws://sub.domain.org", "http://sub.domain.org"),
-            ("http://localhost", "http://localhost"),
-            ("localhost", "localhost"),
-            ("https://sub.domain.org:8080", "sub.domain.org:8080"),
-            ("http://sub.domain.org:8080", "http://sub.domain.org:8080"),
-            ("sub.domain.org:8080", "sub.domain.org:8080"),
-            ("https://sub.domain.org/path/to", "sub.domain.org/path/to"),
-            (
-                "https://sub.domain.org:8080/path/to",
-                "sub.domain.org:8080/path/to",
-            ),
-            (
-                "https://sub.domain.org/npub143675782648/to.git",
-                "sub.domain.org",
-            ),
-            (
-                "https://sub.domain.org/path/npub143675782648/to.git",
-                "sub.domain.org/path",
-            ),
-            ("https://sub.domain.org/", "sub.domain.org"),
-            ("http://sub.domain.org/", "http://sub.domain.org"),
-        ];
-
-        for (input, expected) in test_cases {
-            let normalized = normalize_ngit_relay_url(input)?;
-            assert_eq!(normalized, expected);
-        }
-        Ok(())
     }
 }

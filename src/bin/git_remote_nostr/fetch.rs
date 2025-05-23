@@ -18,7 +18,7 @@ use ngit::{
     },
     git_events::tag_value,
     login::get_curent_user,
-    repo_ref::RepoRef,
+    repo_ref::{RepoRef, is_ngit_relay},
 };
 use nostr::nips::nip19;
 use nostr_sdk::{Event, ToBech32};
@@ -54,6 +54,7 @@ pub async fn run_fetch(
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             &term,
+            is_ngit_relay(git_server_url, &repo_ref.ngit_relays()),
         ) {
             errors.push(error);
         } else {
@@ -163,6 +164,7 @@ pub fn fetch_from_git_server(
     git_server_url: &str,
     decoded_nostr_url: &NostrUrlDecoded,
     term: &console::Term,
+    is_ngit_relay: bool,
 ) -> Result<()> {
     let already_have_oids = oids
         .iter()
@@ -173,7 +175,8 @@ pub fn fetch_from_git_server(
 
     let server_url = git_server_url.parse::<CloneUrl>()?;
 
-    let protocols_to_attempt = get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url);
+    let protocols_to_attempt =
+        get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_ngit_relay);
 
     let mut failed_protocols = vec![];
     let mut success = false;
