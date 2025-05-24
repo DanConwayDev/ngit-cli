@@ -40,10 +40,11 @@ pub const CUSTOMISE_TEMPLATE: &str = r"
 ==========================
 ngit settings are managed through the git config.
 
-Currently the only settings not not reachable through standard commands relate to default hardcoded relays:
+Currently the only settings not reachable through standard commands relate to default hardcoded relays:
 
- - nostr.relay-default-set - must have at least 1 value
- - nostr.relay-blaster-set
+ - nostr.ngit-relay-default-set - only used during `ngit init`
+ - nostr.relay-default-set      - must have at least 1 value, all events send to repo relays, user write and default relays
+ - nostr.relay-blaster-set      - only used for repo announcement events 
  - nostr.relay-signer-fallback-set
 
 These take a string of semi-colon separated websocket URLs without spaces. For example:

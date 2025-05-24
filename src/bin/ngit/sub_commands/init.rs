@@ -252,6 +252,15 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.blossoms.clone()
     };
 
+    let fallback_ngit_relays =
+        if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.ngit-relay-default-set", None) {
+            s.split(';')
+                .filter_map(|url| normalize_ngit_relay_url(url).ok()) // Attempt to parse and filter out errors
+                .collect()
+        } else {
+            vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
+        };
+
     let selected_ngit_relays = if has_server_and_relay_flags {
         // ignore so a script running `ngit init` can contiue without prompts
         vec![]
@@ -265,8 +274,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         );
         let mut selections: Vec<bool> = vec![true; options.len()]; // Initialize selections based on existing options
         let empty = options.is_empty();
-        let fallbacks = vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()];
-        for fallback in fallbacks {
+        for fallback in fallback_ngit_relays {
             // Check if any option contains the fallback as a substring
             if !options.iter().any(|option| option.contains(&fallback)) {
                 options.push(fallback.clone()); // Add fallback if not found
