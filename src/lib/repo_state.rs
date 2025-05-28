@@ -12,7 +12,7 @@ pub struct RepoState {
 impl RepoState {
     pub fn try_from(mut state_events: Vec<nostr::Event>) -> Result<Self> {
         state_events.sort_by_key(|e| e.created_at);
-        let event = state_events.first().context("no state events")?;
+        let event = state_events.last().context("no state events")?;
         let mut state = HashMap::new();
         for tag in event.tags.iter() {
             if let Some(name) = tag.as_slice().first() {
