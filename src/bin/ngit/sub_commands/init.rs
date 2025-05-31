@@ -703,6 +703,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         relays: relays.clone(),
         blossoms,
         trusted_maintainer: user_ref.public_key,
+        maintainers_without_annoucnement: None,
         maintainers: maintainers.clone(),
         events: HashMap::new(),
         nostr_git_url: None,

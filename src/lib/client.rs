@@ -985,6 +985,9 @@ pub async fn get_repo_ref_from_cache(
         .collect();
     let mut seen_blossoms: HashSet<Url> = HashSet::from_iter(blossoms.iter().cloned());
 
+    // also set maintainers_without_annoucnement
+    let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
+
     for m in &maintainers {
         if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
             if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
@@ -1004,6 +1007,8 @@ pub async fn get_repo_ref_from_cache(
                     }
                 }
             }
+        } else {
+            maintainers_without_annoucnement.push(*m);
         }
     }
 
@@ -1014,6 +1019,7 @@ pub async fn get_repo_ref_from_cache(
         relays,
         git_server,
         events,
+        maintainers_without_annoucnement: Some(maintainers_without_annoucnement),
         ..repo_ref
     })
 }

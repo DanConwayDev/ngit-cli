@@ -199,6 +199,20 @@ async fn create_and_publish_events(
         if proposal_refspecs.is_empty() {
             return Ok((vec![], true));
         }
+    } else if repo_ref
+        .maintainers_without_annoucnement
+        .clone()
+        .is_some_and(|ms| ms.contains(&user_ref.public_key))
+    {
+        for refspec in git_server_refspecs {
+            let (_, to) = refspec_to_from_to(refspec).unwrap();
+            eprintln!(
+                "error {to} you must run `ngit init` before pushing updates. you've been offered maintainership but you must accept it before pushing",
+            );
+        }
+        if proposal_refspecs.is_empty() {
+            return Ok((vec![], true));
+        }
     }
 
     let mut events = vec![];

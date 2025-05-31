@@ -1833,3 +1833,11 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
 
     Ok(())
 }
+
+mod push_from_another_maintainer {
+    // TODO that has issued announcement
+    // - that is listed by trusted maintainer - succeeds
+    // - that isn't listed by trusted maintainer - fails
+    // TODO that hasn't yet issued announcement
+    // - that is listed by trusted maintainer - fails
+}

@@ -42,6 +42,8 @@ pub struct RepoRef {
     pub blossoms: Vec<Url>,
     pub maintainers: Vec<PublicKey>,
     pub trusted_maintainer: PublicKey,
+    // set to None if not known
+    pub maintainers_without_annoucnement: Option<Vec<PublicKey>>,
     pub events: HashMap<Nip19Coordinate, nostr::Event>,
     pub nostr_git_url: Option<NostrUrlDecoded>,
 }
@@ -49,6 +51,11 @@ pub struct RepoRef {
 impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
     type Error = anyhow::Error;
 
+    /*
+     * this could do with a refactor to intergrate enhancements made by
+     * `get_repo_ref_from_cache`. Other than tests, its only used there and the
+     * changes made by that function are important.
+     */
     fn try_from((event, trusted_maintainer): (nostr::Event, Option<PublicKey>)) -> Result<Self> {
         // TODO: turn trusted maintainer into NostrUrlDecoded
         if !event.kind.eq(&Kind::GitRepoAnnouncement) {
@@ -66,6 +73,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
             blossoms: Vec::new(),
             maintainers: Vec::new(),
             trusted_maintainer: trusted_maintainer.unwrap_or(event.pubkey),
+            maintainers_without_annoucnement: None,
             events: HashMap::new(),
             nostr_git_url: None,
         };
@@ -740,6 +748,7 @@ mod tests {
             ],
             blossoms: vec![],
             trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
+            maintainers_without_annoucnement: None,
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             events: HashMap::new(),
             nostr_git_url: None,
