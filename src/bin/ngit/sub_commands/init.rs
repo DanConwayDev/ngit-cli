@@ -297,8 +297,38 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         if args.clone_url.is_empty() {
             let clone_url =
                 format_ngit_relay_url_as_clone_url(ngit_relay, &user_ref.public_key, &identifier)?;
-            if !git_server_defaults.contains(&clone_url) {
+
+            let ngit_relay_clone_root = if clone_url.contains("https://") {
+                format!("https://{ngit_relay}")
+            } else {
+                ngit_relay.to_string()
+            };
+
+            // Find all positions of entries containing the relay root
+            let matching_positions: Vec<usize> = git_server_defaults
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, url)| {
+                    if url.contains(&ngit_relay_clone_root) {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // If we found any matches
+            if matching_positions.is_empty() {
+                // No existing entries found, so add a new one
                 git_server_defaults.push(clone_url);
+            } else {
+                // Replace the first occurrence
+                git_server_defaults[matching_positions[0]] = clone_url;
+
+                // Remove any subsequent occurrences (in reverse order to avoid index issues)
+                for &position in matching_positions.iter().skip(1).rev() {
+                    git_server_defaults.remove(position);
+                }
             }
         }
         if args.relays.is_empty() {
