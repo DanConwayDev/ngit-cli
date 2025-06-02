@@ -299,7 +299,8 @@ fn list_from_remote_url(
                 head.name().to_string(),
                 format!("ref: {symbolic_reference}"),
             );
-        } else {
+        // ignore dereferenced tags
+        } else if !head.name().to_string().ends_with("^{}") {
             state.insert(head.name().to_string(), head.oid().to_string());
         }
     }
