@@ -32,6 +32,10 @@ mod two_branches_in_batch_one_added_one_updated {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
         ];
         // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
         let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -107,6 +111,10 @@ mod two_branches_in_batch_one_added_one_updated {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
         ];
         // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
         let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -193,6 +201,10 @@ mod two_branches_in_batch_one_added_one_updated {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
         ];
         // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
         let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -261,6 +273,10 @@ mod two_branches_in_batch_one_added_one_updated {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
         ];
         // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
         let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -345,6 +361,10 @@ mod two_branches_in_batch_one_added_one_updated {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
             state_event.clone(),
         ];
 
@@ -463,6 +483,10 @@ mod delete_one_branch {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
         ];
         // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
         let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -538,6 +562,10 @@ mod delete_one_branch {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
         ];
         // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
         let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -612,6 +640,10 @@ mod delete_one_branch {
             generate_repo_ref_event_with_git_server(vec![
                 source_git_repo.dir.to_str().unwrap().to_string(),
             ]),
+            generate_repo_ref_event_with_git_server_with_keys(
+                vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                &TEST_KEY_2_KEYS,
+            ),
         ];
         // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
         let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -668,6 +700,10 @@ mod delete_one_branch {
                 generate_repo_ref_event_with_git_server(vec![
                     source_git_repo.dir.to_str().unwrap().to_string(),
                 ]),
+                generate_repo_ref_event_with_git_server_with_keys(
+                    vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                    &TEST_KEY_2_KEYS,
+                ),
                 state_event.clone(),
             ];
 
@@ -755,6 +791,10 @@ mod delete_one_branch {
                     generate_repo_ref_event_with_git_server(vec![
                         source_git_repo.dir.to_str().unwrap().to_string(),
                     ]),
+                    generate_repo_ref_event_with_git_server_with_keys(
+                        vec![source_git_repo.dir.to_str().unwrap().to_string()],
+                        &TEST_KEY_2_KEYS,
+                    ),
                     state_event.clone(),
                 ];
 
@@ -841,6 +881,10 @@ async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
             source_git_repo.dir.to_str().unwrap().to_string(),
             second_source_git_repo.dir.to_str().unwrap().to_string(),
         ]),
+        generate_repo_ref_event_with_git_server_with_keys(
+            vec![source_git_repo.dir.to_str().unwrap().to_string()],
+            &TEST_KEY_2_KEYS,
+        ),
         state_event.clone(),
     ];
 
@@ -1835,8 +1879,10 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
 }
 
 mod push_from_another_maintainer {
+
     // TODO that has issued announcement
-    // - that is listed by trusted maintainer - succeeds
+    // - that is listed by trusted maintainer - succeeds (covered by above
+    //   tests)
     // - that isn't listed by trusted maintainer - fails
     // TODO that hasn't yet issued announcement
     // - that is listed by trusted maintainer - fails

@@ -152,6 +152,13 @@ pub fn generate_repo_ref_event() -> nostr::Event {
 }
 
 pub fn generate_repo_ref_event_with_git_server(git_servers: Vec<String>) -> nostr::Event {
+    generate_repo_ref_event_with_git_server_with_keys(git_servers, &TEST_KEY_1_KEYS)
+}
+
+pub fn generate_repo_ref_event_with_git_server_with_keys(
+    git_servers: Vec<String>,
+    keys: &nostr::Keys,
+) -> nostr::Event {
     // taken from test git_repo
     // TODO - this may not be consistant across computers as it might take the
     // author and committer from global git config
@@ -185,16 +192,22 @@ pub fn generate_repo_ref_event_with_git_server(git_servers: Vec<String>) -> nost
             ),
             Tag::custom(
                 nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
-                vec![
-                    TEST_KEY_1_KEYS.public_key().to_string(),
-                    TEST_KEY_2_KEYS.public_key().to_string(),
-                ],
+                [
+                    vec![keys.public_key().to_string()],
+                    vec![
+                        TEST_KEY_1_KEYS.public_key().to_string(),
+                        TEST_KEY_2_KEYS.public_key().to_string(),
+                    ]
+                    .into_iter()
+                    .filter(|key| !keys.public_key().to_string().eq(key))
+                    .collect(),
+                ]
+                .concat(),
             ),
         ])
-        .sign_with_keys(&TEST_KEY_1_KEYS)
+        .sign_with_keys(keys)
         .unwrap()
 }
-
 /// enough to fool event_is_patch_set_root
 pub fn get_pretend_proposal_root_event() -> nostr::Event {
     serde_json::from_str(r#"{"id":"431e58eb8e1b4e20292d1d5bbe81d5cfb042e1bc165de32eddfdd52245a4cce4","pubkey":"f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768","created_at":1721404213,"kind":1617,"tags":[["a","30617:ba882566eff14f3baa976103998c452d27fe95b65a796a6a9f92628bced76fe5:9ee507fc4357d7ee16a5d8901bedcd103f23c17d-consider-it-random"],["a","30617:f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768:9ee507fc4357d7ee16a5d8901bedcd103f23c17d-consider-it-random"],["r","9ee507fc4357d7ee16a5d8901bedcd103f23c17d"],["t","cover-letter"],["alt","git patch cover letter: exampletitle"],["t","root"],["e","8cb75aa4cda10a3a0f3242dc49d36159d30b3185bf63414cf6ce17f5c14a73b1","","mention"],["branch-name","feature"],["p","ba882566eff14f3baa976103998c452d27fe95b65a796a6a9f92628bced76fe5"],["p","f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768"]],"content":"From fe973a840fba2a8ab37dd505c154854a69a6505c Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/2] exampletitle\n\nexampledescription","sig":"37d5b2338bf9fd9d598e6494ae88af9a8dbd52330cfe9d025ee55e35e2f3f55e931ba039d9f7fed8e6fc40206e47619a24f730f8eddc2a07ccfb3988a5005170"}"#).unwrap()

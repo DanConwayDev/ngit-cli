@@ -117,6 +117,10 @@ async fn generate_repo_with_state_event() -> Result<(nostr::Event, GitTestRepo)>
         generate_repo_ref_event_with_git_server(vec![
             source_git_repo.dir.to_str().unwrap().to_string(),
         ]),
+        generate_repo_ref_event_with_git_server_with_keys(
+            vec![source_git_repo.dir.to_str().unwrap().to_string()],
+            &TEST_KEY_2_KEYS,
+        ),
     ];
     // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
@@ -190,6 +194,10 @@ async fn prep_source_repo_and_events_including_proposals()
         generate_test_key_1_metadata_event("fred"),
         generate_test_key_1_relay_list_event(),
         generate_repo_ref_event_with_git_server(vec![source_path.to_string()]),
+        generate_repo_ref_event_with_git_server_with_keys(
+            vec![source_path.to_string()],
+            &TEST_KEY_2_KEYS,
+        ),
         state_event,
     ];
     // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
