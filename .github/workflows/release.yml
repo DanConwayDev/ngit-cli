@@ -28,7 +28,7 @@ jobs:
           # x86_64
           # compatibility: Ubuntu 14.04+, Debian 8+, RHEL/CentOS 7+, Fedora 21+, openSUSE, Arch, etc. Any x86-64 distro with glibc ≥ 2.17. (Not Alpine)
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu.2.17 # glibc ≥ 2.17
+            target: x86_64-unknown-linux-gnu.2.17
             build-tool: cargo-zigbuild
           # aarch64
           # compatibility: Ubuntu 20.04+, Debian 11+, Amazon Linux 2, AWS Graviton, Raspberry Pi OS 64-bit, etc. Any aarch64/arm64 distro with glibc ≥ 2.17.
@@ -40,37 +40,33 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build-tool: cargo-zigbuild
-          # windows - faster alternative to native windows toolchain
-          # compatibility: Windows 7 SP1 / Server 2008 R2 and newer, including Windows 11. Requires the “Universal C Runtime” which is already present on Windows 10+ or via the VC++ 2015-2022 redistributable on older systems. No other DLLs needed.
-          - os: ubuntu-latest
-            target: x86_64-pc-windows-msvc
-            build-tool: cargo-zigbuild
+          # # windows - faster alternative to native windows toolchain
+          # # compatibility: Windows 7 SP1 / Server 2008 R2 and newer, including Windows 11. Requires the “Universal C Runtime” which is already present on Windows 10+ or via the VC++ 2015-2022 redistributable on older systems. No other DLLs needed.
+          # - os: ubuntu-latest
+          #   target: x86_64-pc-windows-msvc
+          #   build-tool: cargo-zigbuild
           # ---------- macOS (needs real mac runner) -------------
           # compatibility: macOS 10.13 High Sierra (2017) or newer. Intel + Apple Silicon.
           - os: macos-14
-            target: universal-apple-darwin # universal = x86_64 + arm64
-            build-tool: cargo # native cargo is fastest
+            target: universal-apple-darwin
+            build-tool: cargo
           # ---------- native Windows toolchain ------------------
           # switch to this if issues are reported with the zig build
-          # - os: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   build-tool: cargo
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            build-tool: cargo
     runs-on: ${{ matrix.os }}
-    env:
-      # make openssl + libgit2 static so the binaries work on old distros
-      OPENSSL_STATIC: 1
-      # enable Rust LTO + stripping (you can also move this into Cargo.toml)
-      CARGO_PROFILE_RELEASE_LTO: true
-      CARGO_PROFILE_RELEASE_STRIP: symbols
-
     steps:
       - uses: actions/checkout@v3
-      # (optional) cache build artefacts; speeds up repeated releases
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-zigbuild using Homebrew for macOS
+        if: runner.os == 'macOS' && matrix.build-tool == 'cargo-zigbuild'
+        run: brew install cargo-zigbuild
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: ngit,git-remote-nostr
           target: ${{ matrix.target }}
+          features: vendored-openssl
           build-tool: ${{ matrix.build-tool }}
           # final file name: ngit-v1.6.3-x86_64-unknown-linux-gnu.tar.gz  …
           archive: ngit-$tag-${{ matrix.target }}
