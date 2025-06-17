@@ -238,6 +238,14 @@ pub fn get_read_protocols_to_try(
             ]
         } else if server_url.protocol() == ServerProtocol::Ftp {
             vec![ServerProtocol::Ftp, ServerProtocol::Ssh]
+        } else if server_url.protocol() == ServerProtocol::Git {
+            vec![
+                ServerProtocol::Git,
+                ServerProtocol::UnauthHttps,
+                ServerProtocol::Ssh,
+                // note: list and fetch stop here if ssh was authenticated
+                ServerProtocol::Https,
+            ]
         } else {
             vec![
                 ServerProtocol::UnauthHttps,
@@ -282,6 +290,13 @@ pub fn get_write_protocols_to_try(
             ]
         } else if server_url.protocol() == ServerProtocol::Ftp {
             vec![ServerProtocol::Ssh, ServerProtocol::Ftp]
+        } else if server_url.protocol() == ServerProtocol::Git {
+            vec![
+                ServerProtocol::Ssh,
+                ServerProtocol::Git,
+                // note: list and fetch stop here if ssh was authenticated
+                ServerProtocol::Https,
+            ]
         } else {
             vec![
                 ServerProtocol::Ssh,
