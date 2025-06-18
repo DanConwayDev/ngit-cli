@@ -1,6 +1,6 @@
 [package]
 name = "ngit"
-version = "1.7.1"
+version = "1.7.2"
 edition = "2021"
 description = "nostr plugin for git"
 authors = ["DanConwayDev <DanConwayDev@protonmail.com>"]
