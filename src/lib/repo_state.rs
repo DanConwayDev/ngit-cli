@@ -30,6 +30,24 @@ impl RepoState {
                 }
             }
         }
+        // Include a HEAD if one isn't listed to prevent errors when users git config
+        // default branch isn't in the state event
+        if !state.contains_key("HEAD") {
+            if state.contains_key("refs/heads/master") {
+                state.insert("HEAD".to_string(), "ref: refs/heads/master".to_string());
+            } else if state.contains_key("refs/heads/main") {
+                state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+            } else if let Some(tag) = event
+                .tags
+                .iter()
+                .find(|t| t.len() > 1 && t.as_slice()[0].starts_with("refs/heads/"))
+            {
+                state.insert(
+                    "HEAD".to_string(),
+                    format!("ref: {}", tag.clone().to_vec()[0]),
+                );
+            }
+        }
         Ok(RepoState {
             identifier: event
                 .tags
