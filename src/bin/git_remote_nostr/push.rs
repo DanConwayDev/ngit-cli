@@ -789,7 +789,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 // ancestor of nostr and we are force pushing anyway...
                                 refspecs_for_remote.push(refspec.clone());
                             } else if is_ngit_relay {
-                                // an ngit-relay can only be pushed to via nostr so can force push
+                                // a grasp server can only be pushed to via nostr so can force push
                                 refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                             } else {
                                 rejected_refspecs

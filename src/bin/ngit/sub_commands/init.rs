@@ -253,7 +253,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     };
 
     let fallback_ngit_relays =
-        if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.ngit-relay-default-set", None) {
+        if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.grasp-default-set", None) {
             s.split(';')
                 .filter_map(|url| normalize_ngit_relay_url(url).ok()) // Attempt to parse and filter out errors
                 .collect()
@@ -282,13 +282,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         }
         let selected = multi_select_with_custom_value(
-            "ngit-relays (ideally use between 2-4)",
-            "ngit-relay",
+            "grasp servers (ideally use between 2-4)",
+            "grasp server",
             options,
             selections,
             normalize_ngit_relay_url,
         )?;
-        show_multi_input_prompt_success("ngit-relays", &selected);
+        show_multi_input_prompt_success("grasp servers", &selected);
         selected
     };
 
@@ -357,7 +357,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .with_default(true),
         )?
     {
-        // TODO check if ngit-relays in use and if so turn this off:
+        // TODO check if grasp servers in use and if so turn this off:
         if git_repo
             .get_git_config_item("nostr.nostate", Some(true))
             .unwrap_or(None)
@@ -387,7 +387,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 let selected = loop {
                     let selections: Vec<bool> = vec![true; additional_server_options.len()];
                     let selected = multi_select_with_custom_value(
-                        "additional git server(s) on top of ngit-relays",
+                        "additional git server(s) on top of grasp servers",
                         "git server remote url",
                         additional_server_options,
                         selections,
@@ -787,7 +787,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         } else {
             let countdown_start = 5;
             println!(
-                "waiting {countdown_start}s for ngit-relay servers to create your repo before we push your data"
+                "waiting {countdown_start}s for grasp servers to create your repo before we push your data"
             );
             let term = Term::stdout();
             for i in (1..=countdown_start).rev() {
