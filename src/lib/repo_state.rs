@@ -1,7 +1,13 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use git2::Oid;
+use nostr::{
+    event::{EventBuilder, Tag},
+    signer::NostrSigner,
+};
+
+use crate::client::{STATE_KIND, sign_event};
 
 pub struct RepoState {
     pub identifier: String,
@@ -56,6 +62,30 @@ impl RepoState {
                 .to_string(),
             state,
             event: event.clone(),
+        })
+    }
+
+    pub async fn build(
+        identifier: String,
+        state: HashMap<String, String>,
+        signer: &Arc<dyn NostrSigner>,
+    ) -> Result<Self> {
+        let mut tags = vec![Tag::identifier(identifier.clone())];
+        for (name, value) in &state {
+            tags.push(Tag::custom(nostr_sdk::TagKind::Custom(name.into()), vec![
+                value.clone(),
+            ]));
+        }
+        let event = sign_event(
+            EventBuilder::new(STATE_KIND, "").tags(tags),
+            signer,
+            "git state".to_string(),
+        )
+        .await?;
+        Ok(RepoState {
+            identifier,
+            state,
+            event,
         })
     }
 }

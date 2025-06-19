@@ -8,9 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use auth_git2::GitAuthenticator;
-use client::{
-    STATE_KIND, get_events_from_local_cache, get_state_from_cache, send_events, sign_event,
-};
+use client::{get_events_from_local_cache, get_state_from_cache, send_events, sign_event};
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
 use git_events::{
@@ -1547,39 +1545,6 @@ fn get_refspecs_from_push_batch(stdin: &Stdin, initial_refspec: &str) -> Result<
         }
     }
     Ok(refspecs)
-}
-
-trait BuildRepoState {
-    async fn build(
-        identifier: String,
-        state: HashMap<String, String>,
-        signer: &Arc<dyn NostrSigner>,
-    ) -> Result<RepoState>;
-}
-impl BuildRepoState for RepoState {
-    async fn build(
-        identifier: String,
-        state: HashMap<String, String>,
-        signer: &Arc<dyn NostrSigner>,
-    ) -> Result<RepoState> {
-        let mut tags = vec![Tag::identifier(identifier.clone())];
-        for (name, value) in &state {
-            tags.push(Tag::custom(nostr_sdk::TagKind::Custom(name.into()), vec![
-                value.clone(),
-            ]));
-        }
-        let event = sign_event(
-            EventBuilder::new(STATE_KIND, "").tags(tags),
-            signer,
-            "git state".to_string(),
-        )
-        .await?;
-        Ok(RepoState {
-            identifier,
-            state,
-            event,
-        })
-    }
 }
 
 #[cfg(test)]
