@@ -25,7 +25,7 @@ use ngit::{
     },
     git_events::{self, event_to_cover_letter, get_event_root},
     login::{self, user::UserRef},
-    repo_ref::{self, get_repo_config_from_yaml, is_ngit_relay},
+    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server},
     repo_state,
 };
 use nostr::nips::nip10::Marker;
@@ -79,7 +79,7 @@ pub async fn run_push(
             git_repo,
             &repo_ref.git_server,
             &repo_ref.to_nostr_git_url(&None),
-            &repo_ref.ngit_relays(),
+            &repo_ref.grasp_servers(),
         )
     });
 
@@ -92,7 +92,7 @@ pub async fn run_push(
             .iter()
             .find(|&url| list_outputs.contains_key(url))
         {
-            let (state, _is_ngit_relay) = list_outputs.get(url).unwrap().to_owned();
+            let (state, _is_grasp_server) = list_outputs.get(url).unwrap().to_owned();
             state
         } else {
             bail!(
@@ -163,7 +163,7 @@ pub async fn run_push(
                         &repo_ref.to_nostr_git_url(&None),
                         &remote_refspecs,
                         &term,
-                        is_ngit_relay(&git_server_url, &repo_ref.ngit_relays()),
+                        is_grasp_server(&git_server_url, &repo_ref.grasp_servers()),
                     );
                 }
             }
@@ -429,11 +429,11 @@ fn push_to_remote(
     decoded_nostr_url: &NostrUrlDecoded,
     remote_refspecs: &[String],
     term: &Term,
-    is_ngit_relay: bool,
+    is_grasp_server: bool,
 ) -> Result<()> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
-        get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_ngit_relay);
+        get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
 
     let mut failed_protocols = vec![];
     let mut success = false;
@@ -726,8 +726,8 @@ fn create_rejected_refspecs_and_remotes_refspecs(
 
     let mut rejected_refspecs: HashMapUrlRefspecs = HashMap::new();
 
-    for (url, (remote_state, is_ngit_relay)) in list_outputs {
-        let is_ngit_relay = is_ngit_relay.to_owned();
+    for (url, (remote_state, is_grasp_server)) in list_outputs {
+        let is_grasp_server = is_grasp_server.to_owned();
         let short_name = get_short_git_server_name(git_repo, url);
         let mut refspecs_for_remote = vec![];
         for refspec in refspecs {
@@ -788,7 +788,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             if ahead_of_nostr.is_empty() {
                                 // ancestor of nostr and we are force pushing anyway...
                                 refspecs_for_remote.push(refspec.clone());
-                            } else if is_ngit_relay {
+                            } else if is_grasp_server {
                                 // a grasp server can only be pushed to via nostr so can force push
                                 refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                             } else {
@@ -807,7 +807,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 )?;
                             }
                         }
-                    } else if is_ngit_relay {
+                    } else if is_grasp_server {
                         refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                     } else {
                         // remote_value oid is not present locally
@@ -842,7 +842,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                     if ahead.is_empty() {
                         // can soft push
                         refspecs_for_remote.push(refspec.clone());
-                    } else if is_ngit_relay {
+                    } else if is_grasp_server {
                         refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                     } else {
                         // cant soft push
@@ -858,7 +858,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                     ).as_str(),
                                 )?;
                     }
-                } else if is_ngit_relay {
+                } else if is_grasp_server {
                     refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                 } else {
                     // havn't fetched oid from remote

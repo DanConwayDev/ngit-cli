@@ -16,7 +16,7 @@ use ngit::{
     client::{Params, send_events},
     git::nostr_url::{CloneUrl, NostrUrlDecoded},
     repo_ref::{
-        detect_existing_ngit_relays, extract_npub, extract_pks, normalize_ngit_relay_url,
+        detect_existing_grasp_servers, extract_npub, extract_pks, normalize_grasp_server_url,
         save_repo_config_to_yaml,
     },
 };
@@ -252,20 +252,20 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.blossoms.clone()
     };
 
-    let fallback_ngit_relays =
+    let fallback_grasp_servers =
         if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.grasp-default-set", None) {
             s.split(';')
-                .filter_map(|url| normalize_ngit_relay_url(url).ok()) // Attempt to parse and filter out errors
+                .filter_map(|url| normalize_grasp_server_url(url).ok()) // Attempt to parse and filter out errors
                 .collect()
         } else {
             vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
         };
 
-    let selected_ngit_relays = if has_server_and_relay_flags {
+    let selected_grasp_servers = if has_server_and_relay_flags {
         // ignore so a script running `ngit init` can contiue without prompts
         vec![]
     } else {
-        let mut options: Vec<String> = detect_existing_ngit_relays(
+        let mut options: Vec<String> = detect_existing_grasp_servers(
             repo_ref.as_ref(),
             &args.relays,
             &args.clone_url,
@@ -274,7 +274,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         );
         let mut selections: Vec<bool> = vec![true; options.len()]; // Initialize selections based on existing options
         let empty = options.is_empty();
-        for fallback in fallback_ngit_relays {
+        for fallback in fallback_grasp_servers {
             // Check if any option contains the fallback as a substring
             if !options.iter().any(|option| option.contains(&fallback)) {
                 options.push(fallback.clone()); // Add fallback if not found
@@ -286,22 +286,25 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             "grasp server",
             options,
             selections,
-            normalize_ngit_relay_url,
+            normalize_grasp_server_url,
         )?;
         show_multi_input_prompt_success("grasp servers", &selected);
         selected
     };
 
     // ensure ngit relays are added as git server, relay and blossom entries
-    for ngit_relay in &selected_ngit_relays {
+    for grasp_server in &selected_grasp_servers {
         if args.clone_url.is_empty() {
-            let clone_url =
-                format_ngit_relay_url_as_clone_url(ngit_relay, &user_ref.public_key, &identifier)?;
+            let clone_url = format_grasp_server_url_as_clone_url(
+                grasp_server,
+                &user_ref.public_key,
+                &identifier,
+            )?;
 
-            let ngit_relay_clone_root = if clone_url.contains("https://") {
-                format!("https://{ngit_relay}")
+            let grasp_server_clone_root = if clone_url.contains("https://") {
+                format!("https://{grasp_server}")
             } else {
-                ngit_relay.to_string()
+                grasp_server.to_string()
             };
 
             // Find all positions of entries containing the relay root
@@ -309,7 +312,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, url)| {
-                    if url.contains(&ngit_relay_clone_root) {
+                    if url.contains(&grasp_server_clone_root) {
                         Some(idx)
                     } else {
                         None
@@ -332,13 +335,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             }
         }
         if args.relays.is_empty() {
-            let relay_url = format_ngit_relay_url_as_relay_url(ngit_relay)?;
+            let relay_url = format_grasp_server_url_as_relay_url(grasp_server)?;
             if !relay_defaults.contains(&relay_url) {
                 relay_defaults.push(relay_url);
             }
         }
         if args.blossoms.is_empty() {
-            let blossom = format_ngit_relay_url_as_blossom_url(ngit_relay)?;
+            let blossom = format_grasp_server_url_as_blossom_url(grasp_server)?;
             if !blossoms_defaults.contains(&blossom) {
                 blossoms_defaults.push(blossom);
             }
@@ -370,18 +373,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     }
 
     let git_server = if args.clone_url.is_empty() {
-        let ngit_relay_git_servers: Vec<String> = git_server_defaults
+        let grasp_server_git_servers: Vec<String> = git_server_defaults
             .iter()
-            .filter(|s| selected_ngit_relays.iter().any(|r| s.contains(r)))
+            .filter(|s| selected_grasp_servers.iter().any(|r| s.contains(r)))
             .cloned()
             .collect();
         let mut additional_server_options: Vec<String> = git_server_defaults
             .iter()
-            .filter(|s| ngit_relay_git_servers.iter().any(|r| s.eq(&r)))
+            .filter(|s| grasp_server_git_servers.iter().any(|r| s.eq(&r)))
             .cloned()
             .collect();
 
-        if simple_mode && !selected_ngit_relays.is_empty() {
+        if simple_mode && !selected_grasp_servers.is_empty() {
             if additional_server_options.is_empty() {
                 // additional git servers were listed
                 let selected = loop {
@@ -414,7 +417,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     break selected;
                 };
                 show_multi_input_prompt_success("git servers", &selected);
-                let mut combined = ngit_relay_git_servers;
+                let mut combined = grasp_server_git_servers;
                 combined.extend(selected);
                 combined
             } else {
@@ -444,14 +447,14 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let relays: Vec<RelayUrl> = {
         if simple_mode {
-            let formatted_selected_ngit_relays: Vec<String> = selected_ngit_relays
+            let formatted_selected_grasp_servers: Vec<String> = selected_grasp_servers
                 .iter()
-                .filter_map(|r| format_ngit_relay_url_as_relay_url(r).ok())
+                .filter_map(|r| format_grasp_server_url_as_relay_url(r).ok())
                 .collect();
             let mut options: Vec<String> = relay_defaults
                 .iter()
                 .filter(|s| {
-                    !formatted_selected_ngit_relays
+                    !formatted_selected_grasp_servers
                         .iter()
                         .any(|r| s.as_str() == r)
                 })
@@ -463,7 +466,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             // add fallback relays as options
             for relay in client.get_fallback_relays().clone() {
                 if !options.iter().any(|r| r.contains(&relay))
-                    && !formatted_selected_ngit_relays
+                    && !formatted_selected_grasp_servers
                         .iter()
                         .any(|r| relay.contains(r))
                 {
@@ -485,7 +488,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             )?;
             show_multi_input_prompt_success("additional nostr relays", &selected);
             [
-                formatted_selected_ngit_relays
+                formatted_selected_grasp_servers
                     .iter()
                     .filter_map(|r| parse_relay_url(r).ok())
                     .collect::<Vec<RelayUrl>>(),
@@ -538,7 +541,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     blossoms_defaults,
                     selections,
                     |s| {
-                        format_ngit_relay_url_as_blossom_url(s)
+                        format_grasp_server_url_as_blossom_url(s)
                             .context(format!("Invalid blossom URL format: {s}"))
                     },
                 )?;
@@ -616,7 +619,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         default_maintainers
     };
 
-    if selected_ngit_relays.is_empty() && git_server.iter().any(|s| s.contains("github.com") || s.contains("codeberg.org")) && Interactor::default().confirm(
+    if selected_grasp_servers.is_empty() && git_server.iter().any(|s| s.contains("github.com") || s.contains("codeberg.org")) && Interactor::default().confirm(
             PromptConfirmParms::default()
                 .with_prompt("you have listed github / codeberg. Are you or other maintainers planning on pushing directly to github / codeberg rather than using your shiny new nostr clone url which will do this for you?")
                 .with_default(false),
@@ -782,7 +785,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         // ignore during tests as git-remote-nostr isn't installed during ngit binary
         // tests
 
-        if selected_ngit_relays.is_empty() {
+        if selected_grasp_servers.is_empty() {
             println!("running `git push` to publish your repository data");
         } else {
             let countdown_start = 5;
@@ -940,38 +943,38 @@ where
     Ok(selected_choices)
 }
 
-fn format_ngit_relay_url_as_clone_url(
+fn format_grasp_server_url_as_clone_url(
     url: &str,
     public_key: &PublicKey,
     identifier: &str,
 ) -> Result<String> {
-    let ngit_relay_url = normalize_ngit_relay_url(url)?;
-    if ngit_relay_url.contains("http://") {
+    let grasp_server_url = normalize_grasp_server_url(url)?;
+    if grasp_server_url.contains("http://") {
         return Ok(format!(
-            "{ngit_relay_url}/{}/{identifier}.git",
+            "{grasp_server_url}/{}/{identifier}.git",
             public_key.to_bech32()?
         ));
     }
     Ok(format!(
-        "https://{ngit_relay_url}/{}/{identifier}.git",
+        "https://{grasp_server_url}/{}/{identifier}.git",
         public_key.to_bech32()?
     ))
 }
 
-fn format_ngit_relay_url_as_relay_url(url: &str) -> Result<String> {
-    let ngit_relay_url = normalize_ngit_relay_url(url)?;
-    if ngit_relay_url.contains("http://") {
-        return Ok(ngit_relay_url.replace("http://", "ws://"));
+fn format_grasp_server_url_as_relay_url(url: &str) -> Result<String> {
+    let grasp_server_url = normalize_grasp_server_url(url)?;
+    if grasp_server_url.contains("http://") {
+        return Ok(grasp_server_url.replace("http://", "ws://"));
     }
-    Ok(format!("wss://{ngit_relay_url}"))
+    Ok(format!("wss://{grasp_server_url}"))
 }
 
-fn format_ngit_relay_url_as_blossom_url(url: &str) -> Result<String> {
-    let ngit_relay_url = normalize_ngit_relay_url(url)?;
-    if ngit_relay_url.contains("http://") {
-        return Ok(ngit_relay_url);
+fn format_grasp_server_url_as_blossom_url(url: &str) -> Result<String> {
+    let grasp_server_url = normalize_grasp_server_url(url)?;
+    if grasp_server_url.contains("http://") {
+        return Ok(grasp_server_url);
     }
-    Ok(format!("https://{ngit_relay_url}"))
+    Ok(format!("https://{grasp_server_url}"))
 }
 
 fn parse_relay_url(s: &str) -> Result<RelayUrl> {

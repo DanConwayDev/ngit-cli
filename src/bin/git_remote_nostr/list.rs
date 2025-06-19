@@ -13,7 +13,7 @@ use ngit::{
     },
     git_events::event_to_cover_letter,
     login::get_curent_user,
-    repo_ref::{self, is_ngit_relay},
+    repo_ref::{self, is_grasp_server},
 };
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use repo_ref::RepoRef;
@@ -41,12 +41,12 @@ pub async fn run_list(
         git_repo,
         &repo_ref.git_server,
         &repo_ref.to_nostr_git_url(&None),
-        &repo_ref.ngit_relays(),
+        &repo_ref.grasp_servers(),
     );
 
     let mut state = if let Some(nostr_state) = nostr_state {
         for (name, value) in &nostr_state.state {
-            for (url, (remote_state, _is_ngit_relay)) in &remote_states {
+            for (url, (remote_state, _is_grasp_server)) in &remote_states {
                 let remote_name = get_short_git_server_name(git_repo, url);
                 if let Some(remote_value) = remote_state.get(name) {
                     if value.ne(remote_value) {
@@ -74,7 +74,7 @@ pub async fn run_list(
         }
         nostr_state.state
     } else {
-        let (state, _is_ngit_relay) = repo_ref
+        let (state, _is_grasp_server) = repo_ref
             .git_server
             .iter()
             .filter_map(|server| remote_states.get(server))
@@ -122,7 +122,7 @@ async fn get_open_and_draft_proposals_state(
 
     // without trusting commit_id we must apply each patch which requires the oid of
     // the parent so we much do a fetch
-    for (git_server_url, (oids_from_git_servers, is_ngit_relay)) in remote_states {
+    for (git_server_url, (oids_from_git_servers, is_grasp_server)) in remote_states {
         if fetch_from_git_server(
             git_repo,
             &oids_from_git_servers
@@ -133,7 +133,7 @@ async fn get_open_and_draft_proposals_state(
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             term,
-            *is_ngit_relay,
+            *is_grasp_server,
         )
         .is_ok()
         {
@@ -178,18 +178,18 @@ pub fn list_from_remotes(
     git_repo: &Repo,
     git_servers: &Vec<String>,
     decoded_nostr_url: &NostrUrlDecoded,
-    ngit_relays: &[String],
+    grasp_servers: &[String],
 ) -> HashMap<String, (HashMap<String, String>, bool)> {
     let mut remote_states = HashMap::new();
     let mut errors = HashMap::new();
     for url in git_servers {
-        let is_ngit_relay = is_ngit_relay(url, ngit_relays);
-        match list_from_remote(term, git_repo, url, decoded_nostr_url, is_ngit_relay) {
+        let is_grasp_server = is_grasp_server(url, grasp_servers);
+        match list_from_remote(term, git_repo, url, decoded_nostr_url, is_grasp_server) {
             Err(error) => {
                 errors.insert(url, error);
             }
             Ok(state) => {
-                remote_states.insert(url.to_string(), (state, is_ngit_relay));
+                remote_states.insert(url.to_string(), (state, is_grasp_server));
             }
         }
     }
@@ -201,11 +201,11 @@ pub fn list_from_remote(
     git_repo: &Repo,
     git_server_url: &str,
     decoded_nostr_url: &NostrUrlDecoded,
-    is_ngit_relay: bool,
+    is_grasp_server: bool,
 ) -> Result<HashMap<String, String>> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
-        get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_ngit_relay);
+        get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
 
     let mut failed_protocols = vec![];
     let mut remote_state: Option<HashMap<String, String>> = None;

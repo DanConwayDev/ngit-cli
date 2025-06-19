@@ -216,9 +216,9 @@ pub fn get_read_protocols_to_try(
     git_repo: &Repo,
     server_url: &CloneUrl,
     decoded_nostr_url: &NostrUrlDecoded,
-    is_ngit_relay: bool,
+    is_grasp_server: bool,
 ) -> Vec<ServerProtocol> {
-    if is_ngit_relay {
+    if is_grasp_server {
         if server_url.protocol() == ServerProtocol::Http {
             vec![(ServerProtocol::UnauthHttp)]
         } else {
@@ -269,9 +269,9 @@ pub fn get_write_protocols_to_try(
     git_repo: &Repo,
     server_url: &CloneUrl,
     decoded_nostr_url: &NostrUrlDecoded,
-    is_ngit_relay: bool,
+    is_grasp_server: bool,
 ) -> Vec<ServerProtocol> {
-    if is_ngit_relay {
+    if is_grasp_server {
         if server_url.protocol() == ServerProtocol::Http {
             vec![(ServerProtocol::UnauthHttp)]
         } else {

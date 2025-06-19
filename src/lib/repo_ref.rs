@@ -308,8 +308,8 @@ impl RepoRef {
         }
     }
 
-    pub fn ngit_relays(&self) -> Vec<String> {
-        detect_existing_ngit_relays(Some(self), &[], &[], &[], &self.identifier)
+    pub fn grasp_servers(&self) -> Vec<String> {
+        detect_existing_grasp_servers(Some(self), &[], &[], &[], &self.identifier)
     }
 }
 
@@ -586,7 +586,7 @@ pub fn save_repo_config_to_yaml(
     .context("failed to write maintainers to maintainers.yaml file serde_yaml")
 }
 
-pub fn detect_existing_ngit_relays(
+pub fn detect_existing_grasp_servers(
     repo_ref: Option<&RepoRef>,
     args_relays: &[String],
     args_clone_url: &[String],
@@ -626,45 +626,46 @@ pub fn detect_existing_ngit_relays(
         Vec::new()
     };
 
-    let mut existing_ngit_relays = Vec::new();
+    let mut existing_grasp_servers = Vec::new();
     for url in &clone_urls {
-        let Ok(formatted_as_ngit_relay_url) = normalize_ngit_relay_url(url) else {
+        let Ok(formatted_as_grasp_server_url) = normalize_grasp_server_url(url) else {
             continue;
         };
-        if existing_ngit_relays.contains(&formatted_as_ngit_relay_url) {
+        if existing_grasp_servers.contains(&formatted_as_grasp_server_url) {
             continue;
         }
 
-        let clone_url_is_ngit_relay_format = if let Ok(npub) = extract_npub(url) {
+        let clone_url_is_grasp_server_format = if let Ok(npub) = extract_npub(url) {
             url.contains(&format!("/{npub}/{identifier}.git"))
         } else {
             false
         };
-        if !clone_url_is_ngit_relay_format {
+        if !clone_url_is_grasp_server_format {
             continue;
         }
 
         let matches_relay = relays.iter().any(|r| {
-            normalize_ngit_relay_url(&r.to_string())
-                .is_ok_and(|r| r.eq(&formatted_as_ngit_relay_url))
+            normalize_grasp_server_url(&r.to_string())
+                .is_ok_and(|r| r.eq(&formatted_as_grasp_server_url))
         });
         if !matches_relay {
             continue;
         }
 
         let matches_blossoms = blossoms.iter().any(|r| {
-            normalize_ngit_relay_url(r.as_str()).is_ok_and(|r| r.eq(&formatted_as_ngit_relay_url))
+            normalize_grasp_server_url(r.as_str())
+                .is_ok_and(|r| r.eq(&formatted_as_grasp_server_url))
         });
         if !matches_blossoms {
             continue;
         }
 
-        existing_ngit_relays.push(formatted_as_ngit_relay_url);
+        existing_grasp_servers.push(formatted_as_grasp_server_url);
     }
-    existing_ngit_relays
+    existing_grasp_servers
 }
 
-pub fn normalize_ngit_relay_url(url: &str) -> Result<String> {
+pub fn normalize_grasp_server_url(url: &str) -> Result<String> {
     // Parse the URL and handle errors
     let mut parsed = Url::parse(url)
         .or_else(|_| Url::parse(&format!("https://{url}")))
@@ -716,10 +717,10 @@ pub fn extract_npub(s: &str) -> Result<&str> {
     }
 }
 
-pub fn is_ngit_relay(url: &str, ngit_relays: &[String]) -> bool {
-    if !ngit_relays.is_empty() {
-        if let Ok(n) = normalize_ngit_relay_url(url) {
-            return ngit_relays.contains(&n);
+pub fn is_grasp_server(url: &str, grasp_servers: &[String]) -> bool {
+    if !grasp_servers.is_empty() {
+        if let Ok(n) = normalize_grasp_server_url(url) {
+            return grasp_servers.contains(&n);
         }
     }
     false
@@ -1005,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_ngit_relay_url_all_checks() -> Result<()> {
+    fn normalize_grasp_server_url_all_checks() -> Result<()> {
         let test_cases = vec![
             ("https://sub.domain.org", "sub.domain.org"),
             ("wss://sub.domain.org", "sub.domain.org"),
@@ -1035,7 +1036,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let normalized = normalize_ngit_relay_url(input)?;
+            let normalized = normalize_grasp_server_url(input)?;
             assert_eq!(normalized, expected);
         }
         Ok(())
