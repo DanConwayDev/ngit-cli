@@ -15,11 +15,11 @@ use std::{
     fmt::{Display, Write},
     fs::create_dir_all,
     path::Path,
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use console::Style;
 use futures::{
@@ -60,6 +60,29 @@ pub struct Client {
     more_fallback_relays: Vec<String>,
     blaster_relays: Vec<String>,
     fallback_signer_relays: Vec<String>,
+    relays_not_to_retry: Arc<RwLock<HashMap<RelayUrl, String>>>,
+}
+
+impl Client {
+    /// Marks a relay as skipped for the current session with a given reason.
+    /// This method encapsulates the write lock for the relays_not_to_retry map.
+    fn skip_relay_for_session(&self, relay_url: RelayUrl, reason: String) {
+        self.relays_not_to_retry
+            .write()
+            .unwrap()
+            .insert(relay_url, reason);
+    }
+
+    /// Checks if a relay should be skipped for the current session and returns
+    /// the reason if it is. This method encapsulates the read lock for the
+    /// relays_not_to_retry map.
+    fn is_relay_skipped_for_session(&self, relay_url: &RelayUrl) -> Option<String> {
+        self.relays_not_to_retry
+            .read()
+            .unwrap()
+            .get(relay_url)
+            .cloned()
+    }
 }
 
 #[cfg_attr(test, automock)]
@@ -127,6 +150,7 @@ impl Connect for Client {
             more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
             fallback_signer_relays: opts.fallback_signer_relays,
+            relays_not_to_retry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -135,6 +159,9 @@ impl Connect for Client {
     }
 
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
+        if let Some(reason) = self.is_relay_skipped_for_session(relay_url) {
+            bail!("{reason}");
+        }
         self.client
             .add_relay(relay_url)
             .await
@@ -150,6 +177,7 @@ impl Connect for Client {
         }
 
         if !relay.is_connected() {
+            self.skip_relay_for_session(relay_url.clone(), "connection timeout".to_string());
             bail!("connection timeout");
         }
         Ok(())
@@ -244,21 +272,37 @@ impl Connect for Client {
                 } else {
                     None
                 };
+                fn update_progress_bar_with_error(
+                    relay_url: &RelayUrl,
+                    pb: Option<ProgressBar>,
+                    error: &anyhow::Error,
+                ) {
+                    if let Some(pb) = pb {
+                        pb.set_style(pb_after_style(false));
+                        pb.set_prefix(format!("{: <11}{}", "error", relay_url));
+                        pb.finish_with_message(
+                            console::style(
+                                error.to_string().replace("relay pool error:", "error:"),
+                            )
+                            .for_stderr()
+                            .red()
+                            .to_string(),
+                        );
+                    }
+                }
+                if let Some(reason) = self.is_relay_skipped_for_session(relay.url()) {
+                    update_progress_bar_with_error(relay.url(), pb, &anyhow!("{reason}"));
+                    bail!("{reason}");
+                }
                 #[allow(clippy::large_futures)]
                 match get_events_of(relay, filters, &pb).await {
                     Err(error) => {
-                        if let Some(pb) = pb {
-                            pb.set_style(pb_after_style(false));
-                            pb.set_prefix(format!("{: <11}{}", "error", relay.url()));
-                            pb.finish_with_message(
-                                console::style(
-                                    error.to_string().replace("relay pool error:", "error:"),
-                                )
-                                .for_stderr()
-                                .red()
-                                .to_string(),
-                            );
+                        // Check error for timeout/connection issues and add to skip list
+                        if error.to_string().contains("connection timeout") {
+                            // Simple check, refine as needed
+                            self.skip_relay_for_session(relay.url().clone(), error.to_string());
                         }
+                        update_progress_bar_with_error(relay.url(), pb, &error);
                         Err(error)
                     }
                     Ok(res) => {
@@ -391,25 +435,55 @@ impl Connect for Client {
                     } else {
                         None
                     };
+                    // do here
 
+                    fn update_progress_bar_with_error(
+                        relay_column_width: usize,
+                        relay_url: &RelayUrl,
+                        pb: Option<ProgressBar>,
+                        error: &anyhow::Error,
+                    ) {
+                        if let Some(pb) = pb {
+                            pb.set_style(pb_after_style(false));
+                            pb.set_prefix(
+                                Style::new()
+                                    .color256(247)
+                                    .apply_to(format!("{: <relay_column_width$}", &relay_url))
+                                    .to_string(),
+                            );
+                            pb.finish_with_message(
+                                console::style(
+                                    error.to_string().replace("relay pool error:", "error:"),
+                                )
+                                .for_stderr()
+                                .red()
+                                .to_string(),
+                            );
+                        }
+                    }
+                    if let Some(reason) = self.is_relay_skipped_for_session(&relay_url) {
+                        update_progress_bar_with_error(
+                            relay_column_width,
+                            &relay_url,
+                            pb,
+                            &anyhow!("{reason}"),
+                        );
+                        bail!("{reason}");
+                    }
                     #[allow(clippy::large_futures)]
                     match self.fetch_all_from_relay(git_repo_path, request, &pb).await {
                         Err(error) => {
-                            if let Some(pb) = pb {
-                                pb.set_style(pb_after_style(false));
-                                pb.set_prefix(
-                                    dim.apply_to(format!("{: <relay_column_width$}", &relay_url))
-                                        .to_string(),
-                                );
-                                pb.finish_with_message(
-                                    console::style(
-                                        error.to_string().replace("relay pool error:", "error:"),
-                                    )
-                                    .for_stderr()
-                                    .red()
-                                    .to_string(),
-                                );
+                            // Check error for timeout/connection issues and add to skip list
+                            if error.to_string().contains("connection timeout") {
+                                // Simple check, refine as needed
+                                self.skip_relay_for_session(relay_url.clone(), error.to_string());
                             }
+                            update_progress_bar_with_error(
+                                relay_column_width,
+                                &relay_url,
+                                pb,
+                                &error,
+                            );
                             Err(error)
                         }
                         Ok(res) => Ok(res),
