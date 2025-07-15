@@ -16,7 +16,7 @@ use client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache};
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
     client::{self, Params},
-    git,
+    git::{self, utils::set_git_timeout},
     login::existing::load_existing_login,
 };
 use nostr::nips::nip19::Nip19Coordinate;
@@ -61,6 +61,8 @@ async fn main() -> Result<()> {
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
 
     repo_ref.set_nostr_git_url(decoded_nostr_url.clone());
+
+    let _ = set_git_timeout();
 
     let stdin = io::stdin();
     let mut line = String::new();
