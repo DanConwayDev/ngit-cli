@@ -23,12 +23,12 @@ directories = "6.0.0"
 futures = "0.3.31"
 git2 = "0.20.2"
 indicatif = "0.18.0"
-nostr = { version = "0.41.0", features = ["nip05", "nip49"] }
-nostr-connect = "0.41.0"
-nostr-database = "0.41.0"
-nostr-lmdb = "0.41.0"
-nostr-relay-pool = "0.41.0"
-nostr-sdk = "0.41.0"
+nostr = { version = "0.42.2", features = ["nip05", "nip49"] }
+nostr-connect = "0.42.0"
+nostr-database = "0.42.0"
+nostr-lmdb = "0.42.0"
+nostr-relay-pool = "0.42.0"
+nostr-sdk = "0.42.0"
 passwords = "3.1.16"
 qrcode = { version = "0.14.1", default-features = false }
 scrypt = "0.11.0"
