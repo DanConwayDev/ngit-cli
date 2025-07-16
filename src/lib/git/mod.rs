@@ -888,7 +888,7 @@ pub fn save_git_config_item(git_repo: &Option<&Repo>, item: &str, value: &str) -
         git2::Config::open_default()?
             .open_global()?
             .set_str(item, value)
-            .context(format!("failed to set global git config item {}", item))
+            .context(format!("failed to set global git config item {item}"))
     }
 }
 
@@ -901,10 +901,7 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
         git2::Config::open_default()?
             .open_global()?
             .remove(item)
-            .context(format!(
-                "failed to remove existing git config item {}",
-                item
-            ))?;
+            .context(format!("failed to remove existing git config item {item}"))?;
         Ok(true)
     }
 }
@@ -1271,7 +1268,7 @@ mod tests {
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.9.0\n\
+                libgit2 1.9.1\n\
                 \n\
                 ",
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &None)?,
@@ -1307,7 +1304,7 @@ mod tests {
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.9.0\n\
+                libgit2 1.9.1\n\
                 \n\
                 ",
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &Some((3, 5)))?,
@@ -1493,10 +1490,10 @@ mod tests {
                     &oid_to_sha1(&feature_oid),
                 )?;
                 assert_eq!(ahead, vec![]);
-                assert_eq!(behind, vec![
-                    oid_to_sha1(&behind_2_oid),
-                    oid_to_sha1(&behind_1_oid),
-                ],);
+                assert_eq!(
+                    behind,
+                    vec![oid_to_sha1(&behind_2_oid), oid_to_sha1(&behind_1_oid),],
+                );
                 Ok(())
             }
 
@@ -1518,10 +1515,10 @@ mod tests {
                     &oid_to_sha1(&main_oid),
                     &oid_to_sha1(&ahead_2_oid),
                 )?;
-                assert_eq!(ahead, vec![
-                    oid_to_sha1(&ahead_2_oid),
-                    oid_to_sha1(&ahead_1_oid),
-                ],);
+                assert_eq!(
+                    ahead,
+                    vec![oid_to_sha1(&ahead_2_oid), oid_to_sha1(&ahead_1_oid),],
+                );
                 assert_eq!(behind, vec![]);
                 Ok(())
             }
@@ -1550,14 +1547,14 @@ mod tests {
                     &oid_to_sha1(&behind_2_oid),
                     &oid_to_sha1(&ahead_2_oid),
                 )?;
-                assert_eq!(ahead, vec![
-                    oid_to_sha1(&ahead_2_oid),
-                    oid_to_sha1(&ahead_1_oid)
-                ],);
-                assert_eq!(behind, vec![
-                    oid_to_sha1(&behind_2_oid),
-                    oid_to_sha1(&behind_1_oid)
-                ],);
+                assert_eq!(
+                    ahead,
+                    vec![oid_to_sha1(&ahead_2_oid), oid_to_sha1(&ahead_1_oid)],
+                );
+                assert_eq!(
+                    behind,
+                    vec![oid_to_sha1(&behind_2_oid), oid_to_sha1(&behind_1_oid)],
+                );
                 Ok(())
             }
         }
@@ -2212,9 +2209,10 @@ mod tests {
                 test_repo.populate_with_test_branch()?;
                 test_repo.checkout("main")?;
 
-                assert_eq!(git_repo.parse_starting_commits("HEAD~1")?, vec![
-                    str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?
-                ],);
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~1")?,
+                    vec![str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?],
+                );
                 Ok(())
             }
 
@@ -2224,9 +2222,10 @@ mod tests {
                 let git_repo = Repo::from_path(&test_repo.dir)?;
                 test_repo.populate_with_test_branch()?;
 
-                assert_eq!(git_repo.parse_starting_commits("HEAD~1")?, vec![
-                    str_to_sha1("82ff2bcc9aa94d1bd8faee723d4c8cc190d6061c")?
-                ],);
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~1")?,
+                    vec![str_to_sha1("82ff2bcc9aa94d1bd8faee723d4c8cc190d6061c")?],
+                );
                 Ok(())
             }
         }
@@ -2240,10 +2239,13 @@ mod tests {
                 test_repo.populate_with_test_branch()?;
                 test_repo.checkout("main")?;
 
-                assert_eq!(git_repo.parse_starting_commits("HEAD~2")?, vec![
-                    str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?,
-                    str_to_sha1("af474d8d271490e5c635aad337abdc050034b16a")?,
-                ],);
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~2")?,
+                    vec![
+                        str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?,
+                        str_to_sha1("af474d8d271490e5c635aad337abdc050034b16a")?,
+                    ],
+                );
                 Ok(())
             }
         }
@@ -2256,11 +2258,14 @@ mod tests {
                 let git_repo = Repo::from_path(&test_repo.dir)?;
                 test_repo.populate_with_test_branch()?;
 
-                assert_eq!(git_repo.parse_starting_commits("HEAD~3")?, vec![
-                    str_to_sha1("82ff2bcc9aa94d1bd8faee723d4c8cc190d6061c")?,
-                    str_to_sha1("a23e6b05aaeb7d1471b4a838b51f337d5644eeb0")?,
-                    str_to_sha1("7ab82116068982671a8111f27dc10599172334b2")?,
-                ],);
+                assert_eq!(
+                    git_repo.parse_starting_commits("HEAD~3")?,
+                    vec![
+                        str_to_sha1("82ff2bcc9aa94d1bd8faee723d4c8cc190d6061c")?,
+                        str_to_sha1("a23e6b05aaeb7d1471b4a838b51f337d5644eeb0")?,
+                        str_to_sha1("7ab82116068982671a8111f27dc10599172334b2")?,
+                    ],
+                );
                 Ok(())
             }
         }
@@ -2274,11 +2279,14 @@ mod tests {
                 test_repo.populate_with_test_branch()?;
                 test_repo.checkout("main")?;
 
-                assert_eq!(git_repo.parse_starting_commits("af474d8..a23e6b0")?, vec![
-                    str_to_sha1("a23e6b05aaeb7d1471b4a838b51f337d5644eeb0")?,
-                    str_to_sha1("7ab82116068982671a8111f27dc10599172334b2")?,
-                    str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?,
-                ],);
+                assert_eq!(
+                    git_repo.parse_starting_commits("af474d8..a23e6b0")?,
+                    vec![
+                        str_to_sha1("a23e6b05aaeb7d1471b4a838b51f337d5644eeb0")?,
+                        str_to_sha1("7ab82116068982671a8111f27dc10599172334b2")?,
+                        str_to_sha1("431b84edc0d2fa118d63faa3c2db9c73d630a5ae")?,
+                    ],
+                );
                 Ok(())
             }
         }

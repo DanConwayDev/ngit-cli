@@ -49,11 +49,14 @@ pub async fn launch() -> Result<()> {
     }
 
     let statuses: Vec<nostr::Event> = {
-        let mut statuses = get_events_from_local_cache(git_repo_path, vec![
-            nostr::Filter::default()
-                .kinds(status_kinds().clone())
-                .events(proposals_and_revisions.iter().map(|e| e.id)),
-        ])
+        let mut statuses = get_events_from_local_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .kinds(status_kinds().clone())
+                    .events(proposals_and_revisions.iter().map(|e| e.id)),
+            ],
+        )
         .await?;
         statuses.sort_by_key(|e| e.created_at);
         statuses.reverse();

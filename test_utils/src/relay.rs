@@ -161,9 +161,11 @@ impl<'a> Relay<'a> {
                         if let Some(listner) = self.req_listener {
                             listner(self, client_id, subscription_id, vec![filter.clone()])?;
                         } else {
-                            self.respond_standard_req(client_id, &subscription_id, &[
-                                filter.clone()
-                            ])?;
+                            self.respond_standard_req(
+                                client_id,
+                                &subscription_id,
+                                &[filter.clone()],
+                            )?;
                             // self.respond_eose(client_id, subscription_id)?;
                         }
                         // respond with events
@@ -186,7 +188,7 @@ impl<'a> Relay<'a> {
 
 pub fn shutdown_relay(port: u64) -> Result<()> {
     let mut counter = 0;
-    while let Ok((mut socket, _)) = tungstenite::connect(format!("ws://localhost:{}", port)) {
+    while let Ok((mut socket, _)) = tungstenite::connect(format!("ws://localhost:{port}")) {
         counter += 1;
         if counter == 1 {
             socket.write(tungstenite::Message::text("shut me down"))?;

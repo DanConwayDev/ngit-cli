@@ -56,9 +56,10 @@ impl RepoState {
         add_head(&mut state);
         let mut tags = vec![Tag::identifier(identifier.clone())];
         for (name, value) in &state {
-            tags.push(Tag::custom(nostr_sdk::TagKind::Custom(name.into()), vec![
-                value.clone(),
-            ]));
+            tags.push(Tag::custom(
+                nostr_sdk::TagKind::Custom(name.into()),
+                vec![value.clone()],
+            ));
         }
         let event = sign_event(
             EventBuilder::new(STATE_KIND, "").tags(tags),

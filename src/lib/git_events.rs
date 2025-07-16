@@ -134,14 +134,15 @@ pub async fn generate_patch_event(
                     // code that makes it into the main branch, assuming
                     // the commit id is correct
                     Tag::from_standardized(TagStandard::Reference(commit.to_string())),
-                    Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("alt")), vec![
-                        format!(
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                        vec![format!(
                             "git patch: {}",
                             git_repo
                                 .get_commit_message_summary(commit)
                                 .unwrap_or_default()
-                        ),
-                    ]),
+                        )],
+                    ),
                 ],
                 if let Some(thread_event_id) = thread_event_id {
                     vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
@@ -205,9 +206,10 @@ pub async fn generate_patch_event(
                     .collect(),
                 vec![
                     // a fallback is now in place to extract this from the patch
-                    Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("commit")), vec![
-                        commit.to_string(),
-                    ]),
+                    Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
+                        vec![commit.to_string()],
+                    ),
                     // this is required as patches cannot be relied upon to include the 'base
                     // commit'
                     Tag::custom(

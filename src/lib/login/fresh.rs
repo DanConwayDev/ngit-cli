@@ -278,7 +278,7 @@ pub async fn get_fresh_nip46_signer(
                 let input = Interactor::default()
                     .input(
                         PromptInputParms::default().with_prompt(if let Some(error) = error {
-                            format!("error: {}. try again with NIP-05 address", error)
+                            format!("error: {error}. try again with NIP-05 address")
                         } else {
                             "NIP-05 address".to_string()
                         }),
@@ -296,7 +296,7 @@ pub async fn get_fresh_nip46_signer(
                 let input = Interactor::default()
                     .input(
                         PromptInputParms::default().with_prompt(if let Some(error) = error {
-                            format!("error: {}. try again with bunker url", error)
+                            format!("error: {error}. try again with bunker url")
                         } else {
                             "bunker url".to_string()
                         }),
@@ -505,7 +505,7 @@ async fn save_to_git_config(
     if let Err(error) =
         silently_save_to_git_config(git_repo, signer_info, global).context(err_msg.clone())
     {
-        eprintln!("Error: {:?}", error);
+        eprintln!("Error: {error:?}");
         match signer_info {
             SignerInfo::Nsec {
                 nsec,
@@ -577,7 +577,7 @@ async fn save_to_git_config(
                                 ),
                             )
                         {
-                            eprintln!("Error: {:?}", error);
+                            eprintln!("Error: {error:?}");
                             eprintln!("login details were not saved");
                         } else {
                             eprintln!(

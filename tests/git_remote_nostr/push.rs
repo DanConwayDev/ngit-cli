@@ -969,19 +969,17 @@ async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_is
         std::fs::write(git_repo.dir.join("new.md"), "some content")?;
         git_repo.stage_and_commit("new.md")?;
 
-        CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, [
-            "merge",
-            &branch_name,
-            "-m",
-            "proposal merge commit message",
-        ])
+        CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["merge", &branch_name, "-m", "proposal merge commit message"],
+        )
         .expect_end_eventually_and_print()?;
 
         let oid = git_repo.get_tip_of_local_branch("main")?;
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
         p.expect("list: connecting...\r\n")?;
         p.expect_eventually("merge commit ")?;
         // shorthand merge commit id appears in this gap
@@ -1125,19 +1123,17 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
         git_repo.checkout_remote_branch(&branch_name)?;
         git_repo.checkout("refs/heads/main")?;
 
-        CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, [
-            "merge",
-            &branch_name,
-            "-m",
-            "proposal merge commit message",
-        ])
+        CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["merge", &branch_name, "-m", "proposal merge commit message"],
+        )
         .expect_end_eventually_and_print()?;
 
         let oid = git_repo.get_tip_of_local_branch("main")?;
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
         p.expect("list: connecting...\r\n")?;
         p.expect_eventually(format!(
             "fast-forward merge: create nostr proposal status event for {branch_name}\r\n"
@@ -1323,7 +1319,7 @@ async fn proposal_commits_applied_and_pushed_to_main_leads_to_status_event_issue
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
         p.expect("list: connecting...\r\n")?;
         p.expect_eventually(format!(
             "applied commits from proposal: create nostr proposal status event for {branch_name}\r\n" ))?;
@@ -1484,7 +1480,7 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
         p.expect("list: connecting...\r\n\r\r\r")?;
         p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
@@ -1639,7 +1635,7 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
         let mut p =
             CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push", "--force"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
         p.expect("list: connecting...\r\n")?;
         p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
@@ -1784,14 +1780,12 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
         std::fs::write(git_repo.dir.join("new2.md"), "some content")?;
         git_repo.stage_and_commit("new2.md")?;
 
-        let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, [
-            "push",
-            "-u",
-            "origin",
-            branch_name,
-        ]);
+        let mut p = CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["push", "-u", "origin", branch_name],
+        );
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
         p.expect("list: connecting...\r\n\r\r\r")?;
         p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;

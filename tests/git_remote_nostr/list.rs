@@ -41,7 +41,7 @@ mod without_state_announcement {
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = cli_tester_after_fetch(&git_repo)?;
             p.send_line("list")?;
-            p.expect(format!("fetching {} ref list over filesystem...\r\n", source_path).as_str())?;
+            p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
             p.expect("list: connecting...\r\n\r\r\r")?;
             // println!("{}", p.expect_eventually("\r\n\r\n")?);
             let res = p.expect_eventually("\r\n\r\n")?;
@@ -59,8 +59,8 @@ mod without_state_announcement {
                     .collect::<HashSet<String>>(),
                 HashSet::from([
                     "@refs/heads/main HEAD".to_string(),
-                    format!("{} refs/heads/main", main_commit_id),
-                    format!("{} refs/heads/vnext", vnext_commit_id),
+                    format!("{main_commit_id} refs/heads/main"),
+                    format!("{vnext_commit_id} refs/heads/vnext"),
                 ]),
             );
             Ok(())
@@ -120,7 +120,7 @@ mod with_state_announcement {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
                 p.expect(
-                    format!("fetching {} ref list over filesystem...\r\n", source_path).as_str(),
+                    format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
                 )?;
                 p.expect("list: connecting...\r\n\r\r\r")?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
@@ -135,8 +135,8 @@ mod with_state_announcement {
                         .collect::<HashSet<String>>(),
                     HashSet::from([
                         "@refs/heads/main HEAD".to_string(),
-                        format!("{} refs/heads/main", main_commit_id),
-                        format!("{} refs/heads/example-branch", example_commit_id),
+                        format!("{main_commit_id} refs/heads/main"),
+                        format!("{example_commit_id} refs/heads/example-branch"),
                     ]),
                 );
 
@@ -204,13 +204,12 @@ mod with_state_announcement {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
                 p.expect(
-                    format!("fetching {} ref list over filesystem...\r\n", source_path).as_str(),
+                    format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
                 )?;
                 p.expect("list: connecting...\r\n\r\r\r")?;
                 p.expect(
                     format!(
-                        "WARNING: {} refs/heads/main is out of sync with nostr \r\n",
-                        source_path
+                        "WARNING: {source_path} refs/heads/main is out of sync with nostr \r\n"
                     )
                     .as_str(),
                 )?;
@@ -231,8 +230,8 @@ mod with_state_announcement {
                         .collect::<HashSet<String>>(),
                     HashSet::from([
                         "@refs/heads/main HEAD".to_string(),
-                        format!("{} refs/heads/main", main_original_commit_id),
-                        format!("{} refs/heads/example-branch", example_commit_id),
+                        format!("{main_original_commit_id} refs/heads/main"),
+                        format!("{example_commit_id} refs/heads/example-branch"),
                     ]),
                 );
                 Ok(())
@@ -292,7 +291,7 @@ mod with_state_announcement {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
                 p.expect(
-                    format!("fetching {} ref list over filesystem...\r\n", source_path).as_str(),
+                    format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
                 )?;
                 p.expect("list: connecting...\r\n\r\r\r")?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);

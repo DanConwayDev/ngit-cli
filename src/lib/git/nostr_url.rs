@@ -71,13 +71,13 @@ impl fmt::Display for NostrUrlDecoded {
         }
         write!(f, "nostr://")?;
         if let Some(user) = &self.user {
-            write!(f, "{}@", user)?;
+            write!(f, "{user}@")?;
         }
         if let Some(protocol) = &self.protocol {
-            write!(f, "{}/", protocol)?;
+            write!(f, "{protocol}/")?;
         }
         if let Some(nip05) = &self.nip05 {
-            write!(f, "{}/", nip05)?;
+            write!(f, "{nip05}/")?;
         } else {
             write!(f, "{}/", self.coordinate.public_key.to_bech32().unwrap())?;
         }
@@ -454,7 +454,7 @@ impl CloneUrl {
                 format!("{}@", user.as_deref().unwrap_or("git")).as_str(),
             );
             if url.port().is_some() {
-                formatted_url = format!("ssh://{}", formatted_url);
+                formatted_url = format!("ssh://{formatted_url}");
             } else {
                 formatted_url = replace_first_occurrence(&formatted_url, '/', ':');
             }
