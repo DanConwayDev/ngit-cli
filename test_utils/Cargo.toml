@@ -4,21 +4,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.75"
-assert_cmd = "2.0.12"
+anyhow = "1.0.98"
+assert_cmd = "2.0.17"
 dialoguer = "0.11.0"
 directories = "6.0.0"
-futures = "0.3.28"
+futures = "0.3.31"
 git2 = "0.20.2"
 nostr = "0.41.0"
 nostr-database = "0.41.0"
 nostr-lmdb = "0.41.0"
 nostr-sdk = "0.41.0"
-once_cell = "1.18.0"
+once_cell = "1.21.3"
 rand = "0.8"
 rexpect = { git = "https://github.com/rust-cli/rexpect.git", rev = "9eb61dd" }
 simple-websockets = { git = "https://github.com/DanConwayDev/simple-websockets", branch= "auto-release-port" }
-strip-ansi-escapes = "0.2.0"
-tokio = { version = "1.40.0", features = ["full"] }
+strip-ansi-escapes = "0.2.1"
+tokio = { version = "1.46.1", features = ["full"] }
 tungstenite = "0.20.1"
 sha2 = "0.10"
