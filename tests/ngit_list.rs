@@ -217,8 +217,7 @@ mod when_main_branch_is_uptodate {
                             ])?;
                             c.succeeds_with(0, true, None)?;
                             p.expect(format!(
-                                "checked out proposal as 'pr/{}(",
-                                FEATURE_BRANCH_NAME_1,
+                                "checked out proposal as 'pr/{FEATURE_BRANCH_NAME_1}(",
                             ))?;
                             p.expect_end_eventually_with(")' branch\r\n")?;
 
@@ -334,8 +333,7 @@ mod when_main_branch_is_uptodate {
                             ])?;
                             c.succeeds_with(0, true, Some(0))?;
                             p.expect(format!(
-                                "checked out proposal as 'pr/{}(",
-                                FEATURE_BRANCH_NAME_3,
+                                "checked out proposal as 'pr/{FEATURE_BRANCH_NAME_3}(",
                             ))?;
                             p.expect_end_eventually_with(")' branch\r\n")?;
 
@@ -530,8 +528,7 @@ mod when_main_branch_is_uptodate {
                             ])?;
                             c.succeeds_with(0, true, Some(0))?;
                             p.expect(format!(
-                                "checked out proposal as 'pr/{}(",
-                                FEATURE_BRANCH_NAME_4,
+                                "checked out proposal as 'pr/{FEATURE_BRANCH_NAME_4}(",
                             ))?;
                             p.expect_end_eventually_with(")' branch\r\n")?;
 
@@ -756,8 +753,7 @@ mod when_main_branch_is_uptodate {
                             ])?;
                             c.succeeds_with(0, true, Some(0))?;
                             p.expect(format!(
-                                "checked out proposal as 'pr/{}(",
-                                FEATURE_BRANCH_NAME_1,
+                                "checked out proposal as 'pr/{FEATURE_BRANCH_NAME_1}(",
                             ))?;
                             p.expect_end_eventually_with(")' branch\r\n")?;
 

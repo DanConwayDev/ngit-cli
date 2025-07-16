@@ -167,7 +167,7 @@ pub fn generate_repo_ref_event_with_git_server_with_keys(
         .tags([
             Tag::identifier(
                 // root_commit.to_string()
-                format!("{}-consider-it-random", root_commit),
+                format!("{root_commit}-consider-it-random"),
             ),
             Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
             Tag::from_standardized(TagStandard::Name("example name".into())),
@@ -1235,10 +1235,10 @@ pub fn create_and_populate_branch(
     test_repo.checkout("main")?;
     test_repo.create_branch(branch_name)?;
     test_repo.checkout(branch_name)?;
-    let file_name = format!("{}3.md", prefix);
+    let file_name = format!("{prefix}3.md");
     std::fs::write(test_repo.dir.join(&file_name), "some content")?;
     test_repo.stage_and_commit_custom_signature(
-        &format!("add {}3.md", prefix),
+        &format!("add {prefix}3.md"),
         Some(
             &Signature::new(
                 "Joe Bloggs",
@@ -1250,10 +1250,10 @@ pub fn create_and_populate_branch(
         commiter,
     )?;
     if !only_one_commit {
-        let file_name = format!("{}4.md", prefix);
+        let file_name = format!("{prefix}4.md");
         std::fs::write(test_repo.dir.join(&file_name), "some content")?;
         test_repo.stage_and_commit_custom_signature(
-            &format!("add {}4.md", prefix),
+            &format!("add {prefix}4.md"),
             Some(
                 &Signature::new(
                     "Joe Bloggs",

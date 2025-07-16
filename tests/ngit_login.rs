@@ -110,9 +110,7 @@ mod with_relays {
 
                         p.expect("failed to extract account name from account metadata...\r\n")?;
 
-                        p.expect_end_with(
-                            format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str(),
-                        )?;
+                        p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())?;
                         for p in [51, 52] {
                             shutdown_relay(8000 + p)?;
                         }
@@ -572,7 +570,7 @@ mod with_offline_flag {
 
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
-            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+            p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())
         }
 
         #[test]
@@ -587,7 +585,7 @@ mod with_offline_flag {
 
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
-            p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+            p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())
         }
 
         mod when_invalid_nsec {
@@ -621,7 +619,7 @@ mod with_offline_flag {
 
                 p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
-                p.expect_end_with(format!("logged in as {}\r\n", TEST_KEY_1_NPUB).as_str())
+                p.expect_end_with(format!("logged in as {TEST_KEY_1_NPUB}\r\n").as_str())
             }
         }
     }
@@ -643,7 +641,7 @@ mod with_offline_flag {
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
             p.expect_end_with(
-                format!("logged in as {} via cli arguments\r\n", TEST_KEY_1_NPUB).as_str(),
+                format!("logged in as {TEST_KEY_1_NPUB} via cli arguments\r\n").as_str(),
             )
         }
 
@@ -682,7 +680,7 @@ mod with_offline_flag {
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
             p.expect_end_with(
-                format!("logged in as {} via cli arguments\r\n", TEST_KEY_1_NPUB).as_str(),
+                format!("logged in as {TEST_KEY_1_NPUB} via cli arguments\r\n").as_str(),
             )
         }
 
@@ -701,7 +699,7 @@ mod with_offline_flag {
             p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
             p.expect_end_with(
-                format!("logged in as {} via cli arguments\r\n", TEST_KEY_1_NPUB).as_str(),
+                format!("logged in as {TEST_KEY_1_NPUB} via cli arguments\r\n").as_str(),
             )
         }
 
@@ -724,7 +722,7 @@ mod with_offline_flag {
                 p.expect("saved login details to local git config. you are only logged in to this local repository.\r\n")?;
 
                 p.expect_end_with(
-                    format!("logged in as {} via cli arguments\r\n", TEST_KEY_2_NPUB).as_str(),
+                    format!("logged in as {TEST_KEY_2_NPUB} via cli arguments\r\n").as_str(),
                 )
             }
         }

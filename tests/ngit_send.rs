@@ -1361,8 +1361,7 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
         p.expect("updates: 1 new maintainer, 1 announcement update, 1 proposal\r\n")?;
         let proposal_root_bech32 = get_pretend_proposal_root_event().id.to_bech32().unwrap();
         p.expect(format!(
-            "creating proposal revision for: {}\r\n",
-            proposal_root_bech32,
+            "creating proposal revision for: {proposal_root_bech32}\r\n",
         ))?;
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;

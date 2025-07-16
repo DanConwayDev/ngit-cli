@@ -888,7 +888,7 @@ pub fn save_git_config_item(git_repo: &Option<&Repo>, item: &str, value: &str) -
         git2::Config::open_default()?
             .open_global()?
             .set_str(item, value)
-            .context(format!("failed to set global git config item {}", item))
+            .context(format!("failed to set global git config item {item}"))
     }
 }
 
@@ -901,10 +901,7 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
         git2::Config::open_default()?
             .open_global()?
             .remove(item)
-            .context(format!(
-                "failed to remove existing git config item {}",
-                item
-            ))?;
+            .context(format!("failed to remove existing git config item {item}"))?;
         Ok(true)
     }
 }

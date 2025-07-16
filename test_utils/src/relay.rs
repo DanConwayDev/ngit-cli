@@ -186,7 +186,7 @@ impl<'a> Relay<'a> {
 
 pub fn shutdown_relay(port: u64) -> Result<()> {
     let mut counter = 0;
-    while let Ok((mut socket, _)) = tungstenite::connect(format!("ws://localhost:{}", port)) {
+    while let Ok((mut socket, _)) = tungstenite::connect(format!("ws://localhost:{port}")) {
         counter += 1;
         if counter == 1 {
             socket.write(tungstenite::Message::text("shut me down"))?;

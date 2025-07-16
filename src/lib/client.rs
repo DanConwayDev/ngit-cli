@@ -794,8 +794,7 @@ pub async fn sign_event(
     if signer.backend() == SignerBackend::NostrConnect {
         let term = console::Term::stderr();
         term.write_line(&format!(
-            "signing event ({}) with remote signer...",
-            description
+            "signing event ({description}) with remote signer..."
         ))?;
         let event = signer
             .sign_event(event_builder.build(signer.get_public_key().await?))
