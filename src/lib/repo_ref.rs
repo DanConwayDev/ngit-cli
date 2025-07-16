@@ -578,11 +578,14 @@ pub fn save_repo_config_to_yaml(
                 .context("failed to convert public key into npub")?,
         );
     }
-    serde_yaml::to_writer(file, &RepoConfigYaml {
-        identifier: Some(identifier),
-        maintainers: maintainers_npubs,
-        relays,
-    })
+    serde_yaml::to_writer(
+        file,
+        &RepoConfigYaml {
+            identifier: Some(identifier),
+            maintainers: maintainers_npubs,
+            relays,
+        },
+    )
     .context("failed to write maintainers to maintainers.yaml file serde_yaml")
 }
 

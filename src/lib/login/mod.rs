@@ -79,11 +79,15 @@ fn print_logged_in_as(
             "failed to find your relay list. consider using another nostr client to create one to enhance your nostr experience."
         );
     }
-    eprintln!("logged in as {}{}", user_ref.metadata.name, match source {
-        SignerInfoSource::CommandLineArguments => " via cli arguments",
-        SignerInfoSource::GitLocal => " to local repository",
-        SignerInfoSource::GitGlobal => "",
-    });
+    eprintln!(
+        "logged in as {}{}",
+        user_ref.metadata.name,
+        match source {
+            SignerInfoSource::CommandLineArguments => " via cli arguments",
+            SignerInfoSource::GitLocal => " to local repository",
+            SignerInfoSource::GitGlobal => "",
+        }
+    );
     Ok(())
 }
 

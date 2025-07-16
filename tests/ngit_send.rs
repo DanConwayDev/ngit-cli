@@ -181,10 +181,14 @@ async fn prep_run_create_proposal(
             8051,
             None,
             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                relay.respond_events(client_id, &subscription_id, &vec![
-                    generate_test_key_1_metadata_event("fred"),
-                    generate_test_key_1_relay_list_event(),
-                ])?;
+                relay.respond_events(
+                    client_id,
+                    &subscription_id,
+                    &vec![
+                        generate_test_key_1_metadata_event("fred"),
+                        generate_test_key_1_relay_list_event(),
+                    ],
+                )?;
                 Ok(())
             }),
         ),
@@ -194,9 +198,11 @@ async fn prep_run_create_proposal(
             8055,
             None,
             Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                relay.respond_events(client_id, &subscription_id, &vec![
-                    generate_repo_ref_event(),
-                ])?;
+                relay.respond_events(
+                    client_id,
+                    &subscription_id,
+                    &vec![generate_repo_ref_event()],
+                )?;
                 Ok(())
             }),
         ),
@@ -762,10 +768,14 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     8051,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_test_key_1_metadata_event("fred"),
-                            generate_test_key_1_relay_list_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -775,9 +785,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     8055,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_repo_ref_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![generate_repo_ref_event()],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -836,10 +848,14 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         8051,
                         None,
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(client_id, &subscription_id, &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ])?;
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event(),
+                                ],
+                            )?;
                             Ok(())
                         }),
                     ),
@@ -849,9 +865,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         8055,
                         None,
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(client_id, &subscription_id, &vec![
-                                generate_repo_ref_event(),
-                            ])?;
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_repo_ref_event()],
+                            )?;
                             Ok(())
                         }),
                     ),
@@ -904,10 +922,14 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         8051,
                         None,
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(client_id, &subscription_id, &vec![
-                                generate_test_key_1_metadata_event("fred"),
-                                generate_test_key_1_relay_list_event(),
-                            ])?;
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event(),
+                                ],
+                            )?;
                             Ok(())
                         }),
                     ),
@@ -917,9 +939,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         8055,
                         None,
                         Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                            relay.respond_events(client_id, &subscription_id, &vec![
-                                generate_repo_ref_event(),
-                            ])?;
+                            relay.respond_events(
+                                client_id,
+                                &subscription_id,
+                                &vec![generate_repo_ref_event()],
+                            )?;
                             Ok(())
                         }),
                     ),
@@ -992,10 +1016,14 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
                     8051,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_test_key_1_metadata_event("fred"),
-                            generate_test_key_1_relay_list_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -1005,9 +1033,11 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
                     8055,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_repo_ref_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![generate_repo_ref_event()],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -1174,13 +1204,16 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
     fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
         p.expect("fetching updates...\r\n")?;
         p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
-        let mut selector = p.expect_multi_select("select commits for proposal", vec![
-            "(Joe Bloggs) add t4.md [feature] fe973a8".to_string(),
-            "(Joe Bloggs) add t3.md 232efb3".to_string(),
-            "(Joe Bloggs) add t2.md [main] 431b84e".to_string(),
-            "(Joe Bloggs) add t1.md af474d8".to_string(),
-            "(Joe Bloggs) Initial commit 9ee507f".to_string(),
-        ])?;
+        let mut selector = p.expect_multi_select(
+            "select commits for proposal",
+            vec![
+                "(Joe Bloggs) add t4.md [feature] fe973a8".to_string(),
+                "(Joe Bloggs) add t3.md 232efb3".to_string(),
+                "(Joe Bloggs) add t2.md [main] 431b84e".to_string(),
+                "(Joe Bloggs) add t1.md af474d8".to_string(),
+                "(Joe Bloggs) Initial commit 9ee507f".to_string(),
+            ],
+        )?;
         selector.succeeds_with(vec![0, 1], false, vec![0, 1])?;
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;
@@ -1205,10 +1238,14 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                 8051,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_test_key_1_metadata_event("fred"),
-                        generate_test_key_1_relay_list_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
+                    )?;
                     Ok(())
                 }),
             ),
@@ -1218,9 +1255,11 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                 8055,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_repo_ref_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event()],
+                    )?;
                     Ok(())
                 }),
             ),
@@ -1262,10 +1301,14 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                     8051,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_test_key_1_metadata_event("fred"),
-                            generate_test_key_1_relay_list_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -1275,9 +1318,11 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                     8055,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_repo_ref_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![generate_repo_ref_event()],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -1393,11 +1438,15 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                 8051,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_test_key_1_metadata_event("fred"),
-                        generate_test_key_1_relay_list_event(),
-                        get_pretend_proposal_root_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                            get_pretend_proposal_root_event(),
+                        ],
+                    )?;
                     Ok(())
                 }),
             ),
@@ -1407,10 +1456,11 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                 8055,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_repo_ref_event(),
-                        get_pretend_proposal_root_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event(), get_pretend_proposal_root_event()],
+                    )?;
                     Ok(())
                 }),
             ),
@@ -1451,11 +1501,15 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                     8051,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_test_key_1_metadata_event("fred"),
-                            generate_test_key_1_relay_list_event(),
-                            get_pretend_proposal_root_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                                get_pretend_proposal_root_event(),
+                            ],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -1465,10 +1519,11 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                     8055,
                     None,
                     Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                        relay.respond_events(client_id, &subscription_id, &vec![
-                            generate_repo_ref_event(),
-                            get_pretend_proposal_root_event(),
-                        ])?;
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![generate_repo_ref_event(), get_pretend_proposal_root_event()],
+                        )?;
                         Ok(())
                     }),
                 ),
@@ -1645,11 +1700,15 @@ mod in_reply_to_mentions_issue {
                 8051,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_test_key_1_metadata_event("fred"),
-                        generate_test_key_1_relay_list_event(),
-                        get_pretend_issue_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                            get_pretend_issue_event(),
+                        ],
+                    )?;
                     Ok(())
                 }),
             ),
@@ -1659,10 +1718,11 @@ mod in_reply_to_mentions_issue {
                 8055,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_repo_ref_event(),
-                        get_pretend_issue_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event(), get_pretend_issue_event()],
+                    )?;
                     Ok(())
                 }),
             ),
@@ -1764,10 +1824,14 @@ mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root 
                 8051,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_test_key_1_metadata_event("fred"),
-                        generate_test_key_1_relay_list_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
+                    )?;
                     Ok(())
                 }),
             ),
@@ -1777,9 +1841,11 @@ mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root 
                 8055,
                 None,
                 Some(&|relay, client_id, subscription_id, _| -> Result<()> {
-                    relay.respond_events(client_id, &subscription_id, &vec![
-                        generate_repo_ref_event(),
-                    ])?;
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event()],
+                    )?;
                     Ok(())
                 }),
             ),

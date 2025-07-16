@@ -969,12 +969,10 @@ async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_is
         std::fs::write(git_repo.dir.join("new.md"), "some content")?;
         git_repo.stage_and_commit("new.md")?;
 
-        CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, [
-            "merge",
-            &branch_name,
-            "-m",
-            "proposal merge commit message",
-        ])
+        CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["merge", &branch_name, "-m", "proposal merge commit message"],
+        )
         .expect_end_eventually_and_print()?;
 
         let oid = git_repo.get_tip_of_local_branch("main")?;
@@ -1125,12 +1123,10 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
         git_repo.checkout_remote_branch(&branch_name)?;
         git_repo.checkout("refs/heads/main")?;
 
-        CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, [
-            "merge",
-            &branch_name,
-            "-m",
-            "proposal merge commit message",
-        ])
+        CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["merge", &branch_name, "-m", "proposal merge commit message"],
+        )
         .expect_end_eventually_and_print()?;
 
         let oid = git_repo.get_tip_of_local_branch("main")?;
@@ -1784,12 +1780,10 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
         std::fs::write(git_repo.dir.join("new2.md"), "some content")?;
         git_repo.stage_and_commit("new2.md")?;
 
-        let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, [
-            "push",
-            "-u",
-            "origin",
-            branch_name,
-        ]);
+        let mut p = CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["push", "-u", "origin", branch_name],
+        );
         cli_expect_nostr_fetch(&mut p)?;
         p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
         p.expect("list: connecting...\r\n\r\r\r")?;

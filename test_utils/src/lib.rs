@@ -544,10 +544,14 @@ impl CliTesterConfirmPrompt<'_> {
         let mut s = String::new();
         self.tester
             .formatter
-            .format_confirm_prompt_selection(&mut s, self.prompt.as_str(), match input {
-                None => self.default,
-                Some(_) => input,
-            })
+            .format_confirm_prompt_selection(
+                &mut s,
+                self.prompt.as_str(),
+                match input {
+                    None => self.default,
+                    Some(_) => input,
+                },
+            )
             .expect("diagluer theme formatter should succeed");
         if !s.contains(self.prompt.as_str()) {
             panic!("dialoguer must be broken as formatted prompt success doesnt contain prompt");
@@ -1017,10 +1021,13 @@ where
     cmd.env("RUST_BACKTRACE", "0");
     cmd.args(args);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
-    rexpect::session::spawn_with_options(cmd, Options {
-        timeout_ms: Some(timeout_ms),
-        strip_ansi_escape_codes: true,
-    })
+    rexpect::session::spawn_with_options(
+        cmd,
+        Options {
+            timeout_ms: Some(timeout_ms),
+            strip_ansi_escape_codes: true,
+        },
+    )
 }
 
 pub fn rexpect_with_from_dir<I, S>(
@@ -1038,10 +1045,13 @@ where
     cmd.current_dir(dir);
     cmd.args(args);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
-    rexpect::session::spawn_with_options(cmd, Options {
-        timeout_ms: Some(timeout_ms),
-        strip_ansi_escape_codes: true,
-    })
+    rexpect::session::spawn_with_options(
+        cmd,
+        Options {
+            timeout_ms: Some(timeout_ms),
+            strip_ansi_escape_codes: true,
+        },
+    )
 }
 
 pub fn remote_helper_rexpect_with_from_dir(
@@ -1056,10 +1066,13 @@ pub fn remote_helper_rexpect_with_from_dir(
     cmd.current_dir(dir);
     cmd.args([dir.as_os_str().to_str().unwrap(), nostr_remote_url]);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
-    rexpect::session::spawn_with_options(cmd, Options {
-        timeout_ms: Some(timeout_ms),
-        strip_ansi_escape_codes: true,
-    })
+    rexpect::session::spawn_with_options(
+        cmd,
+        Options {
+            timeout_ms: Some(timeout_ms),
+            strip_ansi_escape_codes: true,
+        },
+    )
 }
 
 pub fn git_with_remote_helper_rexpect_with_from_dir<I, S>(
@@ -1103,10 +1116,13 @@ where
     cmd.current_dir(dir);
     cmd.args(args);
     // using branch for PR https://github.com/rust-cli/rexpect/pull/103 to strip ansi escape codes
-    rexpect::session::spawn_with_options(cmd, Options {
-        timeout_ms: Some(timeout_ms),
-        strip_ansi_escape_codes: true,
-    })
+    rexpect::session::spawn_with_options(
+        cmd,
+        Options {
+            timeout_ms: Some(timeout_ms),
+            strip_ansi_escape_codes: true,
+        },
+    )
     .context("spawning failed")
 }
 
@@ -1145,11 +1161,14 @@ pub fn get_proposal_branch_name(
     test_repo: &GitTestRepo,
     branch_name_in_event: &str,
 ) -> Result<String> {
-    let events = block_on(get_events_from_cache(&test_repo.dir, vec![
-        nostr::Filter::default()
-            .kind(nostr_sdk::Kind::GitPatch)
-            .hashtag("root"),
-    ]))?;
+    let events = block_on(get_events_from_cache(
+        &test_repo.dir,
+        vec![
+            nostr::Filter::default()
+                .kind(nostr_sdk::Kind::GitPatch)
+                .hashtag("root"),
+        ],
+    ))?;
     get_proposal_branch_name_from_events(&events, branch_name_in_event)
 }
 
@@ -1303,45 +1322,54 @@ pub fn cli_tester_create_proposal(
     create_and_populate_branch(test_repo, branch_name, prefix, false, None)?;
     std::thread::sleep(std::time::Duration::from_millis(1000));
     if let Some(in_reply_to) = in_reply_to {
-        let mut p = CliTester::new_from_dir(&test_repo.dir, [
-            "--nsec",
-            TEST_KEY_1_NSEC,
-            "--password",
-            TEST_PASSWORD,
-            "--disable-cli-spinners",
-            "send",
-            "HEAD~2",
-            "--no-cover-letter",
-            "--in-reply-to",
-            in_reply_to.as_str(),
-        ]);
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "HEAD~2",
+                "--no-cover-letter",
+                "--in-reply-to",
+                in_reply_to.as_str(),
+            ],
+        );
         p.expect_end_eventually()?;
     } else if let Some((title, description)) = cover_letter_title_and_description {
-        let mut p = CliTester::new_from_dir(&test_repo.dir, [
-            "--nsec",
-            TEST_KEY_1_NSEC,
-            "--password",
-            TEST_PASSWORD,
-            "--disable-cli-spinners",
-            "send",
-            "HEAD~2",
-            "--title",
-            format!("\"{title}\"").as_str(),
-            "--description",
-            format!("\"{description}\"").as_str(),
-        ]);
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "HEAD~2",
+                "--title",
+                format!("\"{title}\"").as_str(),
+                "--description",
+                format!("\"{description}\"").as_str(),
+            ],
+        );
         p.expect_end_eventually()?;
     } else {
-        let mut p = CliTester::new_from_dir(&test_repo.dir, [
-            "--nsec",
-            TEST_KEY_1_NSEC,
-            "--password",
-            TEST_PASSWORD,
-            "--disable-cli-spinners",
-            "send",
-            "HEAD~2",
-            "--no-cover-letter",
-        ]);
+        let mut p = CliTester::new_from_dir(
+            &test_repo.dir,
+            [
+                "--nsec",
+                TEST_KEY_1_NSEC,
+                "--password",
+                TEST_PASSWORD,
+                "--disable-cli-spinners",
+                "send",
+                "HEAD~2",
+                "--no-cover-letter",
+            ],
+        );
         p.expect_end_eventually()?;
     }
     Ok(())
@@ -1373,11 +1401,14 @@ pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
     let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
     p.expect("fetching updates...\r\n")?;
     p.expect_eventually("\r\n")?; // some updates listed here
-    let mut c = p.expect_choice("all proposals", vec![
-        format!("\"{PROPOSAL_TITLE_3}\""),
-        format!("\"{PROPOSAL_TITLE_2}\""),
-        format!("\"{PROPOSAL_TITLE_1}\""),
-    ])?;
+    let mut c = p.expect_choice(
+        "all proposals",
+        vec![
+            format!("\"{PROPOSAL_TITLE_3}\""),
+            format!("\"{PROPOSAL_TITLE_2}\""),
+            format!("\"{PROPOSAL_TITLE_1}\""),
+        ],
+    )?;
     c.succeeds_with(
         if proposal_number == 3 {
             0
@@ -1389,12 +1420,15 @@ pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
         true,
         None,
     )?;
-    let mut c = p.expect_choice("", vec![
-        format!("create and checkout proposal branch (2 ahead 0 behind 'main')"),
-        format!("apply to current branch with `git am`"),
-        format!("download to ./patches"),
-        format!("back"),
-    ])?;
+    let mut c = p.expect_choice(
+        "",
+        vec![
+            format!("create and checkout proposal branch (2 ahead 0 behind 'main')"),
+            format!("apply to current branch with `git am`"),
+            format!("download to ./patches"),
+            format!("back"),
+        ],
+    )?;
     c.succeeds_with(0, true, Some(0))?;
     p.expect_end_eventually()?;
     Ok(())
@@ -1466,9 +1500,10 @@ fn get_first_proposal_event_id() -> Result<nostr::EventId> {
             client.fetch_events(
                 nostr::Filter::default()
                     .kind(nostr::Kind::GitPatch)
-                    .custom_tags(nostr::SingleLetterTag::lowercase(nostr::Alphabet::T), vec![
-                        "root",
-                    ]),
+                    .custom_tags(
+                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+                        vec!["root"],
+                    ),
                 Duration::from_millis(500),
             ),
         )?
@@ -1496,15 +1531,18 @@ pub fn create_proposals_with_first_revised_and_repo_with_unrevised_proposal_chec
 
     amend_last_commit(&originating_repo, "add some ammended-commit.md")?;
 
-    let mut p = CliTester::new_from_dir(&originating_repo.dir, [
-        "--nsec",
-        TEST_KEY_1_NSEC,
-        "--password",
-        TEST_PASSWORD,
-        "--disable-cli-spinners",
-        "push",
-        "--force",
-    ]);
+    let mut p = CliTester::new_from_dir(
+        &originating_repo.dir,
+        [
+            "--nsec",
+            TEST_KEY_1_NSEC,
+            "--password",
+            TEST_PASSWORD,
+            "--disable-cli-spinners",
+            "push",
+            "--force",
+        ],
+    );
     p.expect_end_eventually()?;
 
     Ok((originating_repo, test_repo))

@@ -161,9 +161,11 @@ impl<'a> Relay<'a> {
                         if let Some(listner) = self.req_listener {
                             listner(self, client_id, subscription_id, vec![filter.clone()])?;
                         } else {
-                            self.respond_standard_req(client_id, &subscription_id, &[
-                                filter.clone()
-                            ])?;
+                            self.respond_standard_req(
+                                client_id,
+                                &subscription_id,
+                                &[filter.clone()],
+                            )?;
                             // self.respond_eose(client_id, subscription_id)?;
                         }
                         // respond with events

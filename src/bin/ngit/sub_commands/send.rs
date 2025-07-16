@@ -378,9 +378,10 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
                 public_key: _,
                 uppercase: false,
             }) => {
-                let events = get_events_from_local_cache(git_repo_path, vec![
-                    nostr::Filter::new().id(*event_id),
-                ])
+                let events = get_events_from_local_cache(
+                    git_repo_path,
+                    vec![nostr::Filter::new().id(*event_id)],
+                )
                 .await?;
 
                 if let Some(first) = events.iter().find(|e| e.id.eq(event_id)) {
