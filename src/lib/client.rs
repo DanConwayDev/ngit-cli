@@ -31,6 +31,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 use mockall::*;
 use nostr::{
     Event,
+    filter::Alphabet,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     signer::SignerBackend,
 };
@@ -1585,6 +1586,12 @@ pub fn get_fetch_filters(
             vec![
                 nostr::Filter::default()
                     .events(proposal_ids.clone())
+                    .kinds([vec![Kind::GitPatch, Kind::EventDeletion], status_kinds()].concat()),
+                nostr::Filter::default()
+                    .custom_tags(
+                        SingleLetterTag::uppercase(Alphabet::E),
+                        proposal_ids.clone(),
+                    )
                     .kinds([vec![Kind::GitPatch, Kind::EventDeletion], status_kinds()].concat()),
             ]
         },
