@@ -58,6 +58,9 @@ pub fn status_kinds() -> Vec<Kind> {
     ]
 }
 
+pub const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
+pub const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
+
 pub fn event_is_patch_set_root(event: &Event) -> bool {
     event.kind.eq(&Kind::GitPatch)
         && event

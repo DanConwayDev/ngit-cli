@@ -31,6 +31,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 use mockall::*;
 use nostr::{
     Event,
+    event::{TagKind, TagStandard},
     filter::Alphabet,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     signer::SignerBackend,
@@ -47,7 +48,8 @@ use crate::{
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
-        event_is_cover_letter, event_is_patch_set_root, event_is_revision_root, status_kinds,
+        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_is_cover_letter,
+        event_is_patch_set_root, event_is_revision_root, status_kinds,
     },
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
     repo_ref::RepoRef,
@@ -1459,7 +1461,7 @@ async fn process_fetched_events(
                         report.updated_state = Some((event.created_at, event.id));
                     }
                 }
-            } else if event_is_patch_set_root(event) {
+            } else if event_is_patch_set_root(event) || event.kind.eq(&KIND_PULL_REQUEST) {
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
                 if !request.contributors.contains(&event.pubkey)
@@ -1487,12 +1489,23 @@ async fn process_fetched_events(
     }
     for event in &events {
         if !request.existing_events.contains(&event.id)
-            && !event
+            && (!event
                 .tags
                 .event_ids()
                 .any(|id| report.proposals.contains(id))
+                || event
+                    .tags
+                    .filter_standardized(TagKind::Custom(std::borrow::Cow::Borrowed("E")))
+                    .filter_map(|t| match t {
+                        TagStandard::Event { event_id, .. } => Some(event_id),
+                        TagStandard::EventReport(event_id, ..) => Some(event_id),
+                        _ => None,
+                    })
+                    .any(|id| report.proposals.contains(id)))
         {
-            if event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event) {
+            if (event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event))
+                || event.kind.eq(&KIND_PULL_REQUEST_UPDATE)
+            {
                 report.commits.insert(event.id);
             } else if status_kinds().contains(&event.kind) {
                 report.statuses.insert(event.id);
@@ -1570,7 +1583,7 @@ pub fn get_fetch_filters(
                 get_filter_state_events(repo_coordinates),
                 get_filter_repo_events(repo_coordinates),
                 nostr::Filter::default()
-                    .kinds(vec![Kind::GitPatch, Kind::EventDeletion])
+                    .kinds(vec![Kind::GitPatch, Kind::EventDeletion, KIND_PULL_REQUEST])
                     .custom_tags(
                         SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                         repo_coordinates
@@ -1584,15 +1597,29 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
-                nostr::Filter::default()
-                    .events(proposal_ids.clone())
-                    .kinds([vec![Kind::GitPatch, Kind::EventDeletion], status_kinds()].concat()),
+                nostr::Filter::default().events(proposal_ids.clone()).kinds(
+                    [
+                        vec![
+                            Kind::GitPatch,
+                            Kind::EventDeletion,
+                            KIND_PULL_REQUEST_UPDATE,
+                        ],
+                        status_kinds(),
+                    ]
+                    .concat(),
+                ),
                 nostr::Filter::default()
                     .custom_tags(
                         SingleLetterTag::uppercase(Alphabet::E),
                         proposal_ids.clone(),
                     )
-                    .kinds([vec![Kind::GitPatch, Kind::EventDeletion], status_kinds()].concat()),
+                    .kinds(
+                        [
+                            vec![Kind::EventDeletion, KIND_PULL_REQUEST_UPDATE],
+                            status_kinds(),
+                        ]
+                        .concat(),
+                    ),
             ]
         },
         if required_profiles.is_empty() {
