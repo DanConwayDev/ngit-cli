@@ -90,6 +90,19 @@ pub fn patch_supports_commit_ids(event: &Event) -> bool {
             .any(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq("commit-pgp-sig"))
 }
 
+pub fn event_is_valid_pr_or_pr_update(event: &Event) -> bool {
+    [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&event.kind)
+        && event.tags.iter().any(|t| {
+            t.as_slice().len().gt(&1)
+                && t.as_slice()[0].eq("c")
+                && git2::Oid::from_str(&t.as_slice()[1]).is_ok()
+        })
+        && event
+            .tags
+            .iter()
+            .any(|t| t.as_slice().len().gt(&1) && t.as_slice()[0].eq("clone"))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub async fn generate_patch_event(

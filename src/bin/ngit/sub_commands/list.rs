@@ -219,7 +219,11 @@ pub async fn launch() -> Result<()> {
                 PromptChoiceParms::default()
                     .with_prompt("this is new PR event kind which ngit doesnt yet support")
                     .with_default(0)
-                    .with_choices(vec!["back to proposals".to_string()]),
+                    .with_choices(vec![
+                        // TODO enable checkout by fetching oids, creating / updating branch and
+                        // checking out
+                        "back to proposals".to_string(),
+                    ]),
             )? {
                 0 => continue,
                 _ => {

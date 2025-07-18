@@ -49,7 +49,8 @@ use crate::{
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_is_cover_letter,
-        event_is_patch_set_root, event_is_revision_root, status_kinds,
+        event_is_patch_set_root, event_is_revision_root, event_is_valid_pr_or_pr_update,
+        status_kinds,
     },
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
     repo_ref::RepoRef,
@@ -1824,6 +1825,7 @@ pub async fn get_proposals_and_revisions_from_cache(
     .await?
     .iter()
     .filter(|e| event_is_patch_set_root(e) || e.kind.eq(&KIND_PULL_REQUEST))
+    .filter(|e| e.kind.eq(&Kind::GitPatch) || event_is_valid_pr_or_pr_update(e))
     .cloned()
     .collect::<Vec<nostr::Event>>();
     proposals.sort_by_key(|e| e.created_at);
@@ -1874,7 +1876,11 @@ pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
     .iter()
     .copied()
     .collect();
-    commit_events.retain(|e| permissioned_users.contains(&e.pubkey));
+
+    commit_events.retain(|e| {
+        permissioned_users.contains(&e.pubkey)
+            && (e.kind.eq(&Kind::GitPatch) || event_is_valid_pr_or_pr_update(e))
+    });
 
     let revision_roots: HashSet<nostr::EventId> = commit_events
         .iter()
