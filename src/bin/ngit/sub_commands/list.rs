@@ -3,10 +3,12 @@ use std::{io::Write, ops::Add};
 use anyhow::{Context, Result, bail};
 use ngit::{
     client::{
-        Params, get_all_proposal_patch_events_from_cache, get_proposals_and_revisions_from_cache,
+        Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
+        get_proposals_and_revisions_from_cache,
     },
     git_events::{
-        get_commit_id_from_patch, get_most_recent_patch_with_ancestors, status_kinds, tag_value,
+        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, status_kinds, tag_value,
     },
 };
 use nostr_sdk::Kind;
@@ -184,21 +186,22 @@ pub async fn launch() -> Result<()> {
         let cover_letter = event_to_cover_letter(proposals_for_status[selected_index])
             .context("failed to extract proposal details from proposal root event")?;
 
-        let commits_events: Vec<nostr::Event> = get_all_proposal_patch_events_from_cache(
-            git_repo_path,
-            &repo_ref,
-            &proposals_for_status[selected_index].id,
-        )
-        .await?;
+        let commits_events: Vec<nostr::Event> =
+            get_all_proposal_patch_pr_pr_update_events_from_cache(
+                git_repo_path,
+                &repo_ref,
+                &proposals_for_status[selected_index].id,
+            )
+            .await?;
 
-        let Ok(most_recent_proposal_patch_chain) =
-            get_most_recent_patch_with_ancestors(commits_events.clone())
+        let Ok(most_recent_proposal_patch_chain_or_pr_or_pr_update) =
+            get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
         else {
             if Interactor::default().confirm(
                 PromptConfirmParms::default()
                     .with_default(true)
                     .with_prompt(
-                        "failed to find any patches on this proposal. choose another proposal?",
+                        "failed to find any PR or patch events on this proposal. choose another proposal?",
                     ),
             )? {
                 continue;
@@ -208,15 +211,37 @@ pub async fn launch() -> Result<()> {
         // for commit in &most_recent_proposal_patch_chain {
         //     println!("recent_event: {:?}", commit.as_json());
         // }
+        if most_recent_proposal_patch_chain_or_pr_or_pr_update
+            .iter()
+            .any(|e| [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&e.kind))
+        {
+            match Interactor::default().choice(
+                PromptChoiceParms::default()
+                    .with_prompt("this is new PR event kind which ngit doesnt yet support")
+                    .with_default(0)
+                    .with_choices(vec!["back to proposals".to_string()]),
+            )? {
+                0 => continue,
+                _ => {
+                    bail!("unexpected choice")
+                }
+            };
+        }
 
-        let binding_patch_text_ref = format!("{} commits", most_recent_proposal_patch_chain.len());
-        let patch_text_ref = if most_recent_proposal_patch_chain.len().gt(&1) {
+        let binding_patch_text_ref = format!(
+            "{} commits",
+            most_recent_proposal_patch_chain_or_pr_or_pr_update.len()
+        );
+        let patch_text_ref = if most_recent_proposal_patch_chain_or_pr_or_pr_update
+            .len()
+            .gt(&1)
+        {
             binding_patch_text_ref.as_str()
         } else {
             "1 commit"
         };
 
-        let no_support_for_patches_as_branch = most_recent_proposal_patch_chain
+        let no_support_for_patches_as_branch = most_recent_proposal_patch_chain_or_pr_or_pr_update
             .iter()
             .any(|event| !patch_supports_commit_ids(event));
 
@@ -253,8 +278,13 @@ pub async fn launch() -> Result<()> {
                     )?;
                     continue;
                 }
-                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
-                2 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+                1 => {
+                    launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update)
+                }
+                2 => save_patches_to_dir(
+                    most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                    &git_repo,
+                ),
                 3 => continue,
                 _ => {
                     bail!("unexpected choice")
@@ -277,9 +307,11 @@ pub async fn launch() -> Result<()> {
             .eq(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?);
 
         let proposal_base_commit = str_to_sha1(&tag_value(
-            most_recent_proposal_patch_chain.last().context(
-                "there should be at least one patch as we have already checked for this",
-            )?,
+            most_recent_proposal_patch_chain_or_pr_or_pr_update
+                .last()
+                .context(
+                    "there should be at least one patch as we have already checked for this",
+                )?,
             "parent-commit",
         )?)
         .context("failed to get valid parent commit id from patch")?;
@@ -300,8 +332,8 @@ pub async fn launch() -> Result<()> {
                 ],
             ))? {
                 0 | 3 => continue,
-                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
-                2 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
+                2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, &git_repo),
                 _ => {
                     bail!("unexpected choice")
                 }
@@ -309,9 +341,13 @@ pub async fn launch() -> Result<()> {
         }
 
         let proposal_tip = str_to_sha1(
-            &get_commit_id_from_patch(most_recent_proposal_patch_chain.first().context(
-                "there should be at least one patch as we have already checked for this",
-            )?)
+            &get_commit_id_from_patch(
+                most_recent_proposal_patch_chain_or_pr_or_pr_update
+                    .first()
+                    .context(
+                        "there should be at least one patch as we have already checked for this",
+                    )?,
+            )
             .context("failed to get valid commit_id from patch")?,
         )
         .context("failed to get valid commit_id from patch")?;
@@ -325,7 +361,7 @@ pub async fn launch() -> Result<()> {
                 .choice(PromptChoiceParms::default().with_default(0).with_choices(vec![
                 format!(
                     "create and checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
-                    most_recent_proposal_patch_chain.len(),
+                    most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
                     proposal_behind_main.len(),
                 ),
                 format!("apply to current branch with `git am`"),
@@ -337,7 +373,7 @@ pub async fn launch() -> Result<()> {
                     let _ = git_repo
                         .apply_patch_chain(
                             &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                            most_recent_proposal_patch_chain,
+                            most_recent_proposal_patch_chain_or_pr_or_pr_update,
                         )
                         .context("failed to apply patch chain")?;
 
@@ -347,8 +383,8 @@ pub async fn launch() -> Result<()> {
                     );
                     Ok(())
                 }
-                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
-                2 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
+                2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, &git_repo),
                 3 => continue,
                 _ => {
                     bail!("unexpected choice")
@@ -382,7 +418,7 @@ pub async fn launch() -> Result<()> {
                     .with_choices(vec![
                         format!(
                             "checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
-                            most_recent_proposal_patch_chain.len(),
+                            most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
                             proposal_behind_main.len(),
                         ),
                         format!("apply to current branch with `git am`"),
@@ -401,8 +437,13 @@ pub async fn launch() -> Result<()> {
                     );
                     Ok(())
                 }
-                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
-                2 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+                1 => {
+                    launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update)
+                }
+                2 => save_patches_to_dir(
+                    most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                    &git_repo,
+                ),
                 3 => continue,
                 _ => {
                     bail!("unexpected choice")
@@ -414,11 +455,14 @@ pub async fn launch() -> Result<()> {
             git_repo.get_commits_ahead_behind(&master_tip, &local_branch_tip)?;
 
         // new appendments to proposal
-        if let Some(index) = most_recent_proposal_patch_chain.iter().position(|patch| {
-            get_commit_id_from_patch(patch)
-                .unwrap_or_default()
-                .eq(&local_branch_tip.to_string())
-        }) {
+        if let Some(index) = most_recent_proposal_patch_chain_or_pr_or_pr_update
+            .iter()
+            .position(|patch| {
+                get_commit_id_from_patch(patch)
+                    .unwrap_or_default()
+                    .eq(&local_branch_tip.to_string())
+            })
+        {
             return match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)
@@ -437,7 +481,7 @@ pub async fn launch() -> Result<()> {
                     let _ = git_repo
                         .apply_patch_chain(
                             &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                            most_recent_proposal_patch_chain,
+                            most_recent_proposal_patch_chain_or_pr_or_pr_update,
                         )
                         .context("failed to apply patch chain")?;
                     println!(
@@ -448,8 +492,13 @@ pub async fn launch() -> Result<()> {
                     );
                     Ok(())
                 }
-                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
-                2 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+                1 => {
+                    launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update)
+                }
+                2 => save_patches_to_dir(
+                    most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                    &git_repo,
+                ),
                 3 => continue,
                 _ => {
                     bail!("unexpected choice")
@@ -467,7 +516,7 @@ pub async fn launch() -> Result<()> {
         }) {
             println!(
                 "updated proposal available ({} ahead {} behind '{main_branch_name}'). existing version is {} ahead {} behind '{main_branch_name}'",
-                most_recent_proposal_patch_chain.len(),
+                most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
                 proposal_behind_main.len(),
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
@@ -492,11 +541,11 @@ pub async fn launch() -> Result<()> {
                     git_repo.checkout(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     )?;
-                    let chain_length = most_recent_proposal_patch_chain.len();
+                    let chain_length = most_recent_proposal_patch_chain_or_pr_or_pr_update.len();
                     let _ = git_repo
                         .apply_patch_chain(
                             &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                            most_recent_proposal_patch_chain,
+                            most_recent_proposal_patch_chain_or_pr_or_pr_update,
                         )
                         .context("failed to apply patch chain")?;
                     println!(
@@ -520,8 +569,13 @@ pub async fn launch() -> Result<()> {
                     );
                     Ok(())
                 }
-                2 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
-                3 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+                2 => {
+                    launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update)
+                }
+                3 => save_patches_to_dir(
+                    most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                    &git_repo,
+                ),
                 4 => continue,
                 _ => {
                     bail!("unexpected choice")
@@ -581,7 +635,7 @@ pub async fn launch() -> Result<()> {
         if git_repo.does_commit_exist(&proposal_tip.to_string())? {
             println!(
                 "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has amended or rebased it ({} ahead {} behind '{main_branch_name}')",
-                most_recent_proposal_patch_chain.len(),
+                most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
                 proposal_behind_main.len(),
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
@@ -594,7 +648,7 @@ pub async fn launch() -> Result<()> {
                 "your local proposal branch ({} ahead {} behind '{main_branch_name}') has conflicting changes with the latest published proposal ({} ahead {} behind '{main_branch_name}')",
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
-                most_recent_proposal_patch_chain.len(),
+                most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
                 proposal_behind_main.len(),
             );
 
@@ -639,11 +693,11 @@ pub async fn launch() -> Result<()> {
                     &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     &proposal_base_commit.to_string(),
                 )?;
-                let chain_length = most_recent_proposal_patch_chain.len();
+                let chain_length = most_recent_proposal_patch_chain_or_pr_or_pr_update.len();
                 let _ = git_repo
                     .apply_patch_chain(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                        most_recent_proposal_patch_chain,
+                        most_recent_proposal_patch_chain_or_pr_or_pr_update,
                     )
                     .context("failed to apply patch chain")?;
 
@@ -658,8 +712,11 @@ pub async fn launch() -> Result<()> {
                 );
                 Ok(())
             }
-            2 => launch_git_am_with_patches(most_recent_proposal_patch_chain),
-            3 => save_patches_to_dir(most_recent_proposal_patch_chain, &git_repo),
+            2 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
+            3 => save_patches_to_dir(
+                most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                &git_repo,
+            ),
             4 => continue,
             _ => {
                 bail!("unexpected choice")

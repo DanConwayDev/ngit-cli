@@ -70,11 +70,16 @@ pub fn event_is_patch_set_root(event: &Event) -> bool {
 }
 
 pub fn event_is_revision_root(event: &Event) -> bool {
-    event.kind.eq(&Kind::GitPatch)
+    (event.kind.eq(&Kind::GitPatch)
         && event
             .tags
             .iter()
-            .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("revision-root"))
+            .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("revision-root")))
+        || (event.kind.eq(&KIND_PULL_REQUEST)
+            && event
+                .tags
+                .iter()
+                .any(|t| t.as_slice().len() > 1 && t.as_slice()[0].eq("e")))
 }
 
 pub fn patch_supports_commit_ids(event: &Event) -> bool {
@@ -534,13 +539,22 @@ pub fn commit_msg_from_patch_oneliner(patch: &nostr::Event) -> Result<String> {
 }
 
 pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
-    if !event_is_patch_set_root(event) {
+    if !event.kind.eq(&KIND_PULL_REQUEST) && !event_is_patch_set_root(event) {
         bail!("event is not a patch set root event (root patch or cover letter)")
     }
 
-    let title = commit_msg_from_patch_oneliner(event)?;
-    let full = commit_msg_from_patch(event)?;
-    let description = full[title.len()..].trim().to_string();
+    let title = if event.kind.eq(&KIND_PULL_REQUEST) {
+        tag_value(event, "subject").unwrap_or("untitled".to_owned())
+    } else {
+        commit_msg_from_patch_oneliner(event)?
+    };
+    let description = if event.kind.eq(&KIND_PULL_REQUEST) {
+        event.content.clone()
+    } else {
+        commit_msg_from_patch(event)?[title.len()..]
+            .trim()
+            .to_string()
+    };
 
     Ok(CoverLetter {
         title: title.clone(),
@@ -572,25 +586,25 @@ fn safe_branch_name_for_pr(s: &str) -> String {
         .collect()
 }
 
-pub fn get_most_recent_patch_with_ancestors(
-    mut patches: Vec<nostr::Event>,
+pub fn get_pr_tip_event_or_most_recent_patch_with_ancestors(
+    mut proposal_events: Vec<nostr::Event>,
 ) -> Result<Vec<nostr::Event>> {
-    patches.sort_by_key(|e| e.created_at);
+    proposal_events.sort_by_key(|e| e.created_at);
 
-    let youngest_patch = patches.last().context("no patches found")?;
+    let youngest = proposal_events.last().context("no proposal events found")?;
 
-    let patches_with_youngest_created_at: Vec<&nostr::Event> = patches
+    let events_with_youngest_created_at: Vec<&nostr::Event> = proposal_events
         .iter()
-        .filter(|p| p.created_at.eq(&youngest_patch.created_at))
+        .filter(|p| p.created_at.eq(&youngest.created_at))
         .collect();
 
     let mut res = vec![];
 
-    let mut event_id_to_search = patches_with_youngest_created_at
+    let mut event_id_to_search = events_with_youngest_created_at
         .clone()
         .iter()
         .find(|p| {
-            !patches_with_youngest_created_at.iter().any(|p2| {
+            !events_with_youngest_created_at.iter().any(|p2| {
                 if let Ok(reply_to) = get_event_parent_id(p2) {
                     reply_to.eq(&p.id.to_string())
                 } else {
@@ -598,16 +612,18 @@ pub fn get_most_recent_patch_with_ancestors(
                 }
             })
         })
-        .context("failed to find patches_with_youngest_created_at")?
+        .context("failed to find events_with_youngest_created_at")?
         .id
         .to_string();
 
-    while let Some(event) = patches
+    while let Some(event) = proposal_events
         .iter()
         .find(|e| e.id.to_string().eq(&event_id_to_search))
     {
         res.push(event.clone());
-        if event_is_patch_set_root(event) {
+        if [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&event.kind)
+            || event_is_patch_set_root(event)
+        {
             break;
         }
         event_id_to_search = get_event_parent_id(event).unwrap_or_default();

@@ -1811,7 +1811,7 @@ pub async fn get_proposals_and_revisions_from_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
+                .kinds([nostr::Kind::GitPatch, KIND_PULL_REQUEST])
                 .custom_tags(
                     nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                     repo_coordinates
@@ -1823,7 +1823,7 @@ pub async fn get_proposals_and_revisions_from_cache(
     )
     .await?
     .iter()
-    .filter(|e| event_is_patch_set_root(e))
+    .filter(|e| event_is_patch_set_root(e) || e.kind.eq(&KIND_PULL_REQUEST))
     .cloned()
     .collect::<Vec<nostr::Event>>();
     proposals.sort_by_key(|e| e.created_at);
@@ -1831,7 +1831,7 @@ pub async fn get_proposals_and_revisions_from_cache(
     Ok(proposals)
 }
 
-pub async fn get_all_proposal_patch_events_from_cache(
+pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
     git_repo_path: &Path,
     repo_ref: &RepoRef,
     proposal_id: &nostr::EventId,
@@ -1840,10 +1840,21 @@ pub async fn get_all_proposal_patch_events_from_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
+                .kinds([
+                    nostr::Kind::GitPatch,
+                    KIND_PULL_REQUEST,
+                    KIND_PULL_REQUEST_UPDATE,
+                ])
                 .event(*proposal_id),
             nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
+                .kinds([
+                    nostr::Kind::GitPatch,
+                    KIND_PULL_REQUEST,
+                    KIND_PULL_REQUEST_UPDATE,
+                ])
+                .custom_tag(SingleLetterTag::uppercase(Alphabet::E), *proposal_id),
+            nostr::Filter::default()
+                .kinds([nostr::Kind::GitPatch, KIND_PULL_REQUEST])
                 .id(*proposal_id),
         ],
     )
@@ -1876,8 +1887,20 @@ pub async fn get_all_proposal_patch_events_from_cache(
             git_repo_path,
             vec![
                 nostr::Filter::default()
-                    .kind(nostr::Kind::GitPatch)
-                    .events(revision_roots)
+                    .kinds([
+                        nostr::Kind::GitPatch,
+                        KIND_PULL_REQUEST,
+                        KIND_PULL_REQUEST_UPDATE,
+                    ])
+                    .events(revision_roots.clone())
+                    .authors(permissioned_users.clone()),
+                nostr::Filter::default()
+                    .kinds([
+                        nostr::Kind::GitPatch,
+                        KIND_PULL_REQUEST,
+                        KIND_PULL_REQUEST_UPDATE,
+                    ])
+                    .custom_tags(SingleLetterTag::uppercase(Alphabet::E), revision_roots)
                     .authors(permissioned_users.clone()),
             ],
         )

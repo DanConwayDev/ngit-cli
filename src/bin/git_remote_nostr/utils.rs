@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use git2::Repository;
 use ngit::{
     client::{
-        get_all_proposal_patch_events_from_cache, get_events_from_local_cache,
+        get_all_proposal_patch_pr_pr_update_events_from_cache, get_events_from_local_cache,
         get_proposals_and_revisions_from_cache,
     },
     git::{
@@ -18,7 +18,7 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
     git_events::{
-        event_is_revision_root, get_most_recent_patch_with_ancestors,
+        event_is_revision_root, get_pr_tip_event_or_most_recent_patch_with_ancestors,
         is_event_proposal_root_for_branch, status_kinds,
     },
     repo_ref::RepoRef,
@@ -140,12 +140,15 @@ pub async fn get_open_or_draft_proposals(
             Kind::GitStatusOpen
         };
         if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status) {
-            if let Ok(commits_events) =
-                get_all_proposal_patch_events_from_cache(git_repo_path, repo_ref, &proposal.id)
-                    .await
+            if let Ok(commits_events) = get_all_proposal_patch_pr_pr_update_events_from_cache(
+                git_repo_path,
+                repo_ref,
+                &proposal.id,
+            )
+            .await
             {
                 if let Ok(most_recent_proposal_patch_chain) =
-                    get_most_recent_patch_with_ancestors(commits_events.clone())
+                    get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
                 {
                     open_or_draft_proposals
                         .insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
@@ -172,11 +175,15 @@ pub async fn get_all_proposals(
     let mut all_proposals = HashMap::new();
 
     for proposal in proposals {
-        if let Ok(commits_events) =
-            get_all_proposal_patch_events_from_cache(git_repo_path, repo_ref, &proposal.id).await
+        if let Ok(commits_events) = get_all_proposal_patch_pr_pr_update_events_from_cache(
+            git_repo_path,
+            repo_ref,
+            &proposal.id,
+        )
+        .await
         {
             if let Ok(most_recent_proposal_patch_chain) =
-                get_most_recent_patch_with_ancestors(commits_events.clone())
+                get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
             {
                 all_proposals.insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
             }

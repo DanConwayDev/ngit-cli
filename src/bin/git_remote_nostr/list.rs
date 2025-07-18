@@ -11,7 +11,7 @@ use ngit::{
         self,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
-    git_events::event_to_cover_letter,
+    git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
     login::get_curent_user,
     repo_ref::{self, is_grasp_server},
 };
@@ -122,6 +122,16 @@ async fn get_open_and_draft_proposals_state(
 
     // without trusting commit_id we must apply each patch which requires the oid of
     // the parent so we much do a fetch
+
+    // As we are fetching from git servers we mighgt as well get oids from pull
+    // request too
+    // TODO get Pull Request and Pull Request Update Events add these to
+    // refs/nostr/<event-id>
+    // TODO prepare PRs and PRS oids to try and fetch from repo servers that are or
+    // clone urls in PR/update event we are using anyway. TODO after we tried
+    // and failed to get them from these server we should fallback to fetch them
+    // from listed clone urls in PR/update but not during list, only during fetch
+
     for (git_server_url, (oids_from_git_servers, is_grasp_server)) in remote_states {
         if fetch_from_git_server(
             git_repo,
@@ -144,7 +154,7 @@ async fn get_open_and_draft_proposals_state(
     let mut state = HashMap::new();
     let open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
     let current_user = get_curent_user(git_repo)?;
-    for (_, (proposal, patches)) in open_and_draft_proposals {
+    for (_, (proposal, events_to_apply)) in open_and_draft_proposals {
         if let Ok(cl) = event_to_cover_letter(&proposal) {
             if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
                 branch_name = if let Some(public_key) = current_user {
@@ -156,15 +166,43 @@ async fn get_open_and_draft_proposals_state(
                 } else {
                     branch_name
                 };
-                match make_commits_for_proposal(git_repo, repo_ref, &patches) {
-                    Ok(tip) => {
-                        state.insert(format!("refs/heads/{branch_name}"), tip);
-                    }
-                    Err(error) => {
-                        let _ = term.write_line(
-                            format!("WARNING: failed to fetch branch {branch_name} error: {error}")
+                // if events_to_apply contains a PR or PR Update event it should be the only
+                // event in the Vec
+                if let Some(pr_or_pr_update) = events_to_apply
+                    .iter()
+                    .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
+                {
+                    match tag_value(pr_or_pr_update, "c") {
+                        Ok(tip) => {
+                            state.insert(format!("refs/heads/{branch_name}"), tip);
+                        }
+                        Err(_) => {
+                            let _ = term.write_line(
+                                format!(
+                                    "WARNING: failed to fetch branch {branch_name} error: {} event poorly formatted",
+                                    if pr_or_pr_update.kind.eq(&KIND_PULL_REQUEST) {
+                                        "PR"
+                                    } else {
+                                        "PR update"
+                                    }
+                                )
                                 .as_str(),
-                        );
+                            );
+                        }
+                    }
+                } else {
+                    match make_commits_for_proposal(git_repo, repo_ref, &events_to_apply) {
+                        Ok(tip) => {
+                            state.insert(format!("refs/heads/{branch_name}"), tip);
+                        }
+                        Err(error) => {
+                            let _ = term.write_line(
+                                format!(
+                                    "WARNING: failed to fetch branch {branch_name} error: {error}"
+                                )
+                                .as_str(),
+                            );
+                        }
                     }
                 }
             }
