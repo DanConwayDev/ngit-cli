@@ -309,7 +309,7 @@ impl RepoRef {
     }
 
     pub fn grasp_servers(&self) -> Vec<String> {
-        detect_existing_grasp_servers(Some(self), &[], &[], &[], &self.identifier)
+        detect_existing_grasp_servers(Some(self), &[], &[], &self.identifier)
     }
 }
 
@@ -593,7 +593,6 @@ pub fn detect_existing_grasp_servers(
     repo_ref: Option<&RepoRef>,
     args_relays: &[String],
     args_clone_url: &[String],
-    args_blossoms: &[String],
     identifier: &str,
 ) -> Vec<String> {
     // Collect clone URLs from arguments or repo_ref
@@ -613,18 +612,6 @@ pub fn detect_existing_grasp_servers(
             .collect()
     } else if let Some(repo) = repo_ref {
         repo.relays.clone()
-    } else {
-        Vec::new()
-    };
-
-    // Collect blossom server URLs from arguments or repo_ref
-    let blossoms: Vec<Url> = if !args_blossoms.is_empty() {
-        args_blossoms
-            .iter()
-            .filter_map(|r| Url::parse(r).ok())
-            .collect()
-    } else if let Some(repo) = repo_ref {
-        repo.blossoms.clone()
     } else {
         Vec::new()
     };
@@ -652,14 +639,6 @@ pub fn detect_existing_grasp_servers(
                 .is_ok_and(|r| r.eq(&formatted_as_grasp_server_url))
         });
         if !matches_relay {
-            continue;
-        }
-
-        let matches_blossoms = blossoms.iter().any(|r| {
-            normalize_grasp_server_url(r.as_str())
-                .is_ok_and(|r| r.eq(&formatted_as_grasp_server_url))
-        });
-        if !matches_blossoms {
             continue;
         }
 

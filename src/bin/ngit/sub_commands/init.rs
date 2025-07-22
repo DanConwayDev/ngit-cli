@@ -269,7 +269,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             repo_ref.as_ref(),
             &args.relays,
             &args.clone_url,
-            &args.blossoms,
             &identifier,
         );
         let mut selections: Vec<bool> = vec![true; options.len()]; // Initialize selections based on existing options
