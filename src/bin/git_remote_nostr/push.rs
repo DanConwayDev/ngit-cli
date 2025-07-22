@@ -12,12 +12,13 @@ use client::{get_events_from_local_cache, get_state_from_cache, send_events, sig
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
 use git_events::{
-    generate_cover_letter_and_patch_events, generate_patch_event, get_commit_id_from_patch,
+    generate_cover_letter_and_patch_events, generate_patch_event, generate_unsigned_pr_event,
+    get_commit_id_from_patch,
 };
 use git2::{Oid, Repository};
 use ngit::{
     cli_interactor::count_lines_per_msg_vec,
-    client::{self, get_event_from_cache_by_id},
+    client::{self, get_event_from_cache_by_id, sign_draft_event},
     git::{
         self,
         nostr_url::{CloneUrl, NostrUrlDecoded},
@@ -25,10 +26,10 @@ use ngit::{
     },
     git_events::{self, event_to_cover_letter, get_event_root},
     login::{self, user::UserRef},
-    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server},
+    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server, normalize_grasp_server_url},
     repo_state,
 };
-use nostr::nips::nip10::Marker;
+use nostr::{event::UnsignedEvent, nips::nip10::Marker};
 use nostr_sdk::{
     Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, Tag, TagStandard,
     hashes::sha1::Hash as Sha1Hash,
@@ -404,23 +405,118 @@ async fn process_proposal_refspecs(
             let (mut ahead, _) =
                 git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
             ahead.reverse();
-            for patch in generate_cover_letter_and_patch_events(
-                None,
-                git_repo,
-                &ahead,
-                signer,
-                repo_ref,
-                &None,
-                &[],
-            )
-            .await?
+            for event in
+                generate_patches_or_pr_event(git_repo, repo_ref, &ahead, user_ref, signer, term)
+                    .await?
             {
-                events.push(patch);
+                events.push(event);
             }
         }
     }
 
     Ok((events, rejected_proposal_refspecs))
+}
+
+async fn generate_patches_or_pr_event(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    ahead: &[Sha1Hash],
+    user_ref: &UserRef,
+    signer: &Arc<dyn NostrSigner>,
+    term: &Term,
+) -> Result<Vec<Event>> {
+    let mut events: Vec<Event> = vec![];
+    let use_pr = ahead.iter().any(|commit| {
+        if let Ok(patch) = git_repo.make_patch_from_commit(commit, &None) {
+            patch.len()
+                > ((65 // max recomended patch event size specified in nip34 in kb
+                // allownace for nostr event wrapper (id, pubkey, tags, sig)
+                - 1) * 1024)
+        } else {
+            true
+        }
+    });
+
+    if use_pr {
+        let repo_grasps = repo_ref.grasp_servers();
+        let repo_grasp_clone_urls = repo_ref
+            .git_server
+            .iter()
+            .filter(|s| is_grasp_server(s, &repo_grasps));
+
+        let mut unsigned_pr_event: Option<UnsignedEvent> = None;
+        let mut failed_clone_urls = vec![];
+        for clone_url in repo_grasp_clone_urls {
+            let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
+                unsigned_pr_event.clone()
+            } else {
+                generate_unsigned_pr_event(
+                    git_repo,
+                    repo_ref,
+                    &user_ref.public_key,
+                    ahead.first().context("no commits to push")?,
+                    &[clone_url],
+                    &[],
+                )?
+            };
+
+            let refspec = format!(
+                "{}:refs/nostr/{}",
+                ahead.first().unwrap(),
+                draft_pr_event.id()
+            );
+
+            if let Err(error) = push_to_remote_url(git_repo, clone_url, &[refspec], term) {
+                failed_clone_urls.push(clone_url);
+                term.write_line(
+                    format!(
+                        "push: error sending commit data to {}: {error}",
+                        normalize_grasp_server_url(clone_url)?
+                    )
+                    .as_str(),
+                )?;
+            } else {
+                term.write_line(
+                    format!(
+                        "push: commit data sent to {}",
+                        normalize_grasp_server_url(clone_url)?
+                    )
+                    .as_str(),
+                )?;
+                unsigned_pr_event = Some(draft_pr_event);
+            }
+        }
+        if unsigned_pr_event.is_none() {
+            // TODO get fallback grasp servers that aren't in repo_grasps cycle
+            // through until one succeeds TODO create personal-fork
+            // announcement with grasp servers and push, after a few seconds
+            // push ref/nostr/eventid. if one success break out of
+            // for loop and continue
+        }
+        if let Some(unsigned_pr_event) = unsigned_pr_event {
+            let pr_event =
+                sign_draft_event(unsigned_pr_event, signer, "Pull Request".to_string()).await?;
+            events.push(pr_event);
+        } else {
+            bail!("could not find a grasp server that accepts the Pull Request refs");
+        }
+    } else {
+        for patch in generate_cover_letter_and_patch_events(
+            None,
+            git_repo,
+            ahead,
+            signer,
+            repo_ref,
+            &None,
+            &[],
+        )
+        .await?
+        {
+            events.push(patch);
+        }
+    }
+
+    Ok(events)
 }
 
 fn push_to_remote(

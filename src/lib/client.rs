@@ -31,7 +31,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 use mockall::*;
 use nostr::{
     Event,
-    event::{TagKind, TagStandard},
+    event::{TagKind, TagStandard, UnsignedEvent},
     filter::Alphabet,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     signer::SignerBackend,
@@ -809,6 +809,30 @@ pub async fn sign_event(
     } else {
         signer
             .sign_event(event_builder.build(signer.get_public_key().await?))
+            .await
+            .context("failed to sign event")
+    }
+}
+
+pub async fn sign_draft_event(
+    draft_event: UnsignedEvent,
+    signer: &Arc<dyn NostrSigner>,
+    description: String,
+) -> Result<nostr::Event> {
+    if signer.backend() == SignerBackend::NostrConnect {
+        let term = console::Term::stderr();
+        term.write_line(&format!(
+            "signing event ({description}) with remote signer..."
+        ))?;
+        let event = signer
+            .sign_event(draft_event)
+            .await
+            .context("failed to sign event")?;
+        term.clear_last_lines(1)?;
+        Ok(event)
+    } else {
+        signer
+            .sign_event(draft_event)
             .await
             .context("failed to sign event")
     }
