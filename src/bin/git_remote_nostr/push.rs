@@ -382,28 +382,29 @@ async fn process_proposal_refspecs(
                             {
                                 events.push(event);
                             }
-                        }
-                        for (i, commit) in ahead.iter().enumerate() {
-                            let new_patch = generate_patch_event(
-                                git_repo,
-                                &git_repo.get_root_commit()?,
-                                commit,
-                                Some(thread_id),
-                                signer,
-                                repo_ref,
-                                Some(parent_patch.id),
-                                Some((
-                                    (patches.len() + i + 1).try_into().unwrap(),
-                                    (patches.len() + ahead.len()).try_into().unwrap(),
-                                )),
-                                None,
-                                &None,
-                                &[],
-                            )
-                            .await
-                            .context("failed to make patch event from commit")?;
-                            events.push(new_patch.clone());
-                            parent_patch = new_patch;
+                        } else {
+                            for (i, commit) in ahead.iter().enumerate() {
+                                let new_patch = generate_patch_event(
+                                    git_repo,
+                                    &git_repo.get_root_commit()?,
+                                    commit,
+                                    Some(thread_id),
+                                    signer,
+                                    repo_ref,
+                                    Some(parent_patch.id),
+                                    Some((
+                                        (patches.len() + i + 1).try_into().unwrap(),
+                                        (patches.len() + ahead.len()).try_into().unwrap(),
+                                    )),
+                                    None,
+                                    &None,
+                                    &[],
+                                )
+                                .await
+                                .context("failed to make patch event from commit")?;
+                                events.push(new_patch.clone());
+                                parent_patch = new_patch;
+                            }
                         }
                     } else {
                         // we shouldn't get here
