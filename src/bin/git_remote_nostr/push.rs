@@ -321,10 +321,15 @@ async fn process_proposal_refspecs(
             {
                 if refspec.starts_with('+') {
                     // force push
-                    let (_, main_tip) = git_repo.get_main_or_master_branch()?;
+                    let (main_branch_name, main_tip) = git_repo.get_main_or_master_branch()?;
                     let (mut ahead, _) =
                         git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
                     ahead.reverse();
+                    if ahead.is_empty() {
+                        bail!(
+                            "cannot push '{from}' as proposal as branch isn't ahead of '{main_branch_name}'"
+                        );
+                    }
                     for patch in generate_patches_or_pr_event_or_pr_updates(
                         git_repo,
                         repo_ref,
@@ -356,6 +361,11 @@ async fn process_proposal_refspecs(
                         };
                         let mut parent_patch = tip_patch.clone();
                         ahead.reverse();
+                        if ahead.is_empty() {
+                            bail!(
+                                "cannot push '{from}' as proposal as branch isn't ahead of proposal on nostr"
+                            );
+                        }
                         if proposal.kind.eq(&KIND_PULL_REQUEST)
                             || are_commits_too_big_for_patches(git_repo, &ahead)
                         {
@@ -418,10 +428,15 @@ async fn process_proposal_refspecs(
             }
         } else {
             // TODO new proposal / couldn't find exisiting proposal
-            let (_, main_tip) = git_repo.get_main_or_master_branch()?;
+            let (main_branch_name, main_tip) = git_repo.get_main_or_master_branch()?;
             let (mut ahead, _) =
                 git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
             ahead.reverse();
+            if ahead.is_empty() {
+                bail!(
+                    "cannot push '{from}' as proposal as branch isn't ahead of '{main_branch_name}'"
+                );
+            }
             for event in generate_patches_or_pr_event_or_pr_updates(
                 git_repo, repo_ref, &ahead, user_ref, None, signer, term,
             )
@@ -513,11 +528,11 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             }
         }
         if unsigned_pr_event.is_none() {
-            // TODO get fallback grasp servers that aren't in repo_grasps cycle
-            // through until one succeeds TODO create personal-fork
-            // announcement with grasp servers and push, after a few seconds
-            // push ref/nostr/eventid. if one success break out of
-            // for loop and continue
+            // TODO get grasp_default_set servers that aren't in repo_grasps
+            // cycle through until one succeeds TODO create
+            // personal-fork announcement with grasp servers and
+            // push, after a few seconds push ref/nostr/eventid. if
+            // one success break out of for loop and continue
         }
         if let Some(unsigned_pr_event) = unsigned_pr_event {
             let pr_event = sign_draft_event(
