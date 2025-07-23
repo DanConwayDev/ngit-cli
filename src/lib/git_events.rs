@@ -359,9 +359,25 @@ pub fn generate_unsigned_pr_or_update_event(
     clone_url_hint: &[&str],
     mentions: &[nostr::Tag],
 ) -> Result<UnsignedEvent> {
-    let title = git_repo.get_commit_message_summary(commit)?;
+    let root_patch_cover_letter = if let Some(root_proposal) = root_proposal {
+        if root_proposal.kind.eq(&Kind::GitPatch) {
+            Some(event_to_cover_letter(root_proposal)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    let description = {
+    let title = if let Some(cl) = &root_patch_cover_letter {
+        cl.title.clone()
+    } else {
+        git_repo.get_commit_message_summary(commit)?
+    };
+
+    let description = if let Some(cl) = &root_patch_cover_letter {
+        cl.description.clone()
+    } else {
         let mut description = git_repo.get_commit_message(commit)?.trim().to_string();
         if let Some(remaining_description) = description.strip_prefix(&title) {
             description = remaining_description.trim().to_string();
@@ -373,97 +389,111 @@ pub fn generate_unsigned_pr_or_update_event(
         .get_root_commit()
         .context("failed to get root commit of the repository")?;
 
-    Ok(if root_proposal.is_some() {
-        EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
-    } else {
-        EventBuilder::new(KIND_PULL_REQUEST, description)
-    }
-    .tags(
+    let pr_update_specific_tags = |root_proposal: &Event| {
+        vec![
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                vec![format!("git Pull Request Update")],
+            ),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("E")),
+                vec![root_proposal.id],
+            ),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("P")),
+                vec![root_proposal.pubkey],
+            ),
+        ]
+    };
+    let pr_specific_tags = || {
         [
-            repo_ref
-                .maintainers
-                .iter()
-                .map(|m| {
-                    Tag::from_standardized(TagStandard::Coordinate {
-                        coordinate: Coordinate {
-                            kind: nostr::Kind::GitRepoAnnouncement,
-                            public_key: *m,
-                            identifier: repo_ref.identifier.to_string(),
-                        },
-                        relay_url: repo_ref.relays.first().cloned(),
-                        uppercase: false,
-                    })
-                })
-                .collect::<Vec<Tag>>(),
-            mentions.to_vec(),
-            if let Some(root_proposal) = root_proposal {
-                [
-                    vec![Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec![format!("git Pull Request Update")],
-                    )],
-                    if root_proposal.kind.eq(&KIND_PULL_REQUEST) {
-                        vec![
-                            Tag::custom(
-                                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("E")),
-                                vec![root_proposal.id],
-                            ),
-                            Tag::custom(
-                                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("P")),
-                                vec![root_proposal.pubkey],
-                            ),
-                        ]
-                    } else {
-                        // root proposal is a Patch - so use e tag per nip34 spec
-                        vec![Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("e")),
-                            vec![root_proposal.id],
-                        )]
-                    },
-                ]
-                .concat()
-            } else {
-                [
-                    vec![
-                        Tag::from_standardized(TagStandard::Subject(title.clone())),
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                            vec![format!("git Pull Request: {}", title.clone())],
-                        ),
-                    ],
-                    if let Some(branch_name_tag) =
-                        make_branch_name_tag_from_check_out_branch(git_repo)
-                    {
-                        vec![branch_name_tag]
-                    } else {
-                        vec![]
-                    },
-                ]
-                .concat()
-            },
             vec![
-                Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
+                Tag::from_standardized(TagStandard::Subject(title.clone())),
                 Tag::custom(
-                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
-                    vec![format!("{commit}")],
-                ),
-                Tag::custom(
-                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                    clone_url_hint
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<String>>(),
+                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                    vec![format!("git Pull Request: {}", title.clone())],
                 ),
             ],
-            repo_ref
-                .maintainers
-                .iter()
-                .map(|pk| Tag::public_key(*pk))
-                .collect(),
+            if let Some(cl) = &root_patch_cover_letter {
+                vec![
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("e")),
+                        vec![root_proposal.unwrap().id],
+                    ),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
+                        vec![cl.branch_name_without_id_or_prefix.clone()],
+                    ),
+                    Tag::public_key(root_proposal.unwrap().pubkey),
+                ]
+            } else if let Some(branch_name_tag) =
+                make_branch_name_tag_from_check_out_branch(git_repo)
+            {
+                vec![branch_name_tag]
+            } else {
+                vec![]
+            },
         ]
-        .concat(),
+        .concat()
+    };
+
+    Ok(
+        if root_proposal.is_some() && root_patch_cover_letter.is_none() {
+            EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
+        } else {
+            EventBuilder::new(KIND_PULL_REQUEST, description)
+        }
+        .tags(
+            [
+                repo_ref
+                    .maintainers
+                    .iter()
+                    .map(|m| {
+                        Tag::from_standardized(TagStandard::Coordinate {
+                            coordinate: Coordinate {
+                                kind: nostr::Kind::GitRepoAnnouncement,
+                                public_key: *m,
+                                identifier: repo_ref.identifier.to_string(),
+                            },
+                            relay_url: repo_ref.relays.first().cloned(),
+                            uppercase: false,
+                        })
+                    })
+                    .collect::<Vec<Tag>>(),
+                mentions.to_vec(),
+                if let Some(root_proposal) = root_proposal {
+                    if root_patch_cover_letter.is_none() {
+                        pr_update_specific_tags(root_proposal)
+                    } else {
+                        pr_specific_tags()
+                    }
+                } else {
+                    pr_specific_tags()
+                },
+                vec![
+                    Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
+                        vec![format!("{commit}")],
+                    ),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
+                        clone_url_hint
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<String>>(),
+                    ),
+                ],
+                repo_ref
+                    .maintainers
+                    .iter()
+                    .map(|pk| Tag::public_key(*pk))
+                    .collect(),
+            ]
+            .concat(),
+        )
+        .build(*signing_public_key),
     )
-    .build(*signing_public_key))
 }
 
 fn make_branch_name_tag_from_check_out_branch(git_repo: &Repo) -> Option<Tag> {
