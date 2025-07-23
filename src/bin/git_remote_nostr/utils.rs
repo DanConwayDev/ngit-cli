@@ -131,6 +131,7 @@ pub async fn get_open_or_draft_proposals(
                     && e.tags.iter().any(|t| {
                         t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
                     })
+                    && (proposal.pubkey.eq(&e.pubkey) || repo_ref.maintainers.contains(&e.pubkey))
             })
             .collect::<Vec<&nostr::Event>>()
             .first()
