@@ -60,11 +60,11 @@ use crate::{
 #[allow(clippy::struct_field_names)]
 pub struct Client {
     client: nostr_sdk::Client,
-    fallback_relays: Vec<String>,
+    relay_default_set: Vec<String>,
     more_fallback_relays: Vec<String>,
     blaster_relays: Vec<String>,
     fallback_signer_relays: Vec<String>,
-    fallback_grasp_servers: Vec<String>,
+    grasp_default_set: Vec<String>,
     relays_not_to_retry: Arc<RwLock<HashMap<RelayUrl, String>>>,
 }
 
@@ -98,11 +98,11 @@ pub trait Connect {
     async fn set_signer(&mut self, signer: Arc<dyn NostrSigner>);
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()>;
     async fn disconnect(&self) -> Result<()>;
-    fn get_fallback_relays(&self) -> &Vec<String>;
+    fn get_relay_default_set(&self) -> &Vec<String>;
     fn get_more_fallback_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
     fn get_fallback_signer_relays(&self) -> &Vec<String>;
-    fn get_fallback_grasp_servers(&self) -> &Vec<String>;
+    fn get_grasp_default_set(&self) -> &Vec<String>;
     async fn send_event_to<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -152,11 +152,11 @@ impl Connect for Client {
                     .opts(Options::new().relay_limits(RelayLimits::disable()))
                     .build()
             },
-            fallback_relays: opts.fallback_relays,
+            relay_default_set: opts.relay_default_set,
             more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
             fallback_signer_relays: opts.fallback_signer_relays,
-            fallback_grasp_servers: opts.fallback_grasp_servers,
+            grasp_default_set: opts.grasp_default_set,
             relays_not_to_retry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -195,8 +195,8 @@ impl Connect for Client {
         Ok(())
     }
 
-    fn get_fallback_relays(&self) -> &Vec<String> {
-        &self.fallback_relays
+    fn get_relay_default_set(&self) -> &Vec<String> {
+        &self.relay_default_set
     }
 
     fn get_more_fallback_relays(&self) -> &Vec<String> {
@@ -211,8 +211,8 @@ impl Connect for Client {
         &self.fallback_signer_relays
     }
 
-    fn get_fallback_grasp_servers(&self) -> &Vec<String> {
-        &self.fallback_grasp_servers
+    fn get_grasp_default_set(&self) -> &Vec<String> {
+        &self.grasp_default_set
     }
 
     async fn send_event_to<'a>(
@@ -345,8 +345,8 @@ impl Connect for Client {
         trusted_maintainer_coordinate: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
-        let fallback_relays = &self
-            .fallback_relays
+        let relay_default_set = &self
+            .relay_default_set
             .iter()
             .filter_map(|r| RelayUrl::parse(r).ok())
             .collect::<HashSet<RelayUrl>>();
@@ -355,7 +355,7 @@ impl Connect for Client {
             git_repo_path,
             trusted_maintainer_coordinate,
             user_profiles,
-            fallback_relays.clone(),
+            relay_default_set.clone(),
         )
         .await?;
 
@@ -695,18 +695,18 @@ async fn get_events_of(
 
 pub struct Params {
     pub keys: Option<nostr::Keys>,
-    pub fallback_relays: Vec<String>,
+    pub relay_default_set: Vec<String>,
     pub more_fallback_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
     pub fallback_signer_relays: Vec<String>,
-    pub fallback_grasp_servers: Vec<String>,
+    pub grasp_default_set: Vec<String>,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Params {
             keys: None,
-            fallback_relays: if std::env::var("NGITTEST").is_ok() {
+            relay_default_set: if std::env::var("NGITTEST").is_ok() {
                 vec![
                     "ws://localhost:8051".to_string(),
                     "ws://localhost:8052".to_string(),
@@ -742,7 +742,7 @@ impl Default for Params {
             } else {
                 vec!["wss://relay.nsec.app".to_string()]
             },
-            fallback_grasp_servers: if std::env::var("NGITTEST").is_ok() {
+            grasp_default_set: if std::env::var("NGITTEST").is_ok() {
                 vec![]
             } else {
                 vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
@@ -765,7 +765,7 @@ impl Params {
                     .collect();
                 // elsewhere it is assumed this isn't empty
                 if !new_default_relays.is_empty() {
-                    params.fallback_relays = new_default_relays;
+                    params.relay_default_set = new_default_relays;
                 }
             }
             if let Ok(Some(relay_blasters)) =
@@ -794,7 +794,7 @@ impl Params {
                     .filter_map(|url| normalize_grasp_server_url(url).ok()) // Attempt to parse and filter out errors
                     .collect();
                 if !new_default_grasp_servers.is_empty() {
-                    params.fallback_grasp_servers = new_default_grasp_servers;
+                    params.grasp_default_set = new_default_grasp_servers;
                 }
             }
         }
@@ -1995,7 +1995,7 @@ pub async fn send_events(
     silent: bool,
 ) -> Result<()> {
     let fallback = [
-        client.get_fallback_relays().clone(),
+        client.get_relay_default_set().clone(),
         if events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
             client.get_blaster_relays().clone()
         } else {

@@ -229,7 +229,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<String>>()
         } else {
-            client.get_fallback_relays().clone()
+            client.get_relay_default_set().clone()
         }
     } else {
         args.relays.clone()
@@ -252,7 +252,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.blossoms.clone()
     };
 
-    let fallback_grasp_servers = client.get_fallback_grasp_servers();
+    let fallback_grasp_servers = client.get_grasp_default_set();
 
     let selected_grasp_servers = if has_server_and_relay_flags {
         // ignore so a script running `ngit init` can contiue without prompts
@@ -456,7 +456,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             let mut selections: Vec<bool> = vec![true; options.len()];
 
             // add fallback relays as options
-            for relay in client.get_fallback_relays().clone() {
+            for relay in client.get_relay_default_set().clone() {
                 if !options.iter().any(|r| r.contains(&relay))
                     && !formatted_selected_grasp_servers
                         .iter()

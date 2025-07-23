@@ -728,7 +728,7 @@ async fn signup(
                 EventBuilder::metadata(&Metadata::new().name(name)).sign_with_keys(&keys)?;
             let relay_list = EventBuilder::relay_list(
                 client
-                    .get_fallback_relays()
+                    .get_relay_default_set()
                     .iter()
                     .map(|s| (RelayUrl::parse(s).unwrap(), None)),
             )
@@ -738,7 +738,7 @@ async fn signup(
                 client,
                 None,
                 vec![profile, relay_list],
-                client.get_fallback_relays().clone(),
+                client.get_relay_default_set().clone(),
                 vec![],
                 true,
                 false,
