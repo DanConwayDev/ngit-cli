@@ -66,7 +66,7 @@ pub async fn run_push(
         .cloned()
         .collect::<Vec<String>>();
 
-    let mut git_server_refspecs = refspecs
+    let mut git_state_refspecs = refspecs
         .iter()
         .filter(|r| !r.contains("refs/heads/pr/"))
         .cloned()
@@ -106,12 +106,12 @@ pub async fn run_push(
     let (rejected_refspecs, remote_refspecs) = create_rejected_refspecs_and_remotes_refspecs(
         &term,
         git_repo,
-        &git_server_refspecs,
+        &git_state_refspecs,
         &existing_state,
         &list_outputs,
     )?;
 
-    git_server_refspecs.retain(|refspec| {
+    git_state_refspecs.retain(|refspec| {
         if let Some(rejected) = rejected_refspecs.get(&refspec.to_string()) {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
             println!("error {to} {} out of sync with nostr", rejected.join(" "));
@@ -122,11 +122,11 @@ pub async fn run_push(
     });
 
     // all refspecs aren't rejected
-    if !(git_server_refspecs.is_empty() && proposal_refspecs.is_empty()) {
-        let (rejected_proposal_refspecs, rejected) = create_and_publish_events(
+    if !(git_state_refspecs.is_empty() && proposal_refspecs.is_empty()) {
+        let (rejected_proposal_refspecs, rejected) = create_and_publish_events_and_proposals(
             git_repo,
             repo_ref,
-            &git_server_refspecs,
+            &git_state_refspecs,
             &proposal_refspecs,
             client,
             existing_state,
@@ -135,7 +135,7 @@ pub async fn run_push(
         .await?;
 
         if !rejected {
-            for refspec in git_server_refspecs.iter().chain(proposal_refspecs.iter()) {
+            for refspec in git_state_refspecs.iter().chain(proposal_refspecs.iter()) {
                 if rejected_proposal_refspecs.contains(refspec) {
                     continue;
                 }
@@ -154,7 +154,7 @@ pub async fn run_push(
             for (git_server_url, remote_refspecs) in remote_refspecs {
                 let remote_refspecs = remote_refspecs
                     .iter()
-                    .filter(|refspec| git_server_refspecs.contains(refspec))
+                    .filter(|refspec| git_state_refspecs.contains(refspec))
                     .cloned()
                     .collect::<Vec<String>>();
                 if !refspecs.is_empty() {
@@ -175,7 +175,7 @@ pub async fn run_push(
     Ok(())
 }
 
-async fn create_and_publish_events(
+async fn create_and_publish_events_and_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     git_server_refspecs: &Vec<String>,
