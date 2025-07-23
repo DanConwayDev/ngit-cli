@@ -529,6 +529,10 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             }
         }
         if unsigned_pr_event.is_none() {
+            bail!(
+                "a commit in your proposal is too big for a nostr patch. The repository doesnt list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request. Soon ngit will support pushing your changes to a different git / grasp git server."
+            );
+
             // TODO get grasp_default_set servers that aren't in repo_grasps
             // cycle through until one succeeds TODO create
             // personal-fork announcement with grasp servers and
@@ -561,7 +565,11 @@ async fn generate_patches_or_pr_event_or_pr_updates(
                 );
             }
         } else {
-            bail!("could not find a grasp server that accepts the Pull Request refs");
+            bail!(
+                "a commit in your proposal is too big for a nostr patch. tried to use submit as a nostr Pull Request but could not find a grasp server that would accept your changes"
+            );
+            // TODO suggest `ngit send` where user could specify their own clone
+            // url to push to once that feature is added
         }
     } else {
         for patch in generate_cover_letter_and_patch_events(
