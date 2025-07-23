@@ -18,8 +18,9 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
     git_events::{
-        event_is_revision_root, get_pr_tip_event_or_most_recent_patch_with_ancestors,
-        is_event_proposal_root_for_branch, status_kinds,
+        KIND_PULL_REQUEST, event_is_revision_root,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, is_event_proposal_root_for_branch,
+        status_kinds,
     },
     repo_ref::RepoRef,
 };
@@ -123,8 +124,8 @@ pub async fn get_open_or_draft_proposals(
     };
     let mut open_or_draft_proposals = HashMap::new();
 
-    for proposal in proposals {
-        let status = if let Some(e) = statuses
+    let get_status = |proposal: &Event| {
+        if let Some(e) = statuses
             .iter()
             .filter(|e| {
                 status_kinds().contains(&e.kind)
@@ -139,8 +140,32 @@ pub async fn get_open_or_draft_proposals(
             e.kind
         } else {
             Kind::GitStatusOpen
-        };
-        if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status) {
+        }
+    };
+
+    let is_proposal_pr_revision_of_patch = |proposal: &Event, patch: &Event| {
+        proposal.kind.eq(&KIND_PULL_REQUEST)
+            && proposal.tags.clone().into_iter().any(|t| {
+                t.as_slice().len() > 1
+                    && t.as_slice()[0].eq("e")
+                    && t.as_slice()[1].eq(&patch.id.to_string())
+                    && [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&get_status(proposal))
+            })
+    };
+
+    for proposal in &proposals {
+        let status = get_status(proposal);
+        if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status)
+        || // or patch has been revised as a PR which is open or draft
+            (
+                status.eq(&Kind::GitStatusClosed) &&
+                proposal.kind.eq(&Kind::GitPatch) &&
+                proposals.iter()
+                .any(|p| {
+                    is_proposal_pr_revision_of_patch(p, proposal)
+                })
+            )
+        {
             if let Ok(commits_events) = get_all_proposal_patch_pr_pr_update_events_from_cache(
                 git_repo_path,
                 repo_ref,
@@ -151,8 +176,10 @@ pub async fn get_open_or_draft_proposals(
                 if let Ok(most_recent_proposal_patch_chain) =
                     get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
                 {
-                    open_or_draft_proposals
-                        .insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
+                    open_or_draft_proposals.insert(
+                        proposal.id,
+                        (proposal.clone(), most_recent_proposal_patch_chain),
+                    );
                 }
             }
         }
