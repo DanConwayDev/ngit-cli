@@ -252,14 +252,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         args.blossoms.clone()
     };
 
-    let fallback_grasp_servers =
-        if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.grasp-default-set", None) {
-            s.split(';')
-                .filter_map(|url| normalize_grasp_server_url(url).ok()) // Attempt to parse and filter out errors
-                .collect()
-        } else {
-            vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
-        };
+    let fallback_grasp_servers = client.get_fallback_grasp_servers();
 
     let selected_grasp_servers = if has_server_and_relay_flags {
         // ignore so a script running `ngit init` can contiue without prompts
@@ -275,7 +268,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         let empty = options.is_empty();
         for fallback in fallback_grasp_servers {
             // Check if any option contains the fallback as a substring
-            if !options.iter().any(|option| option.contains(&fallback)) {
+            if !options.iter().any(|option| option.contains(fallback)) {
                 options.push(fallback.clone()); // Add fallback if not found
                 selections.push(empty); // mark as selected if no existing ngit relay otherwise not
             }

@@ -53,7 +53,7 @@ use crate::{
         status_kinds,
     },
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
-    repo_ref::RepoRef,
+    repo_ref::{RepoRef, normalize_grasp_server_url},
     repo_state::RepoState,
 };
 
@@ -64,6 +64,7 @@ pub struct Client {
     more_fallback_relays: Vec<String>,
     blaster_relays: Vec<String>,
     fallback_signer_relays: Vec<String>,
+    fallback_grasp_servers: Vec<String>,
     relays_not_to_retry: Arc<RwLock<HashMap<RelayUrl, String>>>,
 }
 
@@ -101,6 +102,7 @@ pub trait Connect {
     fn get_more_fallback_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
     fn get_fallback_signer_relays(&self) -> &Vec<String>;
+    fn get_fallback_grasp_servers(&self) -> &Vec<String>;
     async fn send_event_to<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -154,6 +156,7 @@ impl Connect for Client {
             more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
             fallback_signer_relays: opts.fallback_signer_relays,
+            fallback_grasp_servers: opts.fallback_grasp_servers,
             relays_not_to_retry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -206,6 +209,10 @@ impl Connect for Client {
 
     fn get_fallback_signer_relays(&self) -> &Vec<String> {
         &self.fallback_signer_relays
+    }
+
+    fn get_fallback_grasp_servers(&self) -> &Vec<String> {
+        &self.fallback_grasp_servers
     }
 
     async fn send_event_to<'a>(
@@ -692,6 +699,7 @@ pub struct Params {
     pub more_fallback_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
     pub fallback_signer_relays: Vec<String>,
+    pub fallback_grasp_servers: Vec<String>,
 }
 
 impl Default for Params {
@@ -734,6 +742,11 @@ impl Default for Params {
             } else {
                 vec!["wss://relay.nsec.app".to_string()]
             },
+            fallback_grasp_servers: if std::env::var("NGITTEST").is_ok() {
+                vec![]
+            } else {
+                vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
+            },
         }
     }
 }
@@ -772,6 +785,17 @@ impl Params {
                     .filter_map(|url| RelayUrl::parse(url).ok()) // Attempt to parse and filter out errors
                     .map(|relay_url| relay_url.to_string()) // Convert RelayUrl back to String
                     .collect();
+            }
+            if let Ok(Some(grasp_default_servers)) =
+                get_git_config_item(git_repo, "nostr.grasp-default-set")
+            {
+                let new_default_grasp_servers: Vec<String> = grasp_default_servers
+                    .split(';')
+                    .filter_map(|url| normalize_grasp_server_url(url).ok()) // Attempt to parse and filter out errors
+                    .collect();
+                if !new_default_grasp_servers.is_empty() {
+                    params.fallback_grasp_servers = new_default_grasp_servers;
+                }
             }
         }
         params
