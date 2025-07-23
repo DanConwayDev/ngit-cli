@@ -12,8 +12,8 @@ use client::{get_events_from_local_cache, get_state_from_cache, send_events, sig
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
 use git_events::{
-    generate_cover_letter_and_patch_events, generate_patch_event, generate_unsigned_pr_event,
-    get_commit_id_from_patch,
+    generate_cover_letter_and_patch_events, generate_patch_event,
+    generate_unsigned_pr_or_update_event, get_commit_id_from_patch,
 };
 use git2::{Oid, Repository};
 use ngit::{
@@ -24,7 +24,7 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded},
         oid_to_shorthand_string,
     },
-    git_events::{self, event_to_cover_letter, get_event_root},
+    git_events::{self, KIND_PULL_REQUEST, event_to_cover_letter, get_event_root},
     login::{self, user::UserRef},
     repo_ref::{self, get_repo_config_from_yaml, is_grasp_server, normalize_grasp_server_url},
     repo_state,
@@ -325,14 +325,14 @@ async fn process_proposal_refspecs(
                     let (mut ahead, _) =
                         git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
                     ahead.reverse();
-                    for patch in generate_cover_letter_and_patch_events(
-                        None,
+                    for patch in generate_patches_or_pr_event_or_pr_updates(
                         git_repo,
-                        &ahead,
-                        signer,
                         repo_ref,
-                        &Some(proposal.id.to_string()),
-                        &[],
+                        &ahead,
+                        user_ref,
+                        Some(proposal),
+                        signer,
+                        term,
                     )
                     .await?
                     {
@@ -356,6 +356,23 @@ async fn process_proposal_refspecs(
                         };
                         let mut parent_patch = tip_patch.clone();
                         ahead.reverse();
+                        if proposal.kind.eq(&KIND_PULL_REQUEST)
+                            || are_commits_too_big_for_patches(git_repo, &ahead)
+                        {
+                            for event in generate_patches_or_pr_event_or_pr_updates(
+                                git_repo,
+                                repo_ref,
+                                &ahead,
+                                user_ref,
+                                Some(proposal),
+                                signer,
+                                term,
+                            )
+                            .await?
+                            {
+                                events.push(event);
+                            }
+                        }
                         for (i, commit) in ahead.iter().enumerate() {
                             let new_patch = generate_patch_event(
                                 git_repo,
@@ -405,9 +422,10 @@ async fn process_proposal_refspecs(
             let (mut ahead, _) =
                 git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
             ahead.reverse();
-            for event in
-                generate_patches_or_pr_event(git_repo, repo_ref, &ahead, user_ref, signer, term)
-                    .await?
+            for event in generate_patches_or_pr_event_or_pr_updates(
+                git_repo, repo_ref, &ahead, user_ref, None, signer, term,
+            )
+            .await?
             {
                 events.push(event);
             }
@@ -417,25 +435,32 @@ async fn process_proposal_refspecs(
     Ok((events, rejected_proposal_refspecs))
 }
 
-async fn generate_patches_or_pr_event(
+fn are_commits_too_big_for_patches(git_repo: &Repo, commits: &[Sha1Hash]) -> bool {
+    commits.iter().any(|commit| {
+        if let Ok(patch) = git_repo.make_patch_from_commit(commit, &None) {
+            patch.len()
+                > ((65 // max recomended patch event size specified in nip34 in kb
+            // allownace for nostr event wrapper (id, pubkey, tags, sig)
+            - 1) * 1024)
+        } else {
+            true
+        }
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+async fn generate_patches_or_pr_event_or_pr_updates(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     ahead: &[Sha1Hash],
     user_ref: &UserRef,
+    root_proposal: Option<&Event>,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
 ) -> Result<Vec<Event>> {
     let mut events: Vec<Event> = vec![];
-    let use_pr = ahead.iter().any(|commit| {
-        if let Ok(patch) = git_repo.make_patch_from_commit(commit, &None) {
-            patch.len()
-                > ((65 // max recomended patch event size specified in nip34 in kb
-                // allownace for nostr event wrapper (id, pubkey, tags, sig)
-                - 1) * 1024)
-        } else {
-            true
-        }
-    });
+    let use_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST))
+        || are_commits_too_big_for_patches(git_repo, ahead);
 
     if use_pr {
         let repo_grasps = repo_ref.grasp_servers();
@@ -450,10 +475,11 @@ async fn generate_patches_or_pr_event(
             let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
                 unsigned_pr_event.clone()
             } else {
-                generate_unsigned_pr_event(
+                generate_unsigned_pr_or_update_event(
                     git_repo,
                     repo_ref,
                     &user_ref.public_key,
+                    root_proposal,
                     ahead.first().context("no commits to push")?,
                     &[clone_url],
                     &[],
@@ -494,9 +520,30 @@ async fn generate_patches_or_pr_event(
             // for loop and continue
         }
         if let Some(unsigned_pr_event) = unsigned_pr_event {
-            let pr_event =
-                sign_draft_event(unsigned_pr_event, signer, "Pull Request".to_string()).await?;
+            let pr_event = sign_draft_event(
+                unsigned_pr_event,
+                signer,
+                if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
+                    "Pull Request Replacing Original Patch"
+                } else if root_proposal.is_some() {
+                    "Pull Request Update"
+                } else {
+                    "Pull Request"
+                }
+                .to_string(),
+            )
+            .await?;
             events.push(pr_event);
+            if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
+                events.push(
+                    create_close_status_for_original_patch(
+                        signer,
+                        repo_ref,
+                        root_proposal.unwrap(),
+                    )
+                    .await?,
+                );
+            }
         } else {
             bail!("could not find a grasp server that accepts the Pull Request refs");
         }
@@ -507,7 +554,7 @@ async fn generate_patches_or_pr_event(
             ahead,
             signer,
             repo_ref,
-            &None,
+            &root_proposal.map(|proposal| proposal.id.to_string()),
             &[],
         )
         .await?
@@ -1487,6 +1534,62 @@ async fn create_merge_status(
     .await
 }
 
+async fn create_close_status_for_original_patch(
+    signer: &Arc<dyn NostrSigner>,
+    repo_ref: &RepoRef,
+    proposal: &Event,
+) -> Result<Event> {
+    let mut public_keys = repo_ref
+        .maintainers
+        .iter()
+        .copied()
+        .collect::<HashSet<PublicKey>>();
+    public_keys.insert(proposal.pubkey);
+
+    sign_event(
+        EventBuilder::new(nostr::event::Kind::GitStatusClosed, String::new()).tags(
+            [
+                vec![
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                        vec![
+                            "Git patch closed as forthcoming update is too large. Replacing with Pull Request"
+                                .to_string(),
+                        ],
+                    ),
+                    Tag::from_standardized(nostr::TagStandard::Event {
+                        event_id: proposal.id,
+                        relay_url: repo_ref.relays.first().cloned(),
+                        marker: Some(Marker::Root),
+                        public_key: None,
+                        uppercase: false,
+                    }),
+                ],
+                public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
+                repo_ref
+                    .coordinates()
+                    .iter()
+                    .map(|c| {
+                        Tag::from_standardized(TagStandard::Coordinate {
+                            coordinate: c.coordinate.clone(),
+                            relay_url: c.relays.first().cloned(),
+                            uppercase: false,
+                        })
+                    })
+                    .collect::<Vec<Tag>>(),
+                vec![
+                    Tag::from_standardized(nostr::TagStandard::Reference(
+                        repo_ref.root_commit.to_string(),
+                    )),
+                ],
+            ]
+            .concat(),
+        ),
+        signer,
+        "close status for original patch".to_string(),
+    )
+    .await
+}
 async fn get_proposal_and_revision_root_from_patch(
     git_repo: &Repo,
     patch: &Event,
