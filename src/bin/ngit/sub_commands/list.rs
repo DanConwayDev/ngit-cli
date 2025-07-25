@@ -244,16 +244,16 @@ pub async fn launch() -> Result<()> {
                 PromptChoiceParms::default()
                     .with_default(0)
                     .with_choices(vec![
-                        "learn why 'patch only' proposals can't be checked out".to_string(),
+                        "learn why this proposals can't be checked out".to_string(),
                         format!("apply to current branch with `git am`"),
                         format!("download to ./patches"),
                         "back".to_string(),
                     ]),
             )? {
                 0 => {
-                    println!("Some proposals are posted as 'patch only'\n");
+                    println!("Some proposals are posted as patch without listing a parent commit\n");
                     println!(
-                        "they are not anchored against a particular state of the code base like a standard proposal or a GitHub Pull Request can be\n"
+                        "they are not anchored against a particular state of the code base like a standard patch or a pull request can be\n"
                     );
                     println!(
                         "they are designed to reviewed by studying the diff (in a tool like gitworkshop.dev) and if acceptable by a maintainer, applied to the latest version of master with any conflicts resolved as the do so\n"
@@ -262,7 +262,7 @@ pub async fn launch() -> Result<()> {
                         "this has proven to be a smoother workflow for large scale projects with a high frequency of changes, even when patches are exchanged via email\n"
                     );
                     println!(
-                        "by default ngit posts proposals that support both the branch and patch model so either workflow can be used"
+                        "by default ngit posts proposals with a parent commit so either workflow can be used"
                     );
                     Interactor::default().choice(
                         PromptChoiceParms::default()
