@@ -1246,7 +1246,7 @@ type MergedProposalsInfo =
 async fn get_merged_proposals_info(
     git_repo: &Repo,
     ahead: &Vec<Sha1Hash>,
-    available_patches: &[Event],
+    available_patches_pr_pr_update: &[Event],
 ) -> Result<MergedProposalsInfo> {
     let mut proposals: MergedProposalsInfo = HashMap::new();
 
@@ -1256,19 +1256,19 @@ async fn get_merged_proposals_info(
         // are in ahead
         if commit.parent_count() > 1 {
             for parent in commit.parents() {
-                for patch_event in available_patches
+                for event in available_patches_pr_pr_update
                     .iter()
                     .filter(|e| {
                         e.tags.iter().any(|t| {
                             t.as_slice().len() > 1
-                                && t.as_slice()[0].eq("commit")
+                                && (t.as_slice()[0].eq("commit") || t.as_slice()[0].eq("c"))
                                 && t.as_slice()[1].eq(&parent.id().to_string())
                         })
                     })
                     .collect::<Vec<&Event>>()
                 {
                     if let Ok((proposal_id, revision_id)) =
-                        get_proposal_and_revision_root_from_patch(git_repo, patch_event).await
+                        get_proposal_and_revision_root_from_patch(git_repo, event).await
                     {
                         let (entry_revision_id, merged_patches) =
                             proposals.entry(proposal_id).or_default();
@@ -1281,12 +1281,12 @@ async fn get_merged_proposals_info(
         } else {
             // three way merge or fast forward merge commits
             // note: ahead included commits of three-way merged branches
-            let mut matching_patches = available_patches
+            let mut matching_patches = available_patches_pr_pr_update
                 .iter()
                 .filter(|e| {
                     e.tags.iter().any(|t| {
                         t.as_slice().len() > 1
-                            && t.as_slice()[0].eq("commit")
+                            && (t.as_slice()[0].eq("commit") || t.as_slice()[0].eq("c"))
                             && t.as_slice()[1].eq(&commit_hash.to_string())
                     })
                 })
@@ -1311,7 +1311,7 @@ async fn get_merged_proposals_info(
             // applied commits - this is done after so that merged revisions take priority
             if matching_patches.is_empty() {
                 let author = git_repo.get_commit_author(commit_hash)?;
-                matching_patches = available_patches
+                matching_patches = available_patches_pr_pr_update
                     .iter()
                     .filter(|e| {
                         if let Ok(patch_author) = get_patch_author(e) {
