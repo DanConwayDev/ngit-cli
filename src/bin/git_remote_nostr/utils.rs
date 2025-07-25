@@ -18,9 +18,8 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
     git_events::{
-        KIND_PULL_REQUEST, event_is_revision_root,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, is_event_proposal_root_for_branch,
-        status_kinds,
+        event_is_revision_root, get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status,
+        is_event_proposal_root_for_branch, status_kinds,
     },
     repo_ref::RepoRef,
 };
@@ -104,7 +103,10 @@ pub async fn get_open_or_draft_proposals(
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()
-            .filter(|e| !event_is_revision_root(e))
+            .filter(|e|
+                // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
+                // e.kind.eq(&KIND_PULL_REQUEST) ||
+                !event_is_revision_root(e))
             .cloned()
             .collect();
 
@@ -124,48 +126,9 @@ pub async fn get_open_or_draft_proposals(
     };
     let mut open_or_draft_proposals = HashMap::new();
 
-    let get_status = |proposal: &Event| {
-        if let Some(e) = statuses
-            .iter()
-            .filter(|e| {
-                status_kinds().contains(&e.kind)
-                    && e.tags.iter().any(|t| {
-                        t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
-                    })
-                    && (proposal.pubkey.eq(&e.pubkey) || repo_ref.maintainers.contains(&e.pubkey))
-            })
-            .collect::<Vec<&nostr::Event>>()
-            .first()
-        {
-            e.kind
-        } else {
-            Kind::GitStatusOpen
-        }
-    };
-
-    let is_proposal_pr_revision_of_patch = |proposal: &Event, patch: &Event| {
-        proposal.kind.eq(&KIND_PULL_REQUEST)
-            && proposal.tags.clone().into_iter().any(|t| {
-                t.as_slice().len() > 1
-                    && t.as_slice()[0].eq("e")
-                    && t.as_slice()[1].eq(&patch.id.to_string())
-                    && [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&get_status(proposal))
-            })
-    };
-
     for proposal in &proposals {
-        let status = get_status(proposal);
-        if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status)
-        || // or patch has been revised as a PR which is open or draft
-            (
-                status.eq(&Kind::GitStatusClosed) &&
-                proposal.kind.eq(&Kind::GitPatch) &&
-                proposals.iter()
-                .any(|p| {
-                    is_proposal_pr_revision_of_patch(p, proposal)
-                })
-            )
-        {
+        let status = get_status(proposal, repo_ref, &statuses, &proposals);
+        if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status) {
             if let Ok(commits_events) = get_all_proposal_patch_pr_pr_update_events_from_cache(
                 git_repo_path,
                 repo_ref,
@@ -196,7 +159,10 @@ pub async fn get_all_proposals(
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()
-            .filter(|e| !event_is_revision_root(e))
+            .filter(|e|
+                // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
+                // e.kind.eq(&KIND_PULL_REQUEST) ||
+                !event_is_revision_root(e))
             .cloned()
             .collect();
 

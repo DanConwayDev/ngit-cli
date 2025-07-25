@@ -72,7 +72,10 @@ pub async fn launch() -> Result<()> {
 
     let proposals: Vec<nostr::Event> = proposals_and_revisions
         .iter()
-        .filter(|e| !event_is_revision_root(e))
+        .filter(|e|
+            // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
+            // e.kind.eq(&KIND_PULL_REQUEST) ||
+            !event_is_revision_root(e))
         .cloned()
         .collect();
 

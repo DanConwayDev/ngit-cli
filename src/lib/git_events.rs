@@ -835,7 +835,61 @@ pub fn is_event_proposal_root_for_branch(
             || cl
                 .get_branch_name_with_pr_prefix_and_shorthand_id()
                 .is_ok_and(|s| s.eq(&branch_name))
-    }) && !event_is_revision_root(e))
+    }) && (
+        // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
+        // Note: whilst this the the case elsewhere event_is_revision_root is used, there is more to
+        //       think about here?
+        // e.kind.eq(&KIND_PULL_REQUEST) ||
+        !event_is_revision_root(e)
+    ))
+}
+
+pub fn get_status(
+    proposal: &Event,
+    repo_ref: &RepoRef,
+    all_status_in_repo: &[Event],
+    all_pr_roots_in_repo: &[Event],
+) -> Kind {
+    let get_direct_status = |proposal: &Event| {
+        if let Some(e) = all_status_in_repo
+            .iter()
+            .filter(|e| {
+                status_kinds().contains(&e.kind)
+                    && e.tags.iter().any(|t| {
+                        t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
+                    })
+                    && (proposal.pubkey.eq(&e.pubkey) || repo_ref.maintainers.contains(&e.pubkey))
+            })
+            .collect::<Vec<&nostr::Event>>()
+            .first()
+        {
+            e.kind
+        } else {
+            Kind::GitStatusOpen
+        }
+    };
+    let is_proposal_pr_revision_of_patch = |proposal: &Event, patch: &Event| {
+        proposal.kind.eq(&KIND_PULL_REQUEST)
+            && proposal.tags.clone().into_iter().any(|t| {
+                t.as_slice().len() > 1
+                    && t.as_slice()[0].eq("e")
+                    && t.as_slice()[1].eq(&patch.id.to_string())
+            })
+    };
+
+    let direct_status = get_direct_status(proposal);
+    if direct_status.eq(&Kind::GitStatusClosed) && proposal.kind.eq(&Kind::GitPatch) {
+        if let Some(pr_revision) = all_pr_roots_in_repo
+            .iter()
+            .find(|p| is_proposal_pr_revision_of_patch(p, proposal))
+        {
+            get_direct_status(pr_revision)
+        } else {
+            direct_status
+        }
+    } else {
+        direct_status
+    }
 }
 
 #[cfg(test)]
