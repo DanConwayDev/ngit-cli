@@ -206,13 +206,32 @@ pub async fn launch() -> Result<()> {
         {
             match Interactor::default().choice(
                 PromptChoiceParms::default()
-                    .with_prompt("this is new PR event kind which ngit doesnt yet support")
+                    .with_prompt(
+                        "this is new PR event kind which isn't supported in `ngit list` yet",
+                    )
                     .with_default(0)
-                    .with_choices(vec![
-                        // TODO enable checkout by fetching oids, creating / updating branch and
-                        // checking out
-                        "back to proposals".to_string(),
-                    ]),
+                    .with_choices(
+                        if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&selected_status)
+                            && git_repo
+                                .get_first_nostr_remote_when_in_ngit_binary()
+                                .await
+                                .is_ok_and(|r| r.is_some())
+                        {
+                            vec![
+                                format!(
+                                    "I'll manually checkout the proposal at remote branch '{}'",
+                                    cover_letter
+                                        .get_branch_name_with_pr_prefix_and_shorthand_id()
+                                        .unwrap()
+                                ),
+                                // TODO fetch oids and follow similar logic for dealing with
+                                // conflcts as with patches below
+                                "back to proposals".to_string(),
+                            ]
+                        } else {
+                            vec!["back to proposals".to_string()]
+                        },
+                    ),
             )? {
                 0 => continue,
                 _ => {
@@ -251,7 +270,9 @@ pub async fn launch() -> Result<()> {
                     ]),
             )? {
                 0 => {
-                    println!("Some proposals are posted as patch without listing a parent commit\n");
+                    println!(
+                        "Some proposals are posted as patch without listing a parent commit\n"
+                    );
                     println!(
                         "they are not anchored against a particular state of the code base like a standard patch or a pull request can be\n"
                     );
