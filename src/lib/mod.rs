@@ -4,6 +4,7 @@ pub mod git;
 pub mod git_events;
 pub mod list;
 pub mod login;
+pub mod push;
 pub mod repo_ref;
 pub mod repo_state;
 pub mod utils;
