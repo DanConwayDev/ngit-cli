@@ -8,7 +8,7 @@ use ngit::{
     },
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, status_kinds, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
     },
 };
 use nostr_sdk::Kind;
@@ -80,21 +80,7 @@ pub async fn launch() -> Result<()> {
         .collect();
 
     for proposal in &proposals {
-        let status = if let Some(e) = statuses
-            .iter()
-            .filter(|e| {
-                status_kinds().contains(&e.kind)
-                    && e.tags.iter().any(|t| {
-                        t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
-                    })
-            })
-            .collect::<Vec<&nostr::Event>>()
-            .first()
-        {
-            e.kind
-        } else {
-            Kind::GitStatusOpen
-        };
+        let status = get_status(proposal, &repo_ref, &statuses, &proposals);
         if status.eq(&Kind::GitStatusOpen) {
             open_proposals.push(proposal);
         } else if status.eq(&Kind::GitStatusClosed) {
