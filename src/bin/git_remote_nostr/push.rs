@@ -25,9 +25,15 @@ use ngit::{
         oid_to_shorthand_string,
     },
     git_events::{self, KIND_PULL_REQUEST, event_to_cover_letter, get_event_root},
+    list::list_from_remotes,
     login::{self, user::UserRef},
     repo_ref::{self, get_repo_config_from_yaml, is_grasp_server, normalize_grasp_server_url},
     repo_state,
+    utils::{
+        Direction, find_proposal_and_patches_by_branch_name, get_all_proposals,
+        get_remote_name_by_url, get_short_git_server_name, get_write_protocols_to_try,
+        join_with_and, read_line, set_protocol_preference,
+    },
 };
 use nostr::{event::UnsignedEvent, nips::nip10::Marker};
 use nostr_sdk::{
@@ -37,16 +43,7 @@ use nostr_sdk::{
 use repo_ref::RepoRef;
 use repo_state::RepoState;
 
-use crate::{
-    client::Client,
-    git::Repo,
-    list::list_from_remotes,
-    utils::{
-        Direction, find_proposal_and_patches_by_branch_name, get_all_proposals,
-        get_remote_name_by_url, get_short_git_server_name, get_write_protocols_to_try,
-        join_with_and, read_line, set_protocol_preference,
-    },
-};
+use crate::{client::Client, git::Repo};
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::type_complexity)]

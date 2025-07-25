@@ -18,16 +18,15 @@ use ngit::{
     client::{self, Params},
     git::{self, utils::set_git_timeout},
     login::existing::load_existing_login,
+    utils::read_line,
 };
 use nostr::nips::nip19::Nip19Coordinate;
-use utils::read_line;
 
 use crate::{client::Client, git::Repo};
 
 mod fetch;
 mod list;
 mod push;
-mod utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {

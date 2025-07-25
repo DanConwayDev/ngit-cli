@@ -19,14 +19,14 @@ use ngit::{
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, tag_value},
     login::get_curent_user,
     repo_ref::{RepoRef, is_grasp_server},
+    utils::{
+        Direction, find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch,
+        get_open_or_draft_proposals, get_read_protocols_to_try, join_with_and,
+        set_protocol_preference,
+    },
 };
 use nostr::nips::nip19;
 use nostr_sdk::{Event, ToBech32};
-
-use crate::utils::{
-    Direction, find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch,
-    get_open_or_draft_proposals, get_read_protocols_to_try, join_with_and, set_protocol_preference,
-};
 
 pub async fn run_fetch(
     git_repo: &Repo,
