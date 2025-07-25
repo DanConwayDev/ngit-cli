@@ -10,6 +10,7 @@ use nostr_sdk::{
     Tags,
     hashes::{Hash, sha1::Hash as Sha1Hash},
 };
+use nostr_url::NostrUrlDecoded;
 
 use crate::git_events::{get_commit_id_from_patch, tag_value};
 pub mod identify_ahead_behind;
@@ -92,6 +93,10 @@ pub trait RepoActions {
     fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>>;
     fn save_git_config_item(&self, item: &str, value: &str, global: bool) -> Result<()>;
     fn remove_git_config_item(&self, item: &str, global: bool) -> Result<bool>;
+    #[allow(async_fn_in_trait)]
+    async fn get_first_nostr_remote_when_in_ngit_binary(
+        &self,
+    ) -> Result<Option<(String, NostrUrlDecoded)>>;
 }
 
 impl RepoActions for Repo {
@@ -795,6 +800,21 @@ impl RepoActions for Repo {
             .context("failed to remove existing git config item")?;
             Ok(true)
         }
+    }
+
+    async fn get_first_nostr_remote_when_in_ngit_binary(
+        &self,
+    ) -> Result<Option<(String, NostrUrlDecoded)>> {
+        for remote_name in self.git_repo.remotes()?.iter().flatten() {
+            if let Some(remote_url) = self.git_repo.find_remote(remote_name)?.url() {
+                if let Ok(nostr_url_decoded) =
+                    NostrUrlDecoded::parse_and_resolve(remote_url, &Some(self)).await
+                {
+                    return Ok(Some((remote_name.to_string(), nostr_url_decoded)));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 

@@ -1,6 +1,6 @@
 use core::str;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Stdin,
     sync::{Arc, Mutex},
     time::Instant,
@@ -16,7 +16,7 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
         utils::check_ssh_keys,
     },
-    git_events::tag_value,
+    git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, tag_value},
     login::get_curent_user,
     repo_ref::{RepoRef, is_grasp_server},
 };
@@ -37,38 +37,78 @@ pub async fn run_fetch(
 ) -> Result<()> {
     let mut fetch_batch = get_oids_from_fetch_batch(stdin, oid, refstr)?;
 
-    let oids_from_git_servers = fetch_batch
+    let oids_from_state = fetch_batch
         .iter()
         .filter(|(refstr, _)| !refstr.contains("refs/heads/pr/"))
         .map(|(_, oid)| oid.clone())
         .collect::<Vec<String>>();
 
+    let pr_oid_clone_url_map = identify_clone_urls_for_oids_from_pr_pr_update_events(
+        fetch_batch.values().collect::<Vec<&String>>(),
+        git_repo,
+        repo_ref,
+    )
+    .await?;
+
+    let oids_to_fetch_from_git_servers = [
+        oids_from_state.clone(),
+        pr_oid_clone_url_map
+            .keys()
+            .cloned()
+            .collect::<Vec<String>>(),
+    ]
+    .concat();
+
+    let git_servers = {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = vec![];
+        for server in &repo_ref.git_server {
+            if seen.insert(server.clone()) {
+                out.push(server.clone());
+            }
+        }
+        for url in pr_oid_clone_url_map.values().flatten() {
+            if seen.insert(url.clone()) {
+                out.push(url.clone());
+            }
+        }
+        out
+    };
+
     let mut errors = vec![];
     let term = console::Term::stderr();
 
-    for git_server_url in &repo_ref.git_server {
+    for git_server_url in &git_servers {
+        let oids_to_fetch_from_server = oids_to_fetch_from_git_servers
+            .clone()
+            .into_iter()
+            .filter(|oid| !git_repo.does_commit_exist(oid).unwrap_or(false))
+            .collect::<Vec<String>>();
+
+        if oids_to_fetch_from_server.is_empty() {
+            continue;
+        }
+
         let term = console::Term::stderr();
         if let Err(error) = fetch_from_git_server(
             git_repo,
-            &oids_from_git_servers,
+            &oids_from_state,
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             &term,
             is_grasp_server(git_server_url, &repo_ref.grasp_servers()),
         ) {
             errors.push(error);
-        } else {
-            break;
         }
     }
 
-    if oids_from_git_servers
+    if oids_from_state
         .iter()
         .any(|oid| !git_repo.does_commit_exist(oid).unwrap())
         && !errors.is_empty()
     {
         bail!(
-            "fetch: failed to fetch objects in nostr state event from:\r\n{}",
+            "fetch: failed to fetch objects from:\r\n{}",
             errors
                 .iter()
                 .map(|e| format!(" - {e}"))
@@ -79,10 +119,41 @@ pub async fn run_fetch(
 
     fetch_batch.retain(|refstr, _| refstr.contains("refs/heads/pr/"));
 
-    fetch_open_or_draft_proposals(git_repo, &term, repo_ref, &fetch_batch).await?;
+    fetch_open_or_draft_proposals_from_patches(git_repo, &term, repo_ref, &fetch_batch).await?;
+    // TODO fetch_open_or_draft_proposals just needs to do it for patches
     term.flush()?;
     println!();
     Ok(())
+}
+
+async fn identify_clone_urls_for_oids_from_pr_pr_update_events(
+    oids: Vec<&String>,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+) -> Result<HashMap<String, Vec<String>>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+
+    let open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
+
+    for (_, (_, events)) in open_and_draft_proposals {
+        for event in events {
+            if [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&event.kind) {
+                if let Ok(c) = tag_value(&event, "c") {
+                    if oids.contains(&&c) {
+                        for tag in event.tags.as_slice() {
+                            if tag.kind().eq(&nostr::event::TagKind::Clone) {
+                                for clone_url in tag.as_slice().iter().skip(1) {
+                                    map.entry(c.clone()).or_default().push(clone_url.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(map)
 }
 
 pub fn make_commits_for_proposal(
@@ -128,7 +199,7 @@ pub fn make_commits_for_proposal(
     Ok(tip_commit_id)
 }
 
-async fn fetch_open_or_draft_proposals(
+async fn fetch_open_or_draft_proposals_from_patches(
     git_repo: &Repo,
     term: &console::Term,
     repo_ref: &RepoRef,
@@ -140,12 +211,19 @@ async fn fetch_open_or_draft_proposals(
         let current_user = get_curent_user(git_repo)?;
 
         for refstr in proposal_refs.keys() {
-            if let Some((_, (_, patches))) = find_proposal_and_patches_by_branch_name(
+            if let Some((_, (_, events_to_apply))) = find_proposal_and_patches_by_branch_name(
                 refstr,
                 &open_and_draft_proposals,
                 current_user.as_ref(),
             ) {
-                if let Err(error) = make_commits_for_proposal(git_repo, repo_ref, patches) {
+                if events_to_apply
+                    .iter()
+                    .any(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
+                {
+                    // do nothing - we fetch these oids as part of run_fetch
+                } else if let Err(error) =
+                    make_commits_for_proposal(git_repo, repo_ref, events_to_apply)
+                {
                     term.write_line(
                         format!("WARNING: failed to create branch for {refstr}, error: {error}",)
                             .as_str(),
@@ -429,6 +507,7 @@ fn fetch_from_git_server_url(
         remote_callbacks.credentials(auth.credentials(&git_config));
     }
     fetch_options.remote_callbacks(remote_callbacks);
+
     git_server_remote.download(oids, Some(&mut fetch_options))?;
 
     git_server_remote.disconnect()?;

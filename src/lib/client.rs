@@ -31,6 +31,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 use mockall::*;
 use nostr::{
     Event,
+    event::{TagKind, TagStandard, UnsignedEvent},
     filter::Alphabet,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     signer::SignerBackend,
@@ -47,20 +48,23 @@ use crate::{
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
-        event_is_cover_letter, event_is_patch_set_root, event_is_revision_root, status_kinds,
+        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_is_cover_letter,
+        event_is_patch_set_root, event_is_revision_root, event_is_valid_pr_or_pr_update,
+        status_kinds,
     },
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
-    repo_ref::RepoRef,
+    repo_ref::{RepoRef, normalize_grasp_server_url},
     repo_state::RepoState,
 };
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
     client: nostr_sdk::Client,
-    fallback_relays: Vec<String>,
+    relay_default_set: Vec<String>,
     more_fallback_relays: Vec<String>,
     blaster_relays: Vec<String>,
     fallback_signer_relays: Vec<String>,
+    grasp_default_set: Vec<String>,
     relays_not_to_retry: Arc<RwLock<HashMap<RelayUrl, String>>>,
 }
 
@@ -94,10 +98,11 @@ pub trait Connect {
     async fn set_signer(&mut self, signer: Arc<dyn NostrSigner>);
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()>;
     async fn disconnect(&self) -> Result<()>;
-    fn get_fallback_relays(&self) -> &Vec<String>;
+    fn get_relay_default_set(&self) -> &Vec<String>;
     fn get_more_fallback_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
     fn get_fallback_signer_relays(&self) -> &Vec<String>;
+    fn get_grasp_default_set(&self) -> &Vec<String>;
     async fn send_event_to<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -147,10 +152,11 @@ impl Connect for Client {
                     .opts(Options::new().relay_limits(RelayLimits::disable()))
                     .build()
             },
-            fallback_relays: opts.fallback_relays,
+            relay_default_set: opts.relay_default_set,
             more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
             fallback_signer_relays: opts.fallback_signer_relays,
+            grasp_default_set: opts.grasp_default_set,
             relays_not_to_retry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -189,8 +195,8 @@ impl Connect for Client {
         Ok(())
     }
 
-    fn get_fallback_relays(&self) -> &Vec<String> {
-        &self.fallback_relays
+    fn get_relay_default_set(&self) -> &Vec<String> {
+        &self.relay_default_set
     }
 
     fn get_more_fallback_relays(&self) -> &Vec<String> {
@@ -203,6 +209,10 @@ impl Connect for Client {
 
     fn get_fallback_signer_relays(&self) -> &Vec<String> {
         &self.fallback_signer_relays
+    }
+
+    fn get_grasp_default_set(&self) -> &Vec<String> {
+        &self.grasp_default_set
     }
 
     async fn send_event_to<'a>(
@@ -335,8 +345,8 @@ impl Connect for Client {
         trusted_maintainer_coordinate: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
-        let fallback_relays = &self
-            .fallback_relays
+        let relay_default_set = &self
+            .relay_default_set
             .iter()
             .filter_map(|r| RelayUrl::parse(r).ok())
             .collect::<HashSet<RelayUrl>>();
@@ -345,7 +355,7 @@ impl Connect for Client {
             git_repo_path,
             trusted_maintainer_coordinate,
             user_profiles,
-            fallback_relays.clone(),
+            relay_default_set.clone(),
         )
         .await?;
 
@@ -685,17 +695,18 @@ async fn get_events_of(
 
 pub struct Params {
     pub keys: Option<nostr::Keys>,
-    pub fallback_relays: Vec<String>,
+    pub relay_default_set: Vec<String>,
     pub more_fallback_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
     pub fallback_signer_relays: Vec<String>,
+    pub grasp_default_set: Vec<String>,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Params {
             keys: None,
-            fallback_relays: if std::env::var("NGITTEST").is_ok() {
+            relay_default_set: if std::env::var("NGITTEST").is_ok() {
                 vec![
                     "ws://localhost:8051".to_string(),
                     "ws://localhost:8052".to_string(),
@@ -731,6 +742,11 @@ impl Default for Params {
             } else {
                 vec!["wss://relay.nsec.app".to_string()]
             },
+            grasp_default_set: if std::env::var("NGITTEST").is_ok() {
+                vec![]
+            } else {
+                vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
+            },
         }
     }
 }
@@ -749,7 +765,7 @@ impl Params {
                     .collect();
                 // elsewhere it is assumed this isn't empty
                 if !new_default_relays.is_empty() {
-                    params.fallback_relays = new_default_relays;
+                    params.relay_default_set = new_default_relays;
                 }
             }
             if let Ok(Some(relay_blasters)) =
@@ -769,6 +785,17 @@ impl Params {
                     .filter_map(|url| RelayUrl::parse(url).ok()) // Attempt to parse and filter out errors
                     .map(|relay_url| relay_url.to_string()) // Convert RelayUrl back to String
                     .collect();
+            }
+            if let Ok(Some(grasp_default_servers)) =
+                get_git_config_item(git_repo, "nostr.grasp-default-set")
+            {
+                let new_default_grasp_servers: Vec<String> = grasp_default_servers
+                    .split(';')
+                    .filter_map(|url| normalize_grasp_server_url(url).ok()) // Attempt to parse and filter out errors
+                    .collect();
+                if !new_default_grasp_servers.is_empty() {
+                    params.grasp_default_set = new_default_grasp_servers;
+                }
             }
         }
         params
@@ -806,6 +833,30 @@ pub async fn sign_event(
     } else {
         signer
             .sign_event(event_builder.build(signer.get_public_key().await?))
+            .await
+            .context("failed to sign event")
+    }
+}
+
+pub async fn sign_draft_event(
+    draft_event: UnsignedEvent,
+    signer: &Arc<dyn NostrSigner>,
+    description: String,
+) -> Result<nostr::Event> {
+    if signer.backend() == SignerBackend::NostrConnect {
+        let term = console::Term::stderr();
+        term.write_line(&format!(
+            "signing event ({description}) with remote signer..."
+        ))?;
+        let event = signer
+            .sign_event(draft_event)
+            .await
+            .context("failed to sign event")?;
+        term.clear_last_lines(1)?;
+        Ok(event)
+    } else {
+        signer
+            .sign_event(draft_event)
             .await
             .context("failed to sign event")
     }
@@ -1459,7 +1510,7 @@ async fn process_fetched_events(
                         report.updated_state = Some((event.created_at, event.id));
                     }
                 }
-            } else if event_is_patch_set_root(event) {
+            } else if event_is_patch_set_root(event) || event.kind.eq(&KIND_PULL_REQUEST) {
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
                 if !request.contributors.contains(&event.pubkey)
@@ -1487,12 +1538,23 @@ async fn process_fetched_events(
     }
     for event in &events {
         if !request.existing_events.contains(&event.id)
-            && !event
+            && (!event
                 .tags
                 .event_ids()
                 .any(|id| report.proposals.contains(id))
+                || event
+                    .tags
+                    .filter_standardized(TagKind::Custom(std::borrow::Cow::Borrowed("E")))
+                    .filter_map(|t| match t {
+                        TagStandard::Event { event_id, .. } => Some(event_id),
+                        TagStandard::EventReport(event_id, ..) => Some(event_id),
+                        _ => None,
+                    })
+                    .any(|id| report.proposals.contains(id)))
         {
-            if event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event) {
+            if (event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event))
+                || event.kind.eq(&KIND_PULL_REQUEST_UPDATE)
+            {
                 report.commits.insert(event.id);
             } else if status_kinds().contains(&event.kind) {
                 report.statuses.insert(event.id);
@@ -1570,7 +1632,7 @@ pub fn get_fetch_filters(
                 get_filter_state_events(repo_coordinates),
                 get_filter_repo_events(repo_coordinates),
                 nostr::Filter::default()
-                    .kinds(vec![Kind::GitPatch, Kind::EventDeletion])
+                    .kinds(vec![Kind::GitPatch, Kind::EventDeletion, KIND_PULL_REQUEST])
                     .custom_tags(
                         SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                         repo_coordinates
@@ -1584,15 +1646,29 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
-                nostr::Filter::default()
-                    .events(proposal_ids.clone())
-                    .kinds([vec![Kind::GitPatch, Kind::EventDeletion], status_kinds()].concat()),
+                nostr::Filter::default().events(proposal_ids.clone()).kinds(
+                    [
+                        vec![
+                            Kind::GitPatch,
+                            Kind::EventDeletion,
+                            KIND_PULL_REQUEST_UPDATE,
+                        ],
+                        status_kinds(),
+                    ]
+                    .concat(),
+                ),
                 nostr::Filter::default()
                     .custom_tags(
                         SingleLetterTag::uppercase(Alphabet::E),
                         proposal_ids.clone(),
                     )
-                    .kinds([vec![Kind::GitPatch, Kind::EventDeletion], status_kinds()].concat()),
+                    .kinds(
+                        [
+                            vec![Kind::EventDeletion, KIND_PULL_REQUEST_UPDATE],
+                            status_kinds(),
+                        ]
+                        .concat(),
+                    ),
             ]
         },
         if required_profiles.is_empty() {
@@ -1784,7 +1860,7 @@ pub async fn get_proposals_and_revisions_from_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
+                .kinds([nostr::Kind::GitPatch, KIND_PULL_REQUEST])
                 .custom_tags(
                     nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                     repo_coordinates
@@ -1796,7 +1872,8 @@ pub async fn get_proposals_and_revisions_from_cache(
     )
     .await?
     .iter()
-    .filter(|e| event_is_patch_set_root(e))
+    .filter(|e| event_is_patch_set_root(e) || e.kind.eq(&KIND_PULL_REQUEST))
+    .filter(|e| e.kind.eq(&Kind::GitPatch) || event_is_valid_pr_or_pr_update(e))
     .cloned()
     .collect::<Vec<nostr::Event>>();
     proposals.sort_by_key(|e| e.created_at);
@@ -1804,7 +1881,7 @@ pub async fn get_proposals_and_revisions_from_cache(
     Ok(proposals)
 }
 
-pub async fn get_all_proposal_patch_events_from_cache(
+pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
     git_repo_path: &Path,
     repo_ref: &RepoRef,
     proposal_id: &nostr::EventId,
@@ -1813,10 +1890,21 @@ pub async fn get_all_proposal_patch_events_from_cache(
         git_repo_path,
         vec![
             nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
+                .kinds([
+                    nostr::Kind::GitPatch,
+                    KIND_PULL_REQUEST,
+                    KIND_PULL_REQUEST_UPDATE,
+                ])
                 .event(*proposal_id),
             nostr::Filter::default()
-                .kind(nostr::Kind::GitPatch)
+                .kinds([
+                    nostr::Kind::GitPatch,
+                    KIND_PULL_REQUEST,
+                    KIND_PULL_REQUEST_UPDATE,
+                ])
+                .custom_tag(SingleLetterTag::uppercase(Alphabet::E), *proposal_id),
+            nostr::Filter::default()
+                .kinds([nostr::Kind::GitPatch, KIND_PULL_REQUEST])
                 .id(*proposal_id),
         ],
     )
@@ -1836,7 +1924,11 @@ pub async fn get_all_proposal_patch_events_from_cache(
     .iter()
     .copied()
     .collect();
-    commit_events.retain(|e| permissioned_users.contains(&e.pubkey));
+
+    commit_events.retain(|e| {
+        permissioned_users.contains(&e.pubkey)
+            && (e.kind.eq(&Kind::GitPatch) || event_is_valid_pr_or_pr_update(e))
+    });
 
     let revision_roots: HashSet<nostr::EventId> = commit_events
         .iter()
@@ -1849,8 +1941,20 @@ pub async fn get_all_proposal_patch_events_from_cache(
             git_repo_path,
             vec![
                 nostr::Filter::default()
-                    .kind(nostr::Kind::GitPatch)
-                    .events(revision_roots)
+                    .kinds([
+                        nostr::Kind::GitPatch,
+                        KIND_PULL_REQUEST,
+                        KIND_PULL_REQUEST_UPDATE,
+                    ])
+                    .events(revision_roots.clone())
+                    .authors(permissioned_users.clone()),
+                nostr::Filter::default()
+                    .kinds([
+                        nostr::Kind::GitPatch,
+                        KIND_PULL_REQUEST,
+                        KIND_PULL_REQUEST_UPDATE,
+                    ])
+                    .custom_tags(SingleLetterTag::uppercase(Alphabet::E), revision_roots)
                     .authors(permissioned_users.clone()),
             ],
         )
@@ -1891,7 +1995,7 @@ pub async fn send_events(
     silent: bool,
 ) -> Result<()> {
     let fallback = [
-        client.get_fallback_relays().clone(),
+        client.get_relay_default_set().clone(),
         if events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
             client.get_blaster_relays().clone()
         } else {

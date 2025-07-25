@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use git2::Repository;
 use ngit::{
     client::{
-        get_all_proposal_patch_events_from_cache, get_events_from_local_cache,
+        get_all_proposal_patch_pr_pr_update_events_from_cache, get_events_from_local_cache,
         get_proposals_and_revisions_from_cache,
     },
     git::{
@@ -18,7 +18,7 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
     git_events::{
-        event_is_revision_root, get_most_recent_patch_with_ancestors,
+        event_is_revision_root, get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status,
         is_event_proposal_root_for_branch, status_kinds,
     },
     repo_ref::RepoRef,
@@ -103,7 +103,10 @@ pub async fn get_open_or_draft_proposals(
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()
-            .filter(|e| !event_is_revision_root(e))
+            .filter(|e|
+                // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
+                // e.kind.eq(&KIND_PULL_REQUEST) ||
+                !event_is_revision_root(e))
             .cloned()
             .collect();
 
@@ -123,32 +126,23 @@ pub async fn get_open_or_draft_proposals(
     };
     let mut open_or_draft_proposals = HashMap::new();
 
-    for proposal in proposals {
-        let status = if let Some(e) = statuses
-            .iter()
-            .filter(|e| {
-                status_kinds().contains(&e.kind)
-                    && e.tags.iter().any(|t| {
-                        t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
-                    })
-            })
-            .collect::<Vec<&nostr::Event>>()
-            .first()
-        {
-            e.kind
-        } else {
-            Kind::GitStatusOpen
-        };
+    for proposal in &proposals {
+        let status = get_status(proposal, repo_ref, &statuses, &proposals);
         if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status) {
-            if let Ok(commits_events) =
-                get_all_proposal_patch_events_from_cache(git_repo_path, repo_ref, &proposal.id)
-                    .await
+            if let Ok(commits_events) = get_all_proposal_patch_pr_pr_update_events_from_cache(
+                git_repo_path,
+                repo_ref,
+                &proposal.id,
+            )
+            .await
             {
                 if let Ok(most_recent_proposal_patch_chain) =
-                    get_most_recent_patch_with_ancestors(commits_events.clone())
+                    get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
                 {
-                    open_or_draft_proposals
-                        .insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
+                    open_or_draft_proposals.insert(
+                        proposal.id,
+                        (proposal.clone(), most_recent_proposal_patch_chain),
+                    );
                 }
             }
         }
@@ -165,18 +159,25 @@ pub async fn get_all_proposals(
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()
-            .filter(|e| !event_is_revision_root(e))
+            .filter(|e|
+                // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
+                // e.kind.eq(&KIND_PULL_REQUEST) ||
+                !event_is_revision_root(e))
             .cloned()
             .collect();
 
     let mut all_proposals = HashMap::new();
 
     for proposal in proposals {
-        if let Ok(commits_events) =
-            get_all_proposal_patch_events_from_cache(git_repo_path, repo_ref, &proposal.id).await
+        if let Ok(commits_events) = get_all_proposal_patch_pr_pr_update_events_from_cache(
+            git_repo_path,
+            repo_ref,
+            &proposal.id,
+        )
+        .await
         {
             if let Ok(most_recent_proposal_patch_chain) =
-                get_most_recent_patch_with_ancestors(commits_events.clone())
+                get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
             {
                 all_proposals.insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
             }
