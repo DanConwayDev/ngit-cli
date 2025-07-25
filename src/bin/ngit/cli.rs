@@ -98,7 +98,7 @@ pub enum Commands {
     List,
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
-    Sync,
+    Sync(sub_commands::sync::SubCommandArgs),
     /// login, logout or export keys
     Account(AccountSubCommandArgs),
 }

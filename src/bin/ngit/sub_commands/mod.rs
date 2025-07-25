@@ -4,3 +4,4 @@ pub mod list;
 pub mod login;
 pub mod logout;
 pub mod send;
+pub mod sync;
