@@ -794,17 +794,19 @@ fn generate_updated_state(
                 format!("{to}{}", "^{}"),
                 git_repo
                     .get_commit_or_tip_of_reference(from)
-                    .unwrap()
+                    .context(format!(
+                        "cannot find commit from ref {from} to push to {to}"
+                    ))?
                     .to_string(),
             );
             new_state.insert(
                 to.to_string(),
                 git_repo
                     .git_repo
-                    .find_reference(to)
-                    .unwrap()
+                    .find_reference(from)
+                    .context(format!("cannot find ref {from}  to push to {to}"))?
                     .peel(git2::ObjectType::Tag)
-                    .unwrap()
+                    .context(format!("cannot find tag id {from} to push to {to}"))?
                     .id()
                     .to_string(),
             );
@@ -814,7 +816,9 @@ fn generate_updated_state(
                 to.to_string(),
                 git_repo
                     .get_commit_or_tip_of_reference(from)
-                    .unwrap()
+                    .context(format!(
+                        "cannot find commit from ref {from} to push to {to}"
+                    ))?
                     .to_string(),
             );
         }
