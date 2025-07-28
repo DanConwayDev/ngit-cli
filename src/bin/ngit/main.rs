@@ -32,6 +32,7 @@ async fn main() -> Result<()> {
             Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
             Commands::List => sub_commands::list::launch().await,
             Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
+            Commands::Sync(args) => sub_commands::sync::launch(args).await,
         }
     } else {
         // Handle the case where no command is provided

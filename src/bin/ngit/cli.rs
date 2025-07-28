@@ -96,6 +96,9 @@ pub enum Commands {
     Send(sub_commands::send::SubCommandArgs),
     /// list PRs; checkout, apply or download selected
     List,
+    /// update repo git servers to reflect nostr state (add, update or delete
+    /// remote refs)
+    Sync(sub_commands::sync::SubCommandArgs),
     /// login, logout or export keys
     Account(AccountSubCommandArgs),
 }

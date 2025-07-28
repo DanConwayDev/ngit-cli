@@ -8,7 +8,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use git2::Repository;
-use ngit::{
+use nostr_sdk::{Event, EventId, Kind, PublicKey, Url};
+
+use crate::{
     client::{
         get_all_proposal_patch_pr_pr_update_events_from_cache, get_events_from_local_cache,
         get_proposals_and_revisions_from_cache,
@@ -23,7 +25,6 @@ use ngit::{
     },
     repo_ref::RepoRef,
 };
-use nostr_sdk::{Event, EventId, Kind, PublicKey, Url};
 
 pub fn get_short_git_server_name(git_repo: &Repo, url: &str) -> std::string::String {
     if let Ok(name) = get_remote_name_by_url(&git_repo.git_repo, url) {
