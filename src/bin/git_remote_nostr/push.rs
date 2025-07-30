@@ -790,26 +790,37 @@ fn generate_updated_state(
                 new_state.remove(&format!("{to}{}", "^{}"));
             }
         } else if to.contains("refs/tags") {
-            new_state.insert(
-                format!("{to}{}", "^{}"),
-                git_repo
-                    .get_commit_or_tip_of_reference(from)
-                    .context(format!(
-                        "cannot find commit from ref {from} to push to {to}"
-                    ))?
-                    .to_string(),
-            );
-            new_state.insert(
-                to.to_string(),
-                git_repo
-                    .git_repo
-                    .find_reference(from)
-                    .context(format!("cannot find ref {from}  to push to {to}"))?
-                    .peel(git2::ObjectType::Tag)
-                    .context(format!("cannot find tag id {from} to push to {to}"))?
-                    .id()
-                    .to_string(),
-            );
+            if let Ok(annotated_tag) = git_repo
+                .git_repo
+                .find_reference(from)
+                .context(format!("cannot find ref {from} to push to {to}"))?
+                .peel(git2::ObjectType::Tag)
+            {
+                // this is an anotated tag so there is a tag oid
+                // ref points to tag oid
+                new_state.insert(to.to_string(), annotated_tag.id().to_string());
+                // dereferenced tags ref points to commit at its head
+                new_state.insert(
+                    format!("{to}{}", "^{}"),
+                    git_repo
+                        .get_commit_or_tip_of_reference(from)
+                        .context(format!(
+                            "cannot find commit from annotated tag ref {from} to push to {to}"
+                        ))?
+                        .to_string(),
+                );
+            } else {
+                // this is a lightweight tag so there is no tag oid
+                new_state.insert(
+                    to.to_string(),
+                    git_repo
+                        .get_commit_or_tip_of_reference(from)
+                        .context(format!(
+                            "cannot find commit from annotated tag ref {from} to push to {to}"
+                        ))?
+                        .to_string(),
+                );
+            }
         } else {
             // add or update
             new_state.insert(
