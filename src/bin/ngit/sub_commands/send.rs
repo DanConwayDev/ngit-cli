@@ -4,12 +4,9 @@ use anyhow::{Context, Result, bail};
 use console::Style;
 use ngit::{
     client::{Params, send_events},
-    git_events::generate_cover_letter_and_patch_events,
+    git_events::{EventRefType, generate_cover_letter_and_patch_events},
 };
-use nostr::{
-    ToBech32,
-    nips::{nip10::Marker, nip19::Nip19Event},
-};
+use nostr::{ToBech32, nips::nip19::Nip19Event};
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 use crate::{
@@ -368,7 +365,7 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
     in_reply_to: &[String],
 ) -> Result<(Option<String>, Vec<nostr::Tag>)> {
     let root_proposal_id = if let Some(first) = in_reply_to.first() {
-        match event_tag_from_nip19_or_hex(first, "in-reply-to", Marker::Root, true, false)?
+        match event_tag_from_nip19_or_hex(first, "in-reply-to", EventRefType::Root, true, false)?
             .as_standardized()
         {
             Some(nostr_sdk::TagStandard::Event {
@@ -404,10 +401,16 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
     for (i, reply_to) in in_reply_to.iter().enumerate() {
         if i.ne(&0) || root_proposal_id.is_none() {
             mention_tags.push(
-                event_tag_from_nip19_or_hex(reply_to, "in-reply-to", Marker::Mention, true, false)
-                    .context(format!(
-                        "{reply_to} in 'in-reply-to' not a valid nostr reference"
-                    ))?,
+                event_tag_from_nip19_or_hex(
+                    reply_to,
+                    "in-reply-to",
+                    EventRefType::Quote,
+                    true,
+                    false,
+                )
+                .context(format!(
+                    "{reply_to} in 'in-reply-to' not a valid nostr reference"
+                ))?,
             );
         }
     }

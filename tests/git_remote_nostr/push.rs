@@ -1070,7 +1070,7 @@ async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_is
         merge_status
             .tags
             .iter()
-            .find(|t| t.as_slice().len().eq(&4) && t.as_slice()[3].eq("mention"))
+            .find(|t| t.as_slice()[0].eq("q"))
             .unwrap()
             .as_slice()[1],
         "status mentions proposal tip event \r\nmerge status:\r\n{}\r\nproposal tip:\r\n{}",
@@ -1252,9 +1252,10 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
         .collect::<Vec<String>>()
     {
         assert!(
-            merge_status.tags.iter().any(|t| t.as_slice().len().eq(&4)
-                && t.as_slice()[1] == patch_id
-                && t.as_slice()[3].eq("mention")),
+            merge_status
+                .tags
+                .iter()
+                .any(|t| t.as_slice()[0].eq("q") && t.as_slice()[1] == patch_id),
             "merge status doesnt mention proposal patch {patch_id}  \r\nmerge status:\r\n{}",
             merge_status.as_json(),
         );
@@ -1422,9 +1423,10 @@ async fn proposal_commits_applied_and_pushed_to_main_leads_to_status_event_issue
         .collect::<Vec<String>>()
     {
         assert!(
-            merge_status.tags.iter().any(|t| t.as_slice().len().eq(&4)
-                && t.as_slice()[1] == patch_id
-                && t.as_slice()[3].eq("mention")),
+            merge_status
+                .tags
+                .iter()
+                .any(|t| t.as_slice()[0].eq("q") && t.as_slice()[1] == patch_id),
             "merge status doesnt mention proposal patch {patch_id}  \r\nmerge status:\r\n{}",
             merge_status.as_json(),
         );

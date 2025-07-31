@@ -1759,9 +1759,8 @@ mod in_reply_to_mentions_issue {
             let cover_letter_event: &nostr::Event =
                 relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
             assert!(cover_letter_event.tags.iter().any(|t| {
-                t.as_slice()[0].eq("e")
+                t.as_slice()[0].eq("q")
                     && t.as_slice()[1].eq(&get_pretend_issue_event().id.to_hex())
-                    && t.as_slice()[3].eq(&"mention")
             }));
         }
         Ok(())

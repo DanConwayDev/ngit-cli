@@ -3,7 +3,7 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
-use nostr::nips::{nip05, nip46::NostrConnectURI};
+use nostr::nips::nip46::NostrConnectURI;
 use nostr_connect::client::NostrConnect;
 use nostr_sdk::{EventBuilder, Keys, Metadata, NostrSigner, PublicKey, RelayUrl, ToBech32};
 use qrcode::QrCode;
@@ -25,7 +25,7 @@ use crate::{
         Interactor, InteractorPrompt, Printer, PromptChoiceParms, PromptConfirmParms,
         PromptInputParms, PromptPasswordParms,
     },
-    client::{Connect, send_events},
+    client::{Connect, nip05_query, send_events},
     git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
 };
 
@@ -384,7 +384,7 @@ pub fn generate_nostr_connect_app(
 pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
     let term = console::Term::stderr();
     term.write_line("contacting login service provider...")?;
-    let res = nip05::profile(&nip05, None).await;
+    let res = nip05_query(nip05).await;
     term.clear_last_lines(1)?;
     match res {
         Ok(profile) => {
