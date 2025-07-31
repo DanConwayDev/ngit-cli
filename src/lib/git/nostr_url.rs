@@ -2,10 +2,11 @@ use core::fmt;
 use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
-use nostr::nips::{nip01::Coordinate, nip05, nip19::Nip19Coordinate};
+use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
 use nostr_sdk::{FromBech32, PublicKey, RelayUrl, ToBech32, Url};
 
 use super::{Repo, get_git_config_item, save_git_config_item};
+use crate::client::nip05_query;
 
 #[derive(Debug, PartialEq, Default, Clone)]
 pub enum ServerProtocol {
@@ -206,8 +207,7 @@ impl NostrUrlDecoded {
                             if s.len() == 2 { s[1] } else { s[0] }
                         };
                         term.write_line(&format!("fetching pubic key info from {domain}..."))?;
-                        // TODO we now need to implement our own wrapper for this
-                        let res = nip05::profile(npub_or_nip05, None).await.context(format!(
+                        let res = nip05_query(npub_or_nip05).await.context(format!(
                             "failed to get nostr public key for {npub_or_nip05} from {domain}"
                         ))?;
                         term.clear_last_lines(1)?;

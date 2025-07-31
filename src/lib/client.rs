@@ -33,7 +33,11 @@ use nostr::{
     Event,
     event::{TagKind, TagStandard, UnsignedEvent},
     filter::{Alphabet, MatchEventOptions},
-    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+    nips::{
+        nip01::Coordinate,
+        nip05::{Nip05Address, Nip05Profile},
+        nip19::Nip19Coordinate,
+    },
     signer::SignerBackend,
 };
 use nostr_database::{NostrDatabase, SaveEventStatus};
@@ -43,6 +47,7 @@ use nostr_sdk::{
     ClientOptions, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, SingleLetterTag,
     Timestamp, Url, prelude::RelayLimits,
 };
+use serde_json::Value;
 
 use crate::{
     get_dirs,
@@ -882,6 +887,26 @@ pub async fn fetch_public_key(signer: &Arc<dyn NostrSigner>) -> Result<nostr::Pu
             .await
             .context("failed to get public key from local keys")
     }
+}
+
+pub async fn nip05_query(nip05_addr: &str) -> Result<Nip05Profile> {
+    let addr_deconstructed = Nip05Address::parse(nip05_addr)
+        .context(format!("cannot parse nip05 address: {nip05_addr}"))?;
+    let json_res: Value = reqwest::Client::new()
+        .get(addr_deconstructed.url().to_string())
+        .send()
+        .await
+        .context(format!(
+            "nip05 server is not responding for address: {nip05_addr}"
+        ))?
+        .json()
+        .await
+        .context(format!(
+            "nip05 server response did not respond with json when querying address: {nip05_addr}"
+        ))?;
+    Nip05Profile::from_json(&addr_deconstructed, &json_res).context(format!(
+        "cannot get public key for nip05 address: {nip05_addr}"
+    ))
 }
 
 fn pb_style() -> Result<ProgressStyle> {
