@@ -1209,12 +1209,10 @@ async fn create_merge_status(
                 merged_patches
                     .iter()
                     .map(|merged_patch| {
-                        Tag::from_standardized(nostr::TagStandard::Event {
+                        Tag::from_standardized(nostr::TagStandard::Quote {
                             event_id: *merged_patch,
                             relay_url: repo_ref.relays.first().cloned(),
-                            marker: Some(Marker::Mention),
                             public_key: None,
-                            uppercase: false,
                         })
                     })
                     .collect::<Vec<Tag>>(),

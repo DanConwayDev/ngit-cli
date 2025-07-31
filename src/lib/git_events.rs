@@ -184,7 +184,7 @@ pub async fn generate_patch_event(
                         event_tag_from_nip19_or_hex(
                             &event_ref,
                             "proposal",
-                            Marker::Reply,
+                            EventRefType::Reply,
                             false,
                             false,
                         )?,
@@ -277,10 +277,17 @@ pub async fn generate_patch_event(
     .context("failed to sign event")
 }
 
+#[derive(Debug, PartialEq)]
+pub enum EventRefType {
+    Root,
+    Reply,
+    Quote,
+}
+
 pub fn event_tag_from_nip19_or_hex(
     reference: &str,
     reference_name: &str,
-    marker: Marker,
+    ref_type: EventRefType,
     allow_npub_reference: bool,
     prompt_for_correction: bool,
 ) -> Result<nostr::Tag> {
@@ -291,22 +298,41 @@ pub fn event_tag_from_nip19_or_hex(
                 PromptInputParms::default().with_prompt(format!("{reference_name} reference")),
             )?;
         }
+        let marker = match ref_type {
+            EventRefType::Root => Some(Marker::Root),
+            EventRefType::Reply => Some(Marker::Reply),
+            EventRefType::Quote => None,
+        };
         if let Ok(nip19) = Nip19::from_bech32(&bech32) {
             match nip19 {
                 Nip19::Event(n) => {
+                    if ref_type == EventRefType::Quote {
+                        break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Quote {
+                            event_id: n.event_id,
+                            relay_url: n.relays.first().cloned(),
+                            public_key: None,
+                        }));
+                    }
                     break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                         event_id: n.event_id,
                         relay_url: n.relays.first().cloned(),
-                        marker: Some(marker),
+                        marker,
                         public_key: None,
                         uppercase: false,
                     }));
                 }
                 Nip19::EventId(id) => {
+                    if ref_type == EventRefType::Quote {
+                        break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Quote {
+                            event_id: id,
+                            relay_url: None,
+                            public_key: None,
+                        }));
+                    }
                     break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                         event_id: id,
                         relay_url: None,
-                        marker: Some(marker),
+                        marker,
                         public_key: None,
                         uppercase: false,
                     }));
@@ -335,7 +361,7 @@ pub fn event_tag_from_nip19_or_hex(
             break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                 event_id: id,
                 relay_url: None,
-                marker: Some(marker),
+                marker,
                 public_key: None,
                 uppercase: false,
             }));
@@ -574,7 +600,7 @@ pub async fn generate_cover_letter_and_patch_events(
                     Tag::hashtag("root"),
                     Tag::hashtag("revision-root"),
                     // TODO check if id is for a root proposal (perhaps its for an issue?)
-                    event_tag_from_nip19_or_hex(&event_ref,"proposal",Marker::Reply, false, false)?,
+                    event_tag_from_nip19_or_hex(&event_ref,"proposal",EventRefType::Reply, false, false)?,
                 ]
             } else {
                 vec![
