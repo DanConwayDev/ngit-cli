@@ -384,6 +384,7 @@ pub fn generate_nostr_connect_app(
 pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
     let term = console::Term::stderr();
     term.write_line("contacting login service provider...")?;
+    // TODO we now need to implement our own wrapper for this
     let res = nip05::profile(&nip05, None).await;
     term.clear_last_lines(1)?;
     match res {

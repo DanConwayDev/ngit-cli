@@ -32,15 +32,15 @@ use mockall::*;
 use nostr::{
     Event,
     event::{TagKind, TagStandard, UnsignedEvent},
-    filter::Alphabet,
+    filter::{Alphabet, MatchEventOptions},
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     signer::SignerBackend,
 };
-use nostr_database::{NostrEventsDatabase, SaveEventStatus};
+use nostr_database::{NostrDatabase, SaveEventStatus};
 use nostr_lmdb::NostrLMDB;
 use nostr_relay_pool::relay::ReqExitPolicy;
 use nostr_sdk::{
-    EventBuilder, EventId, Kind, NostrSigner, Options, PublicKey, RelayUrl, SingleLetterTag,
+    ClientOptions, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, SingleLetterTag,
     Timestamp, Url, prelude::RelayLimits,
 };
 
@@ -144,12 +144,12 @@ impl Connect for Client {
         Client {
             client: if let Some(keys) = opts.keys {
                 nostr_sdk::ClientBuilder::new()
-                    .opts(Options::new().relay_limits(RelayLimits::disable()))
+                    .opts(ClientOptions::new().relay_limits(RelayLimits::disable()))
                     .signer(keys)
                     .build()
             } else {
                 nostr_sdk::ClientBuilder::new()
-                    .opts(Options::new().relay_limits(RelayLimits::disable()))
+                    .opts(ClientOptions::new().relay_limits(RelayLimits::disable()))
                     .build()
             },
             relay_default_set: opts.relay_default_set,
@@ -605,7 +605,11 @@ impl Connect for Client {
                 .await?
                 .iter()
                 // don't process events that don't match filters
-                .filter(|e| filters.iter().any(|f| f.match_event(e)))
+                .filter(|e| {
+                    filters
+                        .iter()
+                        .any(|f| f.match_event(e, MatchEventOptions::default()))
+                })
                 .cloned()
                 .collect();
             // TODO: try reconcile

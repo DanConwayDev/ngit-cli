@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-use nostr::{ClientMessage, JsonUtil, RelayMessage};
+use nostr::{ClientMessage, JsonUtil, RelayMessage, filter::MatchEventOptions};
 
 use crate::CliTester;
 
@@ -105,7 +105,11 @@ impl<'a> Relay<'a> {
             &self
                 .events
                 .iter()
-                .filter(|e| filters.iter().any(|filter| filter.match_event(e)))
+                .filter(|e| {
+                    filters
+                        .iter()
+                        .any(|filter| filter.match_event(e, MatchEventOptions::default()))
+                })
                 .filter(|_| true)
                 .cloned()
                 .collect(),

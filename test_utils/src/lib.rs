@@ -13,7 +13,7 @@ use futures::{executor::block_on, future::join_all};
 use git::GitTestRepo;
 use git2::{Signature, Time};
 use nostr::{self, Kind, Tag, nips::nip65::RelayMetadata};
-use nostr_database::NostrEventsDatabase;
+use nostr_database::NostrDatabase;
 use nostr_lmdb::NostrLMDB;
 use nostr_sdk::{Client, Event, NostrSigner, TagStandard, serde_json};
 use once_cell::sync::Lazy;

@@ -206,6 +206,7 @@ impl NostrUrlDecoded {
                             if s.len() == 2 { s[1] } else { s[0] }
                         };
                         term.write_line(&format!("fetching pubic key info from {domain}..."))?;
+                        // TODO we now need to implement our own wrapper for this
                         let res = nip05::profile(npub_or_nip05, None).await.context(format!(
                             "failed to get nostr public key for {npub_or_nip05} from {domain}"
                         ))?;
