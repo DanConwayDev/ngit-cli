@@ -357,7 +357,7 @@ async fn process_proposal_refspecs(
                             );
                         }
                         if proposal.kind.eq(&KIND_PULL_REQUEST)
-                            || are_commits_too_big_for_patches(git_repo, &ahead)
+                            || git_repo.are_commits_too_big_for_patches(&ahead)
                         {
                             for event in generate_patches_or_pr_event_or_pr_updates(
                                 git_repo,
@@ -441,19 +441,6 @@ async fn process_proposal_refspecs(
     Ok((events, rejected_proposal_refspecs))
 }
 
-fn are_commits_too_big_for_patches(git_repo: &Repo, commits: &[Sha1Hash]) -> bool {
-    commits.iter().any(|commit| {
-        if let Ok(patch) = git_repo.make_patch_from_commit(commit, &None) {
-            patch.len()
-                > ((65 // max recomended patch event size specified in nip34 in kb
-            // allownace for nostr event wrapper (id, pubkey, tags, sig)
-            - 1) * 1024)
-        } else {
-            true
-        }
-    })
-}
-
 #[allow(clippy::too_many_lines)]
 async fn generate_patches_or_pr_event_or_pr_updates(
     git_repo: &Repo,
@@ -466,7 +453,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
 ) -> Result<Vec<Event>> {
     let mut events: Vec<Event> = vec![];
     let use_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST))
-        || are_commits_too_big_for_patches(git_repo, ahead);
+        || git_repo.are_commits_too_big_for_patches(ahead);
 
     if use_pr {
         let repo_grasps = repo_ref.grasp_servers();

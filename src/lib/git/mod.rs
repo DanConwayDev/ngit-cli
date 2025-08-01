@@ -75,6 +75,7 @@ pub trait RepoActions {
         commit: &Sha1Hash,
         series_count: &Option<(u64, u64)>,
     ) -> Result<String>;
+    fn are_commits_too_big_for_patches(&self, commits: &[Sha1Hash]) -> bool;
     fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String>;
     fn checkout(&self, ref_name: &str) -> Result<Sha1Hash>;
     fn create_branch_at_commit(&self, branch_name: &str, commit: &str) -> Result<()>;
@@ -378,6 +379,19 @@ impl RepoActions for Repo {
         Ok(std::str::from_utf8(patch.as_slice())
             .context("patch content could not be converted to a utf8 string")?
             .to_owned())
+    }
+
+    fn are_commits_too_big_for_patches(&self, commits: &[Sha1Hash]) -> bool {
+        commits.iter().any(|commit| {
+            if let Ok(patch) = self.make_patch_from_commit(commit, &None) {
+                patch.len()
+                    > ((65 // max recomended patch event size specified in nip34 in kb
+                // allownace for nostr event wrapper (id, pubkey, tags, sig)
+                - 1) * 1024)
+            } else {
+                true
+            }
+        })
     }
 
     fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String> {
