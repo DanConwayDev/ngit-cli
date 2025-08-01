@@ -104,39 +104,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let (first_commit_ahead, behind) =
         git_repo.get_commits_ahead_behind(&main_tip, commits.last().context("no commits")?)?;
 
-    // check proposal ahead of origin/main
-    if first_commit_ahead.len().gt(&1) && !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal builds on a commit {} ahead of '{main_branch_name}' - do you want to continue?", first_commit_ahead.len() - 1)
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-        bail!("aborting because selected commits were ahead of origin/master");
-    }
-
-    // check if a selected commit is already in origin
-    if commits.iter().any(|c| c.eq(&main_tip)) {
-        if !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal contains commit(s) already in  '{main_branch_name}'. proceed anyway?")
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-            bail!("aborting as proposal contains commit(s) already in '{main_branch_name}'");
-        }
-    }
-    // check proposal isn't behind origin/main
-    else if !behind.is_empty() && !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal is {} behind '{main_branch_name}'. consider rebasing before submission. proceed anyway?", behind.len())
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-        bail!("aborting so commits can be rebased");
-    }
+    check_commits_are_suitable_for_proposal(
+        &first_commit_ahead,
+        &commits,
+        &behind,
+        main_branch_name,
+        &main_tip,
+    )?;
 
     let title = if args.no_cover_letter {
         None
@@ -266,6 +240,49 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
     }
     // TODO check if there is already a similarly named
+    Ok(())
+}
+
+fn check_commits_are_suitable_for_proposal(
+    first_commit_ahead: &[Sha1Hash],
+    commits: &[Sha1Hash],
+    behind: &[Sha1Hash],
+    main_branch_name: &str,
+    main_tip: &Sha1Hash,
+) -> Result<()> {
+    // check proposal ahead of origin/main
+    if first_commit_ahead.len().gt(&1) && !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal builds on a commit {} ahead of '{main_branch_name}' - do you want to continue?", first_commit_ahead.len() - 1)
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+        bail!("aborting because selected commits were ahead of origin/master");
+    }
+
+    // check if a selected commit is already in origin
+    if commits.iter().any(|c| c.eq(main_tip)) {
+        if !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal contains commit(s) already in  '{main_branch_name}'. proceed anyway?")
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+            bail!("aborting as proposal contains commit(s) already in '{main_branch_name}'");
+        }
+    }
+    // check proposal isn't behind origin/main
+    else if !behind.is_empty() && !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal is {} behind '{main_branch_name}'. consider rebasing before submission. proceed anyway?", behind.len())
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+        bail!("aborting so commits can be rebased");
+    }
     Ok(())
 }
 
