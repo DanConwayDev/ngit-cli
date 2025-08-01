@@ -225,8 +225,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
             println!(
                 "{}",
                 dim.apply_to(format!(
-                    "view in gitworkshop.dev: https://gitworkshop.dev/repo/{}/proposal/{}",
-                    repo_ref.coordinate_with_hint().to_bech32()?,
+                    "view in gitworkshop.dev: https://gitworkshop.dev/{}",
                     &event_bech32,
                 ))
             );

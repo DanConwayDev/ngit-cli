@@ -448,7 +448,7 @@ async fn get_repo_coordinate_from_user_prompt(
     println!(
         "{}",
         dim.apply_to(
-            "hint: https://gitworkshop.dev/repos lists repositories and their nostr address"
+            "hint: https://gitworkshop.dev/search lists repositories and their nostr address"
         ),
     );
     let git_repo_path = git_repo.get_path()?;

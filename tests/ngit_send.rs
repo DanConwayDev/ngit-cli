@@ -158,7 +158,7 @@ fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()
 }
 
 fn expect_msgs_after(p: &mut CliTester) -> Result<()> {
-    p.expect_after_whitespace("view in gitworkshop.dev: https://gitworkshop.dev/repo")?;
+    p.expect_after_whitespace("view in gitworkshop.dev: https://gitworkshop.dev/")?;
     p.expect_eventually("\r\n")?;
     p.expect("view in another client:  https://njump.me/")?;
     p.expect_eventually("\r\n")?;
