@@ -1592,11 +1592,10 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
             for relay in [&r53, &r55, &r56] {
                 let cover_letter_event: &nostr::Event =
                     relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
-                assert!(
-                    cover_letter_event.tags.iter().any(|t| {
-                        t.as_slice()[0].eq("t") && t.as_slice()[1].eq(&"revision-root")
-                    })
-                );
+                assert!(cover_letter_event.tags.iter().any(|t| {
+                    t.as_slice()[0].eq("t")
+                        && ["revision-root", "root-revision"].contains(&t.as_slice()[1].as_str())
+                }));
             }
             Ok(())
         }
@@ -1773,12 +1772,10 @@ mod in_reply_to_mentions_issue {
         for relay in [&r53, &r55, &r56] {
             let cover_letter_event: &nostr::Event =
                 relay.events.iter().find(|e| is_cover_letter(e)).unwrap();
-            assert!(
-                !cover_letter_event
-                    .tags
-                    .iter()
-                    .any(|t| { t.as_slice()[0].eq("t") && t.as_slice()[1].eq(&"revision-root") })
-            );
+            assert!(!cover_letter_event.tags.iter().any(|t| {
+                t.as_slice()[0].eq("t")
+                    && ["revision-root", "root-revision"].contains(&t.as_slice()[1].as_str())
+            }));
         }
         Ok(())
     }

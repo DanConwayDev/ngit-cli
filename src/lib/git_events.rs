@@ -74,10 +74,10 @@ pub fn event_is_patch_set_root(event: &Event) -> bool {
 
 pub fn event_is_revision_root(event: &Event) -> bool {
     (event.kind.eq(&Kind::GitPatch)
-        && event
-            .tags
-            .iter()
-            .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("revision-root")))
+        && event.tags.iter().any(|t| {
+            t.as_slice().len() > 1
+                && ["revision-root", "root-revision"].contains(&t.as_slice()[1].as_str())
+        }))
         || (event.kind.eq(&KIND_PULL_REQUEST)
             && event
                 .tags
@@ -179,7 +179,7 @@ pub async fn generate_patch_event(
                 } else if let Some(event_ref) = root_proposal_id.clone() {
                     vec![
                         Tag::hashtag("root"),
-                        Tag::hashtag("revision-root"),
+                        Tag::hashtag("root-revision"),
                         // TODO check if id is for a root proposal (perhaps its for an issue?)
                         event_tag_from_nip19_or_hex(
                             &event_ref,
@@ -598,7 +598,7 @@ pub async fn generate_cover_letter_and_patch_events(
             if let Some(event_ref) = root_proposal_id.clone() {
                 vec![
                     Tag::hashtag("root"),
-                    Tag::hashtag("revision-root"),
+                    Tag::hashtag("root-revision"),
                     // TODO check if id is for a root proposal (perhaps its for an issue?)
                     event_tag_from_nip19_or_hex(&event_ref,"proposal",EventRefType::Reply, false, false)?,
                 ]

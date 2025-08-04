@@ -1182,7 +1182,7 @@ pub fn get_proposal_branch_name_from_events(
         if !event
             .tags
             .iter()
-            .any(|t| t.as_slice()[1].eq("revision-root"))
+            .any(|t| ["revision-root", "root-revision"].contains(&t.as_slice()[1].as_str()))
             && event.tags.iter().any(|t| {
                 t.as_slice()[0].eq("branch-name") && t.as_slice()[1].eq(branch_name_in_event)
             })

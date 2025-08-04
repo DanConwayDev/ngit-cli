@@ -1365,11 +1365,10 @@ async fn get_proposal_and_revision_root_from_patch(
         bail!("thread root is not a git patch");
     }
 
-    if proposal_or_revision
-        .tags
-        .iter()
-        .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("revision-root"))
-    {
+    if proposal_or_revision.tags.iter().any(|t| {
+        t.as_slice().len() > 1
+            && ["revision-root", "root-revision"].contains(&t.as_slice()[1].as_str())
+    }) {
         Ok((
             EventId::parse(
                 &proposal_or_revision

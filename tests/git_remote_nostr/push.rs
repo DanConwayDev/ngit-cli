@@ -1688,7 +1688,11 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
 
     let revision_root_patch = new_events
         .iter()
-        .find(|e| e.tags.iter().any(|t| t.as_slice()[1].eq("revision-root")))
+        .find(|e| {
+            e.tags
+                .iter()
+                .any(|t| ["revision-root", "root-revision"].contains(&t.as_slice()[1].as_str()))
+        })
         .unwrap();
 
     assert_eq!(
