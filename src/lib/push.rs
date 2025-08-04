@@ -321,12 +321,14 @@ impl<'a> PushReporter<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn push_refs_and_generate_pr_or_pr_update_event(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     tip: &Sha1Hash,
     user_ref: &UserRef,
     root_proposal: Option<&Event>,
+    title_description_overide: &Option<(String, String)>,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
 ) -> Result<Vec<Event>> {
@@ -348,6 +350,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 repo_ref,
                 &user_ref.public_key,
                 root_proposal,
+                title_description_overide,
                 tip,
                 &[clone_url],
                 &[],

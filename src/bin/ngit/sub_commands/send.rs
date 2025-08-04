@@ -4,9 +4,11 @@ use anyhow::{Context, Result, bail};
 use console::Style;
 use ngit::{
     client::{Params, send_events},
-    git_events::{EventRefType, generate_cover_letter_and_patch_events},
+    git_events::{EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events},
+    push::push_refs_and_generate_pr_or_pr_update_event,
+    utils::proposal_tip_is_pr_or_pr_update,
 };
-use nostr::{ToBech32, nips::nip19::Nip19Event};
+use nostr::{ToBech32, event::Event, nips::nip19::Nip19Event};
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 use crate::{
@@ -60,12 +62,14 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
 
-    let (root_proposal_id, mention_tags) =
-        get_root_proposal_id_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+
+    let (root_proposal, mention_tags) =
+        get_root_proposal_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
             .await?;
 
     if let Some(root_ref) = args.in_reply_to.first() {
-        if root_proposal_id.is_some() {
+        if root_proposal.is_some() {
             println!("creating proposal revision for: {root_ref}");
         }
     }
@@ -112,7 +116,30 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         &main_tip,
     )?;
 
-    let title = if args.no_cover_letter {
+    let as_pr = {
+        if let Some(root_proposal) = &root_proposal {
+            proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
+        } else {
+            false
+        }
+    } || git_repo.are_commits_too_big_for_patches(&commits);
+
+    let title = if as_pr {
+        match &args.title {
+            Some(t) => Some(t.clone()),
+            None => {
+                if root_proposal.is_none() {
+                    Some(
+                        Interactor::default()
+                            .input(PromptInputParms::default().with_prompt("title"))?
+                            .clone(),
+                    )
+                } else {
+                    None
+                }
+            }
+        }
+    } else if args.no_cover_letter {
         None
     } else {
         match &args.title {
@@ -142,7 +169,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 t.clone()
             } else {
                 Interactor::default()
-                    .input(PromptInputParms::default().with_prompt("cover letter description"))?
+                    .input(PromptInputParms::default().with_prompt("description"))?
                     .clone()
             },
         ))
@@ -161,42 +188,58 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     client.set_signer(signer.clone()).await;
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
-
     // oldest first
     commits.reverse();
 
-    let events = generate_cover_letter_and_patch_events(
-        cover_letter_title_description.clone(),
-        &git_repo,
-        &commits,
-        &signer,
-        &repo_ref,
-        &root_proposal_id,
-        &mention_tags,
-    )
-    .await?;
+    let events = if as_pr {
+        push_refs_and_generate_pr_or_pr_update_event(
+            &git_repo,
+            &repo_ref,
+            commits.last().context("no commits")?,
+            &user_ref,
+            root_proposal.as_ref(),
+            &cover_letter_title_description,
+            &signer,
+            &console::Term::stdout(),
+        )
+        .await?
 
-    println!(
-        "posting {} patch{} {} a covering letter...",
-        if cover_letter_title_description.is_none() {
-            events.len()
-        } else {
-            events.len() - 1
-        },
-        if cover_letter_title_description.is_none() && events.len().eq(&1)
-            || cover_letter_title_description.is_some() && events.len().eq(&2)
-        {
-            ""
-        } else {
-            "es"
-        },
-        if cover_letter_title_description.is_none() {
-            "without"
-        } else {
-            "with"
-        }
-    );
+        // TODO
+        //   - allow specifying clone url and ref
+    } else {
+        let events = generate_cover_letter_and_patch_events(
+            cover_letter_title_description.clone(),
+            &git_repo,
+            &commits,
+            &signer,
+            &repo_ref,
+            &root_proposal.as_ref().map(|e| e.id.to_string()),
+            &mention_tags,
+        )
+        .await?;
+
+        println!(
+            "posting {} patch{} {} a covering letter...",
+            if cover_letter_title_description.is_none() {
+                events.len()
+            } else {
+                events.len() - 1
+            },
+            if cover_letter_title_description.is_none() && events.len().eq(&1)
+                || cover_letter_title_description.is_some() && events.len().eq(&2)
+            {
+                ""
+            } else {
+                "es"
+            },
+            if cover_letter_title_description.is_none() {
+                "without"
+            } else {
+                "with"
+            }
+        );
+        events
+    };
 
     send_events(
         &client,
@@ -209,7 +252,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     )
     .await?;
 
-    if root_proposal_id.is_none() {
+    if root_proposal.is_none() {
         if let Some(event) = events.first() {
             let event_bech32 = if let Some(relay) = repo_ref.relays.first() {
                 Nip19Event {
@@ -376,11 +419,11 @@ fn summarise_commit_for_selection(git_repo: &Repo, commit: &Sha1Hash) -> Result<
     ))
 }
 
-async fn get_root_proposal_id_and_mentions_from_in_reply_to(
+async fn get_root_proposal_and_mentions_from_in_reply_to(
     git_repo_path: &Path,
     in_reply_to: &[String],
-) -> Result<(Option<String>, Vec<nostr::Tag>)> {
-    let root_proposal_id = if let Some(first) = in_reply_to.first() {
+) -> Result<(Option<Event>, Vec<nostr::Tag>)> {
+    let root_proposal = if let Some(first) = in_reply_to.first() {
         match event_tag_from_nip19_or_hex(first, "in-reply-to", EventRefType::Root, true, false)?
             .as_standardized()
         {
@@ -398,8 +441,8 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
                 .await?;
 
                 if let Some(first) = events.iter().find(|e| e.id.eq(event_id)) {
-                    if event_is_patch_set_root(first) {
-                        Some(event_id.to_string())
+                    if event_is_patch_set_root(first) || first.kind.eq(&KIND_PULL_REQUEST) {
+                        Some(first.clone())
                     } else {
                         None
                     }
@@ -415,7 +458,7 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
 
     let mut mention_tags = vec![];
     for (i, reply_to) in in_reply_to.iter().enumerate() {
-        if i.ne(&0) || root_proposal_id.is_none() {
+        if i.ne(&0) || root_proposal.is_none() {
             mention_tags.push(
                 event_tag_from_nip19_or_hex(
                     reply_to,
@@ -431,7 +474,7 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
         }
     }
 
-    Ok((root_proposal_id, mention_tags))
+    Ok((root_proposal, mention_tags))
 }
 
 // TODO

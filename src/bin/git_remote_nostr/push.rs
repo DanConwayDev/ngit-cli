@@ -461,6 +461,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             ahead.first().context("no commits to push")?,
             user_ref,
             root_proposal,
+            &None,
             signer,
             term,
         )
