@@ -32,7 +32,7 @@ use mockall::*;
 use nostr::{
     Event,
     event::{TagKind, TagStandard, UnsignedEvent},
-    filter::{Alphabet, MatchEventOptions},
+    filter::Alphabet,
     nips::{
         nip01::Coordinate,
         nip05::{Nip05Address, Nip05Profile},
@@ -149,12 +149,20 @@ impl Connect for Client {
         Client {
             client: if let Some(keys) = opts.keys {
                 nostr_sdk::ClientBuilder::new()
-                    .opts(ClientOptions::new().relay_limits(RelayLimits::disable()))
+                    .opts(
+                        ClientOptions::new()
+                            .relay_limits(RelayLimits::disable())
+                            .verify_subscriptions(true),
+                    )
                     .signer(keys)
                     .build()
             } else {
                 nostr_sdk::ClientBuilder::new()
-                    .opts(ClientOptions::new().relay_limits(RelayLimits::disable()))
+                    .opts(
+                        ClientOptions::new()
+                            .relay_limits(RelayLimits::disable())
+                            .verify_subscriptions(true),
+                    )
                     .build()
             },
             relay_default_set: opts.relay_default_set,
@@ -606,17 +614,7 @@ impl Connect for Client {
             fresh_profiles = HashSet::new();
 
             let relay = self.client.relay(&relay_url).await?;
-            let events: Vec<nostr::Event> = get_events_of(&relay, filters.clone(), &None)
-                .await?
-                .iter()
-                // don't process events that don't match filters
-                .filter(|e| {
-                    filters
-                        .iter()
-                        .any(|f| f.match_event(e, MatchEventOptions::default()))
-                })
-                .cloned()
-                .collect();
+            let events: Vec<nostr::Event> = get_events_of(&relay, filters.clone(), &None).await?;
             // TODO: try reconcile
 
             process_fetched_events(
