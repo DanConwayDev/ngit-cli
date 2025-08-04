@@ -10,25 +10,24 @@ use client::{get_events_from_local_cache, get_state_from_cache, send_events, sig
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
 use git_events::{
-    generate_cover_letter_and_patch_events, generate_patch_event,
-    generate_unsigned_pr_or_update_event, get_commit_id_from_patch,
+    generate_cover_letter_and_patch_events, generate_patch_event, get_commit_id_from_patch,
 };
 use git2::{Oid, Repository};
 use ngit::{
-    client::{self, get_event_from_cache_by_id, sign_draft_event},
+    client::{self, get_event_from_cache_by_id},
     git::{self, nostr_url::NostrUrlDecoded},
     git_events::{self, KIND_PULL_REQUEST, event_to_cover_letter, get_event_root},
     list::list_from_remotes,
     login::{self, user::UserRef},
-    push::{push_to_remote, push_to_remote_url},
-    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server, normalize_grasp_server_url},
+    push::{push_refs_and_generate_pr_or_pr_update_event, push_to_remote},
+    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server},
     repo_state,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
         get_short_git_server_name, read_line,
     },
 };
-use nostr::{event::UnsignedEvent, nips::nip10::Marker};
+use nostr::nips::nip10::Marker;
 use nostr_sdk::{
     Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, Tag, TagStandard,
     hashes::sha1::Hash as Sha1Hash,
@@ -491,103 +490,6 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         }
     }
 
-    Ok(events)
-}
-
-async fn push_refs_and_generate_pr_or_pr_update_event(
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    tip: &Sha1Hash,
-    user_ref: &UserRef,
-    root_proposal: Option<&Event>,
-    signer: &Arc<dyn NostrSigner>,
-    term: &Term,
-) -> Result<Vec<Event>> {
-    let mut events: Vec<Event> = vec![];
-    let repo_grasps = repo_ref.grasp_servers();
-    let repo_grasp_clone_urls = repo_ref
-        .git_server
-        .iter()
-        .filter(|s| is_grasp_server(s, &repo_grasps));
-
-    let mut unsigned_pr_event: Option<UnsignedEvent> = None;
-    let mut failed_clone_urls = vec![];
-    for clone_url in repo_grasp_clone_urls {
-        let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
-            unsigned_pr_event.clone()
-        } else {
-            generate_unsigned_pr_or_update_event(
-                git_repo,
-                repo_ref,
-                &user_ref.public_key,
-                root_proposal,
-                tip,
-                &[clone_url],
-                &[],
-            )?
-        };
-
-        let refspec = format!("{}:refs/nostr/{}", tip, draft_pr_event.id());
-
-        if let Err(error) = push_to_remote_url(git_repo, clone_url, &[refspec], term) {
-            failed_clone_urls.push(clone_url);
-            term.write_line(
-                format!(
-                    "push: error sending commit data to {}: {error}",
-                    normalize_grasp_server_url(clone_url)?
-                )
-                .as_str(),
-            )?;
-        } else {
-            term.write_line(
-                format!(
-                    "push: commit data sent to {}",
-                    normalize_grasp_server_url(clone_url)?
-                )
-                .as_str(),
-            )?;
-            unsigned_pr_event = Some(draft_pr_event);
-        }
-    }
-    if unsigned_pr_event.is_none() {
-        bail!(
-            "The repository doesnt list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request. Soon ngit will support pushing your changes to a different git / grasp git server."
-        );
-
-        // TODO get grasp_default_set servers that aren't in repo_grasps
-        // cycle through until one succeeds TODO create
-        // personal-fork announcement with grasp servers and
-        // push, after a few seconds push ref/nostr/eventid. if
-        // one success break out of for loop and continue
-    }
-    if let Some(unsigned_pr_event) = unsigned_pr_event {
-        let pr_event = sign_draft_event(
-            unsigned_pr_event,
-            signer,
-            if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
-                "Pull Request Replacing Original Patch"
-            } else if root_proposal.is_some() {
-                "Pull Request Update"
-            } else {
-                "Pull Request"
-            }
-            .to_string(),
-        )
-        .await?;
-        events.push(pr_event);
-        if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
-            events.push(
-                create_close_status_for_original_patch(signer, repo_ref, root_proposal.unwrap())
-                    .await?,
-            );
-        }
-    } else {
-        bail!(
-            "a commit in your proposal is too big for a nostr patch. tried to use submit as a nostr Pull Request but could not find a grasp server that would accept your changes"
-        );
-        // TODO suggest `ngit send` where user could specify their own clone
-        // url to push to once that feature is added
-    }
     Ok(events)
 }
 
@@ -1283,62 +1185,6 @@ async fn create_merge_status(
     .await
 }
 
-async fn create_close_status_for_original_patch(
-    signer: &Arc<dyn NostrSigner>,
-    repo_ref: &RepoRef,
-    proposal: &Event,
-) -> Result<Event> {
-    let mut public_keys = repo_ref
-        .maintainers
-        .iter()
-        .copied()
-        .collect::<HashSet<PublicKey>>();
-    public_keys.insert(proposal.pubkey);
-
-    sign_event(
-        EventBuilder::new(nostr::event::Kind::GitStatusClosed, String::new()).tags(
-            [
-                vec![
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec![
-                            "Git patch closed as forthcoming update is too large. Replacing with Pull Request"
-                                .to_string(),
-                        ],
-                    ),
-                    Tag::from_standardized(nostr::TagStandard::Event {
-                        event_id: proposal.id,
-                        relay_url: repo_ref.relays.first().cloned(),
-                        marker: Some(Marker::Root),
-                        public_key: None,
-                        uppercase: false,
-                    }),
-                ],
-                public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
-                repo_ref
-                    .coordinates()
-                    .iter()
-                    .map(|c| {
-                        Tag::from_standardized(TagStandard::Coordinate {
-                            coordinate: c.coordinate.clone(),
-                            relay_url: c.relays.first().cloned(),
-                            uppercase: false,
-                        })
-                    })
-                    .collect::<Vec<Tag>>(),
-                vec![
-                    Tag::from_standardized(nostr::TagStandard::Reference(
-                        repo_ref.root_commit.to_string(),
-                    )),
-                ],
-            ]
-            .concat(),
-        ),
-        signer,
-        "close status for original patch".to_string(),
-    )
-    .await
-}
 async fn get_proposal_and_revision_root_from_patch(
     git_repo: &Repo,
     patch: &Event,
