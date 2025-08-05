@@ -208,6 +208,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
         let mut to_try = repo_grasp_clone_urls.clone();
         let mut tried = vec![];
+        let mut git_ref = None;
         loop {
             let (events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
                 &git_repo,
@@ -217,6 +218,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 root_proposal.as_ref(),
                 &cover_letter_title_description,
                 &repo_grasp_clone_urls,
+                git_ref.clone(),
                 &signer,
                 &console::Term::stdout(),
             )
@@ -235,7 +237,17 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 .clone();
             if CloneUrl::from_str(&clone_url).is_ok() {
                 to_try.push(clone_url);
-                // TODO customise ref to push
+                let mut git_ref_or_branch_name = Interactor::default()
+                    .input(
+                        PromptInputParms::default()
+                            .with_prompt("ref / branch name")
+                            .with_default(git_ref.unwrap_or("refs/nostr/<event-id>".to_string())),
+                    )?
+                    .clone();
+                if !git_ref_or_branch_name.starts_with("refs/") {
+                    git_ref_or_branch_name = format!("refs/heads/{git_ref_or_branch_name}");
+                }
+                git_ref = Some(git_ref_or_branch_name);
             } else {
                 println!("invalid clone url");
             }

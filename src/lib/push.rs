@@ -330,6 +330,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
     servers: &[String],
+    git_ref: Option<String>,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
 ) -> Result<(Option<Vec<Event>>, Vec<(String, Result<()>)>)> {
@@ -352,7 +353,12 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
             )?
         };
 
-        let refspec = format!("{}:refs/nostr/{}", tip, draft_pr_event.id());
+        let git_ref_used = git_ref
+            .clone()
+            .unwrap_or("refs/nostr/<event-id>".to_string())
+            .replace("<event-id>", &draft_pr_event.id().to_string());
+
+        let refspec = format!("{tip}:{git_ref_used}");
 
         if let Err(error) = push_to_remote_url(git_repo, clone_url, &[refspec], term) {
             term.write_line(

@@ -482,6 +482,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             root_proposal,
             &None,
             &repo_grasp_clone_urls,
+            None,
             signer,
             term,
         )
