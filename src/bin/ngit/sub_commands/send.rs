@@ -1,11 +1,13 @@
-use std::path::Path;
+use std::{path::Path, str::FromStr};
 
 use anyhow::{Context, Result, bail};
 use console::Style;
 use ngit::{
     client::{Params, send_events},
+    git::nostr_url::CloneUrl,
     git_events::{EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events},
     push::push_refs_and_generate_pr_or_pr_update_event,
+    repo_ref::is_grasp_server,
     utils::proposal_tip_is_pr_or_pr_update,
 };
 use nostr::{ToBech32, event::Event, nips::nip19::Nip19Event};
@@ -192,20 +194,52 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     commits.reverse();
 
     let events = if as_pr {
-        push_refs_and_generate_pr_or_pr_update_event(
-            &git_repo,
-            &repo_ref,
-            commits.last().context("no commits")?,
-            &user_ref,
-            root_proposal.as_ref(),
-            &cover_letter_title_description,
-            &signer,
-            &console::Term::stdout(),
-        )
-        .await?
-
-        // TODO
-        //   - allow specifying clone url and ref
+        let repo_grasps = repo_ref.grasp_servers();
+        let repo_grasp_clone_urls: Vec<String> = repo_ref
+            .git_server
+            .iter()
+            .filter(|s| is_grasp_server(s, &repo_grasps))
+            .cloned()
+            .collect();
+        if repo_grasp_clone_urls.is_empty() {
+            println!(
+                "The repository doesn't list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request."
+            );
+        }
+        let mut to_try = repo_grasp_clone_urls.clone();
+        let mut tried = vec![];
+        loop {
+            let (events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
+                &git_repo,
+                &repo_ref,
+                commits.last().context("no commits")?,
+                &user_ref,
+                root_proposal.as_ref(),
+                &cover_letter_title_description,
+                &repo_grasp_clone_urls,
+                &signer,
+                &console::Term::stdout(),
+            )
+            .await?;
+            for url in to_try {
+                tried.push(url);
+            }
+            to_try = vec![];
+            if let Some(events) = events {
+                break events;
+            }
+            let clone_url = Interactor::default()
+                .input(
+                    PromptInputParms::default().with_prompt("git repo url with write permission"),
+                )?
+                .clone();
+            if CloneUrl::from_str(&clone_url).is_ok() {
+                to_try.push(clone_url);
+                // TODO customise ref to push
+            } else {
+                println!("invalid clone url");
+            }
+        }
     } else {
         let events = generate_cover_letter_and_patch_events(
             cover_letter_title_description.clone(),

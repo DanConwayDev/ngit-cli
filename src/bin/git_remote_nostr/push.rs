@@ -450,18 +450,38 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
 ) -> Result<Vec<Event>> {
-    let mut events: Vec<Event> = vec![];
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
     let use_pr = parent_is_pr || git_repo.are_commits_too_big_for_patches(ahead);
 
     if use_pr {
-        for event in push_refs_and_generate_pr_or_pr_update_event(
+        let repo_grasps = repo_ref.grasp_servers();
+        let repo_grasp_clone_urls: Vec<String> = repo_ref
+            .git_server
+            .iter()
+            .filter(|s| is_grasp_server(s, &repo_grasps))
+            .cloned()
+            .collect();
+
+        if repo_grasp_clone_urls.is_empty() {
+            // TODO get grasp_default_set servers that aren't in repo_grasps
+            // cycle through until one succeeds TODO create
+            // personal-fork announcement with grasp servers and
+            // push, after a few seconds push ref/nostr/eventid. if
+            // one success break out of for loop and continue
+
+            bail!(
+                "The repository doesnt list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request. Soon ngit will support pushing your changes to a different git / grasp git server."
+            );
+        }
+
+        if let (Some(events), _) = push_refs_and_generate_pr_or_pr_update_event(
             git_repo,
             repo_ref,
             ahead.first().context("no commits to push")?,
             user_ref,
             root_proposal,
             &None,
+            &repo_grasp_clone_urls,
             signer,
             term,
         )
@@ -471,12 +491,17 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             } else {
                 "a commit in your proposal is too big for a nostr patch so we tried to create it as a nostr PR instead. Unfortunately this failed."
             }
-        )?
-        {
-            events.push(event);
+        )? {
+            Ok(events)
+        } else {
+            bail!(
+                "a commit in your proposal is too big for a nostr patch. tried to use submit as a nostr Pull Request but could not find a grasp server that would accept your changes"
+            );
+            // TODO suggest `ngit send` where user could specify their own clone
+            // url to push to once that feature is added
         }
     } else {
-        for patch in generate_cover_letter_and_patch_events(
+        generate_cover_letter_and_patch_events(
             None,
             git_repo,
             ahead,
@@ -485,13 +510,8 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             &root_proposal.map(|proposal| proposal.id.to_string()),
             &[],
         )
-        .await?
-        {
-            events.push(patch);
-        }
+        .await
     }
-
-    Ok(events)
 }
 
 type HashMapUrlRefspecs = HashMap<String, Vec<String>>;

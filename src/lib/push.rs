@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use auth_git2::GitAuthenticator;
 use console::Term;
 use nostr::{
@@ -25,7 +25,7 @@ use crate::{
     },
     git_events::generate_unsigned_pr_or_update_event,
     login::user::UserRef,
-    repo_ref::{RepoRef, is_grasp_server, normalize_grasp_server_url},
+    repo_ref::{RepoRef, normalize_grasp_server_url},
     utils::{
         Direction, get_short_git_server_name, get_write_protocols_to_try, join_with_and,
         set_protocol_preference,
@@ -329,19 +329,14 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     user_ref: &UserRef,
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
+    servers: &[String],
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
-) -> Result<Vec<Event>> {
-    let mut events: Vec<Event> = vec![];
-    let repo_grasps = repo_ref.grasp_servers();
-    let repo_grasp_clone_urls = repo_ref
-        .git_server
-        .iter()
-        .filter(|s| is_grasp_server(s, &repo_grasps));
+) -> Result<(Option<Vec<Event>>, Vec<(String, Result<()>)>)> {
+    let mut responses = vec![];
 
     let mut unsigned_pr_event: Option<UnsignedEvent> = None;
-    let mut failed_clone_urls = vec![];
-    for clone_url in repo_grasp_clone_urls {
+    for clone_url in servers {
         let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
             unsigned_pr_event.clone()
         } else {
@@ -360,7 +355,6 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
         let refspec = format!("{}:refs/nostr/{}", tip, draft_pr_event.id());
 
         if let Err(error) = push_to_remote_url(git_repo, clone_url, &[refspec], term) {
-            failed_clone_urls.push(clone_url);
             term.write_line(
                 format!(
                     "push: error sending commit data to {}: {error}",
@@ -368,7 +362,9 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 )
                 .as_str(),
             )?;
+            responses.push((clone_url.clone(), Err(error)));
         } else {
+            responses.push((clone_url.clone(), Ok(())));
             term.write_line(
                 format!(
                     "push: commit data sent to {}",
@@ -378,17 +374,6 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
             )?;
             unsigned_pr_event = Some(draft_pr_event);
         }
-    }
-    if unsigned_pr_event.is_none() {
-        bail!(
-            "The repository doesnt list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request. Soon ngit will support pushing your changes to a different git / grasp git server."
-        );
-
-        // TODO get grasp_default_set servers that aren't in repo_grasps
-        // cycle through until one succeeds TODO create
-        // personal-fork announcement with grasp servers and
-        // push, after a few seconds push ref/nostr/eventid. if
-        // one success break out of for loop and continue
     }
     if let Some(unsigned_pr_event) = unsigned_pr_event {
         let pr_event = sign_draft_event(
@@ -404,21 +389,25 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
             .to_string(),
         )
         .await?;
-        events.push(pr_event);
         if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
-            events.push(
-                create_close_status_for_original_patch(signer, repo_ref, root_proposal.unwrap())
+            Ok((
+                Some(vec![
+                    pr_event,
+                    create_close_status_for_original_patch(
+                        signer,
+                        repo_ref,
+                        root_proposal.unwrap(),
+                    )
                     .await?,
-            );
+                ]),
+                responses,
+            ))
+        } else {
+            Ok((Some(vec![pr_event]), responses))
         }
     } else {
-        bail!(
-            "a commit in your proposal is too big for a nostr patch. tried to use submit as a nostr Pull Request but could not find a grasp server that would accept your changes"
-        );
-        // TODO suggest `ngit send` where user could specify their own clone
-        // url to push to once that feature is added
+        Ok((None, responses))
     }
-    Ok(events)
 }
 
 async fn create_close_status_for_original_patch(
