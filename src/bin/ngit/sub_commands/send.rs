@@ -6,7 +6,10 @@ use ngit::{
     cli_interactor::{PromptChoiceParms, multi_select_with_custom_value},
     client::{Params, send_events},
     git::nostr_url::CloneUrl,
-    git_events::{EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events},
+    git_events::{
+        EventRefType, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
+        generate_cover_letter_and_patch_events,
+    },
     push::push_refs_and_generate_pr_or_pr_update_event,
     repo_ref::{
         format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
@@ -16,7 +19,7 @@ use ngit::{
 };
 use nostr::{
     ToBech32,
-    event::Event,
+    event::{Event, Kind},
     nips::{
         nip01::Coordinate,
         nip19::{Nip19Coordinate, Nip19Event},
@@ -255,7 +258,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
 
         let mut git_ref = None;
-        loop {
+        let events = loop {
             let (events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
                 &git_repo,
                 &repo_ref,
@@ -464,7 +467,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 to_try.push(url);
             }
             // the loop with continue with the grasp servers
-        }
+        };
+        println!(
+            "posting {}",
+            if events.iter().any(|e| e.kind.eq(&Kind::GitStatusClosed)) {
+                "proposal revision as new PR event, and a close status for the old patch"
+            } else if events.iter().any(|e| e.kind.eq(&KIND_PULL_REQUEST_UPDATE)) {
+                "proposal revision as PR update event"
+            } else {
+                "proposal as PR event"
+            }
+        );
+        events
     } else {
         let events = generate_cover_letter_and_patch_events(
             cover_letter_title_description.clone(),
