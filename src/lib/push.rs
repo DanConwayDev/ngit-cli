@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -52,18 +52,33 @@ pub fn push_to_remote(
 
         let formatted_url = server_url.format_as(protocol, &decoded_nostr_url.user)?;
 
-        if let Err(error) = push_to_remote_url(git_repo, &formatted_url, remote_refspecs, term) {
-            term.write_line(
-                format!("push: {formatted_url} failed over {protocol}: {error}").as_str(),
-            )?;
-            failed_protocols.push(protocol);
-        } else {
-            success = true;
-            if !failed_protocols.is_empty() {
-                term.write_line(format!("push: succeeded over {protocol}").as_str())?;
-                let _ = set_protocol_preference(git_repo, protocol, &server_url, &Direction::Push);
+        match push_to_remote_url(git_repo, &formatted_url, remote_refspecs, term) {
+            Err(error) => {
+                term.write_line(
+                    format!("push: {formatted_url} failed over {protocol}: {error}").as_str(),
+                )?;
+                failed_protocols.push(protocol);
             }
-            break;
+            Ok(failed_refs) => {
+                if let Some((_, error)) = failed_refs.iter().next() {
+                    term.write_line(
+                        format!("push: {formatted_url} failed over {protocol}: {error}").as_str(),
+                    )?;
+                    failed_protocols.push(protocol);
+                } else {
+                    success = true;
+                    if !failed_protocols.is_empty() {
+                        term.write_line(format!("push: succeeded over {protocol}").as_str())?;
+                        let _ = set_protocol_preference(
+                            git_repo,
+                            protocol,
+                            &server_url,
+                            &Direction::Push,
+                        );
+                    }
+                    break;
+                }
+            }
         }
     }
     if success {
@@ -84,12 +99,13 @@ pub fn push_to_remote(
     }
 }
 
+// returns failed refs as a HashMaps of failed refspec and their error
 pub fn push_to_remote_url(
     git_repo: &Repo,
     git_server_url: &str,
     remote_refspecs: &[String],
     term: &Term,
-) -> Result<()> {
+) -> Result<HashMap<String, String>> {
     let git_config = git_repo.git_repo.config()?;
     let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
     let auth = GitAuthenticator::default();
@@ -105,6 +121,9 @@ pub fn push_to_remote_url(
             let mut reporter = push_reporter.lock().unwrap();
             if let Some(error) = error {
                 let existing_lines = reporter.count_all_existing_lines();
+                reporter
+                    .failed_refs
+                    .insert(name.to_string(), error.to_string());
                 reporter.update_reference_errors.push(format!(
                     "WARNING: {} failed to push {name} error: {error}",
                     get_short_git_server_name(git_repo, git_server_url),
@@ -186,7 +205,8 @@ pub fn push_to_remote_url(
     push_options.remote_callbacks(remote_callbacks);
     git_server_remote.push(remote_refspecs, Some(&mut push_options))?;
     let _ = git_server_remote.disconnect();
-    Ok(())
+    let reporter = push_reporter.lock().unwrap();
+    Ok(reporter.failed_refs.clone())
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -235,6 +255,7 @@ pub struct PushReporter<'a> {
     negotiation: Vec<String>,
     transfer_progress_msgs: Vec<String>,
     update_reference_errors: Vec<String>,
+    failed_refs: HashMap<String, String>,
     term: &'a console::Term,
     start_time: Option<Instant>,
     end_time: Option<Instant>,
@@ -246,6 +267,7 @@ impl<'a> PushReporter<'a> {
             negotiation: vec![],
             transfer_progress_msgs: vec![],
             update_reference_errors: vec![],
+            failed_refs: HashMap::new(),
             term,
             start_time: None,
             end_time: None,
@@ -334,7 +356,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
 ) -> Result<(Option<Vec<Event>>, Vec<(String, Result<()>)>)> {
-    let mut responses = vec![];
+    let mut responses: Vec<(String, Result<()>)> = vec![];
 
     let mut unsigned_pr_event: Option<UnsignedEvent> = None;
     for clone_url in servers {
@@ -360,25 +382,27 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
 
         let refspec = format!("{tip}:{git_ref_used}");
 
-        if let Err(error) = push_to_remote_url(git_repo, clone_url, &[refspec], term) {
-            term.write_line(
-                format!(
-                    "push: error sending commit data to {}: {error}",
-                    normalize_grasp_server_url(clone_url)?
-                )
-                .as_str(),
-            )?;
-            responses.push((clone_url.clone(), Err(error)));
-        } else {
-            responses.push((clone_url.clone(), Ok(())));
-            term.write_line(
-                format!(
-                    "push: commit data sent to {}",
-                    normalize_grasp_server_url(clone_url)?
-                )
-                .as_str(),
-            )?;
-            unsigned_pr_event = Some(draft_pr_event);
+        match push_to_remote_url(git_repo, clone_url, &[refspec], term) {
+            Err(error) => {
+                let normalized_url = normalize_grasp_server_url(clone_url)?;
+                term.write_line(&format!(
+                    "push: error sending commit data to {normalized_url}: {error}"
+                ))?;
+                responses.push((clone_url.clone(), Err(anyhow!(error))));
+            }
+            Ok(failed_refs) => {
+                let normalized_url = normalize_grasp_server_url(clone_url)?;
+                if let Some((_, error)) = failed_refs.iter().next() {
+                    term.write_line(&format!(
+                        "push: error sending commit data to {normalized_url}: {error}"
+                    ))?;
+                    responses.push((clone_url.clone(), Err(anyhow!(error.clone()))));
+                } else {
+                    responses.push((clone_url.clone(), Ok(())));
+                    term.write_line(&format!("push: commit data sent to {normalized_url}"))?;
+                    unsigned_pr_event = Some(draft_pr_event);
+                }
+            }
         }
     }
     if let Some(unsigned_pr_event) = unsigned_pr_event {
