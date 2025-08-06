@@ -53,7 +53,7 @@ use crate::{
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
-        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_is_cover_letter,
+        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_USER_GRASP_LIST, event_is_cover_letter,
         event_is_patch_set_root, event_is_revision_root, event_is_valid_pr_or_pr_update,
         status_kinds,
     },
@@ -233,7 +233,7 @@ impl Connect for Client {
         if let Some(git_repo_path) = git_repo_path {
             save_event_in_local_cache(git_repo_path, &event).await?;
         }
-        if event.kind.eq(&Kind::GitRepoAnnouncement) {
+        if [Kind::GitRepoAnnouncement, KIND_USER_GRASP_LIST].contains(&event.kind) {
             save_event_in_global_cache(git_repo_path, &event).await?;
         }
         Ok(event.id)
@@ -1310,17 +1310,21 @@ async fn create_relays_request(
                 user_profiles.insert(current_user);
             }
         }
-        let mut map: HashMap<PublicKey, (Timestamp, Timestamp)> = HashMap::new();
+        let mut map: HashMap<PublicKey, (Timestamp, Timestamp, Timestamp)> = HashMap::new();
         for public_key in &user_profiles {
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
                 map.insert(
                     public_key.to_owned(),
-                    (user_ref.metadata.created_at, user_ref.relays.created_at),
+                    (
+                        user_ref.metadata.created_at,
+                        user_ref.relays.created_at,
+                        user_ref.grasp_list.created_at,
+                    ),
                 );
             } else {
                 map.insert(
                     public_key.to_owned(),
-                    (Timestamp::from(0), Timestamp::from(0)),
+                    (Timestamp::from(0), Timestamp::from(0), Timestamp::from(0)),
                 );
             }
         }
@@ -1547,16 +1551,22 @@ async fn process_fetched_events(
                 {
                     fresh_profiles.insert(event.pubkey);
                 }
-            } else if [Kind::RelayList, Kind::Metadata].contains(&event.kind) {
+            } else if [Kind::RelayList, Kind::Metadata, KIND_USER_GRASP_LIST].contains(&event.kind)
+            {
                 if request.missing_contributor_profiles.contains(&event.pubkey) {
                     report.contributor_profiles.insert(event.pubkey);
-                } else if let Some((_, (metadata_timestamp, relay_list_timestamp))) = request
+                } else if let Some((
+                    _,
+                    (metadata_timestamp, relay_list_timestamp, grasp_list_timestamp),
+                )) = request
                     .profiles_to_fetch_from_user_relays
                     .get_key_value(&event.pubkey)
                 {
                     if (Kind::Metadata.eq(&event.kind) && event.created_at.gt(metadata_timestamp))
                         || (Kind::RelayList.eq(&event.kind)
                             && event.created_at.gt(relay_list_timestamp))
+                        || (KIND_USER_GRASP_LIST.eq(&event.kind)
+                            && event.created_at.gt(grasp_list_timestamp))
                     {
                         report.profile_updates.insert(event.pubkey);
                     }
@@ -1718,35 +1728,21 @@ pub fn get_filter_repo_events(repo_coordinates: &HashSet<Nip19Coordinate>) -> no
                 .map(|c| c.identifier.clone())
                 .collect::<Vec<String>>(),
         )
-        .authors(
-            repo_coordinates
-                .iter()
-                .map(|c| c.public_key)
-                .collect::<Vec<PublicKey>>(),
-        )
 }
 
 pub static STATE_KIND: nostr::Kind = Kind::Custom(30618);
 pub fn get_filter_state_events(repo_coordinates: &HashSet<Nip19Coordinate>) -> nostr::Filter {
-    nostr::Filter::default()
-        .kind(STATE_KIND)
-        .identifiers(
-            repo_coordinates
-                .iter()
-                .map(|c| c.identifier.clone())
-                .collect::<Vec<String>>(),
-        )
-        .authors(
-            repo_coordinates
-                .iter()
-                .map(|c| c.public_key)
-                .collect::<Vec<PublicKey>>(),
-        )
+    nostr::Filter::default().kind(STATE_KIND).identifiers(
+        repo_coordinates
+            .iter()
+            .map(|c| c.identifier.clone())
+            .collect::<Vec<String>>(),
+    )
 }
 
 pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nostr::Filter {
     nostr::Filter::default()
-        .kinds(vec![Kind::Metadata, Kind::RelayList])
+        .kinds(vec![Kind::Metadata, Kind::RelayList, KIND_USER_GRASP_LIST])
         .authors(contributors)
 }
 
@@ -1850,7 +1846,7 @@ pub struct FetchRequest {
     contributors: HashSet<PublicKey>,
     missing_contributor_profiles: HashSet<PublicKey>,
     existing_events: HashSet<EventId>,
-    profiles_to_fetch_from_user_relays: HashMap<PublicKey, (Timestamp, Timestamp)>,
+    profiles_to_fetch_from_user_relays: HashMap<PublicKey, (Timestamp, Timestamp, Timestamp)>,
     user_relays_for_profiles: HashSet<RelayUrl>,
 }
 

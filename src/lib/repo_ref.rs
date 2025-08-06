@@ -40,6 +40,7 @@ pub struct RepoRef {
     pub web: Vec<String>,
     pub relays: Vec<RelayUrl>,
     pub blossoms: Vec<Url>,
+    pub hashtags: Vec<String>,
     pub maintainers: Vec<PublicKey>,
     pub trusted_maintainer: PublicKey,
     // set to None if not known
@@ -71,6 +72,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
             web: Vec::new(),
             relays: Vec::new(),
             blossoms: Vec::new(),
+            hashtags: Vec::new(),
             maintainers: Vec::new(),
             trusted_maintainer: trusted_maintainer.unwrap_or(event.pubkey),
             maintainers_without_annoucnement: None,
@@ -118,6 +120,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                         }
                     }
                 }
+                [t, hashtag, ..] if t == "t" => r.hashtags.push(hashtag.clone()),
                 [t, blossoms @ ..] if t == "blossoms" => {
                     for b in blossoms {
                         if let Ok(b) = Url::parse(b) {
@@ -217,6 +220,15 @@ impl RepoRef {
                             vec![format!("git repository: {}", self.name.clone())],
                         ),
                     ],
+                    self.hashtags
+                        .iter()
+                        .map(|h| {
+                            Tag::custom(
+                                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("t")),
+                                vec![h.clone()],
+                            )
+                        })
+                        .collect(),
                     if self.blossoms.is_empty() {
                         vec![]
                     } else {
@@ -310,6 +322,34 @@ impl RepoRef {
 
     pub fn grasp_servers(&self) -> Vec<String> {
         detect_existing_grasp_servers(Some(self), &[], &[], &self.identifier)
+    }
+
+    // returns false if already present so didn't need adding
+    pub fn add_grasp_server(&mut self, clone_url: &str) -> Result<bool> {
+        if !clone_url.starts_with("http") {
+            bail!("invalid grasp server clone url");
+        }
+        extract_npub(clone_url)
+            .context("invalid grasp server clone url. does not contain valid npub")?;
+        if !(clone_url.ends_with(".git") || clone_url.ends_with(".git/")) {
+            bail!("invalid grasp server clone url. does not end with .git");
+        }
+
+        let relay_url = RelayUrl::parse(
+            &format_grasp_server_url_as_relay_url(clone_url)
+                .context("invalid grasp server clone url")?,
+        )
+        .context("invalid grasp server clone url")?;
+
+        if !self.relays.contains(&relay_url) {
+            self.relays.push(relay_url);
+        }
+        if !self.git_server.contains(&clone_url.to_string()) {
+            self.git_server.push(clone_url.to_string());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -699,13 +739,49 @@ pub fn extract_npub(s: &str) -> Result<&str> {
     }
 }
 
+// this should be called is_grasp_server_in_list
 pub fn is_grasp_server(url: &str, grasp_servers: &[String]) -> bool {
     if !grasp_servers.is_empty() {
-        if let Ok(n) = normalize_grasp_server_url(url) {
-            return grasp_servers.contains(&n);
+        if let Ok(url) = normalize_grasp_server_url(url) {
+            grasp_servers.iter().any(|s| {
+                if let Ok(s) = normalize_grasp_server_url(s) {
+                    s == url
+                } else {
+                    false
+                }
+            })
+        } else {
+            false
         }
+    } else {
+        false
     }
-    false
+}
+
+pub fn format_grasp_server_url_as_relay_url(url: &str) -> Result<String> {
+    let grasp_server_url = normalize_grasp_server_url(url)?;
+    if grasp_server_url.contains("http://") {
+        return Ok(grasp_server_url.replace("http://", "ws://"));
+    }
+    Ok(format!("wss://{grasp_server_url}"))
+}
+
+pub fn format_grasp_server_url_as_clone_url(
+    grasp_server: &str,
+    public_key: &PublicKey,
+    identifier: &str,
+) -> Result<String> {
+    let grasp_server_url = normalize_grasp_server_url(grasp_server)?;
+
+    let prefix = if grasp_server_url.contains("http://") {
+        ""
+    } else {
+        "https://"
+    };
+    Ok(format!(
+        "{prefix}{grasp_server_url}/{}/{identifier}.git",
+        public_key.to_bech32()?
+    ))
 }
 
 #[cfg(test)]
@@ -730,6 +806,7 @@ mod tests {
                 RelayUrl::parse("ws://relay2.io").unwrap(),
             ],
             blossoms: vec![],
+            hashtags: vec![],
             trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers_without_annoucnement: None,
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],

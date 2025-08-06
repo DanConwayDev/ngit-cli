@@ -1,7 +1,7 @@
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use nostr::PublicKey;
+use nostr::{PublicKey, Url, event::Tag, signer::NostrSigner};
 use nostr_sdk::{Alphabet, JsonUtil, Kind, SingleLetterTag, Timestamp, ToBech32};
 use serde::{self, Deserialize, Serialize};
 
@@ -9,13 +9,17 @@ use serde::{self, Deserialize, Serialize};
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
-use crate::client::{Connect, get_event_from_global_cache};
+use crate::{
+    client::{Connect, get_event_from_global_cache, sign_event},
+    git_events::KIND_USER_GRASP_LIST,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRef {
     pub public_key: PublicKey,
     pub metadata: UserMetadata,
     pub relays: UserRelays,
+    pub grasp_list: UserGraspList,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -45,6 +49,35 @@ impl UserRelays {
             .filter(|r| r.read)
             .map(|r| r.url.clone())
             .collect()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserGraspList {
+    pub urls: Vec<Url>,
+    pub created_at: Timestamp,
+}
+
+impl UserGraspList {
+    pub async fn to_event(&mut self, signer: &Arc<dyn NostrSigner>) -> Result<nostr::Event> {
+        let event = sign_event(
+            nostr_sdk::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
+                self.urls
+                    .iter()
+                    .map(|url| {
+                        Tag::custom(
+                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("g")),
+                            vec![url.to_string()],
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            signer,
+            "user grasp list".to_string(),
+        )
+        .await?;
+        self.created_at = event.created_at;
+        Ok(event)
     }
 }
 
@@ -84,6 +117,7 @@ pub async fn get_user_details(
             public_key: public_key.to_owned(),
             metadata: extract_user_metadata(public_key, &[])?,
             relays: extract_user_relays(public_key, &[]),
+            grasp_list: extract_user_grasp_list(public_key, &[]),
         };
         if cache_only {
             Ok(empty)
@@ -117,6 +151,9 @@ pub async fn get_user_ref_from_cache(
         nostr::Filter::default()
             .author(*public_key)
             .kind(Kind::RelayList),
+        nostr::Filter::default()
+            .author(*public_key)
+            .kind(KIND_USER_GRASP_LIST),
     ];
 
     let events = get_event_from_global_cache(git_repo_path, filters.clone()).await?;
@@ -128,6 +165,7 @@ pub async fn get_user_ref_from_cache(
         public_key: public_key.to_owned(),
         metadata: extract_user_metadata(public_key, &events)?,
         relays: extract_user_relays(public_key, &events),
+        grasp_list: extract_user_grasp_list(public_key, &events),
     })
 }
 
@@ -203,6 +241,39 @@ pub fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event
                     url: t.as_slice()[1].clone(),
                     read: t.as_slice().len() == 2 || t.as_slice()[2].eq("read"),
                     write: t.as_slice().len() == 2 || t.as_slice()[2].eq("write"),
+                })
+                .collect()
+        } else {
+            vec![]
+        },
+        created_at: if let Some(event) = event {
+            event.created_at
+        } else {
+            Timestamp::from(0)
+        },
+    }
+}
+
+pub fn extract_user_grasp_list(
+    public_key: &nostr::PublicKey,
+    events: &[nostr::Event],
+) -> UserGraspList {
+    let event = events
+        .iter()
+        .filter(|e| e.kind.eq(&KIND_USER_GRASP_LIST) && e.pubkey.eq(public_key))
+        .max_by_key(|e| e.created_at);
+
+    UserGraspList {
+        urls: if let Some(event) = event {
+            event
+                .tags
+                .iter()
+                .filter_map(|t| {
+                    if t.as_slice().len() > 1 && t.as_slice()[0] == "g" {
+                        Url::parse(&t.as_slice()[1]).ok()
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         } else {
