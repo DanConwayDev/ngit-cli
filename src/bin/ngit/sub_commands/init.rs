@@ -266,11 +266,23 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         );
         let mut selections: Vec<bool> = vec![true; options.len()]; // Initialize selections based on existing options
         let empty = options.is_empty();
+        for user_grasp_option in user_ref.grasp_list.urls {
+            // Check if any option contains the user_grasp_option as a substring
+            if !options
+                .iter()
+                .any(|option| option.contains(user_grasp_option.as_str()))
+            {
+                options.push(user_grasp_option.to_string()); // Add if not found
+                selections.push(empty); // mark as selected if no existing grasp otherwise not
+            }
+        }
+
+        let empty = options.is_empty();
         for fallback in fallback_grasp_servers {
             // Check if any option contains the fallback as a substring
             if !options.iter().any(|option| option.contains(fallback)) {
                 options.push(fallback.clone()); // Add fallback if not found
-                selections.push(empty); // mark as selected if no existing ngit relay otherwise not
+                selections.push(empty); // mark as selected if no existing selections otherwise not
             }
         }
         let selected = multi_select_with_custom_value(
