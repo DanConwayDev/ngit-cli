@@ -32,7 +32,7 @@ use crate::{
     },
 };
 
-// returns failed refs as a HashMaps of failed refspec and their error
+// returns a HashMap of refs responded to and any related cancellation reasons
 pub fn push_to_remote(
     git_repo: &Repo,
     git_server_url: &str,
@@ -40,14 +40,14 @@ pub fn push_to_remote(
     remote_refspecs: &[String],
     term: &Term,
     is_grasp_server: bool,
-) -> Result<HashMap<String, String>> {
+) -> Result<HashMap<String, Option<String>>> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
         get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
 
     let mut failed_protocols = vec![];
     let mut success = false;
-    let mut failed_refs = HashMap::new();
+    let mut ref_updates = HashMap::new();
 
     for protocol in &protocols_to_attempt {
         term.write_line(format!("push: {} over {protocol}...", server_url.short_name(),).as_str())?;
@@ -61,9 +61,13 @@ pub fn push_to_remote(
                 )?;
                 failed_protocols.push(protocol);
             }
-            Ok(failed_refs_on_protocol) => {
+            Ok(ref_updates_on_protocol) => {
                 success = true;
-                if failed_refs_on_protocol.is_empty() {
+                if remote_refspecs.len() == ref_updates_on_protocol.len()
+                    && ref_updates_on_protocol
+                        .values()
+                        .all(|error| error.is_none())
+                {
                     if !failed_protocols.is_empty() {
                         term.write_line(format!("push: succeeded over {protocol}").as_str())?;
                         let _ = set_protocol_preference(
@@ -80,19 +84,22 @@ pub fn push_to_remote(
                             "push: {formatted_url} with {protocol} complete but {}ref{} not accepted:", 
                             if remote_refspecs.len() != failed_protocols.len() { "some " } else {""},
                             if remote_refspecs.len() == 1 { "s"} else {""},
-                    ).as_str(),
+                        ).as_str(),
                     )?;
-                    for (git_ref, error) in &failed_refs_on_protocol {
-                        term.write_line(format!("push:    - {git_ref}: {error}").as_str())?;
+                    for (git_ref, error) in &ref_updates_on_protocol {
+                        if let Some(error) = error {
+                            term.write_line(format!("push:    - {git_ref}: {error}").as_str())?;
+                        }
                     }
-                    failed_refs = failed_refs_on_protocol;
+                    // TODO do we want to report on the refs that weren't responded to?
+                    ref_updates = ref_updates_on_protocol;
                 }
                 break;
             }
         }
     }
     if success {
-        Ok(failed_refs)
+        Ok(ref_updates)
     } else {
         let error = anyhow!(
             "{} failed over {}{}",
@@ -109,13 +116,13 @@ pub fn push_to_remote(
     }
 }
 
-// returns failed refs as a HashMaps of failed refspec and their error
+// returns HashMaps of refspecs responded to and any failure message
 pub fn push_to_remote_url(
     git_repo: &Repo,
     git_server_url: &str,
     remote_refspecs: &[String],
     term: &Term,
-) -> Result<HashMap<String, String>> {
+) -> Result<HashMap<String, Option<String>>> {
     let git_config = git_repo.git_repo.config()?;
     let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
     let auth = GitAuthenticator::default();
@@ -129,11 +136,11 @@ pub fn push_to_remote_url(
         let push_reporter = Arc::clone(&push_reporter);
         move |name, error| {
             let mut reporter = push_reporter.lock().unwrap();
+            reporter
+                .ref_updates
+                .insert(name.to_string(), error.map(|s| s.to_string()));
             if let Some(error) = error {
                 let existing_lines = reporter.count_all_existing_lines();
-                reporter
-                    .failed_refs
-                    .insert(name.to_string(), error.to_string());
                 reporter.update_reference_errors.push(format!(
                     "WARNING: {} failed to push {name} error: {error}",
                     get_short_git_server_name(git_repo, git_server_url),
@@ -156,7 +163,11 @@ pub fn push_to_remote_url(
                     .unwrap_or("")
                     .replace("refs/heads/", "")
                     .replace("refs/tags/", "tags/");
-                let msg = if update.dst().is_zero() {
+                let msg = if let Some(Some(_)) =
+                    reporter.ref_updates.get(update.dst_refname().unwrap_or(""))
+                {
+                    format!("push: - [failed]          {dst_refname}")
+                } else if update.dst().is_zero() {
                     format!("push: - [delete]          {dst_refname}")
                 } else if update.src().is_zero() {
                     if update.dst_refname().unwrap_or("").contains("refs/tags") {
@@ -216,7 +227,7 @@ pub fn push_to_remote_url(
     git_server_remote.push(remote_refspecs, Some(&mut push_options))?;
     let _ = git_server_remote.disconnect();
     let reporter = push_reporter.lock().unwrap();
-    Ok(reporter.failed_refs.clone())
+    Ok(reporter.ref_updates.clone())
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -265,7 +276,7 @@ pub struct PushReporter<'a> {
     negotiation: Vec<String>,
     transfer_progress_msgs: Vec<String>,
     update_reference_errors: Vec<String>,
-    failed_refs: HashMap<String, String>,
+    ref_updates: HashMap<String, Option<String>>,
     term: &'a console::Term,
     start_time: Option<Instant>,
     end_time: Option<Instant>,
@@ -277,7 +288,7 @@ impl<'a> PushReporter<'a> {
             negotiation: vec![],
             transfer_progress_msgs: vec![],
             update_reference_errors: vec![],
-            failed_refs: HashMap::new(),
+            ref_updates: HashMap::new(),
             term,
             start_time: None,
             end_time: None,
@@ -426,13 +437,21 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 ))?;
                 responses.push((clone_url.clone(), Err(anyhow!(error))));
             }
-            Ok(failed_refs) => {
+            Ok(ref_updates) => {
                 let normalized_url = normalize_grasp_server_url(clone_url)?;
-                if let Some((_, error)) = failed_refs.iter().next() {
+                if let Some((_, Some(error))) = ref_updates.iter().next() {
                     term.write_line(&format!(
                         "push: error sending commit data to {normalized_url}: {error}"
                     ))?;
                     responses.push((clone_url.clone(), Err(anyhow!(error.clone()))));
+                } else if ref_updates.is_empty() {
+                    term.write_line(&format!(
+                        "push: error sending commit data to {normalized_url}: server didn't confirm acceptance"
+                    ))?;
+                    responses.push((
+                        clone_url.clone(),
+                        Err(anyhow!("server didn't confirm acceptance")),
+                    ));
                 } else {
                     responses.push((clone_url.clone(), Ok(())));
                     term.write_line(&format!("push: commit data sent to {normalized_url}"))?;
