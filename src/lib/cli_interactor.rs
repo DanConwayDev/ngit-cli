@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use dialoguer::{Confirm, Input, Password, theme::ColorfulTheme};
+use dialoguer::{
+    Confirm, Input, Password,
+    theme::{ColorfulTheme, Theme},
+};
 use indicatif::TermLike;
 #[cfg(test)]
 use mockall::*;
@@ -321,6 +324,19 @@ where
     }
 
     Ok(selected_choices)
+}
+
+pub fn show_multi_input_prompt_success(label: &str, values: &[String]) {
+    let values_str: Vec<&str> = values.iter().map(std::string::String::as_str).collect();
+    eprintln!("{}", {
+        let mut s = String::new();
+        let _ = ColorfulTheme::default().format_multi_select_prompt_selection(
+            &mut s,
+            label,
+            &values_str,
+        );
+        s
+    });
 }
 
 #[derive(Debug, Default)]

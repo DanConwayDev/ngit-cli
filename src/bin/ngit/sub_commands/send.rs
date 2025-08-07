@@ -3,7 +3,9 @@ use std::{path::Path, str::FromStr, thread, time::Duration};
 use anyhow::{Context, Result, bail};
 use console::Style;
 use ngit::{
-    cli_interactor::{PromptChoiceParms, multi_select_with_custom_value},
+    cli_interactor::{
+        PromptChoiceParms, multi_select_with_custom_value, show_multi_input_prompt_success,
+    },
     client::{Params, send_events},
     git::nostr_url::CloneUrl,
     git_events::{
@@ -343,12 +345,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                     .collect();
                 let selections = vec![true; default_choices.len()]; // all selected by default
                 let grasp_servers = multi_select_with_custom_value(
-                    "grasp server(s)",
+                    "alternative grasp server(s)",
                     "grasp server",
                     default_choices,
                     selections,
                     normalize_grasp_server_url,
                 )?;
+                show_multi_input_prompt_success("alternative grasp server(s)", &grasp_servers);
                 if grasp_servers.is_empty() {
                     // ask again
                     continue;
@@ -388,16 +391,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 }
                 normalised_grasp_servers
             } else {
-                println!(
-                    "{} personal-fork so we can push commits to your prefered grasp servers",
-                    if user_repo_ref.is_some() {
-                        "Updating"
-                    } else {
-                        "Creating a"
-                    },
-                );
                 untried_user_grasp_servers
             };
+            println!(
+                "{} personal-fork so we can push commits to your prefered grasp servers",
+                if user_repo_ref.is_some() {
+                    "Updating"
+                } else {
+                    "Creating a"
+                },
+            );
 
             let grasp_servers_as_personal_clone_url: Vec<String> = grasp_servers
                 .iter()
@@ -415,7 +418,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
             let updated_user_repo_ref = {
                 if let Some(mut user_repo_ref) = user_repo_ref {
                     for g in &grasp_servers_as_personal_clone_url {
-                        let _ = user_repo_ref.add_grasp_server(g);
+                        user_repo_ref.add_grasp_server(g)?;
                     }
                     user_repo_ref
                 } else {

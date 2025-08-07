@@ -9,10 +9,12 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use console::{Style, Term};
-use dialoguer::theme::{ColorfulTheme, Theme};
 use ngit::{
     UrlWithoutSlash,
-    cli_interactor::{PromptChoiceParms, PromptConfirmParms, multi_select_with_custom_value},
+    cli_interactor::{
+        PromptChoiceParms, PromptConfirmParms, multi_select_with_custom_value,
+        show_multi_input_prompt_success,
+    },
     client::{Params, send_events},
     git::nostr_url::{CloneUrl, NostrUrlDecoded},
     repo_ref::{
@@ -902,19 +904,6 @@ fn parse_relay_url(s: &str) -> Result<RelayUrl> {
         }
     }
     .context(format!("failed to parse relay url: {s}"))
-}
-
-pub fn show_multi_input_prompt_success(label: &str, values: &[String]) {
-    let values_str: Vec<&str> = values.iter().map(std::string::String::as_str).collect();
-    eprintln!("{}", {
-        let mut s = String::new();
-        let _ = ColorfulTheme::default().format_multi_select_prompt_selection(
-            &mut s,
-            label,
-            &values_str,
-        );
-        s
-    });
 }
 
 fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
