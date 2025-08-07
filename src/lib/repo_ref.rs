@@ -326,12 +326,7 @@ impl RepoRef {
 
     // returns false if already present so didn't need adding
     pub fn add_grasp_server(&mut self, clone_url: &str) -> Result<bool> {
-        if !clone_url.starts_with("http") {
-            bail!("invalid grasp server clone url");
-        }
-        extract_npub(clone_url)
-            .context("invalid grasp server clone url. does not contain valid npub")?;
-        if !(clone_url.ends_with(".git") || clone_url.ends_with(".git/")) {
+        if !is_grasp_server_clone_url(clone_url) {
             bail!("invalid grasp server clone url. does not end with .git");
         }
 
@@ -739,7 +734,6 @@ pub fn extract_npub(s: &str) -> Result<&str> {
     }
 }
 
-// this should be called is_grasp_server_in_list
 pub fn is_grasp_server_in_list(url: &str, grasp_servers: &[String]) -> bool {
     if !grasp_servers.is_empty() {
         if let Ok(url) = normalize_grasp_server_url(url) {
@@ -756,6 +750,12 @@ pub fn is_grasp_server_in_list(url: &str, grasp_servers: &[String]) -> bool {
     } else {
         false
     }
+}
+
+pub fn is_grasp_server_clone_url(url: &str) -> bool {
+    extract_npub(url).is_ok()
+        && (url.ends_with(".git") || url.ends_with(".git/"))
+        && url.starts_with("http")
 }
 
 pub fn format_grasp_server_url_as_relay_url(url: &str) -> Result<String> {
