@@ -79,7 +79,7 @@ mod cannot_find_repo_event {
                 test_repo.populate()?;
                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
                 p.expect(
-                    "hint: https://gitworkshop.dev/repos lists repositories and their nostr address\r\n",
+                    "hint: https://gitworkshop.dev/search lists repositories and their nostr address\r\n",
                 )?;
                 if invalid_input {
                     let mut input = p.expect_input("nostr repository")?;

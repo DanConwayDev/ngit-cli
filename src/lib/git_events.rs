@@ -63,6 +63,7 @@ pub fn status_kinds() -> Vec<Kind> {
 
 pub const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
 pub const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
+pub const KIND_USER_GRASP_LIST: Kind = Kind::Custom(10317);
 
 pub fn event_is_patch_set_root(event: &Event) -> bool {
     event.kind.eq(&Kind::GitPatch)
@@ -376,11 +377,13 @@ pub fn event_tag_from_nip19_or_hex(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate_unsigned_pr_or_update_event(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     signing_public_key: &PublicKey,
     root_proposal: Option<&Event>,
+    title_description_overide: &Option<(String, String)>,
     commit: &Sha1Hash,
     clone_url_hint: &[&str],
     mentions: &[nostr::Tag],
@@ -395,13 +398,17 @@ pub fn generate_unsigned_pr_or_update_event(
         None
     };
 
-    let title = if let Some(cl) = &root_patch_cover_letter {
+    let title = if let Some((title, _)) = &title_description_overide {
+        title.clone()
+    } else if let Some(cl) = &root_patch_cover_letter {
         cl.title.clone()
     } else {
         git_repo.get_commit_message_summary(commit)?
     };
 
-    let description = if let Some(cl) = &root_patch_cover_letter {
+    let description = if let Some((_, description)) = &title_description_overide {
+        description.clone()
+    } else if let Some(cl) = &root_patch_cover_letter {
         cl.description.clone()
     } else {
         let mut description = git_repo.get_commit_message(commit)?.trim().to_string();

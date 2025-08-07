@@ -37,6 +37,25 @@ mod when_commits_behind_ask_to_proceed {
         Ok(test_repo)
     }
 
+    fn create_relay_51() -> Result<Relay<'static>> {
+        Ok(Relay::new(
+            8051,
+            None,
+            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                relay.respond_events(
+                    client_id,
+                    &subscription_id,
+                    &vec![
+                        generate_test_key_1_metadata_event("fred"),
+                        generate_test_key_1_relay_list_event(),
+                        generate_repo_ref_event(),
+                    ],
+                )?;
+                Ok(())
+            }),
+        ))
+    }
+
     fn expect_confirm_prompt(p: &mut CliTester) -> Result<CliTesterConfirmPrompt> {
         p.expect("fetching updates...\r\n")?;
         p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
@@ -49,37 +68,62 @@ mod when_commits_behind_ask_to_proceed {
         )
     }
 
-    #[test]
-    fn asked_with_default_no() -> Result<()> {
-        let test_repo = prep_test_repo()?;
-
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
-        expect_confirm_prompt(&mut p)?;
-        p.exit()?;
-        Ok(())
-    }
-
-    #[test]
-    fn when_response_is_false_aborts() -> Result<()> {
-        let test_repo = prep_test_repo()?;
-
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
-
-        expect_confirm_prompt(&mut p)?.succeeds_with(Some(false))?;
-
-        p.expect_end_with("Error: aborting so commits can be rebased\r\n")?;
-
-        Ok(())
-    }
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn when_response_is_true_proceeds() -> Result<()> {
+    async fn asked_with_default_no() -> Result<()> {
         let test_repo = prep_test_repo()?;
+        let mut r51 = create_relay_51()?;
+        // // check relay had the right number of events
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+            expect_confirm_prompt(&mut p)?;
+            p.exit()?;
+            relay::shutdown_relay(8051)?;
+            Ok(())
+        });
 
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
-        expect_confirm_prompt(&mut p)?.succeeds_with(Some(true))?;
-        p.expect("? include cover letter")?;
-        p.exit()?;
+        // launch relay
+        r51.listen_until_close().await?;
+        cli_tester_handle.join().unwrap()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn when_response_is_false_aborts() -> Result<()> {
+        let test_repo = prep_test_repo()?;
+        let mut r51 = create_relay_51()?;
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+            expect_confirm_prompt(&mut p)?.succeeds_with(Some(false))?;
+            p.expect_end_with("Error: aborting so commits can be rebased\r\n")?;
+            relay::shutdown_relay(8051)?;
+            Ok(())
+        });
+
+        // launch relay
+        r51.listen_until_close().await?;
+        cli_tester_handle.join().unwrap()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn when_response_is_true_proceeds() -> Result<()> {
+        let test_repo = prep_test_repo()?;
+        let mut r51 = create_relay_51()?;
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+            expect_confirm_prompt(&mut p)?.succeeds_with(Some(true))?;
+            p.expect("? include cover letter")?;
+            p.exit()?;
+            relay::shutdown_relay(8051)?;
+            Ok(())
+        });
+
+        // launch relay
+        r51.listen_until_close().await?;
+        cli_tester_handle.join().unwrap()?;
         Ok(())
     }
 }
@@ -158,7 +202,7 @@ fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()
 }
 
 fn expect_msgs_after(p: &mut CliTester) -> Result<()> {
-    p.expect_after_whitespace("view in gitworkshop.dev: https://gitworkshop.dev/repo")?;
+    p.expect_after_whitespace("view in gitworkshop.dev: https://gitworkshop.dev/")?;
     p.expect_eventually("\r\n")?;
     p.expect("view in another client:  https://njump.me/")?;
     p.expect_eventually("\r\n")?;
@@ -1619,7 +1663,7 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                         .unwrap()
                         .as_slice()[1],
                     // id of state nevent
-                    "431e58eb8e1b4e20292d1d5bbe81d5cfb042e1bc165de32eddfdd52245a4cce4",
+                    "000c104861e34a453481ab23e7de21a6baf475b394479705363b035936732528",
                 );
             }
             Ok(())

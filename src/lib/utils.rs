@@ -3,11 +3,13 @@ use std::{
     collections::HashMap,
     fmt,
     io::{self, Stdin},
+    path::Path,
     str::FromStr,
 };
 
 use anyhow::{Context, Result, bail};
 use git2::Repository;
+use nostr::nips::nip19::ToBech32;
 use nostr_sdk::{Event, EventId, Kind, PublicKey, Url};
 
 use crate::{
@@ -20,7 +22,8 @@ use crate::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
     git_events::{
-        event_is_revision_root, get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status,
+        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_is_revision_root,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status,
         is_event_proposal_root_for_branch, status_kinds,
     },
     repo_ref::RepoRef,
@@ -185,6 +188,37 @@ pub async fn get_all_proposals(
         }
     }
     Ok(all_proposals)
+}
+
+pub async fn proposal_tip_is_pr_or_pr_update(
+    git_repo_path: &Path,
+    repo_ref: &RepoRef,
+    proposal_id: &EventId,
+) -> Result<bool> {
+    let commits_events =
+        get_all_proposal_patch_pr_pr_update_events_from_cache(git_repo_path, repo_ref, proposal_id)
+            .await
+            .context(format!(
+                "cannot get existing proposal events for {}",
+                proposal_id.to_bech32()?
+            ))?;
+    let most_recent_proposal_patch_chain = get_pr_tip_event_or_most_recent_patch_with_ancestors(
+        commits_events.clone(),
+    )
+    .context(format!(
+        "cannot find tip from proposal events for {}",
+        proposal_id.to_bech32()?,
+    ))?;
+
+    Ok([KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(
+        &most_recent_proposal_patch_chain
+            .first()
+            .context(format!(
+                "cannot find any proposal events for {}",
+                proposal_id.to_bech32()?
+            ))?
+            .kind,
+    ))
 }
 
 pub fn find_proposal_and_patches_by_branch_name<'a>(

@@ -18,7 +18,7 @@ use ngit::{
     },
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, tag_value},
     login::get_curent_user,
-    repo_ref::{RepoRef, is_grasp_server},
+    repo_ref::{RepoRef, is_grasp_server_in_list},
     utils::{
         Direction, find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch,
         get_open_or_draft_proposals, get_read_protocols_to_try, join_with_and,
@@ -96,7 +96,7 @@ pub async fn run_fetch(
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             &term,
-            is_grasp_server(git_server_url, &repo_ref.grasp_servers()),
+            is_grasp_server_in_list(git_server_url, &repo_ref.grasp_servers()),
         ) {
             errors.push(error);
         }

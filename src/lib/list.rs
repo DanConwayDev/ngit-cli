@@ -9,7 +9,7 @@ use crate::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
-    repo_ref::is_grasp_server,
+    repo_ref::is_grasp_server_in_list,
     utils::{Direction, get_read_protocols_to_try, join_with_and, set_protocol_preference},
 };
 
@@ -23,7 +23,7 @@ pub fn list_from_remotes(
     let mut remote_states = HashMap::new();
     let mut errors = HashMap::new();
     for url in git_servers {
-        let is_grasp_server = is_grasp_server(url, grasp_servers);
+        let is_grasp_server = is_grasp_server_in_list(url, grasp_servers);
         match list_from_remote(term, git_repo, url, decoded_nostr_url, is_grasp_server) {
             Err(error) => {
                 errors.insert(url, error);

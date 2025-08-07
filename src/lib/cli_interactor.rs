@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use dialoguer::{Confirm, Input, Password, theme::ColorfulTheme};
+use dialoguer::{
+    Confirm, Input, Password,
+    theme::{ColorfulTheme, Theme},
+};
 use indicatif::TermLike;
 #[cfg(test)]
 use mockall::*;
@@ -234,6 +237,106 @@ impl PromptMultiChoiceParms {
         self.defaults = Some(defaults);
         self
     }
+}
+
+pub fn multi_select_with_custom_value<F>(
+    prompt: &str,
+    custom_choice_prompt: &str,
+    mut choices: Vec<String>,
+    mut defaults: Vec<bool>,
+    validate_choice: F,
+) -> Result<Vec<String>>
+where
+    F: Fn(&str) -> Result<String>,
+{
+    let mut selected_choices = vec![];
+
+    // Loop to allow users to add more choices
+    loop {
+        // Add 'add another' option at the end of the choices
+        let mut current_choices = choices.clone();
+        current_choices.push(if current_choices.is_empty() {
+            "add".to_string()
+        } else {
+            "add another".to_string()
+        });
+
+        // Create default selections based on the provided defaults
+        let mut current_defaults = defaults.clone();
+        current_defaults.push(current_choices.len() == 1); // 'add another' should not be selected by default
+
+        // Prompt for selections
+        let selected_indices: Vec<usize> = Interactor::default().multi_choice(
+            PromptMultiChoiceParms::default()
+                .with_prompt(prompt)
+                .dont_report()
+                .with_choices(current_choices.clone())
+                .with_defaults(current_defaults),
+        )?;
+
+        // Collect selected choices
+        selected_choices.clear(); // Clear previous selections to update
+        for &index in &selected_indices {
+            if index < choices.len() {
+                // Exclude 'add another' option
+                selected_choices.push(choices[index].clone());
+            }
+        }
+
+        // Check if 'add another' was selected
+        if selected_indices.contains(&(choices.len())) {
+            // Last index is 'add another'
+            let mut new_choice: String;
+            loop {
+                new_choice = Interactor::default().input(
+                    PromptInputParms::default()
+                        .with_prompt(custom_choice_prompt)
+                        .dont_report()
+                        .optional(),
+                )?;
+
+                if new_choice.is_empty() {
+                    break;
+                }
+                // Validate the new choice
+                match validate_choice(&new_choice) {
+                    Ok(valid_choice) => {
+                        new_choice = valid_choice; // Use the fixed version of the input
+                        break; // Valid choice, exit the loop
+                    }
+                    Err(err) => {
+                        // Inform the user about the validation error
+                        println!("Error: {err}");
+                    }
+                }
+            }
+
+            // Add the new choice to the choices vector
+            if !new_choice.is_empty() {
+                choices.push(new_choice.clone()); // Add new choice to the end of the list
+                selected_choices.push(new_choice); // Automatically select the new choice
+                defaults.push(true); // Set the new choice as selected by default
+            }
+        } else {
+            // Exit the loop if 'add another' was not selected
+            break;
+        }
+    }
+
+    Ok(selected_choices)
+}
+
+pub fn show_multi_input_prompt_success(label: &str, values: &[String]) {
+    let values_str: Vec<&str> = values.iter().map(std::string::String::as_str).collect();
+    eprintln!("{}", {
+        let mut s = String::new();
+        let _ = ColorfulTheme::default().format_multi_select_prompt_selection(
+            &mut s,
+            label,
+            &values_str,
+        );
+        s
+    });
 }
 
 #[derive(Debug, Default)]

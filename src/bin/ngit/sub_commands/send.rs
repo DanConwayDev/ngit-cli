@@ -1,12 +1,32 @@
-use std::path::Path;
+use std::{path::Path, str::FromStr, thread, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use console::Style;
 use ngit::{
+    cli_interactor::{
+        PromptChoiceParms, multi_select_with_custom_value, show_multi_input_prompt_success,
+    },
     client::{Params, send_events},
-    git_events::{EventRefType, generate_cover_letter_and_patch_events},
+    git::nostr_url::CloneUrl,
+    git_events::{
+        EventRefType, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
+        generate_cover_letter_and_patch_events,
+    },
+    push::push_refs_and_generate_pr_or_pr_update_event,
+    repo_ref::{
+        format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
+        is_grasp_server_in_list, normalize_grasp_server_url,
+    },
+    utils::proposal_tip_is_pr_or_pr_update,
 };
-use nostr::{ToBech32, nips::nip19::Nip19Event};
+use nostr::{
+    ToBech32,
+    event::{Event, Kind},
+    nips::{
+        nip01::Coordinate,
+        nip19::{Nip19Coordinate, Nip19Event},
+    },
+};
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 
 use crate::{
@@ -60,12 +80,14 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
 
-    let (root_proposal_id, mention_tags) =
-        get_root_proposal_id_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+
+    let (root_proposal, mention_tags) =
+        get_root_proposal_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
             .await?;
 
     if let Some(root_ref) = args.in_reply_to.first() {
-        if root_proposal_id.is_some() {
+        if root_proposal.is_some() {
             println!("creating proposal revision for: {root_ref}");
         }
     }
@@ -104,41 +126,38 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let (first_commit_ahead, behind) =
         git_repo.get_commits_ahead_behind(&main_tip, commits.last().context("no commits")?)?;
 
-    // check proposal ahead of origin/main
-    if first_commit_ahead.len().gt(&1) && !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal builds on a commit {} ahead of '{main_branch_name}' - do you want to continue?", first_commit_ahead.len() - 1)
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-        bail!("aborting because selected commits were ahead of origin/master");
-    }
+    check_commits_are_suitable_for_proposal(
+        &first_commit_ahead,
+        &commits,
+        &behind,
+        main_branch_name,
+        &main_tip,
+    )?;
 
-    // check if a selected commit is already in origin
-    if commits.iter().any(|c| c.eq(&main_tip)) {
-        if !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal contains commit(s) already in  '{main_branch_name}'. proceed anyway?")
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-            bail!("aborting as proposal contains commit(s) already in '{main_branch_name}'");
+    let as_pr = {
+        if let Some(root_proposal) = &root_proposal {
+            proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
+        } else {
+            false
         }
-    }
-    // check proposal isn't behind origin/main
-    else if !behind.is_empty() && !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal is {} behind '{main_branch_name}'. consider rebasing before submission. proceed anyway?", behind.len())
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-        bail!("aborting so commits can be rebased");
-    }
+    } || git_repo.are_commits_too_big_for_patches(&commits);
 
-    let title = if args.no_cover_letter {
+    let title = if as_pr {
+        match &args.title {
+            Some(t) => Some(t.clone()),
+            None => {
+                if root_proposal.is_none() {
+                    Some(
+                        Interactor::default()
+                            .input(PromptInputParms::default().with_prompt("title"))?
+                            .clone(),
+                    )
+                } else {
+                    None
+                }
+            }
+        }
+    } else if args.no_cover_letter {
         None
     } else {
         match &args.title {
@@ -168,7 +187,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 t.clone()
             } else {
                 Interactor::default()
-                    .input(PromptInputParms::default().with_prompt("cover letter description"))?
+                    .input(PromptInputParms::default().with_prompt("description"))?
                     .clone()
             },
         ))
@@ -176,7 +195,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         None
     };
 
-    let (signer, user_ref, _) = login::login_or_signup(
+    let (signer, mut user_ref, _) = login::login_or_signup(
         &Some(&git_repo),
         &extract_signer_cli_arguments(cli_args).unwrap_or(None),
         &cli_args.password,
@@ -187,42 +206,316 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     client.set_signer(signer.clone()).await;
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
-
     // oldest first
     commits.reverse();
 
-    let events = generate_cover_letter_and_patch_events(
-        cover_letter_title_description.clone(),
-        &git_repo,
-        &commits,
-        &signer,
-        &repo_ref,
-        &root_proposal_id,
-        &mention_tags,
-    )
-    .await?;
-
-    println!(
-        "posting {} patch{} {} a covering letter...",
-        if cover_letter_title_description.is_none() {
-            events.len()
-        } else {
-            events.len() - 1
-        },
-        if cover_letter_title_description.is_none() && events.len().eq(&1)
-            || cover_letter_title_description.is_some() && events.len().eq(&2)
-        {
-            ""
-        } else {
-            "es"
-        },
-        if cover_letter_title_description.is_none() {
-            "without"
-        } else {
-            "with"
+    let events = if as_pr {
+        let mut to_try = vec![];
+        let mut tried = vec![];
+        let repo_grasps = repo_ref.grasp_servers();
+        // if the user already has a fork, or is a maintainer, use those git servers
+        let mut user_repo_ref = get_repo_ref_from_cache(
+            Some(git_repo_path),
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: nostr::event::Kind::GitRepoAnnouncement,
+                    public_key: user_ref.public_key,
+                    identifier: repo_ref.identifier.clone(),
+                },
+                relays: vec![],
+            },
+        )
+        .await
+        .ok();
+        if let Some(user_repo_ref) = &user_repo_ref {
+            for url in &user_repo_ref.git_server {
+                if CloneUrl::from_str(url).is_ok() {
+                    to_try.push(url.clone());
+                }
+            }
         }
-    );
+        if !to_try.is_empty() || !repo_grasps.is_empty() {
+            println!(
+                "pushing proposal refs to {}",
+                if repo_ref.maintainers.contains(&user_ref.public_key) {
+                    "repository git servers"
+                } else if to_try.is_empty() {
+                    "repository grasp servers"
+                } else if repo_grasps.is_empty() {
+                    "the git servers listed in your fork"
+                } else {
+                    "the git servers listed in your fork and repository grasp servers"
+                }
+            );
+        } else {
+            println!(
+                "The repository doesn't list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request."
+            );
+        }
+        // also use repo grasp servers
+        for url in &repo_ref.git_server {
+            if is_grasp_server_in_list(url, &repo_grasps) && !to_try.contains(url) {
+                to_try.push(url.clone());
+            }
+        }
+
+        let mut git_ref = None;
+        let events = loop {
+            let (events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
+                &git_repo,
+                &repo_ref,
+                commits.last().context("no commits")?,
+                &user_ref,
+                root_proposal.as_ref(),
+                &cover_letter_title_description,
+                &to_try,
+                git_ref.clone(),
+                &signer,
+                &console::Term::stdout(),
+            )
+            .await?;
+            for url in to_try {
+                tried.push(url);
+            }
+            to_try = vec![];
+            if let Some(events) = events {
+                break events;
+            }
+            // fallback to creating user personal-fork on their grasp servers
+            let untried_user_grasp_servers: Vec<String> = user_ref
+                .grasp_list
+                .urls
+                .iter()
+                .map(std::string::ToString::to_string)
+                .filter(|g| {
+                    // is a grasp server not in list of tried
+                    !is_grasp_server_in_list(g, &tried)
+                })
+                .collect();
+
+            if untried_user_grasp_servers.is_empty()
+                && Interactor::default().choice(
+                    PromptChoiceParms::default()
+                        .with_prompt("choose alternative git server")
+                        .dont_report()
+                        .with_choices(vec![
+                            "choose grasp server(s)".to_string(),
+                            "enter a git repo url with write permission".to_string(),
+                        ])
+                        .with_default(0),
+                )? == 1
+            {
+                loop {
+                    let clone_url = Interactor::default()
+                        .input(
+                            PromptInputParms::default()
+                                .with_prompt("git repo url with write permission"),
+                        )?
+                        .clone();
+                    if CloneUrl::from_str(&clone_url).is_ok() {
+                        to_try.push(clone_url);
+                        let mut git_ref_or_branch_name = Interactor::default()
+                            .input(
+                                PromptInputParms::default()
+                                    .with_prompt("ref / branch name")
+                                    .with_default(
+                                        git_ref.unwrap_or("refs/nostr/<event-id>".to_string()),
+                                    ),
+                            )?
+                            .clone();
+                        if !git_ref_or_branch_name.starts_with("refs/") {
+                            git_ref_or_branch_name = format!("refs/heads/{git_ref_or_branch_name}");
+                        }
+                        git_ref = Some(git_ref_or_branch_name);
+                        break;
+                    }
+                    println!("invalid clone url");
+                }
+                continue;
+            }
+
+            let mut new_grasp_server_events: Vec<Event> = vec![];
+
+            let grasp_servers = if untried_user_grasp_servers.is_empty() {
+                let default_choices: Vec<String> = client
+                    .get_grasp_default_set()
+                    .iter()
+                    .filter(|g| !is_grasp_server_in_list(g, &tried))
+                    .cloned()
+                    .collect();
+                let selections = vec![true; default_choices.len()]; // all selected by default
+                let grasp_servers = multi_select_with_custom_value(
+                    "alternative grasp server(s)",
+                    "grasp server",
+                    default_choices,
+                    selections,
+                    normalize_grasp_server_url,
+                )?;
+                show_multi_input_prompt_success("alternative grasp server(s)", &grasp_servers);
+                if grasp_servers.is_empty() {
+                    // ask again
+                    continue;
+                }
+                let normalised_grasp_servers: Vec<String> = grasp_servers
+                    .iter()
+                    .filter_map(|g| normalize_grasp_server_url(g).ok())
+                    .collect();
+                // if any grasp servers not listed in user grasp list prompt to update
+                let grasp_servers_not_in_user_prefs: Vec<String> = normalised_grasp_servers
+                    .iter()
+                    .filter(|g| {
+                        !user_ref.grasp_list.urls.contains(
+                            // unwrap is safe as we constructed g
+                            &nostr::Url::parse(&format_grasp_server_url_as_relay_url(g).unwrap())
+                                .unwrap(),
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                if !grasp_servers_not_in_user_prefs.is_empty()
+                    && Interactor::default().confirm(
+                        PromptConfirmParms::default()
+                            .with_prompt(
+                                "add these to your list of prefered grasp servers?".to_string(),
+                            )
+                            .with_default(true),
+                    )?
+                {
+                    for g in &normalised_grasp_servers {
+                        let as_url = nostr::Url::parse(&format_grasp_server_url_as_relay_url(g)?)?;
+                        if !user_ref.grasp_list.urls.contains(&as_url) {
+                            user_ref.grasp_list.urls.push(as_url);
+                        }
+                    }
+                    new_grasp_server_events.push(user_ref.grasp_list.to_event(&signer).await?);
+                }
+                normalised_grasp_servers
+            } else {
+                untried_user_grasp_servers
+            };
+            println!(
+                "{} personal-fork so we can push commits to your prefered grasp servers",
+                if user_repo_ref.is_some() {
+                    "Updating"
+                } else {
+                    "Creating a"
+                },
+            );
+
+            let grasp_servers_as_personal_clone_url: Vec<String> = grasp_servers
+                .iter()
+                .filter_map(|g| {
+                    format_grasp_server_url_as_clone_url(
+                        g,
+                        &user_ref.public_key,
+                        &repo_ref.identifier,
+                    )
+                    .ok()
+                })
+                .collect();
+
+            // create personal-fork / update existing user repo and add these grasp servers
+            let updated_user_repo_ref = {
+                if let Some(mut user_repo_ref) = user_repo_ref {
+                    for g in &grasp_servers_as_personal_clone_url {
+                        user_repo_ref.add_grasp_server(g)?;
+                    }
+                    user_repo_ref
+                } else {
+                    // clone repo_ref and reset as personal-fork
+                    let mut user_repo_ref = repo_ref.clone();
+                    user_repo_ref.trusted_maintainer = user_ref.public_key;
+                    user_repo_ref.maintainers = vec![user_ref.public_key];
+                    user_repo_ref.git_server = vec![];
+                    user_repo_ref.relays = vec![];
+                    if !user_repo_ref
+                        .hashtags
+                        .contains(&"personal-fork".to_string())
+                    {
+                        user_repo_ref.hashtags.push("personal-fork".to_string());
+                    }
+                    user_repo_ref
+                }
+            };
+            // pubish event to my-relays and my-fork-relays
+            new_grasp_server_events.push(updated_user_repo_ref.to_event(&signer).await?);
+            send_events(
+                &client,
+                Some(git_repo_path),
+                new_grasp_server_events,
+                user_ref.relays.write(),
+                updated_user_repo_ref.relays.clone(),
+                !cli_args.disable_cli_spinners,
+                false,
+            )
+            .await?;
+            user_repo_ref = Some(updated_user_repo_ref);
+            // wait a few seconds
+            let countdown_start = 5;
+            let term = console::Term::stdout();
+            for i in (1..=countdown_start).rev() {
+                term.write_line(
+                    format!(
+                        "waiting {i}s grasp servers to create your repo before we push your data"
+                    )
+                    .as_str(),
+                )?;
+                thread::sleep(Duration::new(1, 0)); // Sleep for 1 second
+                term.clear_last_lines(1)?;
+            }
+            term.flush().unwrap(); // Ensure the output is flushed to the terminal
+
+            // add grasp servers to to_try
+            for url in grasp_servers_as_personal_clone_url {
+                to_try.push(url);
+            }
+            // the loop with continue with the grasp servers
+        };
+        println!(
+            "posting {}",
+            if events.iter().any(|e| e.kind.eq(&Kind::GitStatusClosed)) {
+                "proposal revision as new PR event, and a close status for the old patch"
+            } else if events.iter().any(|e| e.kind.eq(&KIND_PULL_REQUEST_UPDATE)) {
+                "proposal revision as PR update event"
+            } else {
+                "proposal as PR event"
+            }
+        );
+        events
+    } else {
+        let events = generate_cover_letter_and_patch_events(
+            cover_letter_title_description.clone(),
+            &git_repo,
+            &commits,
+            &signer,
+            &repo_ref,
+            &root_proposal.as_ref().map(|e| e.id.to_string()),
+            &mention_tags,
+        )
+        .await?;
+
+        println!(
+            "posting {} patch{} {} a covering letter...",
+            if cover_letter_title_description.is_none() {
+                events.len()
+            } else {
+                events.len() - 1
+            },
+            if cover_letter_title_description.is_none() && events.len().eq(&1)
+                || cover_letter_title_description.is_some() && events.len().eq(&2)
+            {
+                ""
+            } else {
+                "es"
+            },
+            if cover_letter_title_description.is_none() {
+                "without"
+            } else {
+                "with"
+            }
+        );
+        events
+    };
 
     send_events(
         &client,
@@ -235,7 +528,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     )
     .await?;
 
-    if root_proposal_id.is_none() {
+    if root_proposal.is_none() {
         if let Some(event) = events.first() {
             let event_bech32 = if let Some(relay) = repo_ref.relays.first() {
                 Nip19Event {
@@ -251,8 +544,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
             println!(
                 "{}",
                 dim.apply_to(format!(
-                    "view in gitworkshop.dev: https://gitworkshop.dev/repo/{}/proposal/{}",
-                    repo_ref.coordinate_with_hint().to_bech32()?,
+                    "view in gitworkshop.dev: https://gitworkshop.dev/{}",
                     &event_bech32,
                 ))
             );
@@ -266,6 +558,49 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
     }
     // TODO check if there is already a similarly named
+    Ok(())
+}
+
+fn check_commits_are_suitable_for_proposal(
+    first_commit_ahead: &[Sha1Hash],
+    commits: &[Sha1Hash],
+    behind: &[Sha1Hash],
+    main_branch_name: &str,
+    main_tip: &Sha1Hash,
+) -> Result<()> {
+    // check proposal ahead of origin/main
+    if first_commit_ahead.len().gt(&1) && !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal builds on a commit {} ahead of '{main_branch_name}' - do you want to continue?", first_commit_ahead.len() - 1)
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+        bail!("aborting because selected commits were ahead of origin/master");
+    }
+
+    // check if a selected commit is already in origin
+    if commits.iter().any(|c| c.eq(main_tip)) {
+        if !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal contains commit(s) already in  '{main_branch_name}'. proceed anyway?")
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+            bail!("aborting as proposal contains commit(s) already in '{main_branch_name}'");
+        }
+    }
+    // check proposal isn't behind origin/main
+    else if !behind.is_empty() && !Interactor::default().confirm(
+            PromptConfirmParms::default()
+                .with_prompt(
+                    format!("proposal is {} behind '{main_branch_name}'. consider rebasing before submission. proceed anyway?", behind.len())
+                )
+                .with_default(false)
+        ).context("failed to get confirmation response from interactor confirm")? {
+        bail!("aborting so commits can be rebased");
+    }
     Ok(())
 }
 
@@ -360,11 +695,11 @@ fn summarise_commit_for_selection(git_repo: &Repo, commit: &Sha1Hash) -> Result<
     ))
 }
 
-async fn get_root_proposal_id_and_mentions_from_in_reply_to(
+async fn get_root_proposal_and_mentions_from_in_reply_to(
     git_repo_path: &Path,
     in_reply_to: &[String],
-) -> Result<(Option<String>, Vec<nostr::Tag>)> {
-    let root_proposal_id = if let Some(first) = in_reply_to.first() {
+) -> Result<(Option<Event>, Vec<nostr::Tag>)> {
+    let root_proposal = if let Some(first) = in_reply_to.first() {
         match event_tag_from_nip19_or_hex(first, "in-reply-to", EventRefType::Root, true, false)?
             .as_standardized()
         {
@@ -382,8 +717,8 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
                 .await?;
 
                 if let Some(first) = events.iter().find(|e| e.id.eq(event_id)) {
-                    if event_is_patch_set_root(first) {
-                        Some(event_id.to_string())
+                    if event_is_patch_set_root(first) || first.kind.eq(&KIND_PULL_REQUEST) {
+                        Some(first.clone())
                     } else {
                         None
                     }
@@ -399,7 +734,7 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
 
     let mut mention_tags = vec![];
     for (i, reply_to) in in_reply_to.iter().enumerate() {
-        if i.ne(&0) || root_proposal_id.is_none() {
+        if i.ne(&0) || root_proposal.is_none() {
             mention_tags.push(
                 event_tag_from_nip19_or_hex(
                     reply_to,
@@ -415,7 +750,7 @@ async fn get_root_proposal_id_and_mentions_from_in_reply_to(
         }
     }
 
-    Ok((root_proposal_id, mention_tags))
+    Ok((root_proposal, mention_tags))
 }
 
 // TODO

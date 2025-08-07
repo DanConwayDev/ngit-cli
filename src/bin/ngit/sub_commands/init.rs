@@ -9,15 +9,17 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use console::{Style, Term};
-use dialoguer::theme::{ColorfulTheme, Theme};
 use ngit::{
     UrlWithoutSlash,
-    cli_interactor::{PromptChoiceParms, PromptConfirmParms, PromptMultiChoiceParms},
+    cli_interactor::{
+        PromptChoiceParms, PromptConfirmParms, multi_select_with_custom_value,
+        show_multi_input_prompt_success,
+    },
     client::{Params, send_events},
     git::nostr_url::{CloneUrl, NostrUrlDecoded},
     repo_ref::{
-        detect_existing_grasp_servers, extract_npub, extract_pks, normalize_grasp_server_url,
-        save_repo_config_to_yaml,
+        detect_existing_grasp_servers, extract_npub, extract_pks,
+        format_grasp_server_url_as_relay_url, normalize_grasp_server_url, save_repo_config_to_yaml,
     },
 };
 use nostr::{
@@ -266,11 +268,23 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         );
         let mut selections: Vec<bool> = vec![true; options.len()]; // Initialize selections based on existing options
         let empty = options.is_empty();
+        for user_grasp_option in user_ref.grasp_list.urls {
+            // Check if any option contains the user_grasp_option as a substring
+            if !options
+                .iter()
+                .any(|option| option.contains(user_grasp_option.as_str()))
+            {
+                options.push(user_grasp_option.to_string()); // Add if not found
+                selections.push(empty); // mark as selected if no existing grasp otherwise not
+            }
+        }
+
+        let empty = options.is_empty();
         for fallback in fallback_grasp_servers {
             // Check if any option contains the fallback as a substring
             if !options.iter().any(|option| option.contains(fallback)) {
                 options.push(fallback.clone()); // Add fallback if not found
-                selections.push(empty); // mark as selected if no existing ngit relay otherwise not
+                selections.push(empty); // mark as selected if no existing selections otherwise not
             }
         }
         let selected = multi_select_with_custom_value(
@@ -727,6 +741,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         web,
         relays: relays.clone(),
         blossoms,
+        hashtags: if let Some(repo_ref) = repo_ref {
+            repo_ref.hashtags
+        } else {
+            vec![]
+        },
         trusted_maintainer: user_ref.public_key,
         maintainers_without_annoucnement: None,
         maintainers: maintainers.clone(),
@@ -848,93 +867,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     Ok(())
 }
 
-fn multi_select_with_custom_value<F>(
-    prompt: &str,
-    custom_choice_prompt: &str,
-    mut choices: Vec<String>,
-    mut defaults: Vec<bool>,
-    validate_choice: F,
-) -> Result<Vec<String>>
-where
-    F: Fn(&str) -> Result<String>,
-{
-    let mut selected_choices = vec![];
-
-    // Loop to allow users to add more choices
-    loop {
-        // Add 'add another' option at the end of the choices
-        let mut current_choices = choices.clone();
-        current_choices.push(if current_choices.is_empty() {
-            "add".to_string()
-        } else {
-            "add another".to_string()
-        });
-
-        // Create default selections based on the provided defaults
-        let mut current_defaults = defaults.clone();
-        current_defaults.push(current_choices.len() == 1); // 'add another' should not be selected by default
-
-        // Prompt for selections
-        let selected_indices: Vec<usize> = Interactor::default().multi_choice(
-            PromptMultiChoiceParms::default()
-                .with_prompt(prompt)
-                .dont_report()
-                .with_choices(current_choices.clone())
-                .with_defaults(current_defaults),
-        )?;
-
-        // Collect selected choices
-        selected_choices.clear(); // Clear previous selections to update
-        for &index in &selected_indices {
-            if index < choices.len() {
-                // Exclude 'add another' option
-                selected_choices.push(choices[index].clone());
-            }
-        }
-
-        // Check if 'add another' was selected
-        if selected_indices.contains(&(choices.len())) {
-            // Last index is 'add another'
-            let mut new_choice: String;
-            loop {
-                new_choice = Interactor::default().input(
-                    PromptInputParms::default()
-                        .with_prompt(custom_choice_prompt)
-                        .dont_report()
-                        .optional(),
-                )?;
-
-                if new_choice.is_empty() {
-                    break;
-                }
-                // Validate the new choice
-                match validate_choice(&new_choice) {
-                    Ok(valid_choice) => {
-                        new_choice = valid_choice; // Use the fixed version of the input
-                        break; // Valid choice, exit the loop
-                    }
-                    Err(err) => {
-                        // Inform the user about the validation error
-                        println!("Error: {err}");
-                    }
-                }
-            }
-
-            // Add the new choice to the choices vector
-            if !new_choice.is_empty() {
-                choices.push(new_choice.clone()); // Add new choice to the end of the list
-                selected_choices.push(new_choice); // Automatically select the new choice
-                defaults.push(true); // Set the new choice as selected by default
-            }
-        } else {
-            // Exit the loop if 'add another' was not selected
-            break;
-        }
-    }
-
-    Ok(selected_choices)
-}
-
 fn format_grasp_server_url_as_clone_url(
     url: &str,
     public_key: &PublicKey,
@@ -951,14 +883,6 @@ fn format_grasp_server_url_as_clone_url(
         "https://{grasp_server_url}/{}/{identifier}.git",
         public_key.to_bech32()?
     ))
-}
-
-fn format_grasp_server_url_as_relay_url(url: &str) -> Result<String> {
-    let grasp_server_url = normalize_grasp_server_url(url)?;
-    if grasp_server_url.contains("http://") {
-        return Ok(grasp_server_url.replace("http://", "ws://"));
-    }
-    Ok(format!("wss://{grasp_server_url}"))
 }
 
 fn format_grasp_server_url_as_blossom_url(url: &str) -> Result<String> {
@@ -980,19 +904,6 @@ fn parse_relay_url(s: &str) -> Result<RelayUrl> {
         }
     }
     .context(format!("failed to parse relay url: {s}"))
-}
-
-pub fn show_multi_input_prompt_success(label: &str, values: &[String]) {
-    let values_str: Vec<&str> = values.iter().map(std::string::String::as_str).collect();
-    eprintln!("{}", {
-        let mut s = String::new();
-        let _ = ColorfulTheme::default().format_multi_select_prompt_selection(
-            &mut s,
-            label,
-            &values_str,
-        );
-        s
-    });
 }
 
 fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
