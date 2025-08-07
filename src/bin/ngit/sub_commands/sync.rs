@@ -141,8 +141,8 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                         "error pushing updates to {remote_name}: error: {error}"
                     ))?;
                 }
-                Ok(failed_refs) => {
-                    if failed_refs.is_empty() {
+                Ok(updated_refs) => {
+                    if updated_refs.values().all(std::option::Option::is_none) {
                         if *is_grasp_server || args.force {
                             term.write_line(&format!("{remote_name} sync completed"))?;
                             // TODO we only know if there was an error but not

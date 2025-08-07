@@ -63,10 +63,9 @@ pub fn push_to_remote(
             }
             Ok(ref_updates_on_protocol) => {
                 success = true;
-                if remote_refspecs.len() == ref_updates_on_protocol.len()
-                    && ref_updates_on_protocol
-                        .values()
-                        .all(|error| error.is_none())
+                if ref_updates_on_protocol
+                    .values()
+                    .all(|error| error.is_none())
                 {
                     if !failed_protocols.is_empty() {
                         term.write_line(format!("push: succeeded over {protocol}").as_str())?;
@@ -444,14 +443,6 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                         "push: error sending commit data to {normalized_url}: {error}"
                     ))?;
                     responses.push((clone_url.clone(), Err(anyhow!(error.clone()))));
-                } else if ref_updates.is_empty() {
-                    term.write_line(&format!(
-                        "push: error sending commit data to {normalized_url}: server didn't confirm acceptance"
-                    ))?;
-                    responses.push((
-                        clone_url.clone(),
-                        Err(anyhow!("server didn't confirm acceptance")),
-                    ));
                 } else {
                     responses.push((clone_url.clone(), Ok(())));
                     term.write_line(&format!("push: commit data sent to {normalized_url}"))?;
