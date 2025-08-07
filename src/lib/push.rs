@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use auth_git2::GitAuthenticator;
 use console::Term;
 use nostr::{
@@ -19,19 +19,20 @@ use crate::{
     cli_interactor::count_lines_per_msg_vec,
     client::{sign_draft_event, sign_event},
     git::{
-        Repo,
+        Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded},
         oid_to_shorthand_string,
     },
     git_events::generate_unsigned_pr_or_update_event,
     login::user::UserRef,
-    repo_ref::{RepoRef, normalize_grasp_server_url},
+    repo_ref::{RepoRef, is_grasp_server_clone_url, normalize_grasp_server_url},
     utils::{
         Direction, get_short_git_server_name, get_write_protocols_to_try, join_with_and,
         set_protocol_preference,
     },
 };
 
+// returns failed refs as a HashMaps of failed refspec and their error
 pub fn push_to_remote(
     git_repo: &Repo,
     git_server_url: &str,
@@ -39,13 +40,14 @@ pub fn push_to_remote(
     remote_refspecs: &[String],
     term: &Term,
     is_grasp_server: bool,
-) -> Result<()> {
+) -> Result<HashMap<String, String>> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
         get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
 
     let mut failed_protocols = vec![];
     let mut success = false;
+    let mut failed_refs = HashMap::new();
 
     for protocol in &protocols_to_attempt {
         term.write_line(format!("push: {} over {protocol}...", server_url.short_name(),).as_str())?;
@@ -59,14 +61,9 @@ pub fn push_to_remote(
                 )?;
                 failed_protocols.push(protocol);
             }
-            Ok(failed_refs) => {
-                if let Some((_, error)) = failed_refs.iter().next() {
-                    term.write_line(
-                        format!("push: {formatted_url} failed over {protocol}: {error}").as_str(),
-                    )?;
-                    failed_protocols.push(protocol);
-                } else {
-                    success = true;
+            Ok(failed_refs_on_protocol) => {
+                success = true;
+                if failed_refs_on_protocol.is_empty() {
                     if !failed_protocols.is_empty() {
                         term.write_line(format!("push: succeeded over {protocol}").as_str())?;
                         let _ = set_protocol_preference(
@@ -77,12 +74,25 @@ pub fn push_to_remote(
                         );
                     }
                     break;
+                } else {
+                    term.write_line(
+                        format!(
+                            "push: {formatted_url} with {protocol} complete but {}ref{} not accepted:", 
+                            if remote_refspecs.len() != failed_protocols.len() { "some " } else {""},
+                            if remote_refspecs.len() == 1 { "s"} else {""},
+                    ).as_str(),
+                    )?;
+                    for (git_ref, error) in &failed_refs_on_protocol {
+                        term.write_line(format!("push:    - {git_ref}: {error}").as_str())?;
+                    }
+                    failed_refs = failed_refs_on_protocol;
                 }
+                break;
             }
         }
     }
     if success {
-        Ok(())
+        Ok(failed_refs)
     } else {
         let error = anyhow!(
             "{} failed over {}{}",
@@ -382,7 +392,33 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
 
         let refspec = format!("{tip}:{git_ref_used}");
 
-        match push_to_remote_url(git_repo, clone_url, &[refspec], term) {
+        let res = if is_grasp_server_clone_url(clone_url) {
+            push_to_remote_url(git_repo, clone_url, &[refspec], term)
+        } else {
+            // anticipated only when pushing to user's own repo or a personal-fork with
+            // non-grasp git servers. this is used to extract prefered protocols / ssh
+            // details from nostr url
+            let decoded_nostr_url = {
+                if let Ok(Some((_, decoded_nostr_url))) = git_repo
+                .get_first_nostr_remote_when_in_ngit_binary()
+                .await.context("failed to list git remotes")
+                .context("no `nostr://` remote detected. `ngit sync` must be run from a repo with a nostr remote") {
+                    decoded_nostr_url
+                } else {
+                    repo_ref.to_nostr_git_url(&Some(git_repo))
+                }
+            };
+            push_to_remote(
+                git_repo,
+                clone_url,
+                &decoded_nostr_url,
+                &[refspec],
+                term,
+                false,
+            )
+        };
+
+        match res {
             Err(error) => {
                 let normalized_url = normalize_grasp_server_url(clone_url)?;
                 term.write_line(&format!(

@@ -127,33 +127,47 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 term.write_line(&format!("{remote_name} already in sync"))?;
             }
             // report already in sync
-        } else if let Err(error) = push_to_remote(
-            &git_repo,
-            url,
-            &decoded_nostr_url,
-            &refspecs,
-            &term,
-            *is_grasp_server,
-        ) {
-            term.write_line(&format!(
-                "error pushing updates to {remote_name}: error: {error}"
-            ))?;
-        } else if *is_grasp_server || args.force {
-            term.write_line(&format!("{remote_name} sync completed"))?;
-            // TODO we only know if there was an error but not if it
-            // rejected any updates
         } else {
-            // we should report on refs not force pushed
-            term.write_line(&format!("{remote_name} sync completed"))?;
-        }
-        for name in &not_deleted {
-            term.write_line(&format!("  - {name} not deleted"))?;
-        }
-        for name in &not_updated {
-            term.write_line(&format!("  - {name} not updated due to conflicts"))?;
-        }
-        if !not_updated.is_empty() || !not_deleted.is_empty() {
-            term.write_line("run `ngit sync --force` to delete refs or overwrite conflicts and potentially lose work")?;
+            match push_to_remote(
+                &git_repo,
+                url,
+                &decoded_nostr_url,
+                &refspecs,
+                &term,
+                *is_grasp_server,
+            ) {
+                Err(error) => {
+                    term.write_line(&format!(
+                        "error pushing updates to {remote_name}: error: {error}"
+                    ))?;
+                }
+                Ok(failed_refs) => {
+                    if failed_refs.is_empty() {
+                        if *is_grasp_server || args.force {
+                            term.write_line(&format!("{remote_name} sync completed"))?;
+                            // TODO we only know if there was an error but not
+                            // if it rejected any
+                            // updates
+                        } else {
+                            // we should report on refs not force pushed
+                            term.write_line(&format!("{remote_name} sync completed"))?;
+                        }
+                    } else {
+                        term.write_line(&format!(
+                            "{remote_name} sync completed but not all changes were accepted"
+                        ))?;
+                    }
+                    for name in &not_deleted {
+                        term.write_line(&format!("  - {name} not deleted"))?;
+                    }
+                    for name in &not_updated {
+                        term.write_line(&format!("  - {name} not updated due to conflicts"))?;
+                    }
+                    if !not_updated.is_empty() || !not_deleted.is_empty() {
+                        term.write_line("run `ngit sync --force` to delete refs or overwrite conflicts and potentially lose work")?;
+                    }
+                }
+            }
         }
     }
 
