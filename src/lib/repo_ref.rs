@@ -740,7 +740,7 @@ pub fn extract_npub(s: &str) -> Result<&str> {
 }
 
 // this should be called is_grasp_server_in_list
-pub fn is_grasp_server(url: &str, grasp_servers: &[String]) -> bool {
+pub fn is_grasp_server_in_list(url: &str, grasp_servers: &[String]) -> bool {
     if !grasp_servers.is_empty() {
         if let Ok(url) = normalize_grasp_server_url(url) {
             grasp_servers.iter().any(|s| {

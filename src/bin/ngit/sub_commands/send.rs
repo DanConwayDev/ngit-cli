@@ -13,7 +13,7 @@ use ngit::{
     push::push_refs_and_generate_pr_or_pr_update_event,
     repo_ref::{
         format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
-        is_grasp_server, normalize_grasp_server_url,
+        is_grasp_server_in_list, normalize_grasp_server_url,
     },
     utils::proposal_tip_is_pr_or_pr_update,
 };
@@ -252,7 +252,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
         // also use repo grasp servers
         for url in &repo_ref.git_server {
-            if is_grasp_server(url, &repo_grasps) && !to_try.contains(url) {
+            if is_grasp_server_in_list(url, &repo_grasps) && !to_try.contains(url) {
                 to_try.push(url.clone());
             }
         }
@@ -287,7 +287,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 .map(std::string::ToString::to_string)
                 .filter(|g| {
                     // is a grasp server not in list of tried
-                    !is_grasp_server(g, &tried)
+                    !is_grasp_server_in_list(g, &tried)
                 })
                 .collect();
 
@@ -338,7 +338,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 let default_choices: Vec<String> = client
                     .get_grasp_default_set()
                     .iter()
-                    .filter(|g| !is_grasp_server(g, &tried))
+                    .filter(|g| !is_grasp_server_in_list(g, &tried))
                     .cloned()
                     .collect();
                 let selections = vec![true; default_choices.len()]; // all selected by default

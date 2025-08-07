@@ -20,7 +20,7 @@ use ngit::{
     list::list_from_remotes,
     login::{self, user::UserRef},
     push::{push_refs_and_generate_pr_or_pr_update_event, push_to_remote},
-    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server},
+    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server_in_list},
     repo_state,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
@@ -153,7 +153,7 @@ pub async fn run_push(
                         &repo_ref.to_nostr_git_url(&None),
                         &remote_refspecs,
                         &term,
-                        is_grasp_server(&git_server_url, &repo_ref.grasp_servers()),
+                        is_grasp_server_in_list(&git_server_url, &repo_ref.grasp_servers()),
                     );
                 }
             }
@@ -458,7 +458,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         let repo_grasp_clone_urls: Vec<String> = repo_ref
             .git_server
             .iter()
-            .filter(|s| is_grasp_server(s, &repo_grasps))
+            .filter(|s| is_grasp_server_in_list(s, &repo_grasps))
             .cloned()
             .collect();
 
