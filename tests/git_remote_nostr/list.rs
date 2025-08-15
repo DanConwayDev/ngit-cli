@@ -323,11 +323,10 @@ mod with_state_announcement {
                 FEATURE_BRANCH_NAME_2,
                 FEATURE_BRANCH_NAME_3,
             ] {
-                pr_refs.push(format!(
-                    "{} refs/heads/{}",
-                    proposal_creation_repo.get_tip_of_local_branch(name)?,
-                    get_proposal_branch_name_from_events(&r55.events, name)?,
-                ));
+                let tip = proposal_creation_repo.get_tip_of_local_branch(name)?;
+                let branch_name = get_proposal_branch_name_from_events(&r55.events, name)?;
+                pr_refs.push(format!("{tip} refs/heads/{branch_name}"));
+                pr_refs.push(format!("{tip} refs/{branch_name}"));
             }
 
             assert_eq!(

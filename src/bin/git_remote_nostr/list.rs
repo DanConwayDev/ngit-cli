@@ -10,7 +10,7 @@ use ngit::{
     list::{get_ahead_behind, list_from_remotes},
     login::get_curent_user,
     repo_ref::{self},
-    utils::{get_open_or_draft_proposals, get_short_git_server_name},
+    utils::{get_all_proposals, get_open_or_draft_proposals, get_short_git_server_name},
 };
 use repo_ref::RepoRef;
 
@@ -80,10 +80,15 @@ pub async fn run_list(
 
     state.retain(|k, _| !k.starts_with("refs/heads/pr/"));
 
-    let proposals_state =
-        get_open_and_draft_proposals_state(&term, git_repo, repo_ref, &remote_states).await?;
+    state.extend(
+        // get as refs/heads/pr/<branch-name>(<shorthand-event-id>)
+        get_open_and_draft_proposals_state(&term, git_repo, repo_ref, &remote_states).await?,
+    );
 
-    state.extend(proposals_state);
+    state.extend(
+        // get as refs/pr/<branch-name>(<shorthand-event-id>)
+        get_all_proposals_state(git_repo, repo_ref).await?,
+    );
 
     // TODO 'for push' should we check with the git servers to see if any of them
     // allow push from the user?
@@ -101,6 +106,8 @@ pub async fn run_list(
     Ok(remote_states)
 }
 
+/// fetches branches and tags from git servers so patch parent commits can be
+/// used to build patches with correct commit ids
 async fn get_open_and_draft_proposals_state(
     term: &console::Term,
     git_repo: &Repo,
@@ -207,6 +214,45 @@ async fn get_open_and_draft_proposals_state(
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+    Ok(state)
+}
+
+/// we assume latest default branch oid has been fetched so patch parent commits
+/// are present. doesnt report on proposals failed to recreate
+async fn get_all_proposals_state(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+) -> Result<HashMap<String, String>> {
+    let mut state = HashMap::new();
+    let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
+    let current_user = get_curent_user(git_repo)?;
+    for (_, (proposal, events_to_apply)) in all_proposals {
+        if let Ok(cl) = event_to_cover_letter(&proposal) {
+            if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
+                branch_name = if let Some(public_key) = current_user {
+                    if proposal.pubkey.eq(&public_key) {
+                        format!("pr/{}", cl.branch_name_without_id_or_prefix)
+                    } else {
+                        branch_name
+                    }
+                } else {
+                    branch_name
+                };
+                if let Some(pr_or_pr_update) = events_to_apply
+                    .iter()
+                    .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
+                {
+                    if let Ok(tip) = tag_value(pr_or_pr_update, "c") {
+                        state.insert(format!("refs/{branch_name}"), tip.clone());
+                    }
+                } else if let Ok(tip) =
+                    make_commits_for_proposal(git_repo, repo_ref, &events_to_apply)
+                {
+                    state.insert(format!("refs/{branch_name}"), tip.clone());
                 }
             }
         }
