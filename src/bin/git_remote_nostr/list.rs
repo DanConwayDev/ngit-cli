@@ -166,7 +166,18 @@ async fn get_open_and_draft_proposals_state(
                 {
                     match tag_value(pr_or_pr_update, "c") {
                         Ok(tip) => {
-                            state.insert(format!("refs/heads/{branch_name}"), tip);
+                            // only list Pull Requests as refs/heads/pr/* if data is on a repo git
+                            // server otherwise the standard `git clone
+                            // nostr://` cmd will fail as it assumes all /refs/heads returned by
+                            // list are accessable
+                            let tip_oid_is_on_a_repo_git_server =
+                                remote_states.iter().any(|(_url, (state, _is_grasp))| {
+                                    state.iter().any(|(_, oid)| tip == *oid)
+                                });
+
+                            if tip_oid_is_on_a_repo_git_server {
+                                state.insert(format!("refs/heads/{branch_name}"), tip);
+                            }
                         }
                         Err(_) => {
                             let _ = term.write_line(
