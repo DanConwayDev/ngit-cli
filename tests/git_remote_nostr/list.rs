@@ -327,6 +327,8 @@ mod with_state_announcement {
                 let branch_name = get_proposal_branch_name_from_events(&r55.events, name)?;
                 pr_refs.push(format!("{tip} refs/heads/{branch_name}"));
                 pr_refs.push(format!("{tip} refs/{branch_name}"));
+                let proposal_id = get_proposal_id_from_branch_name(&r55.events, name)?;
+                pr_refs.push(format!("{tip} refs/pr-by-id/{proposal_id}"));
             }
 
             assert_eq!(

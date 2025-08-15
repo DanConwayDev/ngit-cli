@@ -86,7 +86,7 @@ pub async fn run_list(
     );
 
     state.extend(
-        // get as refs/pr/<branch-name>(<shorthand-event-id>)
+        // get as refs/pr/<branch-name>(<shorthand-event-id>) and refs/pr-by-id/<event-id>
         get_all_proposals_state(git_repo, repo_ref).await?,
     );
 
@@ -248,11 +248,13 @@ async fn get_all_proposals_state(
                 {
                     if let Ok(tip) = tag_value(pr_or_pr_update, "c") {
                         state.insert(format!("refs/{branch_name}"), tip.clone());
+                        state.insert(format!("refs/pr-by-id/{}", proposal.id), tip);
                     }
                 } else if let Ok(tip) =
                     make_commits_for_proposal(git_repo, repo_ref, &events_to_apply)
                 {
                     state.insert(format!("refs/{branch_name}"), tip.clone());
+                    state.insert(format!("refs/pr-by-id/{}", proposal.id), tip);
                 }
             }
         }

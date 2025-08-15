@@ -12,7 +12,7 @@ use dialoguer::theme::{ColorfulTheme, Theme};
 use futures::{executor::block_on, future::join_all};
 use git::GitTestRepo;
 use git2::{Signature, Time};
-use nostr::{self, Kind, Tag, nips::nip65::RelayMetadata};
+use nostr::{self, Kind, Tag, event::EventId, nips::nip65::RelayMetadata};
 use nostr_database::NostrDatabase;
 use nostr_lmdb::NostrLMDB;
 use nostr_sdk::{Client, Event, NostrSigner, TagStandard, serde_json};
@@ -1192,6 +1192,24 @@ pub fn get_proposal_branch_name_from_events(
                 branch_name_in_event,
                 &event.id.to_hex().as_str()[..8],
             ));
+        }
+    }
+    bail!("failed to find proposal root with branch-name tag matching title")
+}
+
+pub fn get_proposal_id_from_branch_name(
+    events: &[nostr::Event],
+    branch_name_in_event: &str,
+) -> Result<EventId> {
+    let mut events = events.to_owned();
+    events.reverse();
+    for event in events {
+        if event
+            .tags
+            .iter()
+            .any(|t| t.as_slice()[0].eq("branch-name") && t.as_slice()[1].eq(branch_name_in_event))
+        {
+            return Ok(event.id);
         }
     }
     bail!("failed to find proposal root with branch-name tag matching title")
