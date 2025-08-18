@@ -116,10 +116,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                     continue;
                 }
             }
-            if nostr_ref_name.starts_with("refs/heads/")
-                || nostr_ref_name.starts_with("refs/tags/")
-                || !nostr_ref_name.starts_with("refs/heads/pr/")
-            {
+            if invalid_nostr_state_ref(nostr_ref_name) {
                 // ensure nostr_state only supports refs/heads and refs/tags/
                 // and not refs/heads/prs/*
             } else if let Some(remote_ref_value) = remote_state.get(nostr_ref_name) {
@@ -213,4 +210,9 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn invalid_nostr_state_ref(ref_name: &str) -> bool {
+    ref_name.starts_with("refs/heads/pr/")
+        && !(ref_name.starts_with("refs/heads/") || ref_name.starts_with("refs/tags/"))
 }
