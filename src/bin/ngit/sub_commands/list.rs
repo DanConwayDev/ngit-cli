@@ -1,4 +1,4 @@
-use std::{io::Write, ops::Add};
+use std::{collections::HashSet, io::Write, ops::Add};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
@@ -6,10 +6,12 @@ use ngit::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache,
     },
+    fetch::fetch_from_git_server,
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
     },
+    repo_ref::{RepoRef, is_grasp_server_in_list},
 };
 use nostr_sdk::Kind;
 
@@ -204,40 +206,65 @@ pub async fn launch() -> Result<()> {
             .iter()
             .any(|e| [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&e.kind))
         {
+            let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
+            let local_branch_tip = git_repo.get_tip_of_branch(&branch_name).ok();
+            let proposal_tip_event = most_recent_proposal_patch_chain_or_pr_or_pr_update
+            .first()
+            .context("most_recent_proposal_patch_chain_or_pr_or_pr_update will always contain a event with c tag")?;
+            let proposal_tip = tag_value(proposal_tip_event, "c")?;
+
             match Interactor::default().choice(
                 PromptChoiceParms::default()
-                    .with_prompt(
-                        "this is new PR event kind which isn't supported in `ngit list` yet",
-                    )
                     .with_default(0)
-                    .with_choices(
-                        if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&selected_status)
-                            && git_repo
-                                .get_first_nostr_remote_when_in_ngit_binary()
-                                .await
-                                .is_ok_and(|r| r.is_some())
-                        {
-                            vec![
-                                format!(
-                                    "I'll manually checkout the proposal at remote branch '{}'",
-                                    cover_letter
-                                        .get_branch_name_with_pr_prefix_and_shorthand_id()
-                                        .unwrap()
-                                ),
-                                // TODO fetch oids and follow similar logic for dealing with
-                                // conflcts as with patches below
-                                "back to proposals".to_string(),
-                            ]
+                    .with_choices(vec![
+                        if let Some(local_branch_tip) = local_branch_tip {
+                            if local_branch_tip.to_string() == proposal_tip {
+                                format!("checkout up-to-date proposal branch '{branch_name}'")
+                            } else {
+                                format!("checkout proposal branch and pull changes '{branch_name}'")
+                            }
                         } else {
-                            vec!["back to proposals".to_string()]
+                            format!("create and checkout as branch '{branch_name}'")
                         },
-                    ),
+                        "back to proposals".to_string(),
+                    ]),
             )? {
-                0 => continue,
+                0 => {
+                    if let Some(local_branch_tip) = local_branch_tip {
+                        git_repo
+                            .checkout(&branch_name)
+                            .context("cannot checkout existing proposal branch")?;
+                        if local_branch_tip.to_string() == proposal_tip {
+                            println!("checked out up-to-date proposal branch '{branch_name}'");
+                            return Ok(());
+                        }
+                        if git_repo.does_commit_exist(&proposal_tip)? {
+                            println!("checked out proposal branch and updated tip '{branch_name}'");
+                            return Ok(());
+                        }
+                    }
+                    fetch_oid_for_from_servers_for_pr(
+                        &proposal_tip,
+                        &git_repo,
+                        &repo_ref,
+                        proposal_tip_event,
+                    )?;
+                    git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
+                    git_repo.checkout(&branch_name)?;
+                    if local_branch_tip.is_some() {
+                        println!("created and checked out proposal branch '{branch_name}'");
+                    } else {
+                        println!("checked out proposal branch and pulled updates '{branch_name}'");
+                    }
+                    return Ok(());
+                }
+                1 => {
+                    continue;
+                }
                 _ => {
                     bail!("unexpected choice")
                 }
-            };
+            }
         }
 
         let binding_patch_text_ref = format!(
@@ -737,6 +764,56 @@ pub async fn launch() -> Result<()> {
             }
         };
     }
+}
+
+fn fetch_oid_for_from_servers_for_pr(
+    oid: &str,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    pr_or_pr_update_event: &nostr::Event,
+) -> Result<()> {
+    let git_servers = {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = vec![];
+        for tag in pr_or_pr_update_event.tags.as_slice() {
+            if tag.kind().eq(&nostr::event::TagKind::Clone) {
+                for clone_url in tag.as_slice().iter().skip(1) {
+                    seen.insert(clone_url.clone());
+                }
+            }
+        }
+        for server in &repo_ref.git_server {
+            if seen.insert(server.clone()) {
+                out.push(server.clone());
+            }
+        }
+        out
+    };
+
+    let mut errors = vec![];
+    let term = console::Term::stderr();
+
+    for git_server_url in &git_servers {
+        if let Err(error) = fetch_from_git_server(
+            git_repo,
+            &[oid.to_string()],
+            git_server_url,
+            &repo_ref.to_nostr_git_url(&None),
+            &term,
+            is_grasp_server_in_list(git_server_url, &repo_ref.grasp_servers()),
+        ) {
+            errors.push(error);
+        } else {
+            println!("fetched proposal git data from {git_server_url}");
+            break;
+        }
+    }
+    if !git_repo.does_commit_exist(oid)? {
+        bail!(
+            "cannot find proposal git data from proposal git server hint or repository git servers"
+        )
+    }
+    Ok(())
 }
 
 fn launch_git_am_with_patches(mut patches: Vec<nostr::Event>) -> Result<()> {

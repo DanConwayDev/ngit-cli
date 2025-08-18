@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use nostr::{
@@ -15,6 +15,7 @@ use crate::{
     client::sign_event,
     git::{Repo, RepoActions},
     repo_ref::RepoRef,
+    utils::get_open_or_draft_proposals,
 };
 
 pub fn tag_value(event: &Event, tag_name: &str) -> Result<String> {
@@ -923,6 +924,36 @@ pub fn get_status(
     } else {
         direct_status
     }
+}
+
+pub async fn identify_clone_urls_for_oids_from_pr_pr_update_events(
+    oids: Vec<&String>,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+) -> Result<HashMap<String, Vec<String>>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+
+    let open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
+
+    for (_, (_, events)) in open_and_draft_proposals {
+        for event in events {
+            if [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&event.kind) {
+                if let Ok(c) = tag_value(&event, "c") {
+                    if oids.contains(&&c) {
+                        for tag in event.tags.as_slice() {
+                            if tag.kind().eq(&nostr::event::TagKind::Clone) {
+                                for clone_url in tag.as_slice().iter().skip(1) {
+                                    map.entry(c.clone()).or_default().push(clone_url.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(map)
 }
 
 #[cfg(test)]

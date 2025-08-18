@@ -1,5 +1,6 @@
 pub mod cli_interactor;
 pub mod client;
+pub mod fetch;
 pub mod git;
 pub mod git_events;
 pub mod list;

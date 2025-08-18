@@ -5,6 +5,7 @@ use client::get_state_from_cache;
 use git::RepoActions;
 use ngit::{
     client,
+    fetch::fetch_from_git_server,
     git::{self},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
     list::{get_ahead_behind, list_from_remotes},
@@ -14,10 +15,7 @@ use ngit::{
 };
 use repo_ref::RepoRef;
 
-use crate::{
-    fetch::{fetch_from_git_server, make_commits_for_proposal},
-    git::Repo,
-};
+use crate::{fetch::make_commits_for_proposal, git::Repo};
 
 pub async fn run_list(
     git_repo: &Repo,
