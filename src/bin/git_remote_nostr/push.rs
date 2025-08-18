@@ -544,6 +544,65 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                 }
                 continue;
             }
+            // handle annotated tags
+            if let Ok(annotated_tag) = git_repo
+                .git_repo
+                .find_reference(from)
+                .context(format!("cannot find ref {from}"))?
+                .peel(git2::ObjectType::Tag)
+            {
+                if let Some(remote_value) = remote_value {
+                    if annotated_tag.id().to_string() == *remote_value {
+                        // remote already at correct state
+                    } else if is_grasp_server {
+                        refspecs_for_remote.push(ensure_force_push_refspec(refspec));
+                    } else if refspec.starts_with('+') || refspec.starts_with(':') {
+                        refspecs_for_remote.push(refspec.clone());
+                    } else {
+                        // reject
+                        rejected_refspecs
+                            .entry(refspec.to_string())
+                            .and_modify(|a| a.push(url.to_string()))
+                            .or_insert(vec![url.to_string()]);
+                        // TODO should we reject or or just warn?
+                        term.write_line(
+                            format!(
+                                "ERROR: {short_name} {to} exists with a different reference. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
+                            ).as_str(),
+                        )?;
+                    }
+                } else {
+                    // push new tag
+                    refspecs_for_remote.push(refspec.clone());
+                }
+                continue;
+            } else if let Some(remote_value) = remote_value {
+                if let Ok(oid) = Oid::from_str(refspec) {
+                    if git_repo
+                        .git_repo
+                        .find_object(oid, Some(git2::ObjectType::Tag))
+                        .is_ok()
+                    {
+                        if is_grasp_server {
+                            refspecs_for_remote.push(ensure_force_push_refspec(refspec));
+                        } else if refspec.starts_with('+') || refspec.starts_with(':') {
+                            refspecs_for_remote.push(refspec.clone());
+                        } else {
+                            rejected_refspecs
+                                .entry(refspec.to_string())
+                                .and_modify(|a| a.push(url.to_string()))
+                                .or_insert(vec![url.to_string()]);
+                            term.write_line(
+                                format!(
+                                "ERROR: {short_name} {to} exists with a different reference. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
+                                ).as_str(),
+                            )?;
+                        }
+                        continue;
+                    }
+                }
+            }
+
             let from_tip = git_repo.get_commit_or_tip_of_reference(from)?;
             if let Some(nostr_value) = nostr_value {
                 if let Some(remote_value) = remote_value {
