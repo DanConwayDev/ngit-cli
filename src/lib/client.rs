@@ -1063,17 +1063,17 @@ pub async fn get_repo_ref_from_cache(
     let mut repo_events = vec![];
     loop {
         new_coordinate = false;
-        let repo_events_filter =
-            get_filter_repo_events(&HashSet::from_iter(maintainers.iter().map(|m| {
-                Nip19Coordinate {
-                    coordinate: Coordinate {
-                        kind: Kind::GitRepoAnnouncement,
-                        public_key: *m,
-                        identifier: repo_coordinate.identifier.to_string(),
-                    },
-                    relays: vec![],
-                }
-            })));
+        let repo_events_filter = get_filter_repo_ann_events(
+            &HashSet::from_iter(maintainers.iter().map(|m| Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: *m,
+                    identifier: repo_coordinate.identifier.to_string(),
+                },
+                relays: vec![],
+            })),
+            true,
+        );
 
         let events = [
             get_event_from_global_cache(git_repo_path, vec![repo_events_filter.clone()]).await?,
@@ -1184,7 +1184,7 @@ pub async fn get_state_from_cache(
         RepoState::try_from(
             get_events_from_local_cache(
                 git_repo_path,
-                vec![get_filter_state_events(&repo_ref.coordinates())],
+                vec![get_filter_state_events(&repo_ref.coordinates(), true)],
             )
             .await?,
         )
@@ -1192,7 +1192,7 @@ pub async fn get_state_from_cache(
         RepoState::try_from(
             get_event_from_global_cache(
                 git_repo_path,
-                vec![get_filter_state_events(&repo_ref.coordinates())],
+                vec![get_filter_state_events(&repo_ref.coordinates(), true)],
             )
             .await?,
         )
@@ -1666,8 +1666,8 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
-                get_filter_state_events(repo_coordinates),
-                get_filter_repo_events(repo_coordinates),
+                get_filter_state_events(repo_coordinates, false),
+                get_filter_repo_ann_events(repo_coordinates, false),
                 nostr::Filter::default()
                     .kinds(vec![Kind::GitPatch, Kind::EventDeletion, KIND_PULL_REQUEST])
                     .custom_tags(
@@ -1717,25 +1717,51 @@ pub fn get_fetch_filters(
     .concat()
 }
 
-pub fn get_filter_repo_events(repo_coordinates: &HashSet<Nip19Coordinate>) -> nostr::Filter {
-    nostr::Filter::default()
+pub fn get_filter_repo_ann_events(
+    repo_coordinates: &HashSet<Nip19Coordinate>,
+    maintainers_only: bool,
+) -> nostr::Filter {
+    let filter = nostr::Filter::default()
         .kind(Kind::GitRepoAnnouncement)
         .identifiers(
             repo_coordinates
                 .iter()
                 .map(|c| c.identifier.clone())
                 .collect::<Vec<String>>(),
+        );
+    if maintainers_only {
+        filter.authors(
+            repo_coordinates
+                .iter()
+                .map(|c| c.coordinate.public_key)
+                .collect::<Vec<PublicKey>>(),
         )
+    } else {
+        filter
+    }
 }
 
 pub static STATE_KIND: nostr::Kind = Kind::Custom(30618);
-pub fn get_filter_state_events(repo_coordinates: &HashSet<Nip19Coordinate>) -> nostr::Filter {
-    nostr::Filter::default().kind(STATE_KIND).identifiers(
+pub fn get_filter_state_events(
+    repo_coordinates: &HashSet<Nip19Coordinate>,
+    maintainers_only: bool,
+) -> nostr::Filter {
+    let filter = nostr::Filter::default().kind(STATE_KIND).identifiers(
         repo_coordinates
             .iter()
             .map(|c| c.identifier.clone())
             .collect::<Vec<String>>(),
-    )
+    );
+    if maintainers_only {
+        filter.authors(
+            repo_coordinates
+                .iter()
+                .map(|c| c.coordinate.public_key)
+                .collect::<Vec<PublicKey>>(),
+        )
+    } else {
+        filter
+    }
 }
 
 pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nostr::Filter {
