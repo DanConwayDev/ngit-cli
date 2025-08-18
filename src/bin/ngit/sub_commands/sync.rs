@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ngit::{
     client::{
         Client, Connect, Params, fetching_with_report, get_repo_ref_from_cache,
@@ -13,6 +13,9 @@ use ngit::{
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
+    /// optionally just sync a specific reference. eg main or v1.5.2
+    #[clap(short, long)]
+    pub(crate) ref_name: Option<String>,
     /// force push updates and delete refs from non-grasp git servers
     #[arg(long, action)]
     force: bool,
@@ -22,6 +25,32 @@ pub struct SubCommandArgs {
 pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
+
+    let full_ref_name = if let Some(ref_name) = &args.ref_name {
+        if ref_name.starts_with("refs/") {
+            if git_repo.git_repo.find_reference(ref_name).is_ok() {
+                Some(ref_name.clone())
+            } else {
+                bail!("could not find reference {ref_name}");
+            }
+        } else if git_repo
+            .git_repo
+            .find_reference(&format!("refs/tags/{ref_name}"))
+            .is_ok()
+        {
+            Some(format!("refs/tags/{ref_name}"))
+        } else if git_repo
+            .git_repo
+            .find_reference(&format!("refs/heads/{ref_name}"))
+            .is_ok()
+        {
+            Some(format!("refs/heads/{ref_name}"))
+        } else {
+            bail!("could not find reference {ref_name}");
+        }
+    } else {
+        None
+    };
 
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
@@ -56,6 +85,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         // delete ref from remote
         let mut not_deleted = vec![];
         for remote_ref_name in remote_state.keys() {
+            // skip unspecified refs
+            if let Some(full_ref_name) = &full_ref_name {
+                if remote_ref_name != full_ref_name {
+                    continue;
+                }
+            }
             if (!remote_ref_name.starts_with("refs/heads/pr/")
                 && (remote_ref_name.starts_with("refs/heads/")
                     || remote_ref_name.starts_with("refs/tags/")))
@@ -75,6 +110,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         // add or update ref on remote
         let mut not_updated = vec![];
         for nostr_ref_name in nostr_state.state.keys() {
+            // skip unspecified refs
+            if let Some(full_ref_name) = &full_ref_name {
+                if nostr_ref_name != full_ref_name {
+                    continue;
+                }
+            }
             if nostr_ref_name.starts_with("refs/heads/")
                 || nostr_ref_name.starts_with("refs/tags/")
                 || !nostr_ref_name.starts_with("refs/heads/pr/")

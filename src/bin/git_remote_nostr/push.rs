@@ -601,7 +601,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                     .or_insert(vec![url.to_string()]);
                                 term.write_line(
                                     format!(
-                                        "ERROR: {short_name} {to} conflicts with nostr ({} ahead {} behind) and local ({} ahead {} behind). either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
+                                        "ERROR: {short_name} {to} conflicts with nostr ({} ahead {} behind) and local ({} ahead {} behind). someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
                                         ahead_of_nostr.len(),
                                         behind_nostr.len(),
                                         ahead_of_local.len(),
@@ -622,7 +622,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             .and_modify(|a| a.push(url.to_string()))
                             .or_insert(vec![url.to_string()]);
                         term.write_line(
-                            format!("ERROR: {short_name} {to} conflicts with nostr and is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                            format!("ERROR: {short_name} {to} conflicts with nostr and is not an ancestor of local branch. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again").as_str(),
                         )?;
                     }
                 } else {
@@ -655,7 +655,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             .or_insert(vec![url.to_string()]);
                         term.write_line(
                                     format!(
-                                        "ERROR: {short_name} already contains {to} {} ahead and {} behind local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote",
+                                        "ERROR: {short_name} already contains {to} {} ahead and {} behind local branch. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
                                         ahead.len(),
                                         behind.len(),
                                     ).as_str(),
@@ -672,7 +672,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                         .and_modify(|a| a.push(url.to_string()))
                         .or_insert(vec![url.to_string()]);
                     term.write_line(
-                        format!("ERROR: {short_name} already contains {to} at {remote_value} which is not an ancestor of local branch. either:\r\n  1. pull from that git server and resolve\r\n  2. force push your branch to the git server before pushing to nostr remote").as_str(),
+                        format!("ERROR: {short_name} already contains {to} at {remote_value} which is not an ancestor of local branch. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again").as_str(),
                     )?;
                 }
             } else {
