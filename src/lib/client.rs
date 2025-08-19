@@ -888,6 +888,13 @@ pub async fn fetch_public_key(signer: &Arc<dyn NostrSigner>) -> Result<nostr::Pu
 }
 
 pub async fn nip05_query(nip05_addr: &str) -> Result<Nip05Profile> {
+    // can be removed if this rust-nostr patch is merged
+    // nostr:nevent1qvzqqqqx2ypzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqqsv0xw23ejw77lfvlaqv5y5nnvdc0p68kmvp2vnklpe9wxx0lkugdcv4zjgk
+    let nip05_addr = if nip05_addr.contains('@') {
+        nip05_addr
+    } else {
+        &format!("_@{nip05_addr}")
+    };
     let addr_deconstructed = Nip05Address::parse(nip05_addr)
         .context(format!("cannot parse nip05 address: {nip05_addr}"))?;
     let json_res: Value = reqwest::Client::new()
