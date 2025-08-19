@@ -2,7 +2,7 @@
 
 nostr plugin for git
 
-- clone a nostr repository, or add as a remote, by using the url format nostr://<pub123|nip05-address>/<identifier>
+- clone a nostr repository, or add as a remote, by using the url format nostr://<npub123|nip05-address>/<identifier>
 - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs
 - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options
 - publish a repository to nostr with `ngit init`
