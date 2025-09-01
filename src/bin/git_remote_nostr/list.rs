@@ -120,15 +120,6 @@ async fn get_open_and_draft_proposals_state(
     // without trusting commit_id we must apply each patch which requires the oid of
     // the parent so we much do a fetch
 
-    // As we are fetching from git servers we mighgt as well get oids from pull
-    // request too
-    // TODO get Pull Request and Pull Request Update Events add these to
-    // refs/nostr/<event-id>
-    // TODO prepare PRs and PRS oids to try and fetch from repo servers that are or
-    // clone urls in PR/update event we are using anyway. TODO after we tried
-    // and failed to get them from these server we should fallback to fetch them
-    // from listed clone urls in PR/update but not during list, only during fetch
-
     for (git_server_url, (oids_from_git_servers, is_grasp_server)) in remote_states {
         if fetch_from_git_server(
             git_repo,
@@ -137,6 +128,8 @@ async fn get_open_and_draft_proposals_state(
                 .filter(|v| !v.starts_with("ref: "))
                 .cloned()
                 .collect::<Vec<String>>(),
+            // TODO we could fetch the oids of Pull Requests and Pull Request Updates to prevent
+            // having repeat fetching during the git remote helper fetch phase
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             term,
@@ -171,14 +164,15 @@ async fn get_open_and_draft_proposals_state(
                 {
                     match tag_value(pr_or_pr_update, "c") {
                         Ok(tip) => {
-                            // only list Pull Requests as refs/heads/pr/* if data is on a repo git
-                            // server otherwise the standard `git clone
-                            // nostr://` cmd will fail as it assumes all /refs/heads returned by
-                            // list are accessable
+                            // only list Pull Requests as refs/heads/pr/* if data is commit is
+                            // advertised as tip of a ref on a repo git server or
+                            // available locally. Otherwise the standard cmd:
+                            // `git clone nostr://` will fail as it assumes all /refs/heads
+                            // returned by list are accessable
                             let tip_oid_is_on_a_repo_git_server =
                                 remote_states.iter().any(|(_url, (state, _is_grasp))| {
                                     state.iter().any(|(_, oid)| tip == *oid)
-                                });
+                                }) || git_repo.does_commit_exist(&tip).is_ok_and(|r| r);
 
                             if tip_oid_is_on_a_repo_git_server {
                                 state.insert(format!("refs/heads/{branch_name}"), tip);
