@@ -19,7 +19,7 @@ use ngit::{
     git_events::{self, KIND_PULL_REQUEST, event_to_cover_letter, get_event_root},
     list::list_from_remotes,
     login::{self, user::UserRef},
-    push::{push_refs_and_generate_pr_or_pr_update_event, push_to_remote},
+    push::{push_to_remote, select_servers_push_refs_and_generate_pr_or_pr_update_event},
     repo_ref::{self, get_repo_config_from_yaml, is_grasp_server_in_list},
     repo_state,
     utils::{
@@ -173,7 +173,7 @@ async fn create_and_publish_events_and_proposals(
     existing_state: HashMap<String, String>,
     term: &Term,
 ) -> Result<(Vec<String>, bool)> {
-    let (signer, user_ref, _) =
+    let (signer, mut user_ref, _) =
         login::login_or_signup(&Some(git_repo), &None, &None, Some(client), true).await?;
 
     if !repo_ref.maintainers.contains(&user_ref.public_key) {
@@ -249,10 +249,11 @@ async fn create_and_publish_events_and_proposals(
     }
 
     let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
+        client,
         git_repo,
         repo_ref,
         proposal_refspecs,
-        &user_ref,
+        &mut user_ref,
         &signer,
         term,
     )
@@ -281,10 +282,11 @@ async fn create_and_publish_events_and_proposals(
 
 #[allow(clippy::too_many_lines)]
 async fn process_proposal_refspecs(
+    client: &Client,
     git_repo: &Repo,
     repo_ref: &RepoRef,
     proposal_refspecs: &Vec<String>,
-    user_ref: &UserRef,
+    user_ref: &mut UserRef,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
 ) -> Result<(Vec<Event>, Vec<String>)> {
@@ -294,7 +296,7 @@ async fn process_proposal_refspecs(
         return Ok((events, rejected_proposal_refspecs));
     }
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
-    let current_user = &user_ref.public_key;
+    let current_user = user_ref.public_key;
 
     for refspec in proposal_refspecs {
         let (from, to) = refspec_to_from_to(refspec).unwrap();
@@ -302,7 +304,7 @@ async fn process_proposal_refspecs(
 
         // this failed to find existing PR from user
         if let Some((_, (proposal, patches))) =
-            find_proposal_and_patches_by_branch_name(to, &all_proposals, Some(current_user))
+            find_proposal_and_patches_by_branch_name(to, &all_proposals, Some(&current_user))
         {
             if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
                 .concat()
@@ -320,6 +322,7 @@ async fn process_proposal_refspecs(
                         );
                     }
                     for patch in generate_patches_or_pr_event_or_pr_updates(
+                        client,
                         git_repo,
                         repo_ref,
                         &ahead,
@@ -359,6 +362,7 @@ async fn process_proposal_refspecs(
                             || git_repo.are_commits_too_big_for_patches(&ahead)
                         {
                             for event in generate_patches_or_pr_event_or_pr_updates(
+                                client,
                                 git_repo,
                                 repo_ref,
                                 &ahead,
@@ -428,7 +432,7 @@ async fn process_proposal_refspecs(
                 );
             }
             for event in generate_patches_or_pr_event_or_pr_updates(
-                git_repo, repo_ref, &ahead, user_ref, None, signer, term,
+                client, git_repo, repo_ref, &ahead, user_ref, None, signer, term,
             )
             .await?
             {
@@ -441,11 +445,13 @@ async fn process_proposal_refspecs(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn generate_patches_or_pr_event_or_pr_updates(
+    client: &Client,
     git_repo: &Repo,
     repo_ref: &RepoRef,
     ahead: &[Sha1Hash],
-    user_ref: &UserRef,
+    user_ref: &mut UserRef,
     root_proposal: Option<&Event>,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
@@ -454,53 +460,27 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     let use_pr = parent_is_pr || git_repo.are_commits_too_big_for_patches(ahead);
 
     if use_pr {
-        let repo_grasps = repo_ref.grasp_servers();
-        let repo_grasp_clone_urls: Vec<String> = repo_ref
-            .git_server
-            .iter()
-            .filter(|s| is_grasp_server_in_list(s, &repo_grasps))
-            .cloned()
-            .collect();
-
-        if repo_grasp_clone_urls.is_empty() {
-            // TODO get grasp_default_set servers that aren't in repo_grasps
-            // cycle through until one succeeds TODO create
-            // personal-fork announcement with grasp servers and
-            // push, after a few seconds push ref/nostr/eventid. if
-            // one success break out of for loop and continue
-
-            bail!(
-                "The repository doesnt list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request. Soon ngit will support pushing your changes to a different git / grasp git server."
-            );
-        }
-
-        if let (Some(events), _) = push_refs_and_generate_pr_or_pr_update_event(
+        select_servers_push_refs_and_generate_pr_or_pr_update_event(
+            client,
             git_repo,
             repo_ref,
             ahead.first().context("no commits to push")?,
             user_ref,
             root_proposal,
             &None,
-            &repo_grasp_clone_urls,
-            None,
             signer,
+            false,
             term,
         )
-        .await.context(
+        .await
+        .context(format!(
+            "{} run `ngit send` for more options.",
             if parent_is_pr {
-                "couldn't generate PR update event"
+                "couldn't generate PR update event."
             } else {
                 "a commit in your proposal is too big for a nostr patch so we tried to create it as a nostr PR instead. Unfortunately this failed."
-            }
-        )? {
-            Ok(events)
-        } else {
-            bail!(
-                "a commit in your proposal is too big for a nostr patch. tried to use submit as a nostr Pull Request but could not find a grasp server that would accept your changes"
-            );
-            // TODO suggest `ngit send` where user could specify their own clone
-            // url to push to once that feature is added
-        }
+            },
+        ))
     } else {
         generate_cover_letter_and_patch_events(
             None,
