@@ -15,12 +15,14 @@ use ngit::{
         PromptChoiceParms, PromptConfirmParms, multi_select_with_custom_value,
         show_multi_input_prompt_success,
     },
-    client::{Params, send_events},
+    client::{Params, get_state_from_cache, send_events},
     git::nostr_url::{CloneUrl, NostrUrlDecoded},
+    list::list_from_remote,
     repo_ref::{
         detect_existing_grasp_servers, extract_npub, extract_pks,
         format_grasp_server_url_as_relay_url, normalize_grasp_server_url, save_repo_config_to_yaml,
     },
+    repo_state::RepoState,
 };
 use nostr::{
     FromBech32, PublicKey, ToBech32,
@@ -754,12 +756,67 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     };
     let repo_event = repo_ref.to_event(&signer).await?;
 
+    let nostr_url_decoded = repo_ref.to_nostr_git_url(&Some(&git_repo));
+
+    let mut events = vec![repo_event];
+
+    let (need_push, need_sync) = if std::env::var("NGITTEST").is_ok() || no_state {
+        // dont push or sync during tests as git-remote-nostr isn't installed during
+        // ngit binary tests
+        (false, false)
+    } else if let Ok(nostr_state) =
+        &get_state_from_cache(Some(git_repo.get_path()?), &repo_ref).await
+    {
+        // issue fresh state event with same state to all (inc. new) repo relays
+        let new_state_event = RepoState::build(
+            repo_ref.identifier.clone(),
+            nostr_state.state.clone(),
+            &signer,
+        )
+        .await?
+        .event;
+        events.push(new_state_event);
+        println!("publishing repostory state to nostr...");
+        (false, true)
+    } else if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
+        if let Some(url) = remote.url() {
+            // issue a state event with origin state, to all (inc. new) repo relays
+            if let Ok(mut origin_state) =
+                list_from_remote(&Term::stdout(), &git_repo, url, &nostr_url_decoded, false)
+            {
+                origin_state.retain(|key, _| {
+                    key.starts_with("refs/heads/")
+                        || key.starts_with("refs/tags/")
+                        || key.starts_with("HEAD")
+                });
+                // TODO ngit sync will error if any of these remote refs are not available
+                // locally
+                let new_state_event =
+                    RepoState::build(repo_ref.identifier.clone(), origin_state, &signer)
+                        .await?
+                        .event;
+                events.push(new_state_event);
+                println!("publishing repostory state to nostr...");
+                (false, true)
+            } else {
+                // cant reach existing origin so just try push
+                (true, false)
+            }
+        } else {
+            // origin never connected so just try push
+            (true, false)
+        }
+    } else {
+        // no origin so we need to just push
+        (true, false)
+    };
+
     client.set_signer(signer).await;
 
     send_events(
         &client,
         Some(git_repo_path),
-        vec![repo_event],
+        events,
         user_ref.relays.write(),
         relays.clone(),
         !cli_args.disable_cli_spinners,
@@ -783,7 +840,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     )?;
 
     // set origin remote
-    let nostr_url = repo_ref.to_nostr_git_url(&Some(&git_repo)).to_string();
+    let nostr_url = nostr_url_decoded.to_string();
 
     if git_repo.git_repo.find_remote("origin").is_ok() {
         git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
@@ -792,12 +849,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     }
     println!("set remote origin to nostr url");
 
-    if std::env::var("NGITTEST").is_err() {
-        // ignore during tests as git-remote-nostr isn't installed during ngit binary
-        // tests
-
+    if need_push {
         if selected_grasp_servers.is_empty() {
-            println!("running `git push` to publish your repository data");
+            println!("running `ngit push` to publish your repository data");
         } else {
             let countdown_start = 5;
             println!(
@@ -815,6 +869,31 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         if let Err(err) = push_main_or_master_branch(&git_repo) {
             println!(
                 "your repository announcement was published to nostr but git push exited with an error: {err}"
+            );
+        }
+    }
+    if need_sync {
+        if selected_grasp_servers.is_empty() {
+            println!(
+                "running `ngit sync` to ensure your repository data is available on repository git servers"
+            );
+        } else {
+            let countdown_start = 5;
+            println!(
+                "waiting {countdown_start}s for any new grasp servers to create your repo before we sync your data"
+            );
+            let term = Term::stdout();
+            for i in (1..=countdown_start).rev() {
+                term.write_line(format!("\rrunning `ngit sync` in {i}s").as_str())?;
+                thread::sleep(Duration::new(1, 0)); // Sleep for 1 second
+                term.clear_last_lines(1)?;
+            }
+            term.flush().unwrap(); // Ensure the output is flushed to the terminal
+        }
+
+        if let Err(err) = run_ngit_sync() {
+            println!(
+                "your repository announcement was published to nostr but 'ngit sync' exited with an error: {err}"
             );
         }
     }
@@ -949,5 +1028,36 @@ fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
         Ok(())
     } else {
         bail!("git push process exited with an error: {}", exit_status);
+    }
+}
+
+fn run_ngit_sync() -> Result<()> {
+    println!("========================================");
+    println!("            NGIT SYNC COMMAND            ");
+    println!("========================================");
+
+    let command = "ngit";
+    let args = ["sync"];
+
+    // Spawn the process
+    let mut child = Command::new(command)
+        .args(args)
+        .stdout(Stdio::inherit()) // Redirect stdout to the console
+        .stderr(Stdio::inherit()) // Redirect stderr to the console
+        .spawn()
+        .context("Failed to start ngit sync process")?;
+
+    // Wait for the process to finish
+    let exit_status = child.wait().context("Failed to start ngit sync process")?;
+
+    println!("========================================");
+    println!("        END OF NGIT SYNC OUTPUT");
+    println!("========================================");
+
+    // Check the exit status
+    if exit_status.success() {
+        Ok(())
+    } else {
+        bail!("ngit sync process exited with an error: {}", exit_status);
     }
 }
