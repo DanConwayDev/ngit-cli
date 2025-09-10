@@ -16,6 +16,7 @@ use ngit::{
         show_multi_input_prompt_success,
     },
     client::{Params, get_state_from_cache, send_events},
+    fetch::fetch_from_git_server,
     git::nostr_url::{CloneUrl, NostrUrlDecoded},
     list::list_from_remote,
     repo_ref::{
@@ -789,8 +790,27 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                         || key.starts_with("refs/tags/")
                         || key.starts_with("HEAD")
                 });
-                // TODO ngit sync will error if any of these remote refs are not available
-                // locally
+                let mut required_oids = vec![];
+                for tip in origin_state.values() {
+                    if let Ok(exist) = git_repo.does_commit_exist(tip) {
+                        if !exist {
+                            required_oids.push(tip.clone());
+                        }
+                    }
+                }
+                if required_oids.is_empty() {
+                    println!("fetching refs missing locally from existing origin...");
+                    if let Err(error) = fetch_from_git_server(
+                        &git_repo,
+                        &required_oids,
+                        url,
+                        &nostr_url_decoded,
+                        &Term::stdout(),
+                        false,
+                    ) {
+                        println!("error fetching refs which will make ngit sync fail: {error}");
+                    }
+                }
                 let new_state_event =
                     RepoState::build(repo_ref.identifier.clone(), origin_state, &signer)
                         .await?
