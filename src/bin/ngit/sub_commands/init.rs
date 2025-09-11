@@ -21,7 +21,8 @@ use ngit::{
     list::list_from_remote,
     repo_ref::{
         detect_existing_grasp_servers, extract_npub, extract_pks,
-        format_grasp_server_url_as_relay_url, normalize_grasp_server_url, save_repo_config_to_yaml,
+        format_grasp_server_url_as_relay_url, is_grasp_server_clone_url,
+        normalize_grasp_server_url, save_repo_config_to_yaml,
     },
     repo_state::RepoState,
 };
@@ -389,12 +390,14 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             .collect();
         let mut additional_server_options: Vec<String> = git_server_defaults
             .iter()
-            .filter(|s| grasp_server_git_servers.iter().any(|r| s.eq(&r)))
+            .filter(|s| !is_grasp_server_clone_url(s))
             .cloned()
             .collect();
 
         if simple_mode && !selected_grasp_servers.is_empty() {
             if additional_server_options.is_empty() {
+                git_server_defaults
+            } else {
                 // additional git servers were listed
                 let selected = loop {
                     let selections: Vec<bool> = vec![true; additional_server_options.len()];
@@ -429,8 +432,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 let mut combined = grasp_server_git_servers;
                 combined.extend(selected);
                 combined
-            } else {
-                git_server_defaults
             }
         } else {
             // show all git servers
