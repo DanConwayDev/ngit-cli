@@ -7,7 +7,11 @@ use clap::Parser;
 use cli::{AccountCommands, CUSTOMISE_TEMPLATE, Cli, Commands};
 
 mod cli;
-use ngit::{cli_interactor, client, git, git_events, login, repo_ref};
+use ngit::{
+    cli_interactor, client,
+    git::{self, utils::set_git_timeout},
+    git_events, login, repo_ref,
+};
 
 mod sub_commands;
 
@@ -19,6 +23,8 @@ async fn main() -> Result<()> {
         print!("{CUSTOMISE_TEMPLATE}");
         std::process::exit(0); // Exit the program
     }
+
+    let _ = set_git_timeout();
 
     if let Some(command) = &cli.command {
         match command {
