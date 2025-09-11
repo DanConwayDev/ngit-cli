@@ -385,7 +385,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_server = if args.clone_url.is_empty() {
         let grasp_server_git_servers: Vec<String> = git_server_defaults
             .iter()
-            .filter(|s| selected_grasp_servers.iter().any(|r| s.contains(r)))
+            .filter(|s| is_grasp_server_clone_url(s))
             .cloned()
             .collect();
         let mut additional_server_options: Vec<String> = git_server_defaults
@@ -413,7 +413,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                         },
                     )?;
 
-                    if !selected.is_empty() || Interactor::default().choice(
+                    if selected.is_empty() || Interactor::default().choice(
                     PromptChoiceParms::default()
                         .with_prompt("if you or another maintainer start pushing directly to these, nostr will be out of date")
                         .dont_report()
@@ -428,7 +428,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                     }
                     break selected;
                 };
-                show_multi_input_prompt_success("git servers", &selected);
+                show_multi_input_prompt_success("additional git servers", &selected);
                 let mut combined = grasp_server_git_servers;
                 combined.extend(selected);
                 combined
