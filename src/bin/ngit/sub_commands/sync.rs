@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use console::Term;
+use git2::Oid;
 use ngit::{
     client::{
         Client, Connect, Params, fetching_with_report, get_repo_ref_from_cache,
@@ -239,7 +240,14 @@ fn identify_missing_refs(git_repo: &Repo, state: &HashMap<String, String>) -> Ve
     let mut missing_oids = vec![];
     for tip in state.values() {
         if let Ok(exist) = git_repo.does_commit_exist(tip) {
-            if !exist {
+            let oid_exists_as_tag = Oid::from_str(tip).is_ok_and(|tip| {
+                git_repo
+                    .git_repo
+                    .find_object(tip, Some(git2::ObjectType::Tag))
+                    .is_ok()
+            });
+
+            if !exist && !oid_exists_as_tag {
                 missing_oids.push(tip.to_string());
             }
         }

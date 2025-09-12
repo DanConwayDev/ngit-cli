@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use console::{Style, Term};
+use git2::Oid;
 use ngit::{
     UrlWithoutSlash,
     cli_interactor::{
@@ -794,7 +795,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
                 let mut required_oids = vec![];
                 for tip in origin_state.values() {
                     if let Ok(exist) = git_repo.does_commit_exist(tip) {
-                        if !exist {
+                        let oid_exists_as_tag = Oid::from_str(tip).is_ok_and(|tip| {
+                            git_repo
+                                .git_repo
+                                .find_object(tip, Some(git2::ObjectType::Tag))
+                                .is_ok()
+                        });
+                        if !exist && !oid_exists_as_tag {
                             required_oids.push(tip.clone());
                         }
                     }
