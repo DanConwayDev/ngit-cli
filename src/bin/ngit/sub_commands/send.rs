@@ -43,6 +43,12 @@ pub struct SubCommandArgs {
     #[clap(short, long)]
     /// optional cover letter description
     pub(crate) description: Option<String>,
+    /// publish as Pull Request even if each commit is < 60kb
+    #[arg(long, action)]
+    pub(crate) force_pr: bool,
+    /// publish as Patches even if they may be > 60kb
+    #[arg(long, action)]
+    pub(crate) force_patch: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -116,13 +122,21 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         &main_tip,
     )?;
 
-    let as_pr = {
+    let should_be_pr = {
         if let Some(root_proposal) = &root_proposal {
             proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
         } else {
             false
         }
     } || git_repo.are_commits_too_big_for_patches(&commits);
+
+    let as_pr = if args.force_patch {
+        false
+    } else if args.force_pr {
+        true
+    } else {
+        should_be_pr
+    };
 
     let title = if as_pr {
         match &args.title {
