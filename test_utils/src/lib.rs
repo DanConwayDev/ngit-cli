@@ -225,7 +225,7 @@ pub struct CliTester {
 }
 
 impl CliTester {
-    pub fn expect_input(&mut self, prompt: &str) -> Result<CliTesterInputPrompt> {
+    pub fn expect_input(&'_ mut self, prompt: &str) -> Result<CliTesterInputPrompt<'_>> {
         let mut i = CliTesterInputPrompt {
             tester: self,
             prompt: prompt.to_string(),
@@ -234,7 +234,7 @@ impl CliTester {
         Ok(i)
     }
 
-    pub fn expect_input_eventually(&mut self, prompt: &str) -> Result<CliTesterInputPrompt> {
+    pub fn expect_input_eventually(&'_ mut self, prompt: &str) -> Result<CliTesterInputPrompt<'_>> {
         let mut i = CliTesterInputPrompt {
             tester: self,
             prompt: prompt.to_string(),
@@ -243,7 +243,7 @@ impl CliTester {
         Ok(i)
     }
 
-    pub fn expect_password(&mut self, prompt: &str) -> Result<CliTesterPasswordPrompt> {
+    pub fn expect_password(&'_ mut self, prompt: &str) -> Result<CliTesterPasswordPrompt<'_>> {
         let mut i = CliTesterPasswordPrompt {
             tester: self,
             prompt: prompt.to_string(),
@@ -254,10 +254,10 @@ impl CliTester {
     }
 
     pub fn expect_confirm(
-        &mut self,
+        &'_ mut self,
         prompt: &str,
         default: Option<bool>,
-    ) -> Result<CliTesterConfirmPrompt> {
+    ) -> Result<CliTesterConfirmPrompt<'_>> {
         let mut i = CliTesterConfirmPrompt {
             tester: self,
             prompt: prompt.to_string(),
@@ -268,10 +268,10 @@ impl CliTester {
     }
 
     pub fn expect_confirm_eventually(
-        &mut self,
+        &'_ mut self,
         prompt: &str,
         default: Option<bool>,
-    ) -> Result<CliTesterConfirmPrompt> {
+    ) -> Result<CliTesterConfirmPrompt<'_>> {
         let mut i = CliTesterConfirmPrompt {
             tester: self,
             prompt: prompt.to_string(),
@@ -282,10 +282,10 @@ impl CliTester {
     }
 
     pub fn expect_choice(
-        &mut self,
+        &'_ mut self,
         prompt: &str,
         choices: Vec<String>,
-    ) -> Result<CliTesterChoicePrompt> {
+    ) -> Result<CliTesterChoicePrompt<'_>> {
         let mut i = CliTesterChoicePrompt {
             tester: self,
             prompt: prompt.to_string(),
@@ -296,10 +296,10 @@ impl CliTester {
     }
 
     pub fn expect_multi_select(
-        &mut self,
+        &'_ mut self,
         prompt: &str,
         choices: Vec<String>,
-    ) -> Result<CliTesterMultiSelectPrompt> {
+    ) -> Result<CliTesterMultiSelectPrompt<'_>> {
         let mut i = CliTesterMultiSelectPrompt {
             tester: self,
             prompt: prompt.to_string(),

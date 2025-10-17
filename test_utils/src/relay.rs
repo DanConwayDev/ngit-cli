@@ -168,7 +168,7 @@ impl<'a> Relay<'a> {
                             self.respond_standard_req(
                                 client_id,
                                 &subscription_id,
-                                &[filter.clone()],
+                                std::slice::from_ref(&filter),
                             )?;
                             // self.respond_eose(client_id, subscription_id)?;
                         }

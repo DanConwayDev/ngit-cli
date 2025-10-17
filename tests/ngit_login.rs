@@ -5,7 +5,7 @@ use test_utils::*;
 
 static EXPECTED_NSEC_PROMPT: &str = "nsec";
 
-fn show_first_time_login_choices(p: &mut CliTester) -> Result<CliTesterChoicePrompt> {
+fn show_first_time_login_choices(p: &'_ mut CliTester) -> Result<CliTesterChoicePrompt<'_>> {
     p.expect_choice(
         "login to nostr",
         vec![
