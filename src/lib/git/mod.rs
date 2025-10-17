@@ -420,6 +420,7 @@ impl RepoActions for Repo {
         Ok(diff.deltas().len().gt(&0))
     }
 
+    // youngest first
     fn get_commits_ahead_behind(
         &self,
         base_commit: &Sha1Hash,

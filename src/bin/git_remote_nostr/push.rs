@@ -460,11 +460,15 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     let use_pr = parent_is_pr || git_repo.are_commits_too_big_for_patches(ahead);
 
     if use_pr {
+        let tip = ahead.first().context("no commits")?; // ahead is youngest first
+        let first_commit = ahead.last().context("no commits")?;
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
             git_repo,
             repo_ref,
-            ahead.first().context("no commits to push")?,
+            tip,
+            first_commit,
+            git_repo.get_commit_parent(first_commit).ok().as_ref(),
             user_ref,
             root_proposal,
             &None,

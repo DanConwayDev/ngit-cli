@@ -385,7 +385,9 @@ pub fn generate_unsigned_pr_or_update_event(
     signing_public_key: &PublicKey,
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
-    commit: &Sha1Hash,
+    tip: &Sha1Hash,
+    first_commit: &Sha1Hash,
+    merge_base: Option<&Sha1Hash>,
     clone_url_hint: &[&str],
     mentions: &[nostr::Tag],
 ) -> Result<UnsignedEvent> {
@@ -404,7 +406,7 @@ pub fn generate_unsigned_pr_or_update_event(
     } else if let Some(cl) = &root_patch_cover_letter {
         cl.title.clone()
     } else {
-        git_repo.get_commit_message_summary(commit)?
+        git_repo.get_commit_message_summary(first_commit)?
     };
 
     let description = if let Some((_, description)) = &title_description_overide {
@@ -412,7 +414,10 @@ pub fn generate_unsigned_pr_or_update_event(
     } else if let Some(cl) = &root_patch_cover_letter {
         cl.description.clone()
     } else {
-        let mut description = git_repo.get_commit_message(commit)?.trim().to_string();
+        let mut description = git_repo
+            .get_commit_message(first_commit)?
+            .trim()
+            .to_string();
         if let Some(remaining_description) = description.strip_prefix(&title) {
             description = remaining_description.trim().to_string();
         }
@@ -471,6 +476,15 @@ pub fn generate_unsigned_pr_or_update_event(
         .concat()
     };
 
+    let merge_base_tag = if let Some(merge_base) = merge_base {
+        vec![Tag::custom(
+            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("merge-base")),
+            vec![format!("{merge_base}")],
+        )]
+    } else {
+        vec![]
+    };
+
     Ok(
         if root_proposal.is_some() && root_patch_cover_letter.is_none() {
             EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
@@ -508,7 +522,7 @@ pub fn generate_unsigned_pr_or_update_event(
                     Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
                     Tag::custom(
                         nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
-                        vec![format!("{commit}")],
+                        vec![format!("{tip}")],
                     ),
                     Tag::custom(
                         nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
@@ -518,6 +532,7 @@ pub fn generate_unsigned_pr_or_update_event(
                             .collect::<Vec<String>>(),
                     ),
                 ],
+                merge_base_tag,
                 repo_ref
                     .maintainers
                     .iter()

@@ -206,11 +206,15 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     commits.reverse();
 
     let events = if as_pr {
+        let tip = commits.last().context("no commits")?; // commits has been reversed to oldest first
+        let first_commit = commits.first().context("no commits")?;
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             &client,
             &git_repo,
             &repo_ref,
-            commits.last().context("no commits")?,
+            tip,
+            first_commit,
+            git_repo.get_commit_parent(first_commit).ok().as_ref(),
             &mut user_ref,
             root_proposal.as_ref(),
             &cover_letter_title_description,
