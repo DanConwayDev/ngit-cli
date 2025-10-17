@@ -16,7 +16,9 @@ use git2::{Oid, Repository};
 use ngit::{
     client::{self, get_event_from_cache_by_id},
     git::{self, nostr_url::NostrUrlDecoded},
-    git_events::{self, KIND_PULL_REQUEST, event_to_cover_letter, get_event_root},
+    git_events::{
+        self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
+    },
     list::list_from_remotes,
     login::{self, user::UserRef},
     push::{push_to_remote, select_servers_push_refs_and_generate_pr_or_pr_update_event},
@@ -27,7 +29,11 @@ use ngit::{
         get_short_git_server_name, read_line,
     },
 };
-use nostr::nips::nip10::Marker;
+use nostr::nips::{
+    nip10::Marker,
+    nip19::ToBech32,
+    nip22::{CommentTarget, extract_root},
+};
 use nostr_sdk::{
     Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, Tag, TagStandard,
     hashes::sha1::Hash as Sha1Hash,
@@ -914,6 +920,8 @@ async fn get_merged_status_events(
                 git_repo.get_path()?,
                 vec![
                     nostr::Filter::default().kind(nostr::Kind::GitPatch),
+                    nostr::Filter::default().kind(KIND_PULL_REQUEST),
+                    nostr::Filter::default().kind(KIND_PULL_REQUEST_UPDATE),
                     // TODO: limit by repo_ref
                 ],
             )
@@ -940,7 +948,7 @@ type MergedProposalsInfo =
 async fn get_merged_proposals_info(
     git_repo: &Repo,
     ahead: &Vec<Sha1Hash>,
-    available_patches_pr_pr_update: &[Event],
+    available_patches_prs_pr_updates: &[Event],
 ) -> Result<MergedProposalsInfo> {
     let mut proposals: MergedProposalsInfo = HashMap::new();
 
@@ -950,7 +958,7 @@ async fn get_merged_proposals_info(
         // are in ahead
         if commit.parent_count() > 1 {
             for parent in commit.parents() {
-                for event in available_patches_pr_pr_update
+                for event in available_patches_prs_pr_updates
                     .iter()
                     .filter(|e| {
                         e.tags.iter().any(|t| {
@@ -962,7 +970,10 @@ async fn get_merged_proposals_info(
                     .collect::<Vec<&Event>>()
                 {
                     if let Ok((proposal_id, revision_id)) =
-                        get_proposal_and_revision_root_from_patch(git_repo, event).await
+                        get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
+                            git_repo, event,
+                        )
+                        .await
                     {
                         let (entry_revision_id, merged_patches) =
                             proposals.entry(proposal_id).or_default();
@@ -975,7 +986,7 @@ async fn get_merged_proposals_info(
         } else {
             // three way merge or fast forward merge commits
             // note: ahead included commits of three-way merged branches
-            let mut matching_patches = available_patches_pr_pr_update
+            let mut matching_patches_prs_pr_updates = available_patches_prs_pr_updates
                 .iter()
                 .filter(|e| {
                     e.tags.iter().any(|t| {
@@ -985,15 +996,19 @@ async fn get_merged_proposals_info(
                     })
                 })
                 .collect::<Vec<&Event>>();
-            for patch_event in &matching_patches {
+            for patch_event in &matching_patches_prs_pr_updates {
                 if let Ok((proposal_id, revision_id)) =
-                    get_proposal_and_revision_root_from_patch(git_repo, patch_event).await
+                    get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
+                        git_repo,
+                        patch_event,
+                    )
+                    .await
                 {
-                    let (entry_revision_id, merged_patches) =
+                    let (entry_revision_id, merged_patches_pr_pr_updates) =
                         proposals.entry(proposal_id).or_default();
                     // ignore revisions without all the merged commits
                     if entry_revision_id == &revision_id {
-                        merged_patches.insert(
+                        merged_patches_pr_pr_updates.insert(
                             *commit_hash,
                             MergedPRCommitType::PatchCommit {
                                 event_id: patch_event.id,
@@ -1003,9 +1018,9 @@ async fn get_merged_proposals_info(
                 }
             }
             // applied commits - this is done after so that merged revisions take priority
-            if matching_patches.is_empty() {
+            if matching_patches_prs_pr_updates.is_empty() {
                 let author = git_repo.get_commit_author(commit_hash)?;
-                matching_patches = available_patches_pr_pr_update
+                matching_patches_prs_pr_updates = available_patches_prs_pr_updates
                     .iter()
                     .filter(|e| {
                         if let Ok(patch_author) = get_patch_author(e) {
@@ -1015,9 +1030,13 @@ async fn get_merged_proposals_info(
                         }
                     })
                     .collect::<Vec<&Event>>();
-                for patch_event in matching_patches {
+                for patch_event in matching_patches_prs_pr_updates {
                     if let Ok((proposal_id, revision_id)) =
-                        get_proposal_and_revision_root_from_patch(git_repo, patch_event).await
+                        get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
+                            git_repo,
+                            patch_event,
+                        )
+                        .await
                     {
                         let (entry_revision_id, merged_patches) =
                             proposals.entry(proposal_id).or_default();
@@ -1250,24 +1269,57 @@ async fn create_merge_status(
     .await
 }
 
-async fn get_proposal_and_revision_root_from_patch(
+async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
     git_repo: &Repo,
-    patch: &Event,
+    event: &Event,
 ) -> Result<(EventId, Option<EventId>)> {
-    let proposal_or_revision = if patch
+    if event.kind.eq(&KIND_PULL_REQUEST) {
+        return Ok((event.id, None));
+    } else if event.kind.eq(&KIND_PULL_REQUEST_UPDATE) {
+        if let Some(root) = extract_root(event) {
+            if let CommentTarget::Event {
+                id,
+                relay_hint: _,
+                pubkey_hint: _,
+                kind,
+            } = root
+            {
+                if let Some(kind) = kind {
+                    if !kind.eq(&KIND_PULL_REQUEST) {
+                        bail!(
+                            "pull request update {} root event is {} and not a pull request kind",
+                            { event.id.to_bech32()? },
+                            kind
+                        );
+                    }
+                }
+                return Ok((*id, None));
+            }
+            bail!(
+                "pull request update {} root event is not a pull request event",
+                event.id.to_bech32()?
+            );
+        }
+        bail!(
+            "pull request update {} root event is not a pull request event",
+            { event.id.to_bech32()? }
+        );
+    }
+
+    let proposal_or_revision = if event
         .tags
         .iter()
         .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("root"))
     {
-        patch.clone()
+        event.clone()
     } else {
         let proposal_or_revision_id = EventId::parse(
-            &if let Some(t) = patch.tags.iter().find(|t| t.is_root()) {
+            &if let Some(t) = event.tags.iter().find(|t| t.is_root()) {
                 t.clone()
-            } else if let Some(t) = patch.tags.iter().find(|t| t.is_reply()) {
+            } else if let Some(t) = event.tags.iter().find(|t| t.is_reply()) {
                 t.clone()
             } else {
-                Tag::event(patch.id)
+                Tag::event(event.id)
             }
             .as_slice()[1]
                 .clone(),
