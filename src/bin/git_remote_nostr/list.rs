@@ -198,12 +198,16 @@ async fn get_open_and_draft_proposals_state(
                             state.insert(format!("refs/heads/{branch_name}"), tip);
                         }
                         Err(error) => {
-                            let _ = term.write_line(
-                                format!(
-                                    "WARNING: failed to fetch branch {branch_name} error: {error}"
-                                )
-                                .as_str(),
-                            );
+                            if let Ok(Some(public_key)) = get_curent_user(git_repo) {
+                                if repo_ref.maintainers.contains(&public_key)
+                                    || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
+                                {
+                                    term.write_line(
+                                        format!("WARNING (only shown to maintainers or author): failed to fetch branch {branch_name}, error: {error}",)
+                                            .as_str(),
+                                    )?;
+                                }
+                            }
                         }
                     }
                 }

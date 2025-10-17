@@ -188,10 +188,16 @@ async fn fetch_open_or_draft_proposals_from_patches(
                 } else if let Err(error) =
                     make_commits_for_proposal(git_repo, repo_ref, events_to_apply)
                 {
-                    term.write_line(
-                        format!("WARNING: failed to create branch for {refstr}, error: {error}",)
-                            .as_str(),
-                    )?;
+                    if let Ok(Some(public_key)) = get_curent_user(git_repo) {
+                        if repo_ref.maintainers.contains(&public_key)
+                            || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
+                        {
+                            term.write_line(
+                                format!("WARNING (only shown to maintainers or author): failed to create branch for {refstr}, error: {error}",)
+                                    .as_str(),
+                            )?;
+                        }
+                    }
                     break;
                 }
             }
