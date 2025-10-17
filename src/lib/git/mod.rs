@@ -459,8 +459,7 @@ impl RepoActions for Repo {
             }) {
             None => {
                 bail!(format!(
-                    "{} is not an ancestor of {}",
-                    latest_commit, base_commit
+                    "{latest_commit} is not an ancestor of {base_commit}"
                 ));
             }
             Some(res) => res.context("revwalk failed to reveal commit")?,
@@ -671,7 +670,7 @@ impl RepoActions for Repo {
                 if !applied_oid.to_string().eq(commit_id) {
                     bail!(
                         "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
-                        applied_oid.to_string(),
+                        applied_oid,
                         get_commit_id_from_patch(patch)?,
                     );
                 }

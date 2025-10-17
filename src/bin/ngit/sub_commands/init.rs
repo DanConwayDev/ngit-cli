@@ -1055,7 +1055,7 @@ fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
     if exit_status.success() {
         Ok(())
     } else {
-        bail!("git push process exited with an error: {}", exit_status);
+        bail!("git push process exited with an error: {exit_status}");
     }
 }
 
@@ -1086,6 +1086,6 @@ fn run_ngit_sync() -> Result<()> {
     if exit_status.success() {
         Ok(())
     } else {
-        bail!("ngit sync process exited with an error: {}", exit_status);
+        bail!("ngit sync process exited with an error: {exit_status}");
     }
 }

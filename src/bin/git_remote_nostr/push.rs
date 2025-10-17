@@ -1391,10 +1391,7 @@ fn update_remote_refs_pushed(
 
 fn refspec_to_from_to(refspec: &str) -> Result<(&str, &str)> {
     if !refspec.contains(':') {
-        bail!(
-            "refspec should contain a colon (:) but consists of: {}",
-            refspec
-        );
+        bail!("refspec should contain a colon (:) but consists of: {refspec}");
     }
     let parts = refspec.split(':').collect::<Vec<&str>>();
     Ok((

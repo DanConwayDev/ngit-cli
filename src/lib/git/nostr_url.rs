@@ -543,7 +543,7 @@ pub fn convert_clone_url_to_https(url: &str) -> Result<String> {
             // Construct the HTTPS URL
             return Ok(format!("https://{}/{}", parts[0], parts[1..].join("/")));
         }
-        bail!("Invalid SSH URL format: {}", url);
+        bail!("Invalid SSH URL format: {url}");
     }
     // Convert ftp:// to https://
     else if stripped_url.starts_with("ftp://") {
@@ -555,7 +555,7 @@ pub fn convert_clone_url_to_https(url: &str) -> Result<String> {
     }
 
     // If the URL is neither HTTPS, SSH, nor git@, return an error
-    bail!("Unsupported URL protocol: {}", url);
+    bail!("Unsupported URL protocol: {url}");
 }
 
 // Function to strip username and password from the URL
