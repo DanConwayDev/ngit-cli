@@ -22,7 +22,7 @@ use ngit::{
     list::list_from_remotes,
     login::{self, user::UserRef},
     push::{push_to_remote, select_servers_push_refs_and_generate_pr_or_pr_update_event},
-    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server_in_list},
+    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server_clone_url},
     repo_state,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
@@ -159,7 +159,7 @@ pub async fn run_push(
                         &repo_ref.to_nostr_git_url(&None),
                         &remote_refspecs,
                         &term,
-                        is_grasp_server_in_list(&git_server_url, &repo_ref.grasp_servers()),
+                        is_grasp_server_clone_url(&git_server_url),
                     );
                 }
             }

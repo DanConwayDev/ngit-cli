@@ -736,26 +736,56 @@ pub fn extract_npub(s: &str) -> Result<&str> {
 
 pub fn is_grasp_server_in_list(url: &str, grasp_servers: &[String]) -> bool {
     if !grasp_servers.is_empty() {
-        if let Ok(url) = normalize_grasp_server_url(url) {
-            grasp_servers.iter().any(|s| {
-                if let Ok(s) = normalize_grasp_server_url(s) {
-                    s == url
-                } else {
-                    false
-                }
-            })
-        } else {
-            false
-        }
+        grasp_servers
+            .iter()
+            .any(|s| s.trim_end_matches('/') == url.trim_end_matches('/'))
     } else {
         false
     }
 }
 
 pub fn is_grasp_server_clone_url(url: &str) -> bool {
-    extract_npub(url).is_ok()
-        && (url.ends_with(".git") || url.ends_with(".git/"))
-        && url.starts_with("http")
+    // Must start with http:// or https://
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return false;
+    }
+
+    // Must end with .git or .git/
+    if !url.ends_with(".git") && !url.ends_with(".git/") {
+        return false;
+    }
+
+    // Must contain a valid npub
+    let npub = match extract_npub(url) {
+        Ok(npub) => npub,
+        Err(_) => return false,
+    };
+
+    // Must have format: /{npub}/<repo-name>.git
+    // The npub must be followed by a slash and then a non-empty repo name
+    let npub_pattern = format!("/{}/", npub);
+    if let Some(npub_pos) = url.find(&npub_pattern) {
+        // Get the part after /{npub}/
+        let after_npub = &url[npub_pos + npub_pattern.len()..];
+
+        // Remove trailing slash if present
+        let after_npub = after_npub.trim_end_matches('/');
+
+        // Must have a non-empty repo name that ends with .git
+        if after_npub.is_empty() || after_npub == ".git" {
+            return false;
+        }
+
+        // Repo name must be at least 1 character before .git
+        if !after_npub.ends_with(".git") {
+            return false;
+        }
+
+        let repo_name = &after_npub[..after_npub.len() - 4]; // Remove .git
+        !repo_name.is_empty()
+    } else {
+        false
+    }
 }
 
 pub fn format_grasp_server_url_as_relay_url(url: &str) -> Result<String> {
@@ -1099,5 +1129,163 @@ mod tests {
             assert_eq!(normalized, expected);
         }
         Ok(())
+    }
+
+    mod is_grasp_server_in_list {
+        use super::*;
+
+        #[test]
+        fn detects_in_list() {
+            assert!(is_grasp_server_in_list(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/example-repo.git",
+                &[
+                    "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/example-repo.git".to_string(),
+                    "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/example-repo2.git".to_string(),
+                ],
+            ))
+        }
+
+        #[test]
+        fn ignores_not_in_list() {
+            assert!(!is_grasp_server_in_list(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/example-repo3.git",
+                &[
+                    "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/example-repo.git".to_string(),
+                    "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/example-repo2.git".to_string(),
+                ],
+            ))
+        }
+    }
+
+    mod is_grasp_server_clone_url {
+        use super::*;
+
+        #[test]
+        fn valid_https_url() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn valid_http_url() {
+            assert!(is_grasp_server_clone_url(
+                "http://localhost:8080/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/test-repo.git"
+            ));
+        }
+
+        #[test]
+        fn valid_with_trailing_slash() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git/"
+            ));
+        }
+
+        #[test]
+        fn valid_with_nested_path() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev/path/to/server/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn valid_with_port() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev:8080/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_missing_git_extension() {
+            assert!(!is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo"
+            ));
+        }
+
+        #[test]
+        fn invalid_no_npub() {
+            assert!(!is_grasp_server_clone_url(
+                "https://relay.ngit.dev/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_npub_not_in_path() {
+            // npub exists but not in the path structure (e.g., in query string or fragment)
+            assert!(!is_grasp_server_clone_url(
+                "https://relay.ngit.dev/my-repo.git?npub=npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr"
+            ));
+        }
+
+        #[test]
+        fn invalid_wrong_protocol() {
+            assert!(!is_grasp_server_clone_url(
+                "ftp://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_no_protocol() {
+            assert!(!is_grasp_server_clone_url(
+                "relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_wss_protocol() {
+            assert!(!is_grasp_server_clone_url(
+                "wss://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_npub_not_followed_by_slash() {
+            // npub must be followed by a slash before the repo name
+            assert!(!is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejrmy-repo.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_no_repo_name_after_npub() {
+            assert!(!is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_empty_repo_name() {
+            assert!(!is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr.git"
+            ));
+        }
+
+        #[test]
+        fn invalid_malformed_npub() {
+            assert!(!is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub123invalid/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn valid_repo_name_with_hyphens() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-awesome-repo.git"
+            ));
+        }
+
+        #[test]
+        fn valid_repo_name_with_underscores() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my_repo.git"
+            ));
+        }
+
+        #[test]
+        fn valid_repo_name_with_numbers() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/repo123.git"
+            ));
+        }
     }
 }

@@ -185,7 +185,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 &decoded_nostr_url,
                 &refspecs,
                 &term,
-                *is_grasp_server,
+                *is_grasp_server || is_grasp_server_clone_url(url),
             ) {
                 Err(error) => {
                     term.write_line(&format!(
