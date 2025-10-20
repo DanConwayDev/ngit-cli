@@ -13,6 +13,7 @@ use ngit::{
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
 };
+use nostr::filter::{Alphabet, SingleLetterTag};
 use nostr_sdk::Kind;
 
 use crate::{
@@ -59,6 +60,12 @@ pub async fn launch() -> Result<()> {
                 nostr::Filter::default()
                     .kinds(status_kinds().clone())
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
+                nostr::Filter::default()
+                    .custom_tags(
+                        SingleLetterTag::uppercase(Alphabet::E),
+                        proposals_and_revisions.iter().map(|e| e.id),
+                    )
+                    .kinds(status_kinds().clone()),
             ],
         )
         .await?;
