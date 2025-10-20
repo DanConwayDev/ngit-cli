@@ -31,7 +31,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 use mockall::*;
 use nostr::{
     Event,
-    event::{TagKind, TagStandard, UnsignedEvent},
+    event::UnsignedEvent,
     filter::Alphabet,
     nips::{
         nip01::Coordinate,
@@ -1575,19 +1575,15 @@ async fn process_fetched_events(
     }
     for event in &events {
         if !request.existing_events.contains(&event.id)
-            && (!event
-                .tags
-                .event_ids()
-                .any(|id| report.proposals.contains(id))
-                || event
-                    .tags
-                    .filter_standardized(TagKind::Custom(std::borrow::Cow::Borrowed("E")))
-                    .filter_map(|t| match t {
-                        TagStandard::Event { event_id, .. } => Some(event_id),
-                        TagStandard::EventReport(event_id, ..) => Some(event_id),
-                        _ => None,
-                    })
-                    .any(|id| report.proposals.contains(id)))
+            && !event.tags.iter().any(|t| {
+                t.as_slice().len() > 1
+                    && (t.as_slice()[0].eq("E") || t.as_slice()[0].eq("e"))
+                    && if let Ok(id) = EventId::parse(&t.as_slice()[1]) {
+                        report.proposals.contains(&id)
+                    } else {
+                        false
+                    }
+            })
         {
             if (event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event))
                 || event.kind.eq(&KIND_PULL_REQUEST_UPDATE)
