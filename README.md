@@ -23,9 +23,9 @@ run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in you
 
 ## contributions welcome!
 
-[gitworkshop.dev/dan@gitworkshop.dev/ngit](https://gitworkshop.dev/dan@gitworkshop.dev/ngit) to report issues and see PRs
+[gitworkshop.dev/danconwaydev.com/ngit](https://gitworkshop.dev/danconwaydev.com/ngit) to report issues and see PRs
 
-use ngit to submit PRs with clone url: `nostr://dan@gitworkshop.dev/relay.damus.io/ngit`
+use ngit to submit PRs with clone url: `nostr://danconwaydev.com/relay.ngit.dev/ngit`
 
 ## primer
 
