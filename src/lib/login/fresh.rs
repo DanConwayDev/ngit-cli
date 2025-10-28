@@ -413,13 +413,13 @@ pub async fn listen_for_remote_signer(
     let app_key = app_key.clone();
     let nostr_connect_url_clone = nostr_connect_url.clone();
 
-    let nostr_connect = NostrConnect::new(
+    let nostr_connect = Arc::new(NostrConnect::new(
         nostr_connect_url_clone,
         app_key,
         Duration::from_secs(10 * 60),
         None,
-    )?;
-    let signer: Arc<dyn NostrSigner> = Arc::new(nostr_connect);
+    )?);
+    let signer: Arc<dyn NostrSigner> = nostr_connect.clone();
     let pubkey_future = signer.get_public_key();
 
     // wait for signer response or ctrl + c
@@ -437,12 +437,16 @@ pub async fn listen_for_remote_signer(
     printer.clear_all();
 
     if let Some(Ok(public_key)) = res {
-        let bunker_url = NostrConnectURI::Bunker {
-            // TODO the remote signer pubkey may not be the user pubkey
-            remote_signer_public_key: public_key,
-            relays: nostr_connect_url.relays().to_vec(),
-            secret: nostr_connect_url.secret().map(String::from),
-        };
+        // Get the proper bunker URI from the NostrConnect client
+        // This will contain the correct remote-signer-pubkey that was discovered
+        // during the connection handshake, regardless of whether the original URL
+        // was bunker:// (already had it) or nostrconnect:// (extracted from response
+        // event author)
+        let bunker_url = nostr_connect
+            .bunker_uri()
+            .await
+            .context("failed to get bunker URI from NostrConnect client")?;
+
         Ok((signer, public_key, bunker_url))
     } else {
         bail!("failed to get signer")
