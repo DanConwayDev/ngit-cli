@@ -1,5 +1,6 @@
 use anyhow::Result;
 use nostr_sdk::Kind;
+use rstest::*;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
 
@@ -120,68 +121,107 @@ mod when_repo_not_previously_claimed {
 
             use super::*;
 
+            #[derive(Clone)]
+            pub struct SentToCorrectRelaysScenario {
+                pub r51_repo_event_count: usize,
+                pub r52_repo_event_count: usize,
+                pub r53_repo_event_count: usize,
+                pub r55_repo_event_count: usize,
+                pub r56_repo_event_count: usize,
+                pub r57_repo_event_count: usize,
+            }
+
+            #[fixture]
+            async fn scenario() -> SentToCorrectRelaysScenario {
+                let (r51, r52, r53, r55, r56, r57) =
+                    prep_run_init().await.expect("prep_run_init failed");
+
+                // Extract event counts for verification
+                let r51_repo_event_count = r51
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
+                    .count();
+                let r52_repo_event_count = r52
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
+                    .count();
+                let r53_repo_event_count = r53
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
+                    .count();
+                let r55_repo_event_count = r55
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
+                    .count();
+                let r56_repo_event_count = r56
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
+                    .count();
+                let r57_repo_event_count = r57
+                    .events
+                    .iter()
+                    .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
+                    .count();
+
+                SentToCorrectRelaysScenario {
+                    r51_repo_event_count,
+                    r52_repo_event_count,
+                    r53_repo_event_count,
+                    r55_repo_event_count,
+                    r56_repo_event_count,
+                    r57_repo_event_count,
+                }
+            }
+
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn only_1_repository_kind_event_sent_to_user_relays() -> Result<()> {
-                let (_, _, r53, r55, _, _) = prep_run_init().await?;
-                for relay in [&r53, &r55] {
-                    assert_eq!(
-                        relay
-                            .events
-                            .iter()
-                            .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                            .count(),
-                        1,
-                    );
-                }
+            async fn only_1_repository_kind_event_sent_to_user_relays(
+                #[future] scenario: SentToCorrectRelaysScenario,
+            ) -> Result<()> {
+                let s = scenario.await;
+                assert_eq!(s.r53_repo_event_count, 1);
+                assert_eq!(s.r55_repo_event_count, 1);
                 Ok(())
             }
 
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn only_1_repository_kind_event_sent_to_specified_repo_relays() -> Result<()> {
-                let (_, _, _, r55, r56, _) = prep_run_init().await?;
-                for relay in [&r55, &r56] {
-                    assert_eq!(
-                        relay
-                            .events
-                            .iter()
-                            .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                            .count(),
-                        1,
-                    );
-                }
+            async fn only_1_repository_kind_event_sent_to_specified_repo_relays(
+                #[future] scenario: SentToCorrectRelaysScenario,
+            ) -> Result<()> {
+                let s = scenario.await;
+                assert_eq!(s.r55_repo_event_count, 1);
+                assert_eq!(s.r56_repo_event_count, 1);
                 Ok(())
             }
 
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn only_1_repository_kind_event_sent_to_fallback_relays() -> Result<()> {
-                let (r51, r52, _, _, _, _) = prep_run_init().await?;
-                for relay in [&r51, &r52] {
-                    assert_eq!(
-                        relay
-                            .events
-                            .iter()
-                            .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                            .count(),
-                        1,
-                    );
-                }
+            async fn only_1_repository_kind_event_sent_to_fallback_relays(
+                #[future] scenario: SentToCorrectRelaysScenario,
+            ) -> Result<()> {
+                let s = scenario.await;
+                assert_eq!(s.r51_repo_event_count, 1);
+                assert_eq!(s.r52_repo_event_count, 1);
                 Ok(())
             }
 
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn only_1_repository_kind_event_sent_to_blaster_relays() -> Result<()> {
-                let (_, _, _, _, _, r57) = prep_run_init().await?;
-                assert_eq!(
-                    r57.events
-                        .iter()
-                        .filter(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .count(),
-                    1,
-                );
+            async fn only_1_repository_kind_event_sent_to_blaster_relays(
+                #[future] scenario: SentToCorrectRelaysScenario,
+            ) -> Result<()> {
+                let s = scenario.await;
+                assert_eq!(s.r57_repo_event_count, 1);
                 Ok(())
             }
         }
@@ -271,179 +311,153 @@ mod when_repo_not_previously_claimed {
         mod tags_as_specified_in_args {
             use super::*;
 
+            #[derive(Clone)]
+            pub struct TagsAsSpecifiedScenario {
+                pub event: nostr::Event,
+            }
+
+            #[fixture]
+            async fn scenario() -> TagsAsSpecifiedScenario {
+                let (_, _, r53, _r55, _r56, _r57) =
+                    prep_run_init().await.expect("prep_run_init failed");
+
+                // Extract the GitRepoAnnouncement event (should be same on all relays)
+                let event = r53
+                    .events
+                    .iter()
+                    .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
+                    .expect("GitRepoAnnouncement event not found")
+                    .clone();
+
+                TagsAsSpecifiedScenario { event }
+            }
+
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn d_replaceable_event_identifier() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-
-                    assert!(event.tags.iter().any(
+            async fn d_replaceable_event_identifier(
+                #[future] scenario: TagsAsSpecifiedScenario,
+            ) -> Result<()> {
+                let s = scenario.await;
+                assert!(
+                    s.event.tags.iter().any(
                         |t| t.as_slice()[0].eq("d") && t.as_slice()[1].eq("example-identifier")
-                    ));
-                }
+                    )
+                );
                 Ok(())
             }
 
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn earliest_unique_commit_as_reference_with_euc_marker() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-
-                    assert!(event.tags.iter().any(|t| t.as_slice()[0].eq("r")
-                        && t.as_slice()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")
-                        && t.as_slice()[2].eq("euc")));
-                }
+            async fn earliest_unique_commit_as_reference_with_euc_marker(
+                #[future] scenario: TagsAsSpecifiedScenario,
+            ) -> Result<()> {
+                let s = scenario.await;
+                assert!(s.event.tags.iter().any(|t| t.as_slice()[0].eq("r")
+                    && t.as_slice()[1].eq("9ee507fc4357d7ee16a5d8901bedcd103f23c17d")
+                    && t.as_slice()[2].eq("euc")));
                 Ok(())
             }
 
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn name() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-
-                    assert!(
-                        event
-                            .tags
-                            .iter()
-                            .any(|t| t.as_slice()[0].eq("name")
-                                && t.as_slice()[1].eq("example-name"))
-                    );
-                }
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn alt() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-
-                    assert!(event.tags.iter().any(|t| t.as_slice()[0].eq("alt")
-                        && t.as_slice()[1].eq("git repository: example-name")));
-                }
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn description() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-
-                    assert!(event.tags.iter().any(|t| t.as_slice()[0].eq("description")
-                        && t.as_slice()[1].eq("example-description")));
-                }
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn git_server() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-
-                    assert!(
-                        event.tags.iter().any(|t| t.as_slice()[0].eq("clone")
-                            && t.as_slice()[1].eq("https://git.myhosting.com/my-repo.git")) /* todo check it defaults to origin */
-                    );
-                }
-                Ok(())
-            }
-
-            #[tokio::test]
-            #[serial]
-            async fn relays() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-                    let relays_tag = event
+            async fn name(#[future] scenario: TagsAsSpecifiedScenario) -> Result<()> {
+                let s = scenario.await;
+                assert!(
+                    s.event
                         .tags
                         .iter()
-                        .find(|t| t.as_slice()[0].eq("relays"))
-                        .unwrap()
-                        .as_slice();
-                    assert_eq!(relays_tag[1], "ws://localhost:8055",);
-                    assert_eq!(relays_tag[2], "ws://localhost:8056",);
-                }
+                        .any(|t| t.as_slice()[0].eq("name") && t.as_slice()[1].eq("example-name"))
+                );
                 Ok(())
             }
 
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn web() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-                    let web_tag = event
-                        .tags
-                        .iter()
-                        .find(|t| t.as_slice()[0].eq("web"))
-                        .unwrap()
-                        .as_slice();
-                    assert_eq!(web_tag[1], "https://exampleproject.xyz",);
-                    assert_eq!(web_tag[2], "https://gitworkshop.dev/123",);
-                }
+            async fn alt(#[future] scenario: TagsAsSpecifiedScenario) -> Result<()> {
+                let s = scenario.await;
+                assert!(s.event.tags.iter().any(|t| t.as_slice()[0].eq("alt")
+                    && t.as_slice()[1].eq("git repository: example-name")));
                 Ok(())
             }
 
+            #[rstest]
             #[tokio::test]
             #[serial]
-            async fn maintainers() -> Result<()> {
-                let (_, _, r53, r55, r56, r57) = prep_run_init().await?;
-                for relay in [&r53, &r55, &r56, &r57] {
-                    let event: &nostr::Event = relay
-                        .events
-                        .iter()
-                        .find(|e| e.kind.eq(&Kind::GitRepoAnnouncement))
-                        .unwrap();
-                    let maintainers_tag = event
+            async fn description(#[future] scenario: TagsAsSpecifiedScenario) -> Result<()> {
+                let s = scenario.await;
+                assert!(
+                    s.event
                         .tags
                         .iter()
-                        .find(|t| t.as_slice()[0].eq("maintainers"))
-                        .unwrap()
-                        .as_slice();
-                    assert_eq!(maintainers_tag[1], TEST_KEY_1_KEYS.public_key().to_string());
-                }
+                        .any(|t| t.as_slice()[0].eq("description")
+                            && t.as_slice()[1].eq("example-description"))
+                );
+                Ok(())
+            }
+
+            #[rstest]
+            #[tokio::test]
+            #[serial]
+            async fn git_server(#[future] scenario: TagsAsSpecifiedScenario) -> Result<()> {
+                let s = scenario.await;
+                assert!(
+                    s.event.tags.iter().any(|t| t.as_slice()[0].eq("clone")
+                        && t.as_slice()[1].eq("https://git.myhosting.com/my-repo.git")) /* todo check it defaults to origin */
+                );
+                Ok(())
+            }
+
+            #[rstest]
+            #[tokio::test]
+            #[serial]
+            async fn relays(#[future] scenario: TagsAsSpecifiedScenario) -> Result<()> {
+                let s = scenario.await;
+                let relays_tag = s
+                    .event
+                    .tags
+                    .iter()
+                    .find(|t| t.as_slice()[0].eq("relays"))
+                    .unwrap()
+                    .as_slice();
+                assert_eq!(relays_tag[1], "ws://localhost:8055",);
+                assert_eq!(relays_tag[2], "ws://localhost:8056",);
+                Ok(())
+            }
+
+            #[rstest]
+            #[tokio::test]
+            #[serial]
+            async fn web(#[future] scenario: TagsAsSpecifiedScenario) -> Result<()> {
+                let s = scenario.await;
+                let web_tag = s
+                    .event
+                    .tags
+                    .iter()
+                    .find(|t| t.as_slice()[0].eq("web"))
+                    .unwrap()
+                    .as_slice();
+                assert_eq!(web_tag[1], "https://exampleproject.xyz",);
+                assert_eq!(web_tag[2], "https://gitworkshop.dev/123",);
+                Ok(())
+            }
+
+            #[rstest]
+            #[tokio::test]
+            #[serial]
+            async fn maintainers(#[future] scenario: TagsAsSpecifiedScenario) -> Result<()> {
+                let s = scenario.await;
+                let maintainers_tag = s
+                    .event
+                    .tags
+                    .iter()
+                    .find(|t| t.as_slice()[0].eq("maintainers"))
+                    .unwrap()
+                    .as_slice();
+                assert_eq!(maintainers_tag[1], TEST_KEY_1_KEYS.public_key().to_string());
                 Ok(())
             }
         }

@@ -13,6 +13,19 @@ mod fetch;
 mod list;
 mod push;
 
+// Scenario result structs - hold immutable state from expensive setup
+// operations
+
+#[derive(Clone)]
+pub struct TwoBranchesScenario {
+    pub main_commit_id: String,
+    pub vnext_commit_id: String,
+    pub main_on_server: bool,
+    pub vnext_on_server: bool,
+    pub main_remote_ref_matches: bool,
+    pub vnext_remote_ref_matches: bool,
+}
+
 static NOSTR_REMOTE_NAME: &str = "nostr";
 static STATE_KIND: nostr::Kind = Kind::Custom(30618);
 
