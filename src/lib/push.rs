@@ -444,7 +444,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         }
     }
     if !to_try.is_empty() || !repo_grasps.is_empty() {
-        println!(
+        eprintln!(
             "pushing proposal refs to {}",
             if repo_ref.maintainers.contains(&user_ref.public_key) {
                 "repository git servers"
@@ -457,7 +457,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
             }
         );
     } else {
-        println!(
+        eprintln!(
             "The repository doesn't list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request."
         );
     }
@@ -550,7 +550,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
                         git_ref = Some(git_ref_or_branch_name);
                         break;
                     }
-                    println!("invalid clone url");
+                    eprintln!("invalid clone url");
                 }
                 continue;
             }
@@ -615,7 +615,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         } else {
             untried_user_grasp_servers
         };
-        println!(
+        eprintln!(
             "{} personal-fork so we can push commits to your prefered grasp servers",
             if user_repo_ref.is_some() {
                 "Updating"
@@ -690,7 +690,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         }
         // the loop with continue with the grasp servers
     };
-    println!(
+    eprintln!(
         "posting {}",
         if events.iter().any(|e| e.kind.eq(&Kind::GitStatusClosed)) {
             "proposal revision as new PR event, and a close status for the old patch"
