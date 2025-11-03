@@ -516,11 +516,7 @@ async fn save_to_git_config(
                 password: _,
                 npub: _,
             } => {
-                if nsec.contains("ncryptsec") {
-                    eprintln!("consider manually setting git config nostr.nsec to: {nsec}");
-                } else {
-                    eprintln!("consider manually setting git config nostr.nsec");
-                }
+                eprintln!("consider manually setting git config nostr.nsec to: {nsec}");
             }
             SignerInfo::Bunker {
                 bunker_uri,
