@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - Fix Account Creation on NixOS
+
+### Fixed
+
+- **NIP-46 bunker url privacy** tag bunker pubkey rather than user pubkey to communicate with bunker
+- **Create account** show nsec for manually setting nostr.nsec git config when not able to set global git config
+
 ## [2.0.0] - Pull Request support
 
 ### Breaking Changes
