@@ -77,13 +77,8 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     let term = console::Term::stderr();
 
-    let remote_states = list_from_remotes(
-        &term,
-        &git_repo,
-        &repo_ref.git_server,
-        &decoded_nostr_url,
-        &repo_ref.grasp_servers(),
-    );
+    let remote_states =
+        list_from_remotes(&term, &git_repo, &repo_ref.git_server, &decoded_nostr_url);
 
     let missing_refs =
         fetch_missing_refs(&git_repo, &nostr_state, &remote_states, &decoded_nostr_url);

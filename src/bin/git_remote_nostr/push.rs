@@ -75,7 +75,6 @@ pub async fn run_push(
             git_repo,
             &repo_ref.git_server,
             &repo_ref.to_nostr_git_url(&None),
-            &repo_ref.grasp_servers(),
         )
     });
 

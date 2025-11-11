@@ -31,7 +31,6 @@ pub async fn run_list(
         git_repo,
         &repo_ref.git_server,
         &repo_ref.to_nostr_git_url(&None),
-        &repo_ref.grasp_servers(),
     );
 
     let mut state = if let Some(nostr_state) = nostr_state {

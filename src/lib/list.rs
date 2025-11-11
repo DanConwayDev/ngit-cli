@@ -9,7 +9,7 @@ use crate::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
     },
-    repo_ref::is_grasp_server_in_list,
+    repo_ref::is_grasp_server_clone_url,
     utils::{Direction, get_read_protocols_to_try, join_with_and, set_protocol_preference},
 };
 
@@ -18,12 +18,11 @@ pub fn list_from_remotes(
     git_repo: &Repo,
     git_servers: &Vec<String>,
     decoded_nostr_url: &NostrUrlDecoded,
-    grasp_servers: &[String],
 ) -> HashMap<String, (HashMap<String, String>, bool)> {
     let mut remote_states = HashMap::new();
     let mut errors = HashMap::new();
     for url in git_servers {
-        let is_grasp_server = is_grasp_server_in_list(url, grasp_servers);
+        let is_grasp_server = is_grasp_server_clone_url(url);
         match list_from_remote(term, git_repo, url, decoded_nostr_url, is_grasp_server) {
             Err(error) => {
                 errors.insert(url, error);
@@ -72,8 +71,7 @@ pub fn list_from_remote(
         match res {
             Ok(state) => {
                 remote_state = Some(state);
-                term.clear_last_lines(1)?;
-                if !failed_protocols.is_empty() {
+                if !is_grasp_server && !failed_protocols.is_empty() {
                     term.write_line(
                         format!(
                             "list: succeeded over {protocol} from {}",
@@ -87,27 +85,27 @@ pub fn list_from_remote(
                 break;
             }
             Err(error) => {
-                term.clear_last_lines(1)?;
-                term.write_line(&format!(
-                    "list: {formatted_url} failed over {protocol}{}: {error}",
-                    if protocol == &ServerProtocol::Ssh {
-                        if let Some(ssh_key_file) = &decoded_nostr_url.ssh_key_file_path() {
-                            format!(" with ssh key from {ssh_key_file}")
+                if is_grasp_server {
+                    term.write_line(&format!("list: failed: {error}"))?;
+                } else {
+                    term.write_line(&format!(
+                        "list: {formatted_url} failed over {protocol}{}: {error}",
+                        if protocol == &ServerProtocol::Ssh {
+                            if let Some(ssh_key_file) = &decoded_nostr_url.ssh_key_file_path() {
+                                format!(" with ssh key from {ssh_key_file}")
+                            } else {
+                                String::new()
+                            }
                         } else {
                             String::new()
                         }
-                    } else {
-                        String::new()
-                    }
-                ))?;
+                    ))?;
+                }
                 failed_protocols.push(protocol);
             }
         }
     }
     if let Some(remote_state) = remote_state {
-        if failed_protocols.is_empty() {
-            term.clear_last_lines(1)?;
-        }
         Ok(remote_state)
     } else {
         let error = anyhow!(
@@ -120,7 +118,9 @@ pub fn list_from_remote(
                 ""
             },
         );
-        term.write_line(format!("list: {error}").as_str())?;
+        if !is_grasp_server {
+            term.write_line(format!("list: {error}").as_str())?;
+        }
         Err(error)
     }
 }

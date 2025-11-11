@@ -42,7 +42,7 @@ mod without_state_announcement {
             let mut p = cli_tester_after_fetch(&git_repo)?;
             p.send_line("list")?;
             p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-            p.expect("list: connecting...\r\n\r\r\r")?;
+            p.expect("list: connecting...\r\n\r")?;
             // println!("{}", p.expect_eventually("\r\n\r\n")?);
             let res = p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
@@ -122,7 +122,7 @@ mod with_state_announcement {
                 p.expect(
                     format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
                 )?;
-                p.expect("list: connecting...\r\n\r\r\r")?;
+                p.expect("list: connecting...\r\n\r")?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;
                 p.exit()?;
@@ -206,7 +206,7 @@ mod with_state_announcement {
                 p.expect(
                     format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
                 )?;
-                p.expect("list: connecting...\r\n\r\r\r")?;
+                p.expect("list: connecting...\r\n\r")?;
                 p.expect(
                     format!(
                         "WARNING: {source_path} refs/heads/main is out of sync with nostr \r\n"
@@ -293,7 +293,7 @@ mod with_state_announcement {
                 p.expect(
                     format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
                 )?;
-                p.expect("list: connecting...\r\n\r\r\r")?;
+                p.expect("list: connecting...\r\n\r")?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;
 
