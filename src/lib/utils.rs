@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use git2::Repository;
 use nostr::nips::nip19::ToBech32;
-use nostr_sdk::{Event, EventId, Kind, PublicKey, Url};
+use nostr_sdk::{Event, EventId, Kind, PublicKey};
 
 use crate::{
     client::{
@@ -26,19 +26,38 @@ use crate::{
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status,
         is_event_proposal_root_for_branch, status_kinds,
     },
-    repo_ref::RepoRef,
+    repo_ref::{RepoRef, extract_npub, is_grasp_server_clone_url},
 };
 
-pub fn get_short_git_server_name(git_repo: &Repo, url: &str) -> std::string::String {
-    if let Ok(name) = get_remote_name_by_url(&git_repo.git_repo, url) {
-        return name;
-    }
-    if let Ok(url) = Url::parse(url) {
-        if let Some(domain) = url.domain() {
-            return domain.to_string();
+pub fn get_short_git_server_name(url: &str) -> std::string::String {
+    // Check if this is a grasp server URL
+    if is_grasp_server_clone_url(url) {
+        // Try to extract and format the grasp server URL
+        if let Ok(npub) = extract_npub(url) {
+            // Parse the URL to get the domain and identifier
+            if let Ok(clone_url) = CloneUrl::from_str(url) {
+                let domain = clone_url.domain();
+                let path = clone_url.short_name();
+
+                // Extract the identifier from the path (after /{npub}/)
+                if let Some(after_npub) = path.split(&format!("/{}/", npub)).nth(1) {
+                    // Truncate npub to show first 10 and last 5 characters
+                    let truncated_npub = if npub.len() > 20 {
+                        format!("{}...{}", &npub[..4], &npub[npub.len() - 5..])
+                    } else {
+                        npub.to_string()
+                    };
+
+                    return format!("{}/{}/{}", domain, truncated_npub, after_npub);
+                }
+            }
         }
     }
-    url.to_string()
+
+    // Fall back to default behavior for non-grasp server URLs
+    CloneUrl::from_str(url)
+        .map(|u| u.short_name())
+        .unwrap_or_else(|_| url.to_string())
 }
 
 pub fn get_remote_name_by_url(git_repo: &Repository, url: &str) -> Result<String> {

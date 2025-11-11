@@ -520,7 +520,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
 
     for (url, (remote_state, is_grasp_server)) in list_outputs {
         let is_grasp_server = is_grasp_server.to_owned();
-        let short_name = get_short_git_server_name(git_repo, url);
+        let short_name = get_short_git_server_name(url);
         let mut refspecs_for_remote = vec![];
         for refspec in refspecs {
             let (from, to) = refspec_to_from_to(refspec)?;

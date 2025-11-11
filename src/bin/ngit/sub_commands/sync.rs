@@ -84,7 +84,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         fetch_missing_refs(&git_repo, &nostr_state, &remote_states, &decoded_nostr_url);
 
     for (url, (remote_state, is_grasp_server)) in &remote_states {
-        let remote_name = get_short_git_server_name(&git_repo, url);
+        let remote_name = get_short_git_server_name(url);
         let mut refspecs = vec![];
         // delete ref from remote
         let mut not_deleted = vec![];

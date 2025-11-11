@@ -181,7 +181,7 @@ pub fn push_to_remote_url(
                 let existing_lines = reporter.count_all_existing_lines();
                 reporter.update_reference_errors.push(format!(
                     "WARNING: {} failed to push {name} error: {error}",
-                    get_short_git_server_name(git_repo, git_server_url),
+                    get_short_git_server_name(git_server_url),
                 ));
                 reporter.write_all(existing_lines);
             }

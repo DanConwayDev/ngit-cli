@@ -39,7 +39,7 @@ pub async fn run_list(
         let remote_issues = identify_remote_sync_issues(git_repo, &nostr_state, &remote_states);
 
         // Generate and print warnings
-        let warnings = generate_remote_sync_warnings(git_repo, &remote_issues, &remote_states);
+        let warnings = generate_remote_sync_warnings(&remote_issues, &remote_states);
         for warning in warnings {
             term.write_line(&warning)?;
         }

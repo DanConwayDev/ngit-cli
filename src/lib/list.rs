@@ -237,7 +237,7 @@ pub fn identify_remote_sync_issues(
 
     for (name, value) in &nostr_state.state {
         for (url, (remote_state, _is_grasp_server)) in remote_states {
-            let remote_name = get_short_git_server_name(git_repo, url);
+            let remote_name = get_short_git_server_name(url);
             let issues = remote_issues.entry(remote_name.clone()).or_default();
 
             let is_branch = name.starts_with("refs/heads/");
@@ -416,7 +416,6 @@ pub fn format_ref_issue_simple(
 
 /// Generate warning messages for remote sync issues
 pub fn generate_remote_sync_warnings(
-    git_repo: &Repo,
     remote_issues: &HashMap<String, RemoteIssues>,
     remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
 ) -> Vec<String> {
@@ -430,7 +429,7 @@ pub fn generate_remote_sync_warnings(
         // Find remote state for this remote
         let remote_state = remote_states
             .iter()
-            .find(|(url, _)| &get_short_git_server_name(git_repo, url) == remote_name)
+            .find(|(url, _)| &get_short_git_server_name(url) == remote_name)
             .map(|(_, (state, _))| state);
 
         if let Some(state) = remote_state {
