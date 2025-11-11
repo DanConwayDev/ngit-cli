@@ -8,15 +8,16 @@ use ngit::{
     fetch::fetch_from_git_server,
     git::{self},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
-    list::{get_ahead_behind, list_from_remotes},
+    list::{generate_remote_sync_warnings, identify_remote_sync_issues, list_from_remotes},
     login::get_curent_user,
     repo_ref::{self},
-    utils::{get_all_proposals, get_open_or_draft_proposals, get_short_git_server_name},
+    utils::{get_all_proposals, get_open_or_draft_proposals},
 };
 use repo_ref::RepoRef;
 
 use crate::{fetch::make_commits_for_proposal, git::Repo};
 
+#[allow(clippy::too_many_lines)]
 pub async fn run_list(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -34,33 +35,15 @@ pub async fn run_list(
     );
 
     let mut state = if let Some(nostr_state) = nostr_state {
-        for (name, value) in &nostr_state.state {
-            for (url, (remote_state, _is_grasp_server)) in &remote_states {
-                let remote_name = get_short_git_server_name(git_repo, url);
-                if let Some(remote_value) = remote_state.get(name) {
-                    if value.ne(remote_value) {
-                        term.write_line(
-                            format!(
-                                "WARNING: {remote_name} {name} is {} nostr ",
-                                if let Ok((ahead, behind)) =
-                                    get_ahead_behind(git_repo, value, remote_value)
-                                {
-                                    format!("{} ahead {} behind", ahead.len(), behind.len())
-                                } else {
-                                    "out of sync with".to_string()
-                                }
-                            )
-                            .as_str(),
-                        )?;
-                    }
-                } else {
-                    term.write_line(
-                        format!("WARNING: {remote_name} {name} is missing but tracked on nostr")
-                            .as_str(),
-                    )?;
-                }
-            }
+        // Identify sync issues using shared abstraction
+        let remote_issues = identify_remote_sync_issues(git_repo, &nostr_state, &remote_states);
+
+        // Generate and print warnings
+        let warnings = generate_remote_sync_warnings(git_repo, &remote_issues, &remote_states);
+        for warning in warnings {
+            term.write_line(&warning)?;
         }
+
         nostr_state.state
     } else {
         let (state, _is_grasp_server) = repo_ref

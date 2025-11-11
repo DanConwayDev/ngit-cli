@@ -208,10 +208,7 @@ mod with_state_announcement {
                 )?;
                 p.expect("list: connecting...\r\n\r")?;
                 p.expect(
-                    format!(
-                        "WARNING: {source_path} refs/heads/main is out of sync with nostr \r\n"
-                    )
-                    .as_str(),
+                    format!("WARNING: {source_path} is out of sync. main out of sync\r\n").as_str(),
                 )?;
 
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
