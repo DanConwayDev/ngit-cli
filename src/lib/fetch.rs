@@ -27,10 +27,23 @@ pub fn fetch_from_git_server(
     term: &console::Term,
     is_grasp_server: bool,
 ) -> Result<()> {
-    let already_have_oids = oids
-        .iter()
-        .all(|oid| git_repo.does_commit_exist(oid).is_ok_and(|outcome| outcome));
-    if already_have_oids {
+    // Check which OIDs are missing, invalid, or annotated tags
+    let mut missing_oids: Vec<&String> = Vec::new();
+
+    for oid in oids {
+        // First check if it's a valid OID format
+        if let Ok(oid_obj) = git2::Oid::from_str(oid) {
+            // Skip annotated tags (they point to tag objects, not commits)
+            if git_repo.git_repo.find_tag(oid_obj).is_err() {
+                // Check if commit exists
+                if let Ok(false) = git_repo.does_commit_exist(oid) {
+                    missing_oids.push(oid)
+                }
+            }
+        }
+    }
+
+    if missing_oids.is_empty() {
         return Ok(());
     }
 
