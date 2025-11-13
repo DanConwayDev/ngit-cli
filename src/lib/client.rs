@@ -195,7 +195,7 @@ impl Connect for Client {
         if !relay.is_connected() {
             #[allow(clippy::large_futures)]
             relay
-                .try_connect(std::time::Duration::from_secs(LONG_TIMEOUT))
+                .try_connect(std::time::Duration::from_secs(long_timeout()))
                 .await?;
         }
 
@@ -278,7 +278,7 @@ impl Connect for Client {
         let relays_map = self.client.relays().await;
 
         // Static timeout for get_events_per_relay (no adaptive timeout here)
-        let static_timeout = Arc::new(AtomicU64::new(LONG_TIMEOUT));
+        let static_timeout = Arc::new(AtomicU64::new(long_timeout()));
 
         let futures: Vec<_> = relays
             .clone()
@@ -385,7 +385,7 @@ impl Connect for Client {
 
         // Track current timeout value for progress bar display (starts at LONG,
         // switches to SHORT)
-        let current_timeout = Arc::new(AtomicU64::new(LONG_TIMEOUT));
+        let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
 
         let mut processed_relays = HashSet::new();
 
@@ -527,7 +527,7 @@ impl Connect for Client {
                         let timeout_future = async {
                             // Poll for timeout or SUCCESS_THRESHOLD success threshold
                             let check_interval = Duration::from_millis(100);
-                            let long_timeout_end = tokio::time::Instant::now() + Duration::from_secs(LONG_TIMEOUT);
+                            let long_timeout_end = tokio::time::Instant::now() + Duration::from_secs(long_timeout());
 
                             loop {
                                 // Check if SUCCESS_THRESHOLD of relays have succeeded
@@ -567,7 +567,7 @@ impl Connect for Client {
                             }
                             timeout_type = timeout_future => {
                                 Err(anyhow!("timeout after {}s timeout",
-                                    if timeout_type == "long" { LONG_TIMEOUT } else { short_timeout() }))
+                                    if timeout_type == "long" { long_timeout() } else { short_timeout() }))
                             }
                         };
 
@@ -731,12 +731,19 @@ impl Connect for Client {
     }
 }
 
-static LONG_TIMEOUT: u64 = 45;
 static SUCCESS_THRESHOLD: f64 = 0.5; // 50% of relays must succeed to switch to short timeout
+
+fn long_timeout() -> u64 {
+    if std::env::var("NGITTEST").is_ok() {
+        1
+    } else {
+        45
+    }
+}
 
 fn short_timeout() -> u64 {
     if std::env::var("NGITTEST").is_ok() {
-        3
+        1
     } else {
         7
     }
@@ -751,7 +758,7 @@ async fn get_events_of(
 
     let mut retry_delay = Duration::from_secs(2);
     let start_time = std::time::Instant::now();
-    let max_timeout = Duration::from_secs(LONG_TIMEOUT);
+    let max_timeout = Duration::from_secs(long_timeout());
     let mut last_error = None;
     let mut attempt_num = 0;
     let dim = Style::new().color256(247);
@@ -865,7 +872,7 @@ async fn get_events_of(
             .fetch_events(
                 filter,
                 // Use a very long timeout; actual timeout is controlled by outer tokio::select!
-                std::time::Duration::from_secs(LONG_TIMEOUT),
+                std::time::Duration::from_secs(long_timeout()),
                 ReqExitPolicy::ExitOnEOSE,
             )
             .await
