@@ -11,7 +11,6 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use auth_git2::GitAuthenticator;
-use console::Style;
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use nostr::hashes::sha1::Hash as Sha1Hash;
@@ -140,9 +139,8 @@ pub async fn list_from_remotes(
             let current_timeout_clone = current_timeout.clone();
             let progress_reporter_clone = progress_reporter.clone();
             let decoded_nostr_url = decoded_nostr_url.clone();
-            
+
             async move {
-                let dim = Style::new().color256(247);
                 let server_name = get_short_git_server_name(&url);
 
                 let pb = if std::env::var("NGITTEST").is_err() {
@@ -151,10 +149,12 @@ pub async fn list_from_remotes(
                             let pb = progress_reporter_clone.add(
                                 ProgressBar::new(1)
                                     .with_prefix(
-                                        dim.apply_to(format!(
+                                        console::style(format!(
                                             "{: <server_column_width$} connecting",
                                             &server_name
                                         ))
+                                        .for_stderr()
+                                        .yellow()
                                         .to_string(),
                                     )
                                     .with_style(style),
@@ -177,9 +177,9 @@ pub async fn list_from_remotes(
                     if let Some(pb) = pb {
                         pb.set_style(git_server_pb_after_style(false));
                         pb.set_prefix(
-                            Style::new()
-                                .color256(247)
-                                .apply_to(format!("{: <server_column_width$}", server_name))
+                            console::style(format!("{: <server_column_width$}", server_name))
+                                .for_stderr()
+                                .dim()
                                 .to_string(),
                         );
                         pb.finish_with_message(
@@ -196,7 +196,7 @@ pub async fn list_from_remotes(
                 let url_clone = url.clone();
                 let decoded_nostr_url_clone = decoded_nostr_url.clone();
                 let pb_clone = pb.clone();
-                
+
                 let list_future = async move {
                     match tokio::task::spawn_blocking(move || {
                         // Re-open repo in blocking thread (git2::Repository is not Send)
@@ -204,7 +204,7 @@ pub async fn list_from_remotes(
                             Some(path) => Repo::from_path(&path).ok(),
                             None => None,
                         };
-                        
+
                         match git_repo {
                             Some(ref repo) => list_from_remote_sync(
                                 repo,
@@ -283,7 +283,7 @@ pub async fn list_from_remotes(
                             temp_states.insert(url.clone(), (state.clone(), is_grasp_server));
                             let remote_issues = identify_remote_sync_issues(git_repo, nostr_state, &temp_states);
                             let warnings = generate_remote_sync_warnings(&remote_issues, &temp_states);
-                            
+
                             if warnings.is_empty() {
                                 "in sync".to_string()
                             } else {
@@ -313,9 +313,9 @@ pub async fn list_from_remotes(
                         if let Some(pb) = pb {
                             pb.set_style(git_server_pb_after_style(is_success));
                             pb.set_prefix(
-                                Style::new()
-                                    .color256(247)
-                                    .apply_to(format!("{: <server_column_width$}", &server_name))
+                                console::style(format!("{: <server_column_width$}", &server_name))
+                                    .for_stderr()
+                                    .dim()
                                     .to_string(),
                             );
                             pb.finish_with_message(message_style.to_string());

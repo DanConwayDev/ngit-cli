@@ -455,7 +455,6 @@ impl Connect for Client {
                     let progress_reporter_clone = progress_reporter.clone();
                     let total_relays_clone = total_relays;
                     async move {
-                        let dim = Style::new().color256(247);
                         let relay_column_width = request.relay_column_width;
 
                         let relay_url = request
@@ -467,10 +466,10 @@ impl Connect for Client {
                             let pb = progress_reporter_clone.add(
                                 ProgressBar::new(1)
                                     .with_prefix(
-                                        dim.apply_to(format!(
+                                        format!(
                                             "{: <relay_column_width$} connecting",
                                             &relay_url
-                                        ))
+                                        )
                                         .to_string(),
                                     )
                                     .with_style(pb_style(current_timeout_clone.clone())?),
@@ -681,6 +680,7 @@ impl Connect for Client {
                             format!("fetching... updates: {report}")
                         },
                     ))
+                    .for_stderr()
                     .to_string(),
                 );
             }
@@ -713,18 +713,16 @@ impl Connect for Client {
         }
         if let Some(pb) = pb {
             pb.set_style(pb_after_style(true));
-            pb.set_prefix(
-                dim.apply_to(format!(
-                    "{: <relay_column_width$} {}",
-                    relay_url,
-                    if report.to_string().is_empty() {
-                        "no new events".to_string()
-                    } else {
-                        format!("new events: {report}")
-                    },
-                ))
-                .to_string(),
-            );
+            pb.set_prefix(format!(
+                "{} {}",
+                dim.apply_to(format!("{: <relay_column_width$}", &relay_url))
+                    .for_stderr(),
+                if report.to_string().is_empty() {
+                    "no new events".to_string()
+                } else {
+                    format!("new events: {report}")
+                },
+            ));
             pb.finish_with_message("");
         }
         Ok(report)
@@ -805,7 +803,7 @@ async fn get_events_of(
                 pb.set_message(format!(
                     "{} {}",
                     console::style("connection failed").for_stderr().red(),
-                    dim.apply_to(retry_msg)
+                    dim.apply_to(retry_msg).for_stderr()
                 ));
             }
             tokio::time::sleep(retry_delay).await;
@@ -831,7 +829,7 @@ async fn get_events_of(
                     pb.set_message(format!(
                         "{} {}",
                         console::style("connection failed").for_stderr().red(),
-                        dim.apply_to(retry_msg)
+                        dim.apply_to(retry_msg).for_stderr()
                     ));
                 }
 
@@ -1113,6 +1111,7 @@ fn pb_style(current_timeout: Arc<AtomicU64>) -> Result<ProgressStyle> {
                             w,
                             "{}",
                             dim.apply_to(format!("timeout in {:.1}s", timeout - elapsed))
+                                .for_stderr()
                         )
                         .unwrap();
                     }
