@@ -157,17 +157,13 @@ async fn fetching_with_report_for_helper(
 ) -> Result<()> {
     let term = console::Term::stderr();
     term.write_line("nostr: fetching...")?;
-    let (relay_reports, progress_reporter) = client
+    let (relay_reports, _progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
             Some(trusted_maintainer_coordinate),
             &HashSet::new(),
         )
         .await?;
-    if !relay_reports.iter().any(std::result::Result::is_err) {
-        let _ = progress_reporter.clear();
-        term.clear_last_lines(1)?;
-    }
     let report = consolidate_fetch_reports(relay_reports);
     if report.to_string().is_empty() {
         term.write_line("nostr: no updates")?;
