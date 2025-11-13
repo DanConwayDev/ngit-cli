@@ -8,7 +8,7 @@ mod without_state_announcement {
     #[serial]
     async fn lists_head_and_2_branches_and_commit_ids_from_git_server() -> Result<()> {
         let source_git_repo = prep_git_repo()?;
-        let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+        let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
         std::fs::write(source_git_repo.dir.join("commit.md"), "some content")?;
         let main_commit_id = source_git_repo.stage_and_commit("commit.md")?;
 
@@ -41,8 +41,7 @@ mod without_state_announcement {
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = cli_tester_after_fetch(&git_repo)?;
             p.send_line("list")?;
-            p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-            p.expect("list: connecting...\r\n\r")?;
+            p.expect("git servers: listing refs...\r\n")?;
             // println!("{}", p.expect_eventually("\r\n\r\n")?);
             let res = p.expect_eventually("\r\n\r\n")?;
             p.exit()?;
@@ -90,7 +89,7 @@ mod with_state_announcement {
         #[serial]
         async fn lists_head_and_2_branches_and_commit_ids_announcement() -> Result<()> {
             let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
-            let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+            let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
             let main_commit_id = source_git_repo.get_tip_of_local_branch("main")?;
             let example_commit_id = source_git_repo.get_tip_of_local_branch("example-branch")?;
@@ -119,10 +118,7 @@ mod with_state_announcement {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
-                p.expect(
-                    format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
-                )?;
-                p.expect("list: connecting...\r\n\r")?;
+                p.expect("git servers: listing refs...\r\n")?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;
                 p.exit()?;
@@ -163,7 +159,7 @@ mod with_state_announcement {
         #[serial]
         async fn anouncement_state_is_used() -> Result<()> {
             let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
-            let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+            let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
             let main_original_commit_id = source_git_repo.get_tip_of_local_branch("main")?;
 
             {
@@ -203,13 +199,7 @@ mod with_state_announcement {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
-                p.expect(
-                    format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
-                )?;
-                p.expect("list: connecting...\r\n\r")?;
-                p.expect(
-                    format!("WARNING: {source_path} is out of sync. main out of sync\r\n").as_str(),
-                )?;
+                p.expect("git servers: listing refs...\r\n")?;
 
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;
@@ -255,7 +245,7 @@ mod with_state_announcement {
         #[serial]
         async fn open_proposal_listed_in_prs_namespace() -> Result<()> {
             let (state_event, source_git_repo) = generate_repo_with_state_event().await?;
-            let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+            let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
             let main_commit_id = source_git_repo.get_tip_of_local_branch("main")?;
             let example_commit_id = source_git_repo.get_tip_of_local_branch("example-branch")?;
@@ -287,10 +277,7 @@ mod with_state_announcement {
 
                 let mut p = cli_tester_after_fetch(&git_repo)?;
                 p.send_line("list")?;
-                p.expect(
-                    format!("fetching {source_path} ref list over filesystem...\r\n").as_str(),
-                )?;
-                p.expect("list: connecting...\r\n\r")?;
+                p.expect("git servers: listing refs...\r\n")?;
                 // println!("{}", p.expect_eventually("\r\n\r\n")?);
                 let res = p.expect_eventually("\r\n\r\n")?;
 

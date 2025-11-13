@@ -845,7 +845,7 @@ async fn pushes_to_all_git_servers_listed_and_ok_printed() -> Result<()> {
 async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_issued() -> Result<()>
 {
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
-    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
         Relay::new(8051, None, None),
@@ -881,8 +881,7 @@ async fn proposal_three_way_merge_commit_pushed_to_main_leads_to_status_event_is
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-        p.expect("list: connecting...\r\n")?;
+        p.expect("git servers: listing refs...\r\n")?;
         p.expect_eventually("merge commit ")?;
         // shorthand merge commit id appears in this gap
         p.expect_eventually(": create nostr proposal status event\r\n")?;
@@ -1002,7 +1001,7 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
 -> Result<()> {
     //
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
-    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
         Relay::new(8051, None, None),
@@ -1035,8 +1034,7 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-        p.expect("list: connecting...\r\n")?;
+        p.expect("git servers: listing refs...\r\n")?;
         p.expect_eventually(format!(
             "fast-forward merge: create nostr proposal status event for {branch_name}\r\n"
         ))?;
@@ -1184,7 +1182,7 @@ async fn proposal_fast_forward_merge_commits_pushed_to_main_leads_to_status_even
 async fn proposal_commits_applied_and_pushed_to_main_leads_to_status_event_issued() -> Result<()> {
     //
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
-    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
         Relay::new(8051, None, None),
         Relay::new(8052, None, None),
@@ -1222,8 +1220,7 @@ async fn proposal_commits_applied_and_pushed_to_main_leads_to_status_event_issue
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-        p.expect("list: connecting...\r\n")?;
+        p.expect("git servers: listing refs...\r\n")?;
         p.expect_eventually(format!(
             "applied commits from proposal: create nostr proposal status event for {branch_name}\r\n" ))?;
         // status updates printed here
@@ -1354,7 +1351,7 @@ async fn proposal_commits_applied_and_pushed_to_main_leads_to_status_event_issue
 #[serial]
 async fn push_2_commits_to_existing_proposal() -> Result<()> {
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
-    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
         Relay::new(8051, None, None),
@@ -1384,8 +1381,7 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
 
         let mut p = CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-        p.expect("list: connecting...\r\n\r")?;
+        p.expect("git servers: listing refs...\r\n")?;
         p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
@@ -1500,7 +1496,7 @@ async fn push_2_commits_to_existing_proposal() -> Result<()> {
 #[serial]
 async fn force_push_creates_proposal_revision() -> Result<()> {
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
-    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
         Relay::new(8051, None, None),
@@ -1539,8 +1535,7 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
         let mut p =
             CliTester::new_git_with_remote_helper_from_dir(&git_repo.dir, ["push", "--force"]);
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-        p.expect("list: connecting...\r\n")?;
+        p.expect("git servers: listing refs...\r\n")?;
         p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 
@@ -1659,7 +1654,7 @@ async fn force_push_creates_proposal_revision() -> Result<()> {
 #[serial]
 async fn push_new_pr_branch_creates_proposal() -> Result<()> {
     let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
-    let source_path = source_git_repo.dir.to_str().unwrap().to_string();
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
 
     let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
         Relay::new(8051, None, None),
@@ -1693,8 +1688,7 @@ async fn push_new_pr_branch_creates_proposal() -> Result<()> {
             ["push", "-u", "origin", branch_name],
         );
         cli_expect_nostr_fetch(&mut p)?;
-        p.expect(format!("fetching {source_path} ref list over filesystem...\r\n").as_str())?;
-        p.expect("list: connecting...\r\n\r")?;
+        p.expect("git servers: listing refs...\r\n")?;
         p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
         let output = p.expect_end_eventually()?;
 

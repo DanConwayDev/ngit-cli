@@ -69,14 +69,18 @@ pub async fn run_push(
 
     let term = console::Term::stderr();
 
-    let list_outputs = list_outputs.unwrap_or_else(|| {
+    let list_outputs = if let Some(outputs) = list_outputs {
+        outputs
+    } else {
         list_from_remotes(
             &term,
             git_repo,
             &repo_ref.git_server,
             &repo_ref.to_nostr_git_url(&None),
+            None,
         )
-    });
+        .await
+    };
 
     let existing_state = {
         // if no state events - create from first git server listed

@@ -8,7 +8,7 @@ use ngit::{
     fetch::fetch_from_git_server,
     git::{self},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
-    list::{generate_remote_sync_warnings, identify_remote_sync_issues, list_from_remotes},
+    list::list_from_remotes,
     login::get_curent_user,
     repo_ref::{self},
     utils::{get_all_proposals, get_open_or_draft_proposals},
@@ -27,23 +27,17 @@ pub async fn run_list(
 
     let term = console::Term::stderr();
 
+    term.write_line("git servers: listing refs...")?;
     let remote_states = list_from_remotes(
         &term,
         git_repo,
         &repo_ref.git_server,
         &repo_ref.to_nostr_git_url(&None),
-    );
+        nostr_state.as_ref(),
+    )
+    .await;
 
     let mut state = if let Some(nostr_state) = nostr_state {
-        // Identify sync issues using shared abstraction
-        let remote_issues = identify_remote_sync_issues(git_repo, &nostr_state, &remote_states);
-
-        // Generate and print warnings
-        let warnings = generate_remote_sync_warnings(&remote_issues, &remote_states);
-        for warning in warnings {
-            term.write_line(&warning)?;
-        }
-
         nostr_state.state
     } else {
         let (state, _is_grasp_server) = repo_ref
