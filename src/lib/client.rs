@@ -1559,6 +1559,20 @@ async fn create_relays_request(
             if let Some(git_repo_path) = git_repo_path {
                 for (id, _) in get_local_cache_database(git_repo_path)
                     .await?
+                    .negentropy_items(filter.clone())
+                    .await?
+                {
+                    existing_events.insert(id);
+                }
+            }
+            // Also check global cache for profile events to avoid re-fetching
+            if filter.kinds.as_ref().map_or(false, |kinds| {
+                kinds.iter().any(|k| {
+                    k.eq(&Kind::Metadata) || k.eq(&Kind::RelayList) || k.eq(&KIND_USER_GRASP_LIST)
+                })
+            }) {
+                for (id, _) in get_global_cache_database(git_repo_path)
+                    .await?
                     .negentropy_items(filter)
                     .await?
                 {
