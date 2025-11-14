@@ -219,10 +219,13 @@ fn get_nreq(
         let cm_result = ClientMessage::from_json(s);
         if let Ok(ClientMessage::Req {
             subscription_id,
-            filter,
+            filters,
         }) = cm_result
         {
-            return Ok((subscription_id.into_owned(), filter.into_owned()));
+            return Ok((
+                subscription_id.into_owned(),
+                filters.into_iter().next().unwrap().into_owned(),
+            ));
         }
     }
     bail!("not nostr event")

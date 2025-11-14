@@ -1296,7 +1296,7 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
                         );
                     }
                 }
-                return Ok((*id, None));
+                return Ok((id, None));
             }
             bail!(
                 "pull request update {} root event is not a pull request event",

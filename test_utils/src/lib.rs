@@ -135,7 +135,7 @@ pub fn make_event_old_or_change_user(
         .build(keys.public_key());
 
     unsigned.created_at =
-        nostr::types::Timestamp::from(nostr::types::Timestamp::now().as_u64() - how_old_in_secs);
+        nostr::types::Timestamp::from(nostr::types::Timestamp::now().as_secs() - how_old_in_secs);
     unsigned.id = Some(nostr::EventId::new(
         &keys.public_key(),
         &unsigned.created_at,
