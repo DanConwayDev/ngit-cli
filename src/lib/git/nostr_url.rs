@@ -1033,6 +1033,31 @@ mod tests {
         }
 
         #[test]
+        fn relay_hint_has_path() -> Result<()> {
+            assert_eq!(
+                format!("{}", NostrUrlDecoded {
+                    original_string: String::new(),
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            identifier: "ngit".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        },
+                        relays: vec![RelayUrl::parse("wss://nos.lol/outbox").unwrap()],
+                    },
+                    protocol: None,
+                    ssh_key_file: None,
+                    nip05: None,
+                }),
+                "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nos.lol%2Foutbox/ngit",
+            );
+            Ok(())
+        }
+
+        #[test]
         fn with_protocol() -> Result<()> {
             assert_eq!(
                 format!("{}", NostrUrlDecoded {
