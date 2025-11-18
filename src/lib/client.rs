@@ -1566,7 +1566,7 @@ async fn create_relays_request(
                 }
             }
             // Also check global cache for profile events to avoid re-fetching
-            if filter.kinds.as_ref().map_or(false, |kinds| {
+            if filter.kinds.as_ref().is_some_and(|kinds| {
                 kinds.iter().any(|k| {
                     k.eq(&Kind::Metadata) || k.eq(&Kind::RelayList) || k.eq(&KIND_USER_GRASP_LIST)
                 })
