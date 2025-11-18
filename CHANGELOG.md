@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0]
+
+### Added
+
+- **Adaptive relay timeouts**: Relay timeout is now 45 seconds initially, then 7 seconds based on successful connections for faster operations
+- **Async git list refs operation**: Made git ref list async and include sync report inline for better visibility
+- **Improved fetch reporting**: Fetch report now shows even when successful in git remote helper for better transparency
+
+### Fixed
+
+- **CLI output improvements**:
+  - Fixed line deletion during fetch operations
+  - Fixed dim coloring in CLI output
+  - Fixed out of sync grasp server CLI output
+- **Tag handling**: Don't attempt to fetch annotated tags that are already available locally
+- **Fetch reporting**: Fixed cached profile events being incorrectly shown as new
+
+### Changed
+
+- Updated to rust-nostr v0.44
+
 ## [2.0.1] - Fix Account Creation on NixOS
 
 ### Fixed
@@ -77,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.7.4] - 2025-07-16
 
 ### Fixed
+
 - Apply nip46 breaking changes as remote signers remove nip04 support
 - Apply relay connection timeout once, instead of per request batch
 - Add git server timeouts
@@ -85,24 +107,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.7.3] - 2025-06-20
 
 ### Changed
+
 - Rename ngit-relay to grasp
 
 ### Fixed
+
 - Always include HEAD in state event
 
 ## [1.7.2] - 2025-06-18
 
 ### Fixed
+
 - Fix clone when HEAD isn't in nostr state event
 
 ## [1.7.1] - 2025-06-17
 
 ### Fixed
+
 - Add support for `git://` clone urls
 
 ## [1.7.0] - 2025-06-03
 
 ### Added
+
 - Quality-of-life features for ngit-relay users
   - Detect ngit-relays and only attempt using unauthenticated http protocols
   - Better sync and less errors as nostr is the only way to push
@@ -117,33 +144,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add show npub command
 
 ### Fixed
+
 - Use newest state event found, rather than oldest
 - More resilient builds for platforms and distros
 
 ## [1.6.3] - 2025-05-12
 
 ### Fixed
+
 - Fallback to http protocol if ssh is unavailable
 
 ## [1.6.2] - 2025-05-06
 
 ### Added
+
 - Add event description for remote signing process
 
 ### Fixed
+
 - Fix custom ports use for git servers
 
 ### Changed
+
 - Bump all dependencies to latest major versions
 
 ## [1.6.1] - 2025-04-02
 
 ### Changed
+
 - Build binaries for more OSes
 
 ## [1.6.0] - 2024-12-20
 
 ### Added
+
 - Overhaul and simplify login experience
 - Add `account` api with `login`, `logout` and `export-keys` commands
 - Add sign up feature targeted at users new to nostr
@@ -152,11 +186,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expand merge types that automatically update PR status when pushed
 
 ### Changed
+
 - Don't create `maintainers.yaml` for new repos but continue to support it for existing projects
 - Remove ngit `pull`, `push` and `fetch` api to nudge users to use native git commands with git plugin
 - Bump dependencies (e.g., rust-nostr to v0.37)
 
 ### Fixed
+
 - Fix `ngit account login` from outside of a git repository
 - Add QR code border
 - Make `ngit list` prompts more intuitive
@@ -164,6 +200,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.3] - 2024-11-12
 
 ### Fixed
+
 - Fix remote signing as nip46 update has breaking changes
 - Auth to relays on requests
 - Fix `pr/` branch name prefix issue
@@ -172,12 +209,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When git-remote-nostr called directly show help instead of error
 
 ### Changed
+
 - Bump rust-nostr to v0.36
 - Replace sqlite with lmdb due to rust-nostr deprecation
 
 ## [1.5.2] - 2024-09-24
 
 ### Added
+
 - Login via nip46 QR code
 - Enable login directly in git plugin
 - Add resilience to git plugin so that a poorly formatted PR will gracefully fail
@@ -185,12 +224,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.1] - 2024-09-20
 
 ### Changed
+
 - Git plugin reports on event broadcasting
 
 ## [1.5.0] - 2024-09-18
 
 ### Added
-- New nostr url format that works better for MacOS users: `nostr://<*protocol>/<npub123>/<*relay-hint>/<identifier>` (*optional)
+
+- New nostr url format that works better for MacOS users: `nostr://<*protocol>/<npub123>/<*relay-hint>/<identifier>` (\*optional)
 - Status updates during clone, push and fetch
 - Intelligent protocol selection and fallback
   - Unless unusual protocol specified in clone url it will try in this order:
@@ -201,57 +242,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enable building binaries via nix
 
 ### Changed
+
 - Refactor into lib and bin structure
 - Bump dependencies
 
 ## [1.4.6] - 2024-09-13
 
 ### Fixed
+
 - Fix `ngit push` and `ngit pull` when on a pr branch not in the format `pr/<branch-name>(<8-chars-from-id>)`
 
 ## [1.4.5] - 2024-08-30
 
 ### Added
+
 - When clone url is ssh use auth for `list` and `fetch` as they are required
 - When clone url is ssh, fallback to https so read events don't always require auth
 
 ### Fixed
+
 - Stop asking for git server credentials when pushing `pr/` branch
 - Fix `no repo events at specified coordinates` error via rust-nostr v0.34.1 upgrade
 
 ## [1.4.4] - 2024-08-27
 
 ### Added
+
 - Include git plugin in release zip
 
 ## [1.4.3] - 2024-08-27
 
 ### Fixed
+
 - Fix clone using nostr url
 
 ## [1.4.2] - 2024-08-20
 
 ### Fixed
+
 - Only maintainers can push normal branches / tags
 
 ## [1.4.1] - 2024-08-20
 
 ### Fixed
+
 - Fix pushing tags in git-remote-nostr
 
 ## [1.4.0] - 2024-08-20
 
 ### Added
+
 - Add git-remote-nostr binary
 
 ## [1.3.1] - 2024-07-25
 
 ### Fixed
+
 - Fix(init): update maintainers.yaml if identifier or relays have changed
 
 ## [1.3.0] - 2024-07-24
 
 ### Added
+
 - NIP-46 remote signing (from Amber, etc)
 - `list` breaks down proposals by status
 - Local cache in `.git` to enable viewing proposals offline and reuse by other git clients
@@ -264,74 +316,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add euc marker per NIP-34 tweak
 
 ### Fixed
+
 - Ensure repo events of all maintainers are tagged in proposals
 - Stop filtering out very large patches
 
 ## [1.3-beta1] - 2024-07-05
 
 ### Added
+
 - Beta release for testing
 
 ## [1.2.1] - 2024-05-14
 
 ### Fixed
+
 - Fix ngit init support for multiple maintainers
 
 ## [1.2.0] - 2024-05-14
 
 ### Added
+
 - `ngit send --in-reply-to` tag any nostr notes and npubs in proposals
 - `ngit send` link to proposal on gitworkshop
 
 ### Changed
+
 - Remove unreliable relay.f7z.io from default relay set
 
 ## [1.1.2] - 2024-04-16
 
 ### Added
+
 - Improve relay timeout behaviour
 - Improve reliability via dependency upgrade
 - Build via nix in ci
 
 ### Fixed
+
 - Various reliability improvements
 
 ## [1.1.1] - 2024-03-08
 
 ### Fixed
+
 - Fix stack overflow bug when origin remote doesn't exist
 
 ## [1.1.0] - 2024-03-08
 
 ### Added
+
 - ngit send - improve proposal commit
 
 ## [1.0.0] - 2024-02-29
 
 ### Changed
+
 - Major version to indicate breaking changes, not stability
 
 ## [0.1.2] - 2024-01-31
 
 ### Added
+
 - Early release improvements
 
 ## [0.1.1] - 2024-01-26
 
 ### Added
+
 - Early release improvements
 
 ## [0.1.0] - 2024-01-23
 
 ### Added
+
 - Initial minor release
 
 ## [0.0.2] - 2023-05-23
 
 ### Added
+
 - Early development release
 
 ## [0.0.1] - 2023-05-21
 
 ### Added
+
 - Initial release
