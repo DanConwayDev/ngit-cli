@@ -911,7 +911,7 @@ impl Default for Params {
                                                          * known
                                                          * to delete all messages */
                     "wss://nos.lol".to_string(),
-                    "wss://relay.nostr.band".to_string(),
+                    "wss://nostr.land".to_string(),
                 ]
             },
             more_fallback_relays: if std::env::var("NGITTEST").is_ok() {
