@@ -1300,6 +1300,11 @@ pub async fn get_repo_ref_from_cache(
         Some(repo_coordinate.public_key),
     ))?;
 
+    // Use name/description/web from the latest event across all maintainers
+    let latest_metadata = repo_events
+        .last()
+        .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
+
     let mut events: HashMap<Nip19Coordinate, nostr::Event> = HashMap::new();
     for m in &maintainers {
         if let Some(e) = repo_events.iter().find(|e| e.pubkey.eq(m)) {
@@ -1364,6 +1369,15 @@ pub async fn get_repo_ref_from_cache(
         git_server,
         events,
         maintainers_without_annoucnement: Some(maintainers_without_annoucnement),
+        name: latest_metadata
+            .as_ref()
+            .map_or_else(|| repo_ref.name.clone(), |r| r.name.clone()),
+        description: latest_metadata
+            .as_ref()
+            .map_or_else(|| repo_ref.description.clone(), |r| r.description.clone()),
+        web: latest_metadata
+            .as_ref()
+            .map_or_else(|| repo_ref.web.clone(), |r| r.web.clone()),
         ..repo_ref
     })
 }
