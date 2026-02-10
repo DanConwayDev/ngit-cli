@@ -25,7 +25,7 @@ use crate::{
         Interactor, InteractorPrompt, Printer, PromptChoiceParms, PromptConfirmParms,
         PromptInputParms, PromptPasswordParms,
     },
-    client::{Connect, nip05_query, send_events},
+    client::{Connect, nip05_query, save_event_in_global_cache, send_events},
     git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
 };
 
@@ -123,7 +123,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
             .input(
                 PromptInputParms::default()
                     .with_prompt("nsec")
-                    .optional()
+                    .with_flag_name("--nsec")
                     .dont_report(),
             )
             .context("failed to get nsec input from interactor")?;
@@ -509,6 +509,26 @@ async fn save_to_git_config(
     if let Err(error) =
         silently_save_to_git_config(git_repo, signer_info, global).context(err_msg.clone())
     {
+        // Check if this is a read-only file system error
+        let is_readonly_error = error
+            .chain()
+            .any(|e| e.to_string().contains("Read-only file system"));
+
+        if is_readonly_error && global {
+            // In non-interactive mode, provide a clear error with --local suggestion
+            if crate::cli_interactor::Interactor::is_non_interactive() {
+                use crate::cli_interactor::cli_error;
+                return Err(cli_error(
+                    "failed to create account",
+                    &[("cause", "global git config is read-only")],
+                    &[
+                        "ngit account create --local --nsec <your-nsec>",
+                        "ngit account login --local --nsec <your-nsec>",
+                    ],
+                ));
+            }
+        }
+
         eprintln!("Error: {error:?}");
         match signer_info {
             SignerInfo::Nsec {
@@ -678,6 +698,119 @@ fn silently_save_to_git_config(
     Ok(())
 }
 
+/// Non-interactive signup function for creating a new account
+///
+/// # Arguments
+/// * `name` - Display name for the new account
+/// * `client` - Optional client for publishing metadata to relays
+/// * `save_local` - If true, save credentials to local git config only
+/// * `publish` - If true, publish metadata and relay list to relays
+///
+/// # Returns
+/// Returns a tuple of (signer, public_key, signer_info, keys) where keys can be
+/// used to display the nsec
+pub async fn signup_non_interactive(
+    name: String,
+    #[cfg(test)] client: Option<&MockConnect>,
+    #[cfg(not(test))] client: Option<&Client>,
+    save_local: bool,
+    publish: bool,
+) -> Result<(Arc<dyn NostrSigner>, PublicKey, SignerInfo, Keys)> {
+    // Generate new keypair
+    let keys = nostr::Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let public_key = keys.public_key();
+
+    let signer_info = SignerInfo::Nsec {
+        nsec,
+        password: None,
+        npub: Some(public_key.to_bech32()?),
+    };
+
+    // Save to git config
+    let git_repo = Repo::discover().ok();
+    if let Err(error) = silently_save_to_git_config(&git_repo.as_ref(), &signer_info, !save_local) {
+        let is_readonly = error
+            .chain()
+            .any(|e| e.to_string().contains("Read-only file system"));
+
+        if is_readonly && !save_local {
+            use crate::cli_interactor::cli_error;
+
+            let mut cmds: Vec<String> = match &signer_info {
+                SignerInfo::Nsec { nsec, npub, .. } => {
+                    let mut v = vec![format!("git config --global nostr.nsec {nsec}")];
+                    if let Some(npub) = npub {
+                        v.push(format!("git config --global nostr.npub {npub}"));
+                    }
+                    v
+                }
+                SignerInfo::Bunker {
+                    bunker_uri,
+                    bunker_app_key,
+                    npub,
+                } => {
+                    let mut v = vec![
+                        format!("git config --global nostr.bunker-uri {bunker_uri}"),
+                        format!("git config --global nostr.bunker-app-key {bunker_app_key}"),
+                    ];
+                    if let Some(npub) = npub {
+                        v.push(format!("git config --global nostr.npub {npub}"));
+                    }
+                    v
+                }
+            };
+            cmds.push("ngit account create --local --name <your-name>".to_string());
+
+            let cmd_refs: Vec<&str> = cmds.iter().map(String::as_str).collect();
+            return Err(cli_error(
+                "global git config is read-only. login to local repo or save git config manually",
+                &[("--local", "login scoped to this repositoriy")],
+                &cmd_refs,
+            ));
+        }
+
+        return Err(error);
+    }
+
+    let git_repo_path = if let Some(ref git_repo) = git_repo {
+        Some(git_repo.get_path()?)
+    } else {
+        None
+    };
+
+    // Build events, save to cache, and optionally publish to relays
+    if let Some(client) = client {
+        let profile = EventBuilder::metadata(&Metadata::new().name(name)).sign_with_keys(&keys)?;
+        let relay_list = EventBuilder::relay_list(
+            client
+                .get_relay_default_set()
+                .iter()
+                .map(|s| (RelayUrl::parse(s).unwrap(), None)),
+        )
+        .sign_with_keys(&keys)?;
+
+        // Save to global cache so subsequent commands don't need to fetch
+        save_event_in_global_cache(git_repo_path, &profile).await?;
+        save_event_in_global_cache(git_repo_path, &relay_list).await?;
+
+        if publish {
+            send_events(
+                client,
+                git_repo_path,
+                vec![profile, relay_list],
+                client.get_relay_default_set().clone(),
+                vec![],
+                true,
+                false,
+            )
+            .await?;
+        }
+    }
+
+    Ok((Arc::new(keys.clone()), public_key, signer_info, keys))
+}
+
 async fn signup(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
@@ -714,42 +847,22 @@ async fn signup(
                 _ => break Ok(None),
             }
         }
-        let keys = nostr::Keys::generate();
-        let nsec = keys.secret_key().to_bech32()?;
+
+        // Call the non-interactive function
+        let (signer, public_key, signer_info, _keys) = signup_non_interactive(
+            name.clone(),
+            client,
+            false, // save_local = false (will be saved globally by caller)
+            true,  // publish = true (always publish in interactive mode)
+        )
+        .await?;
+
         show_prompt_success("user display name", &name);
-        let signer_info = SignerInfo::Nsec {
-            nsec,
-            password: None,
-            npub: Some(keys.public_key().to_bech32()?),
-        };
-        let public_key = keys.public_key();
-        if let Some(client) = client {
-            let profile =
-                EventBuilder::metadata(&Metadata::new().name(name)).sign_with_keys(&keys)?;
-            let relay_list = EventBuilder::relay_list(
-                client
-                    .get_relay_default_set()
-                    .iter()
-                    .map(|s| (RelayUrl::parse(s).unwrap(), None)),
-            )
-            .sign_with_keys(&keys)?;
-            eprintln!("publishing user profile to relays");
-            send_events(
-                client,
-                None,
-                vec![profile, relay_list],
-                client.get_relay_default_set().clone(),
-                vec![],
-                true,
-                false,
-            )
-            .await?;
-        }
         eprintln!(
             "to login to other nostr clients eg. gitworkshop.dev with this account run `ngit export-keys` at any time to reveal your nostr account secret"
         );
         break Ok(Some((
-            Arc::new(keys),
+            signer,
             public_key,
             signer_info,
             // TODO factor in source

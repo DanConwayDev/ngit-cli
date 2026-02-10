@@ -15,6 +15,7 @@ use crate::{
     cli::{Cli, extract_signer_cli_arguments},
     cli_interactor::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
+        cli_error,
     },
     client::{
         Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
@@ -38,9 +39,9 @@ pub struct SubCommandArgs {
     #[arg(long, action)]
     pub(crate) no_cover_letter: bool,
     /// optional cover letter title
-    #[clap(short, long)]
+    #[clap(long)]
     pub(crate) title: Option<String>,
-    #[clap(short, long)]
+    #[clap(long)]
     /// optional cover letter description
     pub(crate) description: Option<String>,
     /// publish as Pull Request even if each commit is < 60kb
@@ -51,6 +52,83 @@ pub struct SubCommandArgs {
     pub(crate) force_patch: bool,
 }
 
+/// Validates send command arguments for non-interactive mode.
+///
+/// Returns Ok(()) if:
+/// - Interactive mode is enabled (all validation happens interactively)
+/// - Updating an existing proposal (`in_reply_to` is non-empty)
+/// - Using defaults mode (--defaults will fill in gaps)
+/// - Both title and description are provided
+///
+/// Returns an error if:
+/// - Description provided without title
+/// - Title provided without description
+/// - Missing required arguments in non-interactive mode
+fn validate_send_args(cli: &Cli, args: &SubCommandArgs) -> Result<()> {
+    // Interactive mode handles all validation interactively
+    if cli.interactive {
+        return Ok(());
+    }
+
+    // Description requires title
+    if args.description.is_some() && args.title.is_none() {
+        let message = "ngit send requires --title when --description is provided";
+        let details = vec![("--title <T>", "cover letter title")];
+        let suggestions = vec![
+            "ngit send HEAD~2 --title \"My Feature\" --description \"Details\"",
+            "ngit send --interactive",
+        ];
+        return Err(cli_error(message, &details, &suggestions));
+    }
+
+    // Title requires description
+    if args.title.is_some() && args.description.is_none() {
+        let message = "ngit send requires --description when --title is provided";
+        let details = vec![("--description <D>", "cover letter description")];
+        let suggestions = vec![
+            "ngit send HEAD~2 --title \"My Feature\" --description \"Details\"",
+            "ngit send --interactive",
+        ];
+        return Err(cli_error(message, &details, &suggestions));
+    }
+
+    // Updating existing proposal - no additional validation needed
+    if !args.in_reply_to.is_empty() {
+        return Ok(());
+    }
+
+    // Defaults mode will fill in gaps
+    if cli.defaults {
+        return Ok(());
+    }
+
+    // Both title and description provided - all good
+    if args.title.is_some() && args.description.is_some() {
+        return Ok(());
+    }
+
+    // --no-cover-letter with a range is valid (patches without cover letter)
+    if args.no_cover_letter && !args.since_or_range.is_empty() {
+        return Ok(());
+    }
+
+    // Missing required arguments for non-interactive mode
+    let message = "ngit send requires additional arguments";
+    let mut details = vec![];
+    if args.since_or_range.is_empty() {
+        details.push(("<SINCE_OR_RANGE>", "commits to send (eg. HEAD~2)"));
+    }
+    details.push(("--title <T> --description <D>", "cover letter details"));
+    details.push(("-d, --defaults", "use sensible defaults"));
+    details.push(("--interactive", "prompt for values"));
+    let suggestions = vec![
+        "ngit send HEAD~2 --title \"My Feature\" --description \"Details\"",
+        "ngit send --defaults",
+        "ngit send --interactive",
+    ];
+    Err(cli_error(message, &details, &suggestions))
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -59,6 +137,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let (main_branch_name, main_tip) = git_repo
         .get_main_or_master_branch()
         .context("the default branches (main or master) do not exist")?;
+
+    // Validate arguments early, before any network calls
+    validate_send_args(cli_args, args)?;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
@@ -82,20 +163,46 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     let mut commits: Vec<Sha1Hash> = {
         if args.since_or_range.is_empty() {
-            let branch_name = git_repo.get_checked_out_branch_name()?;
-            let proposed_commits = if branch_name.eq(main_branch_name) {
-                vec![main_tip]
+            if cli_args.interactive {
+                let branch_name = git_repo.get_checked_out_branch_name()?;
+                let proposed_commits = if branch_name.eq(main_branch_name) {
+                    vec![main_tip]
+                } else {
+                    let (_, _, ahead, _) = identify_ahead_behind(&git_repo, &None, &None)?;
+                    ahead
+                };
+                choose_commits(&git_repo, proposed_commits)?
             } else {
-                let (_, _, ahead, _) = identify_ahead_behind(&git_repo, &None, &None)?;
-                ahead
-            };
-            choose_commits(&git_repo, proposed_commits)?
+                // --defaults was validated above, so we know it's set
+                let branch_name = git_repo.get_checked_out_branch_name()?;
+                let proposed_commits = if branch_name.eq(main_branch_name) {
+                    vec![main_tip]
+                } else {
+                    let (_, _, ahead, _) = identify_ahead_behind(&git_repo, &None, &None)?;
+                    ahead
+                };
+                if proposed_commits.len() > 10 && !cli_args.force {
+                    bail!(
+                        "too many commits ({}). use --force to proceed or specify a range",
+                        proposed_commits.len()
+                    );
+                }
+                proposed_commits
+            }
         } else {
             git_repo
                 .parse_starting_commits(&args.since_or_range)
                 .context("failed to parse specified starting commit or range")?
         }
     };
+
+    // Check for too many commits with explicit range
+    if commits.len() > 10 && !cli_args.force && !cli_args.interactive {
+        bail!(
+            "too many commits ({}). use --force to proceed or specify a smaller range",
+            commits.len()
+        );
+    }
 
     if commits.is_empty() {
         bail!("no commits selected");
@@ -115,6 +222,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         git_repo.get_commits_ahead_behind(&main_tip, commits.last().context("no commits")?)?;
 
     check_commits_are_suitable_for_proposal(
+        cli_args,
         &first_commit_ahead,
         &commits,
         &behind,
@@ -138,57 +246,92 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         should_be_pr
     };
 
-    let title = if as_pr {
-        match &args.title {
-            Some(t) => Some(t.clone()),
-            None => {
-                if root_proposal.is_none() {
-                    Some(
-                        Interactor::default()
-                            .input(PromptInputParms::default().with_prompt("title"))?
-                            .clone(),
-                    )
-                } else {
-                    None
+    let cover_letter_title_description = if cli_args.interactive {
+        // Interactive flow: prompt for cover letter confirm, title, description
+        let title = if as_pr {
+            match &args.title {
+                Some(t) => Some(t.clone()),
+                None => {
+                    if root_proposal.is_none() {
+                        Some(
+                            Interactor::default()
+                                .input(PromptInputParms::default().with_prompt("title"))?
+                                .clone(),
+                        )
+                    } else {
+                        None
+                    }
                 }
             }
-        }
-    } else if args.no_cover_letter {
-        None
-    } else {
-        match &args.title {
-            Some(t) => Some(t.clone()),
-            None => {
-                if Interactor::default().confirm(
-                    PromptConfirmParms::default()
-                        .with_default(false)
-                        .with_prompt("include cover letter?"),
-                )? {
-                    Some(
-                        Interactor::default()
-                            .input(PromptInputParms::default().with_prompt("title"))?
-                            .clone(),
-                    )
-                } else {
-                    None
+        } else if args.no_cover_letter {
+            None
+        } else {
+            match &args.title {
+                Some(t) => Some(t.clone()),
+                None => {
+                    if Interactor::default().confirm(
+                        PromptConfirmParms::default()
+                            .with_default(false)
+                            .with_prompt("include cover letter?"),
+                    )? {
+                        Some(
+                            Interactor::default()
+                                .input(PromptInputParms::default().with_prompt("title"))?
+                                .clone(),
+                        )
+                    } else {
+                        None
+                    }
                 }
             }
-        }
-    };
+        };
 
-    let cover_letter_title_description = if let Some(title) = title {
-        Some((
-            title,
-            if let Some(t) = &args.description {
-                t.clone()
-            } else {
-                Interactor::default()
-                    .input(PromptInputParms::default().with_prompt("description"))?
-                    .clone()
-            },
-        ))
+        if let Some(title) = title {
+            Some((
+                title,
+                if let Some(t) = &args.description {
+                    t.clone()
+                } else {
+                    Interactor::default()
+                        .input(PromptInputParms::default().with_prompt("description"))?
+                        .clone()
+                },
+            ))
+        } else {
+            None
+        }
+    } else if as_pr {
+        // PR always needs cover letter
+        let title = match &args.title {
+            Some(t) => t.clone(),
+            None if cli_args.defaults => {
+                git_repo.get_commit_message_summary(commits.first().context("no commits")?)?
+            }
+            None => bail!("PR requires --title and --description (or use --defaults)"),
+        };
+        let description = match &args.description {
+            Some(d) => d.clone(),
+            None if cli_args.defaults => {
+                let commit = commits.first().context("no commits")?;
+                let full_message = git_repo.get_commit_message(commit)?;
+                let summary = git_repo.get_commit_message_summary(commit)?;
+                full_message
+                    .strip_prefix(&summary)
+                    .unwrap_or(&full_message)
+                    .trim()
+                    .to_string()
+            }
+            None => bail!("PR requires --title and --description (or use --defaults)"),
+        };
+        Some((title, description))
     } else {
-        None
+        // Patch mode
+        match (&args.title, &args.description) {
+            (Some(t), Some(d)) => Some((t.clone(), d.clone())),
+            (Some(_), None) => bail!("--title requires --description"),
+            (None, Some(_)) => bail!("--description requires --title"),
+            (None, None) => None, // no cover letter
+        }
     };
 
     let (signer, mut user_ref, _) = login::login_or_signup(
@@ -303,6 +446,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 }
 
 fn check_commits_are_suitable_for_proposal(
+    cli: &Cli,
     first_commit_ahead: &[Sha1Hash],
     commits: &[Sha1Hash],
     behind: &[Sha1Hash],
@@ -310,37 +454,63 @@ fn check_commits_are_suitable_for_proposal(
     main_tip: &Sha1Hash,
 ) -> Result<()> {
     // check proposal ahead of origin/main
-    if first_commit_ahead.len().gt(&1) && !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal builds on a commit {} ahead of '{main_branch_name}' - do you want to continue?", first_commit_ahead.len() - 1)
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-        bail!("aborting because selected commits were ahead of origin/master");
+    if first_commit_ahead.len().gt(&1) {
+        if cli.interactive {
+            if !Interactor::default().confirm(
+                PromptConfirmParms::default()
+                    .with_prompt(
+                        format!("proposal builds on a commit {} ahead of '{main_branch_name}' - do you want to continue?", first_commit_ahead.len() - 1)
+                    )
+                    .with_default(false)
+            ).context("failed to get confirmation response from interactor confirm")? {
+                bail!("aborting ...");
+            }
+        } else if !cli.force {
+            bail!(
+                "proposal builds on a commit {} ahead of '{}'. use --force to proceed",
+                first_commit_ahead.len() - 1,
+                main_branch_name
+            );
+        }
     }
 
     // check if a selected commit is already in origin
     if commits.iter().any(|c| c.eq(main_tip)) {
-        if !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal contains commit(s) already in  '{main_branch_name}'. proceed anyway?")
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-            bail!("aborting as proposal contains commit(s) already in '{main_branch_name}'");
+        if cli.interactive {
+            if !Interactor::default().confirm(
+                PromptConfirmParms::default()
+                    .with_prompt(
+                        format!("proposal contains commit(s) already in  '{main_branch_name}'. proceed anyway?")
+                    )
+                    .with_default(false)
+            ).context("failed to get confirmation response from interactor confirm")? {
+                bail!("aborting ...");
+            }
+        } else if !cli.force {
+            bail!(
+                "proposal contains commit(s) already in '{main_branch_name}'. use --force to proceed"
+            );
         }
     }
     // check proposal isn't behind origin/main
-    else if !behind.is_empty() && !Interactor::default().confirm(
-            PromptConfirmParms::default()
-                .with_prompt(
-                    format!("proposal is {} behind '{main_branch_name}'. consider rebasing before submission. proceed anyway?", behind.len())
-                )
-                .with_default(false)
-        ).context("failed to get confirmation response from interactor confirm")? {
-        bail!("aborting so commits can be rebased");
+    else if !behind.is_empty() {
+        if cli.interactive {
+            if !Interactor::default().confirm(
+                PromptConfirmParms::default()
+                    .with_prompt(
+                        format!("proposal is {} behind '{main_branch_name}'. consider rebasing before submission. proceed anyway?", behind.len())
+                    )
+                    .with_default(false)
+            ).context("failed to get confirmation response from interactor confirm")? {
+                bail!("aborting so commits can be rebased");
+            }
+        } else if !cli.force {
+            bail!(
+                "proposal is {} behind '{}'. rebase first or use --force to proceed",
+                behind.len(),
+                main_branch_name
+            );
+        }
     }
     Ok(())
 }

@@ -208,6 +208,82 @@ pub fn generate_repo_ref_event_with_git_server_with_keys(
         .sign_with_keys(keys)
         .unwrap()
 }
+
+/// Generate a repo announcement event signed by TEST_KEY_2 that lists
+/// TEST_KEY_1 as a maintainer. Used for State D tests (co-maintainer scenario).
+pub fn generate_repo_ref_event_as_key_2_listing_key_1() -> nostr::Event {
+    generate_repo_ref_event_as_key_2_with_maintainers(vec![
+        TEST_KEY_2_KEYS.public_key().to_string(),
+        TEST_KEY_1_KEYS.public_key().to_string(),
+    ])
+}
+
+/// Generate a repo announcement event signed by TEST_KEY_2 that does NOT list
+/// TEST_KEY_1. Used for State E tests (not listed scenario).
+pub fn generate_repo_ref_event_as_key_2_not_listing_key_1() -> nostr::Event {
+    generate_repo_ref_event_as_key_2_with_maintainers(vec![
+        TEST_KEY_2_KEYS.public_key().to_string(),
+    ])
+}
+
+/// Generate a repo announcement event signed by TEST_KEY_2 with specific
+/// maintainers.
+fn generate_repo_ref_event_as_key_2_with_maintainers(maintainers: Vec<String>) -> nostr::Event {
+    let root_commit = "9ee507fc4357d7ee16a5d8901bedcd103f23c17d";
+    nostr::event::EventBuilder::new(nostr::Kind::GitRepoAnnouncement, "")
+        .tags([
+            Tag::identifier(format!("{root_commit}-consider-it-random")),
+            Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
+            Tag::from_standardized(TagStandard::Name("example name".into())),
+            Tag::from_standardized(TagStandard::Description("example description".into())),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
+                vec!["git:://123.gitexample.com/test".to_string()],
+            ),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
+                vec![
+                    "https://exampleproject.xyz".to_string(),
+                    "https://gitworkshop.dev/123".to_string(),
+                ],
+            ),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
+                vec![
+                    "ws://localhost:8055".to_string(),
+                    "ws://localhost:8056".to_string(),
+                ],
+            ),
+            Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
+                maintainers,
+            ),
+        ])
+        .sign_with_keys(&TEST_KEY_2_KEYS)
+        .unwrap()
+}
+
+/// Generate relay list event for TEST_KEY_2 (same relays as KEY_1 for
+/// simplicity)
+pub fn generate_test_key_2_relay_list_event() -> nostr::Event {
+    nostr::event::EventBuilder::new(nostr::Kind::RelayList, "")
+        .tags([
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8053").unwrap(),
+                metadata: Some(RelayMetadata::Write),
+            }),
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8054").unwrap(),
+                metadata: Some(RelayMetadata::Read),
+            }),
+            nostr::Tag::from_standardized(nostr::TagStandard::RelayMetadata {
+                relay_url: nostr::RelayUrl::from_str("ws://localhost:8055").unwrap(),
+                metadata: None,
+            }),
+        ])
+        .sign_with_keys(&TEST_KEY_2_KEYS)
+        .unwrap()
+}
 /// enough to fool event_is_patch_set_root
 pub fn get_pretend_proposal_root_event() -> nostr::Event {
     serde_json::from_str(r#"{"id":"000c104861e34a453481ab23e7de21a6baf475b394479705363b035936732528","pubkey":"f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768","created_at":1754322009,"kind":1617,"tags":[["a","30617:f53e4bcd7a9cdef049cf6467d638a1321958acd3b71eb09823fd6fadb023d768:9ee507fc4357d7ee16a5d8901bedcd103f23c17d-consider-it-random","ws://localhost:8055"],["a","30617:ba882566eff14f3baa976103998c452d27fe95b65a796a6a9f92628bced76fe5:9ee507fc4357d7ee16a5d8901bedcd103f23c17d-consider-it-random","ws://localhost:8055"],["r","9ee507fc4357d7ee16a5d8901bedcd103f23c17d"],["r","232efb37ebc67692c9e9ff58b83c0d3d63971a0a"],["alt","git patch: add t3.md"],["t","root"],["branch-name","feature"],["p","ba882566eff14f3baa976103998c452d27fe95b65a796a6a9f92628bced76fe5"],["commit","232efb37ebc67692c9e9ff58b83c0d3d63971a0a"],["parent-commit","431b84edc0d2fa118d63faa3c2db9c73d630a5ae"],["commit-pgp-sig",""],["description","add t3.md"],["author","Joe Bloggs","joe.bloggs@pm.me","0","0"],["committer","Joe Bloggs","joe.bloggs@pm.me","0","0"]],"content":"From 232efb37ebc67692c9e9ff58b83c0d3d63971a0a Mon Sep 17 00:00:00 2001\nFrom: Joe Bloggs <joe.bloggs@pm.me>\nDate: Thu, 1 Jan 1970 00:00:00 +0000\nSubject: [PATCH 1/2] add t3.md\n\n---\n t3.md | 1 +\n 1 file changed, 1 insertion(+)\n create mode 100644 t3.md\n\ndiff --git a/t3.md b/t3.md\nnew file mode 100644\nindex 0000000..f0eec86\n--- /dev/null\n+++ b/t3.md\n@@ -0,0 +1 @@\n+some content\n\\ No newline at end of file\n--\nlibgit2 1.9.1\n\n","sig":"65577fea803ea464bb073273a3fbfbdb5bfdaa64fb3b1d029ee8f3729fde051ad90610d08e441335f365b6c1d6f2270909bc37d12433ca82f0b2928b7a503e31"}"#).unwrap()
@@ -1416,7 +1492,7 @@ pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
     test_repo: &GitTestRepo,
     proposal_number: u16,
 ) -> Result<()> {
-    let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+    let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
     p.expect("fetching updates...\r\n")?;
     p.expect_eventually("\r\n")?; // some updates listed here
     let mut c = p.expect_choice(

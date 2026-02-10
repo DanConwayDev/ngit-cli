@@ -41,7 +41,7 @@ for code collaboration, nostr is used for:
 - state (ie. git refs)
 - proposals (PRs), issues and related discussion
 
-a git server is still required for data storage and syncing state. multiple git servers can be used for reduncancy and they can be seemlessly swapped out by maintainers just like nostr relays.
+a git server is still required for data storage and syncing state. multiple git servers can be used for reduncancy and they can be seemlessly swapped out by maintainers just like nostr relays. see [maintainer model](docs/architecture/maintainer-model.md) for details on how multi-maintainer repositories work.
 
 eg self-hosted, github, codeberg, etc.
 

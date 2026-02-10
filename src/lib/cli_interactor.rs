@@ -1,4 +1,7 @@
-use anyhow::{Context, Result};
+use std::fmt;
+
+use anyhow::{Context, Result, bail};
+use console::Style;
 use dialoguer::{
     Confirm, Input, Password,
     theme::{ColorfulTheme, Theme},
@@ -7,9 +10,93 @@ use indicatif::TermLike;
 #[cfg(test)]
 use mockall::*;
 
+/// Sentinel error type indicating the error has already been printed to stderr.
+///
+/// When this propagates up to `main()`, it signals "already printed styled
+/// output to stderr, don't double-print". This is the same pattern clap uses
+/// internally.
+#[derive(Debug)]
+pub struct CliError;
+
+impl fmt::Display for CliError {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Empty display — the error message was already printed to stderr
+        Ok(())
+    }
+}
+
+impl std::error::Error for CliError {}
+
+/// Print a styled CLI error to stderr and return an `anyhow::Error` wrapping
+/// [`CliError`].
+///
+/// - `message`: the main error text (printed after the red `error:` prefix)
+/// - `details`: flag/description pairs shown as gray indented lines (for
+///   multiple missing fields). Descriptions are aligned to the longest flag.
+/// - `suggestions`: command suggestions shown in yellow
+///
+/// This function does NOT call `process::exit()`. It prints to stderr and
+/// returns an error that the caller should propagate with `?` or `return Err`.
+pub fn cli_error(message: &str, details: &[(&str, &str)], suggestions: &[&str]) -> anyhow::Error {
+    let dim = Style::new().for_stderr().color256(247);
+
+    eprint!(
+        "{} {}",
+        console::style("error:").for_stderr().red(),
+        message
+    );
+    if details.is_empty() {
+        eprintln!();
+    } else {
+        let max_flag_len = details
+            .iter()
+            .map(|(flag, _)| flag.len())
+            .max()
+            .unwrap_or(0);
+        eprintln!();
+        for (flag, desc) in details {
+            eprintln!(
+                "  {:width$}  {}",
+                dim.apply_to(flag),
+                dim.apply_to(desc),
+                width = max_flag_len
+            );
+        }
+    }
+
+    if !suggestions.is_empty() {
+        eprintln!();
+        for cmd in suggestions {
+            eprintln!(
+                "{}",
+                console::style(format!("    {cmd}")).for_stderr().yellow(),
+            );
+        }
+    }
+
+    CliError.into()
+}
+
 #[derive(Default)]
 pub struct Interactor {
     theme: ColorfulTheme,
+    non_interactive: bool,
+}
+
+impl Interactor {
+    pub fn new(non_interactive: bool) -> Self {
+        Self {
+            theme: ColorfulTheme::default(),
+            non_interactive,
+        }
+    }
+
+    /// Returns true if running in non-interactive mode (the default).
+    /// Interactive mode is only enabled when NGIT_INTERACTIVE_MODE env var is
+    /// set (via -i flag).
+    pub fn is_non_interactive() -> bool {
+        std::env::var("NGIT_INTERACTIVE_MODE").is_err()
+    }
 }
 
 #[cfg_attr(test, automock)]
@@ -22,6 +109,21 @@ pub trait InteractorPrompt {
 }
 impl InteractorPrompt for Interactor {
     fn input(&self, parms: PromptInputParms) -> Result<String> {
+        if self.non_interactive || Self::is_non_interactive() {
+            if parms.optional || !parms.default.is_empty() {
+                return Ok(parms.default);
+            }
+            let flag_hint = parms
+                .flag_name
+                .as_ref()
+                .map(|f| format!(" (provide {} or use -i/-d)", f))
+                .unwrap_or_else(|| " (use -i for interactive mode or -d for defaults)".to_string());
+            bail!(
+                "interactive input required but running in non-interactive mode: {}{}",
+                parms.prompt,
+                flag_hint
+            );
+        }
         let mut input = Input::with_theme(&self.theme)
             .with_prompt(parms.prompt)
             .allow_empty(parms.optional)
@@ -32,6 +134,12 @@ impl InteractorPrompt for Interactor {
         Ok(input.interact_text()?)
     }
     fn password(&self, parms: PromptPasswordParms) -> Result<String> {
+        if self.non_interactive || Self::is_non_interactive() {
+            bail!(
+                "password input required but running in non-interactive mode: {}",
+                parms.prompt
+            );
+        }
         let mut p = Password::with_theme(&self.theme)
             .with_prompt(parms.prompt)
             .report(parms.report);
@@ -42,6 +150,9 @@ impl InteractorPrompt for Interactor {
         Ok(pass)
     }
     fn confirm(&self, params: PromptConfirmParms) -> Result<bool> {
+        if self.non_interactive || Self::is_non_interactive() {
+            return Ok(params.default);
+        }
         let confirm: bool = Confirm::with_theme(&self.theme)
             .with_prompt(params.prompt)
             .default(params.default)
@@ -49,6 +160,15 @@ impl InteractorPrompt for Interactor {
         Ok(confirm)
     }
     fn choice(&self, parms: PromptChoiceParms) -> Result<usize> {
+        if self.non_interactive || Self::is_non_interactive() {
+            if let Some(default) = parms.default {
+                return Ok(default);
+            }
+            bail!(
+                "interactive choice required but running in non-interactive mode: {}",
+                parms.prompt
+            );
+        }
         let mut choice = dialoguer::Select::with_theme(&self.theme)
             .with_prompt(parms.prompt)
             .report(parms.report)
@@ -61,6 +181,17 @@ impl InteractorPrompt for Interactor {
         choice.interact().context("failed to get choice")
     }
     fn multi_choice(&self, parms: PromptMultiChoiceParms) -> Result<Vec<usize>> {
+        if self.non_interactive || Self::is_non_interactive() {
+            if let Some(defaults) = &parms.defaults {
+                return Ok(defaults
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &selected)| selected)
+                    .map(|(i, _)| i)
+                    .collect());
+            }
+            return Ok(vec![]); // Empty selection if no defaults
+        }
         // the colorful theme is not very clear so falling back to default
         let mut choice = dialoguer::MultiSelect::default()
             .with_prompt(parms.prompt)
@@ -73,11 +204,20 @@ impl InteractorPrompt for Interactor {
     }
 }
 
+/// Parameters for interactive input prompts.
+///
+/// Supports both interactive and non-interactive modes:
+/// - Interactive mode (NGIT_INTERACTIVE_MODE set): prompts user
+/// - Non-interactive mode (default): returns default value or errors
+///
+/// The `flag_name` field improves error messages by telling users
+/// which CLI flag would provide the missing value.
 pub struct PromptInputParms {
     pub prompt: String,
     pub default: String,
     pub report: bool,
     pub optional: bool,
+    pub flag_name: Option<String>,
 }
 
 impl Default for PromptInputParms {
@@ -87,6 +227,7 @@ impl Default for PromptInputParms {
             default: String::new(),
             optional: false,
             report: true,
+            flag_name: None,
         }
     }
 }
@@ -107,6 +248,11 @@ impl PromptInputParms {
 
     pub fn dont_report(mut self) -> Self {
         self.report = false;
+        self
+    }
+
+    pub fn with_flag_name<S: Into<String>>(mut self, flag_name: S) -> Self {
+        self.flag_name = Some(flag_name.into());
         self
     }
 }

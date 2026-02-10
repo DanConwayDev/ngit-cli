@@ -77,7 +77,7 @@ mod cannot_find_repo_event {
             let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
                 let test_repo = GitTestRepo::without_repo_in_git_config();
                 test_repo.populate()?;
-                let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                 p.expect(
                     "hint: https://gitworkshop.dev/search lists repositories and their nostr address\r\n",
                 )?;
@@ -197,7 +197,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
@@ -316,7 +316,7 @@ mod when_main_branch_is_uptodate {
 
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
@@ -438,7 +438,7 @@ mod when_main_branch_is_uptodate {
                             )?;
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
@@ -516,7 +516,7 @@ mod when_main_branch_is_uptodate {
                             )?;
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
@@ -639,7 +639,7 @@ mod when_main_branch_is_uptodate {
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
                             // create proposal branch
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -664,7 +664,7 @@ mod when_main_branch_is_uptodate {
 
                             test_repo.checkout("main")?;
                             // run test
-                            p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -735,7 +735,7 @@ mod when_main_branch_is_uptodate {
                             let test_repo = GitTestRepo::default();
                             test_repo.populate()?;
                             // create proposal branch
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -760,7 +760,7 @@ mod when_main_branch_is_uptodate {
 
                             test_repo.checkout("main")?;
                             // run test
-                            p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -850,7 +850,7 @@ mod when_main_branch_is_uptodate {
                             )?;
 
                             // run test
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -926,7 +926,7 @@ mod when_main_branch_is_uptodate {
                             )?;
 
                             // run test
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -1039,7 +1039,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.checkout("main")?;
 
                             // run test
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -1118,7 +1118,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.checkout("main")?;
 
                             // run test
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -1223,7 +1223,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.checkout("main")?;
 
                             // run test
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -1305,7 +1305,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.checkout("main")?;
 
                             // run test
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -1407,7 +1407,7 @@ mod when_main_branch_is_uptodate {
                             let (originating_repo, test_repo) = create_proposals_with_first_rebased_and_repo_with_latest_main_and_unrebased_proposal()?;
                             test_repo.checkout("main")?;
 
-                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                             p.expect("fetching updates...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
@@ -1480,7 +1480,7 @@ mod when_main_branch_is_uptodate {
                                 let (_, test_repo) = create_proposals_with_first_rebased_and_repo_with_latest_main_and_unrebased_proposal()?;
                                 test_repo.checkout("main")?;
 
-                                let mut p = CliTester::new_from_dir(&test_repo.dir, ["list"]);
+                                let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
                                 p.expect("fetching updates...\r\n")?;
                                 p.expect_eventually("\r\n")?; // some updates listed here
                                 let mut c = p.expect_choice(

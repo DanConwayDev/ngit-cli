@@ -26,6 +26,24 @@ pub struct SubCommandArgs {
 }
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
+    // Early validation: check if we have required parameters in non-interactive
+    // mode
+    let signer_info = extract_signer_cli_arguments(args)?;
+    if Interactor::is_non_interactive() && signer_info.is_none() {
+        use ngit::cli_interactor::cli_error;
+        return Err(cli_error(
+            "requires --nsec or --interactive",
+            &[
+                ("--nsec <key>", "provide secret key (nsec or hex)"),
+                ("--interactive", "for nostr connect or bunker login"),
+            ],
+            &[
+                "ngit account login --nsec <your-nsec>",
+                "ngit account create",
+            ],
+        ));
+    }
+
     let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = { git_repo_result.ok() };
 
@@ -42,7 +60,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         fresh_login_or_signup(
             &git_repo.as_ref(),
             client.as_ref(),
-            extract_signer_cli_arguments(args)?,
+            signer_info,
             log_in_locally_only || command_args.local,
         )
         .await?;
@@ -56,6 +74,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
 }
 
 /// return ( bool - logged out, bool - log in to local git locally)
+#[allow(clippy::too_many_lines)]
 async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool)> {
     for source in if local_only || std::env::var("NGITTEST").is_ok() {
         vec![SignerInfoSource::GitLocal]
@@ -74,6 +93,41 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
         )
         .await
         {
+            // In non-interactive mode, automatically logout without prompting
+            if Interactor::is_non_interactive() {
+                for item in [
+                    "nostr.nsec",
+                    "nostr.npub",
+                    "nostr.bunker-uri",
+                    "nostr.bunker-app-key",
+                ] {
+                    if let Err(_error) = remove_git_config_item(
+                        if source == SignerInfoSource::GitLocal {
+                            &git_repo
+                        } else {
+                            &None
+                        },
+                        item,
+                    ) {
+                        use ngit::cli_interactor::cli_error;
+                        return Err(cli_error(
+                            &format!(
+                                "failed to edit {} git config item '{item}'",
+                                if source == SignerInfoSource::GitGlobal {
+                                    "global"
+                                } else {
+                                    "local"
+                                },
+                            ),
+                            &[],
+                            &["ngit account login --local --nsec <your-nsec>"],
+                        ));
+                    }
+                }
+                return Ok((true, local_only));
+            }
+
+            // Interactive mode: prompt user for what to do
             match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)
