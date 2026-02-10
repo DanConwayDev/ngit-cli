@@ -11,6 +11,7 @@ use crate::sub_commands;
     help_template = "{name} {version}\nnostr plugin for git\n - clone a nostr repository, or add as a remote, by using the url format nostr://pub123/identifier\n - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs\n - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options\n- publish a repository to nostr with `ngit init`\n\n{usage}\n{all-args}"
 )]
 #[command(propagate_version = true)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -32,6 +33,15 @@ pub struct Cli {
     /// show customization options via git config
     #[arg(short, long, global = true)]
     pub customize: bool,
+    /// Use default values without prompting (non-interactive mode)
+    #[arg(short = 'd', long, global = true, conflicts_with = "interactive")]
+    pub defaults: bool,
+    /// Enable interactive prompts (default behavior)
+    #[arg(short = 'i', long, global = true)]
+    pub interactive: bool,
+    /// Force operations, bypass safety guards
+    #[arg(short = 'f', long, global = true)]
+    pub force: bool,
 }
 
 pub const CUSTOMISE_TEMPLATE: &str = r"
@@ -111,6 +121,8 @@ pub enum AccountCommands {
     Logout,
     /// export nostr keys to login to other nostr clients
     ExportKeys,
+    /// create a new nostr account
+    Create(sub_commands::create::SubCommandArgs),
 }
 
 #[derive(clap::Parser)]
