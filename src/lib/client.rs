@@ -69,7 +69,6 @@ use crate::{
 pub struct Client {
     client: nostr_sdk::Client,
     relay_default_set: Vec<String>,
-    more_fallback_relays: Vec<String>,
     blaster_relays: Vec<String>,
     fallback_signer_relays: Vec<String>,
     grasp_default_set: Vec<String>,
@@ -107,7 +106,6 @@ pub trait Connect {
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()>;
     async fn disconnect(&self) -> Result<()>;
     fn get_relay_default_set(&self) -> &Vec<String>;
-    fn get_more_fallback_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
     fn get_fallback_signer_relays(&self) -> &Vec<String>;
     fn get_grasp_default_set(&self) -> &Vec<String>;
@@ -169,7 +167,6 @@ impl Connect for Client {
                     .build()
             },
             relay_default_set: opts.relay_default_set,
-            more_fallback_relays: opts.more_fallback_relays,
             blaster_relays: opts.blaster_relays,
             fallback_signer_relays: opts.fallback_signer_relays,
             grasp_default_set: opts.grasp_default_set,
@@ -209,10 +206,6 @@ impl Connect for Client {
 
     fn get_relay_default_set(&self) -> &Vec<String> {
         &self.relay_default_set
-    }
-
-    fn get_more_fallback_relays(&self) -> &Vec<String> {
-        &self.more_fallback_relays
     }
 
     fn get_blaster_relays(&self) -> &Vec<String> {
@@ -890,7 +883,6 @@ async fn get_events_of(
 pub struct Params {
     pub keys: Option<nostr::Keys>,
     pub relay_default_set: Vec<String>,
-    pub more_fallback_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
     pub fallback_signer_relays: Vec<String>,
     pub grasp_default_set: Vec<String>,
@@ -911,18 +903,6 @@ impl Default for Params {
                                                          * known
                                                          * to delete all messages */
                     "wss://nos.lol".to_string(),
-                ]
-            },
-            more_fallback_relays: if std::env::var("NGITTEST").is_ok() {
-                vec![
-                    "ws://localhost:8055".to_string(),
-                    "ws://localhost:8056".to_string(),
-                ]
-            } else {
-                vec![
-                    "wss://purplerelay.com".to_string(), // free but reliability not tested
-                    "wss://purplepages.es".to_string(),  // for profile events but unreliable
-                    "wss://relayable.org".to_string(),   // free but not always reliable
                 ]
             },
             blaster_relays: if std::env::var("NGITTEST").is_ok() {
