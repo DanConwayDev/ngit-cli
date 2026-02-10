@@ -282,6 +282,30 @@ impl GitTestRepo {
         branch.set_upstream(Some(&format!("origin/{branch_name}")))?;
         self.checkout(branch_name)
     }
+
+    /// Set nostr.repo git config to point to a specific pubkey's coordinate.
+    /// Used for State D/E tests where the coordinate points to another user.
+    pub fn set_nostr_repo_coordinate(
+        &self,
+        pubkey: &nostr::PublicKey,
+        identifier: &str,
+        relays: &[&str],
+    ) {
+        let relay_urls: Vec<nostr::RelayUrl> = relays
+            .iter()
+            .map(|r| nostr::RelayUrl::parse(r).unwrap())
+            .collect();
+        let coordinate = Nip19Coordinate {
+            coordinate: Coordinate::new(nostr::Kind::GitRepoAnnouncement, *pubkey)
+                .identifier(identifier.to_string()),
+            relays: relay_urls,
+        };
+        let _ = self
+            .git_repo
+            .config()
+            .unwrap()
+            .set_str("nostr.repo", &coordinate.to_bech32().unwrap());
+    }
 }
 
 impl Drop for GitTestRepo {
