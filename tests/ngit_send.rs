@@ -75,7 +75,7 @@ mod when_commits_behind_ask_to_proceed {
         let mut r51 = create_relay_51()?;
         // // check relay had the right number of events
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-            let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "send", "HEAD~2"]);
             expect_confirm_prompt(&mut p)?;
             p.exit()?;
             relay::shutdown_relay(8051)?;
@@ -94,7 +94,7 @@ mod when_commits_behind_ask_to_proceed {
         let test_repo = prep_test_repo()?;
         let mut r51 = create_relay_51()?;
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-            let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "send", "HEAD~2"]);
             expect_confirm_prompt(&mut p)?.succeeds_with(Some(false))?;
             p.expect_end_with("Error: aborting so commits can be rebased\r\n")?;
             relay::shutdown_relay(8051)?;
@@ -113,7 +113,7 @@ mod when_commits_behind_ask_to_proceed {
         let test_repo = prep_test_repo()?;
         let mut r51 = create_relay_51()?;
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-            let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+            let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "send", "HEAD~2"]);
             expect_confirm_prompt(&mut p)?.succeeds_with(Some(true))?;
             p.expect("? include cover letter")?;
             p.exit()?;
@@ -1235,6 +1235,7 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
 
     fn cli_tester_create_proposal(git_repo: &GitTestRepo) -> CliTester {
         let args = vec![
+            "-i",
             "--nsec",
             TEST_KEY_1_NSEC,
             "--password",
@@ -1939,6 +1940,147 @@ mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root 
                     .public_key()
                     .to_hex())
             }));
+        }
+        Ok(())
+    }
+}
+
+mod non_interactive_validation {
+    use super::*;
+
+    #[test]
+    fn bare_send_errors_with_helpful_message() -> Result<()> {
+        let test_repo = prep_git_repo()?;
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send"]);
+        let output = p.expect_end_eventually()?;
+        assert!(output.contains("ngit send requires additional arguments"));
+        assert!(output.contains("<SINCE_OR_RANGE>"));
+        assert!(output.contains("--title"));
+        assert!(output.contains("--description"));
+        assert!(output.contains("--defaults"));
+        assert!(output.contains("--interactive"));
+        Ok(())
+    }
+
+    #[test]
+    fn send_with_range_only_errors() -> Result<()> {
+        let test_repo = prep_git_repo()?;
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
+        let output = p.expect_end_eventually()?;
+        assert!(output.contains("ngit send requires additional arguments"));
+        assert!(output.contains("--title"));
+        assert!(output.contains("--description"));
+        assert!(output.contains("--defaults"));
+        Ok(())
+    }
+
+    #[test]
+    fn send_force_pr_without_title_errors() -> Result<()> {
+        let test_repo = prep_git_repo()?;
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--force-pr", "HEAD~2"]);
+        let output = p.expect_end_eventually()?;
+        assert!(output.contains("ngit send requires additional arguments"));
+        assert!(output.contains("--title"));
+        assert!(output.contains("--description"));
+        assert!(output.contains("--defaults"));
+        Ok(())
+    }
+
+    #[test]
+    fn send_description_without_title_errors() -> Result<()> {
+        let test_repo = prep_git_repo()?;
+        let mut p =
+            CliTester::new_from_dir(&test_repo.dir, ["send", "--description", "Y", "HEAD~2"]);
+        let output = p.expect_end_eventually()?;
+        assert!(output.contains("ngit send requires --title when --description is provided"));
+        assert!(output.contains("--title"));
+        Ok(())
+    }
+
+    #[test]
+    fn send_title_without_description_errors() -> Result<()> {
+        let test_repo = prep_git_repo()?;
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--title", "X", "HEAD~2"]);
+        let output = p.expect_end_eventually()?;
+        assert!(output.contains("ngit send requires --description when --title is provided"));
+        assert!(output.contains("--description"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn send_defaults_sends_patches_without_cover_letter() -> Result<()> {
+        let git_repo = prep_git_repo()?;
+
+        let (mut r51, mut r52, mut r53, mut r55, mut r56) = (
+            Relay::new(
+                8051,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
+                    )?;
+                    Ok(())
+                }),
+            ),
+            Relay::new(8052, None, None),
+            Relay::new(8053, None, None),
+            Relay::new(
+                8055,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![generate_repo_ref_event()],
+                    )?;
+                    Ok(())
+                }),
+            ),
+            Relay::new(8056, None, None),
+        );
+
+        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
+            let mut p = CliTester::new_from_dir(
+                &git_repo.dir,
+                [
+                    "--nsec",
+                    TEST_KEY_1_NSEC,
+                    "--password",
+                    TEST_PASSWORD,
+                    "--disable-cli-spinners",
+                    "--defaults",
+                    "send",
+                ],
+            );
+            p.expect_end_eventually()?;
+            for p in [51, 52, 53, 55, 56] {
+                relay::shutdown_relay(8000 + p)?;
+            }
+            Ok(())
+        });
+
+        let _ = join!(
+            r51.listen_until_close(),
+            r52.listen_until_close(),
+            r53.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+        );
+        cli_tester_handle.join().unwrap()?;
+
+        // verify patches sent without cover letter
+        for relay in [&r53, &r55, &r56] {
+            assert_eq!(
+                relay.events.iter().filter(|e| is_cover_letter(e)).count(),
+                0,
+            );
+            assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 2);
         }
         Ok(())
     }
