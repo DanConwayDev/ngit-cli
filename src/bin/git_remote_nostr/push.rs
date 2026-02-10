@@ -20,7 +20,7 @@ use ngit::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
     },
     list::list_from_remotes,
-    login::{self, user::UserRef},
+    login::{existing::load_existing_login, user::UserRef},
     push::{push_to_remote, select_servers_push_refs_and_generate_pr_or_pr_update_event},
     repo_ref::{self, get_repo_config_from_yaml, is_grasp_server_clone_url},
     repo_state,
@@ -173,6 +173,7 @@ pub async fn run_push(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn create_and_publish_events_and_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -182,8 +183,18 @@ async fn create_and_publish_events_and_proposals(
     existing_state: HashMap<String, String>,
     term: &Term,
 ) -> Result<(Vec<String>, bool)> {
-    let (signer, mut user_ref, _) =
-        login::login_or_signup(&Some(git_repo), &None, &None, Some(client), true).await?;
+    let (signer, mut user_ref, _) = load_existing_login(
+        &Some(git_repo),
+        &None,
+        &None,
+        &None,
+        Some(client),
+        true,  // silent
+        false, // prompt_for_password - MUST be false for non-interactive
+        true,  // fetch_profile_updates
+    )
+    .await
+    .context("Authentication required. Run 'ngit account login' first, then try again.")?;
 
     if !repo_ref.maintainers.contains(&user_ref.public_key) {
         for refspec in git_server_refspecs {
