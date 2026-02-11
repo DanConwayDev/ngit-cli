@@ -308,7 +308,7 @@ fn resolve_grasp_servers(
         return Ok(args.grasp_server.clone());
     }
 
-    let has_both_relays_and_clone_url = !args.relays.is_empty() && !args.clone.is_empty();
+    let has_both_relays_and_clone_url = !args.relay.is_empty() && !args.clone.is_empty();
     if has_both_relays_and_clone_url {
         return Ok(vec![]);
     }
@@ -320,7 +320,7 @@ fn resolve_grasp_servers(
     if !args.clone.is_empty() {
         return Ok(detect_existing_grasp_servers(
             my_ref.as_ref(),
-            &args.relays,
+            &args.relay,
             &args.clone,
             identifier,
         ));
@@ -329,8 +329,7 @@ fn resolve_grasp_servers(
     if !interactive || cli.defaults || state.has_coordinate() || cli.force {
         // Prefer grasp servers from my existing announcement, then user's grasp
         // list, then system fallbacks
-        let existing =
-            detect_existing_grasp_servers(my_ref.as_ref(), &args.relays, &[], identifier);
+        let existing = detect_existing_grasp_servers(my_ref.as_ref(), &args.relay, &[], identifier);
         if !existing.is_empty() {
             return Ok(existing);
         }
@@ -339,7 +338,7 @@ fn resolve_grasp_servers(
 
     // Interactive prompt
     let mut options: Vec<String> =
-        detect_existing_grasp_servers(my_ref.as_ref(), &args.relays, &args.clone, identifier);
+        detect_existing_grasp_servers(my_ref.as_ref(), &args.relay, &args.clone, identifier);
     let mut selections: Vec<bool> = vec![true; options.len()];
     let empty = options.is_empty();
     for user_grasp_option in &user_ref.grasp_list.urls {
@@ -415,7 +414,7 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
     }
 
     let has_grasp_servers = !args.grasp_server.is_empty();
-    let has_both_relays_and_clone_url = !args.relays.is_empty() && !args.clone.is_empty();
+    let has_both_relays_and_clone_url = !args.relay.is_empty() && !args.clone.is_empty();
     let missing_servers =
         !has_grasp_servers && !user_has_grasp_list && !has_both_relays_and_clone_url;
     if missing_servers {
@@ -470,7 +469,7 @@ pub struct SubCommandArgs {
     grasp_server: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// additional relays beyond grasp servers
-    relays: Vec<String>,
+    relay: Vec<String>,
     #[clap(long)]
     /// additional git server URLs beyond grasp servers
     clone: Vec<String>,
@@ -494,7 +493,7 @@ impl SubCommandArgs {
             || self.identifier.is_some()
             || self.description.is_some()
             || !self.clone.is_empty()
-            || !self.relays.is_empty()
+            || !self.relay.is_empty()
             || !self.grasp_server.is_empty()
             || !self.web.is_empty()
             || !self.blossoms.is_empty()
@@ -675,7 +674,7 @@ fn resolve_fields(
     };
 
     // --- Simple mode (interactive only) ---
-    let simple_mode = if !interactive || (!args.clone.is_empty() && !args.relays.is_empty()) {
+    let simple_mode = if !interactive || (!args.clone.is_empty() && !args.relay.is_empty()) {
         false // not used in non-interactive, but avoids Option
     } else {
         Interactor::default().choice(
@@ -796,10 +795,10 @@ fn resolve_fields(
     } else {
         args.clone.clone()
     };
-    let mut relay_strings = if args.relays.is_empty() {
+    let mut relay_strings = if args.relay.is_empty() {
         relays_default
     } else {
-        args.relays.clone()
+        args.relay.clone()
     };
     let mut blossom_strings = if args.blossoms.is_empty() {
         blossoms_default
@@ -844,7 +843,7 @@ fn resolve_fields(
     };
 
     // --- Relays ---
-    let relays: Vec<RelayUrl> = if !args.relays.is_empty() || !interactive {
+    let relays: Vec<RelayUrl> = if !args.relay.is_empty() || !interactive {
         relay_strings
             .iter()
             .filter_map(|r| parse_relay_url(r).ok())

@@ -95,7 +95,7 @@ mod state_a_fresh {
                 TEST_KEY_1_NSEC,
                 "--disable-cli-spinners",
                 "init",
-                "--relays",
+                "--relay",
                 "ws://localhost:8055",
             ];
             let mut p = CliTester::new_from_dir(&git_repo.dir, args);
