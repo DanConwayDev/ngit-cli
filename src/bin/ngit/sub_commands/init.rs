@@ -304,8 +304,8 @@ fn resolve_grasp_servers(
     identifier: &str,
     interactive: bool,
 ) -> Result<Vec<String>> {
-    if !args.grasp_servers.is_empty() {
-        return Ok(args.grasp_servers.clone());
+    if !args.grasp_server.is_empty() {
+        return Ok(args.grasp_server.clone());
     }
 
     let has_both_relays_and_clone_url = !args.relays.is_empty() && !args.clone.is_empty();
@@ -414,13 +414,13 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
         missing.push(("--name <NAME>", "repository name or identifier"));
     }
 
-    let has_grasp_servers = !args.grasp_servers.is_empty();
+    let has_grasp_servers = !args.grasp_server.is_empty();
     let has_both_relays_and_clone_url = !args.relays.is_empty() && !args.clone.is_empty();
     let missing_servers =
         !has_grasp_servers && !user_has_grasp_list && !has_both_relays_and_clone_url;
     if missing_servers {
         missing.push((
-            "--grasp-servers <URL>...",
+            "--grasp-server <URL>...",
             "where your git+nostr data is hosted",
         ));
     }
@@ -467,7 +467,7 @@ pub struct SubCommandArgs {
     description: Option<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
     /// where your git+nostr data is hosted
-    grasp_servers: Vec<String>,
+    grasp_server: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// additional relays beyond grasp servers
     relays: Vec<String>,
@@ -495,7 +495,7 @@ impl SubCommandArgs {
             || self.description.is_some()
             || !self.clone.is_empty()
             || !self.relays.is_empty()
-            || !self.grasp_servers.is_empty()
+            || !self.grasp_server.is_empty()
             || !self.web.is_empty()
             || !self.blossoms.is_empty()
             || !self.other_maintainers.is_empty()

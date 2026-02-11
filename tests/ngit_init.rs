@@ -64,7 +64,7 @@ mod state_a_fresh {
             p.expect_eventually("logged in as")?;
             p.expect_eventually("missing required fields")?;
             p.expect_eventually("--name <NAME>")?;
-            p.expect_eventually("--grasp-servers")?;
+            p.expect_eventually("--grasp-server")?;
             Ok(())
         }
 
@@ -82,7 +82,7 @@ mod state_a_fresh {
             ];
             let mut p = CliTester::new_from_dir(&git_repo.dir, args);
             p.expect_eventually("logged in as")?;
-            p.expect_eventually("missing --grasp-servers")?;
+            p.expect_eventually("missing --grasp-server")?;
             Ok(())
         }
 
@@ -102,7 +102,7 @@ mod state_a_fresh {
             p.expect_eventually("logged in as")?;
             p.expect_eventually("missing required fields")?;
             p.expect_eventually("--name <NAME>")?;
-            p.expect_eventually("--grasp-servers")?;
+            p.expect_eventually("--grasp-server")?;
             Ok(())
         }
     }
@@ -177,7 +177,7 @@ mod state_a_fresh {
                 run_init_with_grasp_server(vec![
                     "--name",
                     "My Project",
-                    "--grasp-servers",
+                    "--grasp-server",
                     "ws://localhost:8055",
                 ])
                 .await
@@ -461,7 +461,7 @@ mod state_b_coordinate_only {
                         "--disable-cli-spinners",
                         "init",
                         "--force",
-                        "--grasp-servers",
+                        "--grasp-server",
                         "ws://localhost:8055",
                     ];
                     let mut p = CliTester::new_from_dir(&dir, args);
@@ -938,7 +938,7 @@ mod state_d_co_maintainer {
                         TEST_KEY_1_NSEC,
                         "--disable-cli-spinners",
                         "init",
-                        "--grasp-servers",
+                        "--grasp-server",
                         "ws://localhost:8055",
                     ];
                     let mut p = CliTester::new_from_dir(&dir, args);
@@ -1241,7 +1241,7 @@ mod state_e_not_listed {
                         "--disable-cli-spinners",
                         "init",
                         "--force",
-                        "--grasp-servers",
+                        "--grasp-server",
                         "ws://localhost:8055",
                     ];
                     let mut p = CliTester::new_from_dir(&dir, args);
