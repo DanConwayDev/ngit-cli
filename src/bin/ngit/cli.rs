@@ -53,7 +53,7 @@ ngit settings are managed through the git config.
 Currently the only settings not reachable through standard commands relate to default hardcoded relays:
 
  - nostr.grasp-default-set - only used during `ngit init`
- - nostr.relay-default-set      - must have at least 1 value, all events send to repo relays, user write and default relays
+ - nostr.relay-default-set      - used for profile discovery and account bootstrapping
  - nostr.relay-blaster-set      - only used for repo announcement events 
  - nostr.relay-signer-fallback-set
 

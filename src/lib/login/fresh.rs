@@ -715,6 +715,7 @@ pub async fn signup_non_interactive(
     #[cfg(not(test))] client: Option<&Client>,
     save_local: bool,
     publish: bool,
+    relay_urls: Vec<String>,
 ) -> Result<(Arc<dyn NostrSigner>, PublicKey, SignerInfo, Keys)> {
     // Generate new keypair
     let keys = nostr::Keys::generate();
@@ -783,10 +784,9 @@ pub async fn signup_non_interactive(
     if let Some(client) = client {
         let profile = EventBuilder::metadata(&Metadata::new().name(name)).sign_with_keys(&keys)?;
         let relay_list = EventBuilder::relay_list(
-            client
-                .get_relay_default_set()
+            relay_urls
                 .iter()
-                .map(|s| (RelayUrl::parse(s).unwrap(), None)),
+                .filter_map(|s| RelayUrl::parse(s).ok().map(|url| (url, None))),
         )
         .sign_with_keys(&keys)?;
 
@@ -799,7 +799,7 @@ pub async fn signup_non_interactive(
                 client,
                 git_repo_path,
                 vec![profile, relay_list],
-                client.get_relay_default_set().clone(),
+                relay_urls,
                 vec![],
                 true,
                 false,
@@ -848,12 +848,19 @@ async fn signup(
             }
         }
 
-        // Call the non-interactive function
+        // Call the non-interactive function, using relay_default_set as the
+        // relay list for interactive signup
+        let relay_urls = if let Some(c) = client {
+            c.get_relay_default_set().clone()
+        } else {
+            vec![]
+        };
         let (signer, public_key, signer_info, _keys) = signup_non_interactive(
             name.clone(),
             client,
             false, // save_local = false (will be saved globally by caller)
             true,  // publish = true (always publish in interactive mode)
+            relay_urls,
         )
         .await?;
 

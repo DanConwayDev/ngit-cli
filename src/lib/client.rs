@@ -1577,7 +1577,14 @@ async fn create_relays_request(
     };
 
     let relays = {
-        let mut relays = fallback_relays;
+        // Only use fallback relays for bootstrapping (no repo context).
+        // When we have a repo coordinate, rely on repo relays and coordinate
+        // hint relays instead of always merging in the default set.
+        let mut relays = if trusted_maintainer_coordinate.is_none() {
+            fallback_relays
+        } else {
+            HashSet::new()
+        };
         if let Some(repo_ref) = &repo_ref {
             for r in repo_ref.relays.clone() {
                 relays.insert(r);
@@ -1588,6 +1595,8 @@ async fn create_relays_request(
                 relays.insert(r.clone());
             }
         }
+        // When bootstrapping with no repo context and no coordinate hints,
+        // we need at least the fallback relays to discover the user profile.
         relays
     };
 
@@ -2238,8 +2247,15 @@ pub async fn send_events(
     animate: bool,
     silent: bool,
 ) -> Result<()> {
+    // Only include default relays as fallback when there are no repo relays
+    // (bootstrapping case, e.g. new account signup). When repo relays exist,
+    // trust the repo and user relay configuration.
     let fallback = [
-        client.get_relay_default_set().clone(),
+        if repo_read_relays.is_empty() && my_write_relays.is_empty() {
+            client.get_relay_default_set().clone()
+        } else {
+            vec![]
+        },
         if events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
             client.get_blaster_relays().clone()
         } else {

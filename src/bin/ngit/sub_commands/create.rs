@@ -16,6 +16,11 @@ pub struct SubCommandArgs {
     #[arg(long, required = true)]
     pub name: String,
 
+    /// Relay URLs for the new account's relay list (can be specified multiple
+    /// times). Defaults to the relay-default-set if not provided.
+    #[arg(long = "relay", value_parser, num_args = 1)]
+    pub relays: Vec<String>,
+
     /// Don't publish metadata to relays (offline mode)
     #[arg(long)]
     pub offline: bool,
@@ -28,20 +33,31 @@ pub struct SubCommandArgs {
 pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().ok();
 
+    let params = Params::with_git_config_relay_defaults(&git_repo.as_ref());
+
+    let relay_urls = if args.relays.is_empty() {
+        params.relay_default_set.clone()
+    } else {
+        args.relays.clone()
+    };
+
     let client = if args.offline {
         None
     } else {
-        Some(Client::new(Params::with_git_config_relay_defaults(
-            &git_repo.as_ref(),
-        )))
+        Some(Client::new(params))
     };
 
     let publish = !args.offline;
 
-    let (_signer, public_key, _signer_info, keys) =
-        signup_non_interactive(args.name.clone(), client.as_ref(), args.local, publish)
-            .await
-            .context("failed to create account")?;
+    let (_signer, public_key, _signer_info, keys) = signup_non_interactive(
+        args.name.clone(),
+        client.as_ref(),
+        args.local,
+        publish,
+        relay_urls,
+    )
+    .await
+    .context("failed to create account")?;
 
     // Display the generated nsec prominently
     println!("\n✓ Account created successfully!");

@@ -56,6 +56,29 @@ mod when_commits_behind_ask_to_proceed {
         ))
     }
 
+    fn create_relay_55() -> Result<Relay<'static>> {
+        Ok(Relay::new(
+            8055,
+            None,
+            Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                relay.respond_events(
+                    client_id,
+                    &subscription_id,
+                    &vec![
+                        generate_repo_ref_event(),
+                        generate_test_key_1_metadata_event("fred"),
+                        generate_test_key_1_relay_list_event(),
+                    ],
+                )?;
+                Ok(())
+            }),
+        ))
+    }
+
+    fn create_relay_56() -> Result<Relay<'static>> {
+        Ok(Relay::new(8056, None, None))
+    }
+
     fn expect_confirm_prompt(p: &'_ mut CliTester) -> Result<CliTesterConfirmPrompt<'_>> {
         p.expect("fetching updates...\r\n")?;
         p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
@@ -73,17 +96,25 @@ mod when_commits_behind_ask_to_proceed {
     async fn asked_with_default_no() -> Result<()> {
         let test_repo = prep_test_repo()?;
         let mut r51 = create_relay_51()?;
+        let mut r55 = create_relay_55()?;
+        let mut r56 = create_relay_56()?;
         // // check relay had the right number of events
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "send", "HEAD~2"]);
             expect_confirm_prompt(&mut p)?;
             p.exit()?;
-            relay::shutdown_relay(8051)?;
+            for p in [51, 55, 56] {
+                relay::shutdown_relay(8000 + p)?;
+            }
             Ok(())
         });
 
         // launch relay
-        r51.listen_until_close().await?;
+        let _ = join!(
+            r51.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+        );
         cli_tester_handle.join().unwrap()?;
         Ok(())
     }
@@ -93,16 +124,24 @@ mod when_commits_behind_ask_to_proceed {
     async fn when_response_is_false_aborts() -> Result<()> {
         let test_repo = prep_test_repo()?;
         let mut r51 = create_relay_51()?;
+        let mut r55 = create_relay_55()?;
+        let mut r56 = create_relay_56()?;
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "send", "HEAD~2"]);
             expect_confirm_prompt(&mut p)?.succeeds_with(Some(false))?;
             p.expect_end_with("Error: aborting so commits can be rebased\r\n")?;
-            relay::shutdown_relay(8051)?;
+            for p in [51, 55, 56] {
+                relay::shutdown_relay(8000 + p)?;
+            }
             Ok(())
         });
 
         // launch relay
-        r51.listen_until_close().await?;
+        let _ = join!(
+            r51.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+        );
         cli_tester_handle.join().unwrap()?;
         Ok(())
     }
@@ -112,17 +151,25 @@ mod when_commits_behind_ask_to_proceed {
     async fn when_response_is_true_proceeds() -> Result<()> {
         let test_repo = prep_test_repo()?;
         let mut r51 = create_relay_51()?;
+        let mut r55 = create_relay_55()?;
+        let mut r56 = create_relay_56()?;
         let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "send", "HEAD~2"]);
             expect_confirm_prompt(&mut p)?.succeeds_with(Some(true))?;
             p.expect("? include cover letter")?;
             p.exit()?;
-            relay::shutdown_relay(8051)?;
+            for p in [51, 55, 56] {
+                relay::shutdown_relay(8000 + p)?;
+            }
             Ok(())
         });
 
         // launch relay
-        r51.listen_until_close().await?;
+        let _ = join!(
+            r51.listen_until_close(),
+            r55.listen_until_close(),
+            r56.listen_until_close(),
+        );
         cli_tester_handle.join().unwrap()?;
         Ok(())
     }
@@ -245,7 +292,11 @@ async fn prep_run_create_proposal(
                 relay.respond_events(
                     client_id,
                     &subscription_id,
-                    &vec![generate_repo_ref_event()],
+                    &vec![
+                        generate_repo_ref_event(),
+                        generate_test_key_1_metadata_event("fred"),
+                        generate_test_key_1_relay_list_event(),
+                    ],
                 )?;
                 Ok(())
             }),
@@ -319,13 +370,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
 
     #[tokio::test]
     #[serial]
-    async fn only_1_cover_letter_event_sent_to_fallback_relays() -> Result<()> {
+    async fn no_events_sent_to_fallback_relays() -> Result<()> {
         let (r51, r52, _, _, _) = prep_run_create_proposal(true).await?;
+        // Fallback relays should not receive events when repo relays exist
         for relay in [&r51, &r52] {
-            assert_eq!(
-                relay.events.iter().filter(|e| is_cover_letter(e)).count(),
-                1,
-            );
+            assert_eq!(relay.events.len(), 0);
         }
         Ok(())
     }
@@ -333,8 +382,9 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
     #[tokio::test]
     #[serial]
     async fn only_2_patch_kind_events_sent_to_each_relay() -> Result<()> {
-        let (r51, r52, r53, r55, r56) = prep_run_create_proposal(true).await?;
-        for relay in [&r51, &r52, &r53, &r55, &r56] {
+        let (_, _, r53, r55, r56) = prep_run_create_proposal(true).await?;
+        // Only user and repo relays should receive patches, not fallback relays
+        for relay in [&r53, &r55, &r56] {
             assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 2,);
         }
         Ok(())
@@ -832,7 +882,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         relay.respond_events(
                             client_id,
                             &subscription_id,
-                            &vec![generate_repo_ref_event()],
+                            &vec![
+                                generate_repo_ref_event(),
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
                         )?;
                         Ok(())
                     }),
@@ -848,10 +902,8 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                     &mut p,
                     vec![
                         (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
-                        (" [my-relay] ws://localhost:8053", true, ""),
                         (" [repo-relay] ws://localhost:8056", true, ""),
-                        (" [default] ws://localhost:8051", true, ""),
-                        (" [default] ws://localhost:8052", true, ""),
+                        (" [my-relay] ws://localhost:8053", true, ""),
                     ],
                     3,
                 )?;
@@ -912,7 +964,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                             relay.respond_events(
                                 client_id,
                                 &subscription_id,
-                                &vec![generate_repo_ref_event()],
+                                &vec![
+                                    generate_repo_ref_event(),
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event(),
+                                ],
                             )?;
                             Ok(())
                         }),
@@ -986,7 +1042,11 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                             relay.respond_events(
                                 client_id,
                                 &subscription_id,
-                                &vec![generate_repo_ref_event()],
+                                &vec![
+                                    generate_repo_ref_event(),
+                                    generate_test_key_1_metadata_event("fred"),
+                                    generate_test_key_1_relay_list_event(),
+                                ],
                             )?;
                             Ok(())
                         }),
@@ -1009,14 +1069,12 @@ mod when_cover_letter_details_specified_with_range_of_head_2_sends_cover_letter_
                         &mut p,
                         vec![
                             (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
-                            (" [my-relay] ws://localhost:8053", true, ""),
                             (
                                 " [repo-relay] ws://localhost:8056",
                                 false,
                                 "error: Payment Required",
                             ),
-                            (" [default] ws://localhost:8051", true, ""),
-                            (" [default] ws://localhost:8052", true, ""),
+                            (" [my-relay] ws://localhost:8053", true, ""),
                         ],
                         3,
                     )?;
@@ -1080,7 +1138,11 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
                         relay.respond_events(
                             client_id,
                             &subscription_id,
-                            &vec![generate_repo_ref_event()],
+                            &vec![
+                                generate_repo_ref_event(),
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
                         )?;
                         Ok(())
                     }),
@@ -1097,10 +1159,8 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
                     &mut p,
                     vec![
                         (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
-                        (" [my-relay] ws://localhost:8053", true, ""),
                         (" [repo-relay] ws://localhost:8056", true, ""),
-                        (" [default] ws://localhost:8051", true, ""),
-                        (" [default] ws://localhost:8052", true, ""),
+                        (" [my-relay] ws://localhost:8053", true, ""),
                     ],
                     2,
                 )?;
@@ -1303,7 +1363,11 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                     relay.respond_events(
                         client_id,
                         &subscription_id,
-                        &vec![generate_repo_ref_event()],
+                        &vec![
+                            generate_repo_ref_event(),
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
                     )?;
                     Ok(())
                 }),
@@ -1366,7 +1430,11 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                         relay.respond_events(
                             client_id,
                             &subscription_id,
-                            &vec![generate_repo_ref_event()],
+                            &vec![
+                                generate_repo_ref_event(),
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
                         )?;
                         Ok(())
                     }),
@@ -1382,10 +1450,8 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
                     &mut p,
                     vec![
                         (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
-                        (" [my-relay] ws://localhost:8053", true, ""),
                         (" [repo-relay] ws://localhost:8056", true, ""),
-                        (" [default] ws://localhost:8051", true, ""),
-                        (" [default] ws://localhost:8052", true, ""),
+                        (" [my-relay] ws://localhost:8053", true, ""),
                     ],
                     2,
                 )?;
@@ -1504,7 +1570,12 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                     relay.respond_events(
                         client_id,
                         &subscription_id,
-                        &vec![generate_repo_ref_event(), get_pretend_proposal_root_event()],
+                        &vec![
+                            generate_repo_ref_event(),
+                            get_pretend_proposal_root_event(),
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
                     )?;
                     Ok(())
                 }),
@@ -1567,7 +1638,12 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                         relay.respond_events(
                             client_id,
                             &subscription_id,
-                            &vec![generate_repo_ref_event(), get_pretend_proposal_root_event()],
+                            &vec![
+                                generate_repo_ref_event(),
+                                get_pretend_proposal_root_event(),
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
                         )?;
                         Ok(())
                     }),
@@ -1583,10 +1659,8 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
                     &mut p,
                     vec![
                         (" [my-relay] [repo-relay] ws://localhost:8055", true, ""),
-                        (" [my-relay] ws://localhost:8053", true, ""),
                         (" [repo-relay] ws://localhost:8056", true, ""),
-                        (" [default] ws://localhost:8051", true, ""),
-                        (" [default] ws://localhost:8052", true, ""),
+                        (" [my-relay] ws://localhost:8053", true, ""),
                     ],
                     3,
                 )?;
@@ -1765,7 +1839,12 @@ mod in_reply_to_mentions_issue {
                     relay.respond_events(
                         client_id,
                         &subscription_id,
-                        &vec![generate_repo_ref_event(), get_pretend_issue_event()],
+                        &vec![
+                            generate_repo_ref_event(),
+                            get_pretend_issue_event(),
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
                     )?;
                     Ok(())
                 }),
@@ -1885,7 +1964,11 @@ mod in_reply_to_mentions_npub_and_nprofile_which_get_mentioned_in_proposal_root 
                     relay.respond_events(
                         client_id,
                         &subscription_id,
-                        &vec![generate_repo_ref_event()],
+                        &vec![
+                            generate_repo_ref_event(),
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
                     )?;
                     Ok(())
                 }),
@@ -2037,7 +2120,11 @@ mod non_interactive_validation {
                     relay.respond_events(
                         client_id,
                         &subscription_id,
-                        &vec![generate_repo_ref_event()],
+                        &vec![
+                            generate_repo_ref_event(),
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                        ],
                     )?;
                     Ok(())
                 }),

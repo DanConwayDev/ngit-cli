@@ -337,7 +337,21 @@ mod state_b_coordinate_only {
                 ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8056, None, None),
             );
 
@@ -420,7 +434,21 @@ mod state_b_coordinate_only {
                 ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8056, None, None),
             );
 
@@ -537,7 +565,22 @@ mod state_c_my_announcement {
             ),
             Relay::new(8052, None, None),
             Relay::new(8053, None, None),
-            Relay::new(8055, None, None),
+            Relay::new(
+                8055,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                            generate_repo_ref_event(),
+                        ],
+                    )?;
+                    Ok(())
+                }),
+            ),
             Relay::new(8056, None, None),
         );
 
@@ -595,7 +638,22 @@ mod state_c_my_announcement {
                 ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                                generate_repo_ref_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8056, None, None),
             );
 
@@ -657,7 +715,22 @@ mod state_c_my_announcement {
                 ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                                generate_repo_ref_event(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8056, None, None),
             );
 
@@ -836,7 +909,24 @@ mod state_d_co_maintainer {
                 ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                                generate_test_key_2_metadata_event("carole"),
+                                generate_test_key_2_relay_list_event(),
+                                generate_repo_ref_event_as_key_2_listing_key_1(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8056, None, None),
             );
 
@@ -1021,7 +1111,24 @@ mod state_e_not_listed {
             ),
             Relay::new(8052, None, None),
             Relay::new(8053, None, None),
-            Relay::new(8055, None, None),
+            Relay::new(
+                8055,
+                None,
+                Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                    relay.respond_events(
+                        client_id,
+                        &subscription_id,
+                        &vec![
+                            generate_test_key_1_metadata_event("fred"),
+                            generate_test_key_1_relay_list_event(),
+                            generate_test_key_2_metadata_event("carole"),
+                            generate_test_key_2_relay_list_event(),
+                            generate_repo_ref_event_as_key_2_not_listing_key_1(),
+                        ],
+                    )?;
+                    Ok(())
+                }),
+            ),
             Relay::new(8056, None, None),
         );
 
@@ -1104,7 +1211,24 @@ mod state_e_not_listed {
                 ),
                 Relay::new(8052, None, None),
                 Relay::new(8053, None, None),
-                Relay::new(8055, None, None),
+                Relay::new(
+                    8055,
+                    None,
+                    Some(&|relay, client_id, subscription_id, _| -> Result<()> {
+                        relay.respond_events(
+                            client_id,
+                            &subscription_id,
+                            &vec![
+                                generate_test_key_1_metadata_event("fred"),
+                                generate_test_key_1_relay_list_event(),
+                                generate_test_key_2_metadata_event("carole"),
+                                generate_test_key_2_relay_list_event(),
+                                generate_repo_ref_event_as_key_2_not_listing_key_1(),
+                            ],
+                        )?;
+                        Ok(())
+                    }),
+                ),
                 Relay::new(8056, None, None),
             );
 

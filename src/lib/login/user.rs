@@ -113,6 +113,8 @@ pub async fn get_user_details(
         }
         Ok(user_ref)
     } else {
+        // No cached profile found. Fall back to fetching from default relays
+        // (bootstrapping).
         let empty = UserRef {
             public_key: public_key.to_owned(),
             metadata: extract_user_metadata(public_key, &[])?,
