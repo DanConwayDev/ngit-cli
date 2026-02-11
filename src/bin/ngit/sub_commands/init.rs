@@ -12,7 +12,6 @@ use anyhow::{Context, Result, bail};
 use console::{Style, Term};
 use git2::Oid;
 use ngit::{
-    UrlWithoutSlash,
     cli_interactor::{
         PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
         show_multi_input_prompt_success,
@@ -109,10 +108,10 @@ struct ResolvedFields {
     description: String,
     git_servers: Vec<String>,
     relays: Vec<RelayUrl>,
-    blossoms: Vec<Url>,
     web: Vec<String>,
     maintainers: Vec<PublicKey>,
     earliest_unique_commit: String,
+    blossoms: Vec<Url>,
     hashtags: Vec<String>,
     selected_grasp_servers: Vec<String>,
 }
@@ -157,12 +156,6 @@ fn is_grasp_derived_relay(relay: &str, grasp_servers: &[String]) -> bool {
     grasp_servers.iter().any(|gs| {
         normalize_grasp_server_url(gs).is_ok_and(|gs_normalized| gs_normalized == relay_normalized)
     })
-}
-
-/// Check if a blossom URL corresponds to one of the given grasp servers.
-fn is_grasp_derived_blossom(blossom: &str, grasp_servers: &[String]) -> bool {
-    // Blossom URLs are https://{grasp_server} — same normalization as relays
-    is_grasp_derived_relay(blossom, grasp_servers)
 }
 
 fn dir_name_fallback() -> String {
@@ -231,18 +224,16 @@ fn resolve_web(
     vec![gitworkshop_url.to_string()]
 }
 
-/// Derive clone-urls, relays, and blossoms from selected grasp servers.
+/// Derive clone-urls and relays from selected grasp servers.
 ///
 /// For each grasp server, adds/replaces the corresponding clone URL in
-/// `git_servers`, adds a relay URL to `relays`, and adds a blossom URL to
-/// `blossoms`. Grasp-derived infrastructure is always added — the other
-/// lists (`git_servers`, `relays`, `blossoms`) contain *additional*
-/// infrastructure beyond what grasp servers provide.
+/// `git_servers` and adds a relay URL to `relays`. Grasp-derived infrastructure
+/// is always added — the other lists (`git_servers`, `relays`)
+/// contain *additional* infrastructure beyond what grasp servers provide.
 fn apply_grasp_infrastructure(
     grasp_servers: &[String],
     git_servers: &mut Vec<String>,
     relays: &mut Vec<String>,
-    blossoms: &mut Vec<String>,
     public_key: &PublicKey,
     identifier: &str,
 ) -> Result<()> {
@@ -281,12 +272,6 @@ fn apply_grasp_infrastructure(
         let relay_url = format_grasp_server_url_as_relay_url(grasp_server)?;
         if !relays.contains(&relay_url) {
             relays.push(relay_url);
-        }
-
-        // Always add grasp-derived blossom
-        let blossom = format_grasp_server_url_as_blossom_url(grasp_server)?;
-        if !blossoms.contains(&blossom) {
-            blossoms.push(blossom);
         }
     }
     Ok(())
@@ -474,9 +459,6 @@ pub struct SubCommandArgs {
     /// additional git server URLs beyond grasp servers
     clone: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
-    /// additional blossom servers beyond grasp servers
-    blossoms: Vec<String>,
-    #[clap(long, value_parser, num_args = 1..)]
     /// homepage
     web: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
@@ -496,7 +478,6 @@ impl SubCommandArgs {
             || !self.relay.is_empty()
             || !self.grasp_server.is_empty()
             || !self.web.is_empty()
-            || !self.blossoms.is_empty()
             || !self.other_maintainers.is_empty()
             || self.earliest_unique_commit.is_some()
     }
@@ -718,7 +699,7 @@ fn resolve_fields(
         resolve_grasp_servers(args, cli, state, user_ref, client, &identifier, interactive)?;
 
     // --- Base infrastructure (flag > my event > fallback) ---
-    // Grasp-derived infrastructure (my clone URLs, relays, blossoms) is handled
+    // Grasp-derived infrastructure (my clone URLs, relays) is handled
     // by apply_grasp_infrastructure below. Defaults here are *additional*
     // infrastructure only. My own grasp-format clone URLs are filtered out so
     // they get re-derived from the resolved grasp servers. Grasp-format clone
@@ -779,17 +760,6 @@ fn resolve_fields(
         client.get_relay_default_set().clone()
     };
 
-    let blossoms_default: Vec<String> = if let Some(ref mr) = my_ref {
-        // Keep blossoms that don't correspond to my grasp servers
-        mr.blossoms
-            .iter()
-            .map(UrlWithoutSlash::to_string_without_trailing_slash)
-            .filter(|b| !is_grasp_derived_blossom(b, &my_existing_grasp_servers))
-            .collect()
-    } else {
-        vec![]
-    };
-
     let mut git_servers = if args.clone.is_empty() {
         git_servers_default
     } else {
@@ -800,17 +770,11 @@ fn resolve_fields(
     } else {
         args.relay.clone()
     };
-    let mut blossom_strings = if args.blossoms.is_empty() {
-        blossoms_default
-    } else {
-        args.blossoms.clone()
-    };
 
     apply_grasp_infrastructure(
         &selected_grasp_servers,
         &mut git_servers,
         &mut relay_strings,
-        &mut blossom_strings,
         &user_ref.public_key,
         &identifier,
     )?;
@@ -908,33 +872,6 @@ fn resolve_fields(
         selected
             .iter()
             .filter_map(|r| parse_relay_url(r).ok())
-            .collect()
-    };
-
-    // --- Blossoms ---
-    let blossoms: Vec<Url> = if !args.blossoms.is_empty() || !interactive {
-        blossom_strings
-            .iter()
-            .filter_map(|b| Url::parse(b).ok())
-            .collect()
-    } else if !simple_mode {
-        let selections: Vec<bool> = vec![true; blossom_strings.len()];
-        let selected = multi_select_with_custom_value(
-            "blossom servers",
-            "blossom server",
-            blossom_strings,
-            selections,
-            |s| {
-                format_grasp_server_url_as_blossom_url(s)
-                    .context(format!("Invalid blossom URL format: {s}"))
-            },
-        )?;
-        show_multi_input_prompt_success("blossom servers", &selected);
-        selected.iter().filter_map(|b| Url::parse(b).ok()).collect()
-    } else {
-        blossom_strings
-            .iter()
-            .filter_map(|b| Url::parse(b).ok())
             .collect()
     };
 
@@ -1113,6 +1050,11 @@ fn resolve_fields(
         euc_default
     };
 
+    // --- Blossoms (preserve from latest event) ---
+    let blossoms = latest
+        .as_ref()
+        .map_or_else(Vec::new, |lr| lr.blossoms.clone());
+
     // --- Hashtags (shared metadata — from latest event, like name/description/web)
     // ---
     let hashtags = latest
@@ -1125,10 +1067,10 @@ fn resolve_fields(
         description,
         git_servers,
         relays,
-        blossoms,
         web,
         maintainers,
         earliest_unique_commit,
+        blossoms,
         hashtags,
         selected_grasp_servers,
     })
@@ -1572,14 +1514,6 @@ fn format_grasp_server_url_as_clone_url(
         "https://{grasp_server_url}/{}/{identifier}.git",
         public_key.to_bech32()?
     ))
-}
-
-fn format_grasp_server_url_as_blossom_url(url: &str) -> Result<String> {
-    let grasp_server_url = normalize_grasp_server_url(url)?;
-    if grasp_server_url.contains("http://") {
-        return Ok(grasp_server_url);
-    }
-    Ok(format!("https://{grasp_server_url}"))
 }
 
 fn parse_relay_url(s: &str) -> Result<RelayUrl> {
