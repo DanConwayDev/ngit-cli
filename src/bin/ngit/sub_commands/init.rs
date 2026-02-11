@@ -224,6 +224,41 @@ fn resolve_web(
     vec![gitworkshop_url.to_string()]
 }
 
+/// Normalize and validate a hashtag: lowercase, strip leading `#`, allow only
+/// `a-z`, `0-9`, and `-` (no leading/trailing/consecutive hyphens).
+fn validate_hashtag(s: &str) -> Result<String> {
+    let trimmed = s.trim().trim_start_matches('#').to_lowercase();
+    if trimmed.is_empty() {
+        bail!("hashtag cannot be empty");
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        bail!("hashtag can only contain lowercase letters (a-z), digits (0-9), and hyphens (-)");
+    }
+    if trimmed.starts_with('-') || trimmed.ends_with('-') {
+        bail!("hashtag cannot start or end with a hyphen");
+    }
+    if trimmed.contains("--") {
+        bail!("hashtag cannot contain consecutive hyphens");
+    }
+    Ok(trimmed)
+}
+
+/// Resolve the `hashtags` field from args or existing announcement.
+fn resolve_hashtags(args_hashtag: &[String], state: &InitState) -> Result<Vec<String>> {
+    if !args_hashtag.is_empty() {
+        return args_hashtag
+            .iter()
+            .map(|h| validate_hashtag(h))
+            .collect();
+    }
+    if let Some(rr) = state.repo_ref() {
+        return Ok(
+            latest_event_repo_ref(rr).map_or_else(|| rr.hashtags.clone(), |lr| lr.hashtags),
+        );
+    }
+    Ok(vec![])
+}
+
 /// Derive clone-urls and relays from selected grasp servers.
 ///
 /// For each grasp server, adds/replaces the corresponding clone URL in
@@ -464,6 +499,9 @@ pub struct SubCommandArgs {
     #[clap(long, value_parser, num_args = 1..)]
     /// npubs of other maintainers
     other_maintainers: Vec<String>,
+    #[clap(long, value_parser, num_args = 1..)]
+    /// hashtags for repository discovery
+    hashtag: Vec<String>,
     #[clap(long)]
     /// usually root commit but will be more recent commit for forks
     earliest_unique_commit: Option<String>,
@@ -479,6 +517,7 @@ impl SubCommandArgs {
             || !self.grasp_server.is_empty()
             || !self.web.is_empty()
             || !self.other_maintainers.is_empty()
+            || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
     }
 }
@@ -1057,9 +1096,23 @@ fn resolve_fields(
 
     // --- Hashtags (shared metadata — from latest event, like name/description/web)
     // ---
-    let hashtags = latest
-        .as_ref()
-        .map_or_else(Vec::new, |lr| lr.hashtags.clone());
+    let hashtags_default = resolve_hashtags(&args.hashtag, state)?;
+
+    let hashtags = if !args.hashtag.is_empty() || !interactive || simple_mode {
+        hashtags_default
+    } else {
+        // advanced interactive
+        let selections: Vec<bool> = vec![true; hashtags_default.len()];
+        let selected = multi_select_with_custom_value(
+            "hashtags for repository discovery",
+            "hashtag",
+            hashtags_default,
+            selections,
+            validate_hashtag,
+        )?;
+        show_multi_input_prompt_success("hashtags", &selected);
+        selected
+    };
 
     Ok(ResolvedFields {
         identifier,
