@@ -45,11 +45,8 @@ async fn main() {
                 }
             },
             Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
-            Commands::List => {
-                // list is inherently interactive - it presents menus for
-                // browsing and selecting proposals
-                std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
-                sub_commands::list::launch().await
+            Commands::List { status, json, id } => {
+                sub_commands::list::launch(status.clone(), *json, id.clone()).await
             }
             Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
             Commands::Sync(args) => sub_commands::sync::launch(args).await,

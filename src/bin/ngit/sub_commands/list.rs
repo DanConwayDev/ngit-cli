@@ -14,6 +14,8 @@ use ngit::{
     repo_ref::{RepoRef, is_grasp_server_in_list},
 };
 use nostr::filter::{Alphabet, SingleLetterTag};
+use nostr::nips::nip19::Nip19;
+use nostr::{FromBech32, ToBech32};
 use nostr_sdk::Kind;
 
 use crate::{
@@ -30,7 +32,248 @@ use crate::{
 };
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch() -> Result<()> {
+pub async fn launch(status: String, json: bool, id: Option<String>) -> Result<()> {
+    if std::env::var("NGIT_INTERACTIVE_MODE").is_ok() {
+        return launch_interactive().await;
+    }
+
+    let git_repo = Repo::discover().context("failed to find a git repository")?;
+    let git_repo_path = git_repo.get_path()?;
+
+    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+
+    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+
+    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+
+    let proposals_and_revisions: Vec<nostr::Event> =
+        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
+    if proposals_and_revisions.is_empty() {
+        println!("no proposals found... create one? try `ngit send`");
+        return Ok(());
+    }
+
+    let statuses: Vec<nostr::Event> = {
+        let mut statuses = get_events_from_local_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .kinds(status_kinds().clone())
+                    .events(proposals_and_revisions.iter().map(|e| e.id)),
+                nostr::Filter::default()
+                    .custom_tags(
+                        SingleLetterTag::uppercase(Alphabet::E),
+                        proposals_and_revisions.iter().map(|e| e.id),
+                    )
+                    .kinds(status_kinds().clone()),
+            ],
+        )
+        .await?;
+        statuses.sort_by_key(|e| e.created_at);
+        statuses.reverse();
+        statuses
+    };
+
+    let mut open_proposals: Vec<&nostr::Event> = vec![];
+    let mut draft_proposals: Vec<&nostr::Event> = vec![];
+    let mut closed_proposals: Vec<&nostr::Event> = vec![];
+    let mut applied_proposals: Vec<&nostr::Event> = vec![];
+
+    let proposals: Vec<nostr::Event> = proposals_and_revisions
+        .iter()
+        .filter(|e| !event_is_revision_root(e))
+        .cloned()
+        .collect();
+
+    for proposal in &proposals {
+        let status_kind = get_status(proposal, &repo_ref, &statuses, &proposals);
+        if status_kind.eq(&Kind::GitStatusOpen) {
+            open_proposals.push(proposal);
+        } else if status_kind.eq(&Kind::GitStatusClosed) {
+            closed_proposals.push(proposal);
+        } else if status_kind.eq(&Kind::GitStatusDraft) {
+            draft_proposals.push(proposal);
+        } else if status_kind.eq(&Kind::GitStatusApplied) {
+            applied_proposals.push(proposal);
+        }
+    }
+
+    let status_filter: HashSet<&str> = status.split(',').map(str::trim).collect();
+
+    let filtered_proposals: Vec<(&nostr::Event, Kind)> = proposals
+        .iter()
+        .filter_map(|p| {
+            let status_kind = get_status(p, &repo_ref, &statuses, &proposals);
+            let status_str = match status_kind {
+                Kind::GitStatusOpen => "open",
+                Kind::GitStatusDraft => "draft",
+                Kind::GitStatusClosed => "closed",
+                Kind::GitStatusApplied => "applied",
+                _ => "unknown",
+            };
+            if status_filter.contains(status_str) || status_filter.contains("unknown") {
+                Some((p, status_kind))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if let Some(ref event_id_or_nevent) = id {
+        return show_proposal_details(&filtered_proposals, &repo_ref, event_id_or_nevent, json);
+    }
+
+    if json {
+        output_json(&filtered_proposals, &repo_ref)?;
+    } else {
+        output_table(&filtered_proposals, &repo_ref);
+    }
+
+    Ok(())
+}
+
+fn status_kind_to_str(kind: Kind) -> &'static str {
+    match kind {
+        Kind::GitStatusOpen => "open",
+        Kind::GitStatusDraft => "draft",
+        Kind::GitStatusClosed => "closed",
+        Kind::GitStatusApplied => "applied",
+        _ => "unknown",
+    }
+}
+
+fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) {
+    if proposals.is_empty() {
+        println!("No proposals found matching the filter.");
+        return;
+    }
+
+    println!("{:<8} {:<8} TITLE", "ID", "STATUS");
+    for (proposal, status_kind) in proposals {
+        let id = &proposal.id.to_string()[..7];
+        let status = status_kind_to_str(*status_kind);
+        let title = if let Ok(cl) = event_to_cover_letter(proposal) {
+            cl.title
+        } else if let Ok(msg) = tag_value(proposal, "description") {
+            msg.split('\n').collect::<Vec<&str>>()[0].to_string()
+        } else {
+            proposal.id.to_string()
+        };
+        println!("{id:<8} {status:<8} {title}");
+    }
+
+    println!();
+    println!("To checkout: ngit checkout <id>");
+    println!("To apply:    ngit apply <id>");
+}
+
+fn output_json(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) -> Result<()> {
+    let json_output: Vec<serde_json::Value> = proposals
+        .iter()
+        .map(|(proposal, status_kind)| {
+            let id = proposal.id.to_string();
+            let status = status_kind_to_str(*status_kind).to_string();
+            let (title, author, branch) = if let Ok(cl) = event_to_cover_letter(proposal) {
+                (
+                    cl.title.clone(),
+                    proposal.pubkey.to_bech32().unwrap_or_default(),
+                    cl.get_branch_name_with_pr_prefix_and_shorthand_id()
+                        .unwrap_or_default(),
+                )
+            } else {
+                let title = tag_value(proposal, "description").map_or_else(
+                    |_| proposal.id.to_string(),
+                    |d| d.split('\n').collect::<Vec<&str>>()[0].to_string(),
+                );
+                (
+                    title,
+                    proposal.pubkey.to_bech32().unwrap_or_default(),
+                    String::new(),
+                )
+            };
+            serde_json::json!({
+                "id": id,
+                "status": status,
+                "title": title,
+                "author": author,
+                "branch": branch
+            })
+        })
+        .collect();
+
+    println!("{}", serde_json::to_string_pretty(&json_output)?);
+    Ok(())
+}
+
+fn show_proposal_details(
+    proposals: &[(&nostr::Event, Kind)],
+    _repo_ref: &RepoRef,
+    event_id_or_nevent: &str,
+    json: bool,
+) -> Result<()> {
+    let target_id = if event_id_or_nevent.starts_with("nevent") {
+        let nip19 = Nip19::from_bech32(event_id_or_nevent)
+            .context("failed to parse nevent")?;
+        match nip19 {
+            Nip19::EventId(id) => id,
+            Nip19::Event(event) => event.event_id,
+            _ => bail!("invalid nevent format"),
+        }
+    } else {
+        nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
+    };
+
+    let (proposal, status_kind) = proposals
+        .iter()
+        .find(|(p, _)| p.id == target_id)
+        .context("proposal not found")?;
+
+    let cover_letter = event_to_cover_letter(proposal)
+        .context("failed to extract proposal details from proposal root event")?;
+
+    if json {
+        let json_output = serde_json::json!({
+            "id": proposal.id.to_string(),
+            "status": status_kind_to_str(*status_kind),
+            "title": cover_letter.title,
+            "author": proposal.pubkey.to_bech32().unwrap_or_default(),
+            "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+            "description": cover_letter.description,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_output)?);
+        return Ok(());
+    }
+
+    println!("Title: {}", cover_letter.title);
+    println!(
+        "Author: {}",
+        proposal.pubkey.to_bech32().unwrap_or_default()
+    );
+    println!("Status: {}", status_kind_to_str(*status_kind));
+    println!(
+        "Branch: {}",
+        cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
+    );
+
+    if !cover_letter.description.is_empty() {
+        println!();
+        println!("Description:");
+        for line in cover_letter.description.lines() {
+            println!("  {line}");
+        }
+    }
+
+    println!();
+    println!("To checkout: ngit checkout {}", &proposal.id.to_string()[..7]);
+    println!("To apply:    ngit apply {}", &proposal.id.to_string()[..7]);
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn launch_interactive() -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 

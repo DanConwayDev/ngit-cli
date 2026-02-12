@@ -105,7 +105,16 @@ pub enum Commands {
     /// submit PR with advanced options
     Send(sub_commands::send::SubCommandArgs),
     /// list PRs; checkout, apply or download selected
-    List,
+    List {
+        /// Filter by status (comma-separated: open,draft,closed,applied)
+        #[arg(long, default_value = "open,draft")]
+        status: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Show details for specific proposal (event-id or nevent)
+        id: Option<String>,
+    },
     /// checkout a proposal branch by event-id or nevent
     Checkout {
         /// Proposal event-id (hex) or nevent (bech32)
