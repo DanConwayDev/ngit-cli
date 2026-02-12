@@ -106,6 +106,11 @@ pub enum Commands {
     Send(sub_commands::send::SubCommandArgs),
     /// list PRs; checkout, apply or download selected
     List,
+    /// checkout a proposal branch by event-id or nevent
+    Checkout {
+        /// Proposal event-id (hex) or nevent (bech32)
+        id: String,
+    },
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),

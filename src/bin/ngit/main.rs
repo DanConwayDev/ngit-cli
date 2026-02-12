@@ -53,6 +53,7 @@ async fn main() {
             }
             Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
+            Commands::Checkout { id } => sub_commands::checkout::launch(id).await,
         }
     } else {
         // Handle the case where no command is provided
