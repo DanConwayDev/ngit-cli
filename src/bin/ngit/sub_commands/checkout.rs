@@ -56,7 +56,10 @@ pub async fn launch(id: &str) -> Result<()> {
     let proposal = proposals_and_revisions
         .iter()
         .find(|e| e.id == event_id)
-        .context(format!("proposal with id {} not found in cache", event_id.to_hex()))?;
+        .context(format!(
+            "proposal with id {} not found in cache",
+            event_id.to_hex()
+        ))?;
 
     let cover_letter = event_to_cover_letter(proposal)
         .context("failed to extract proposal details from proposal root event")?;
@@ -143,12 +146,54 @@ fn checkout_pr(
             println!("checked out up-to-date proposal branch '{branch_name}'");
             return Ok(());
         }
-        if git_repo.does_commit_exist(&proposal_tip)? {
-            git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
-            git_repo.checkout(&branch_name)?;
-            println!("checked out proposal branch and updated tip '{branch_name}'");
+
+        let has_tracking = git_repo.get_upstream_for_branch(&branch_name)?.is_some();
+
+        if has_tracking {
+            println!(
+                "{}",
+                console::style(format!(
+                    "Local branch '{branch_name}' is behind. Run git pull to update."
+                ))
+                .yellow()
+            );
             return Ok(());
         }
+
+        if git_repo.does_commit_exist(&proposal_tip)? {
+            if git_repo.ancestor_of(&str_to_sha1(&proposal_tip)?, &local_branch_tip)? {
+                git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
+                git_repo.checkout(&branch_name)?;
+                println!("checked out proposal branch and updated tip '{branch_name}'");
+                return Ok(());
+            }
+            println!(
+                "{}",
+                console::style(format!(
+                    "Branch '{branch_name}' has diverged from proposal tip."
+                ))
+                .yellow()
+            );
+            println!("{}", console::style("To reset to proposal tip:").yellow());
+            println!(
+                "{}",
+                console::style(format!("  git reset --hard {proposal_tip}")).yellow()
+            );
+            println!(
+                "{}",
+                console::style("To rebase local commits onto proposal tip:").yellow()
+            );
+            println!(
+                "{}",
+                console::style(format!("  git rebase {proposal_tip}")).yellow()
+            );
+            bail!("branch diverged from proposal");
+        }
+
+        bail!(
+            "proposal tip {proposal_tip} not found locally and branch has no tracking remote. \n\
+             Try fetching from git servers first."
+        );
     }
 
     if let Some(remote_name) = nostr_remote_name {
@@ -160,12 +205,7 @@ fn checkout_pr(
         }
     }
 
-    fetch_oid_for_from_servers_for_pr(
-        &proposal_tip,
-        git_repo,
-        repo_ref,
-        proposal_tip_event,
-    )?;
+    fetch_oid_for_from_servers_for_pr(&proposal_tip, git_repo, repo_ref, proposal_tip_event)?;
     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
     git_repo.checkout(&branch_name)?;
     println!("created and checked out proposal branch '{branch_name}'");
@@ -207,9 +247,7 @@ fn checkout_patch(
     }
 
     if git_repo.has_outstanding_changes()? {
-        bail!(
-            "working directory is not clean. Discard or stash (un)staged changes and try again."
-        );
+        bail!("working directory is not clean. Discard or stash (un)staged changes and try again.");
     }
 
     let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
@@ -224,12 +262,17 @@ fn checkout_patch(
             let remote_branch = format!("{remote_name}/{branch_name}");
             if git_repo.get_tip_of_branch(&remote_branch).is_ok() {
                 checkout_remote_branch_with_tracking(git_repo, remote_name, &branch_name)?;
-                println!("checked out proposal branch '{branch_name}' with tracking to {remote_name}");
+                println!(
+                    "checked out proposal branch '{branch_name}' with tracking to {remote_name}"
+                );
                 return Ok(());
             }
         }
         let _ = git_repo
-            .apply_patch_chain(&branch_name, most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec())
+            .apply_patch_chain(
+                &branch_name,
+                most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
+            )
             .context("failed to apply patch chain")?;
         println!("checked out proposal as '{branch_name}' branch");
         return Ok(());
@@ -256,7 +299,10 @@ fn checkout_patch(
     git_repo.create_branch_at_commit(&branch_name, &proposal_base_commit.to_string())?;
     git_repo.checkout(&branch_name)?;
     let _ = git_repo
-        .apply_patch_chain(&branch_name, most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec())
+        .apply_patch_chain(
+            &branch_name,
+            most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
+        )
         .context("failed to apply patch chain")?;
     println!("checked out updated proposal as '{branch_name}' branch");
     Ok(())

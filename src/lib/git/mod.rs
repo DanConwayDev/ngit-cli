@@ -91,6 +91,7 @@ pub trait RepoActions {
     ) -> Result<Oid>;
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
     fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool>;
+    fn get_upstream_for_branch(&self, branch_name: &str) -> Result<Option<String>>;
     fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>>;
     fn save_git_config_item(&self, item: &str, value: &str, global: bool) -> Result<()>;
     fn remove_git_config_item(&self, item: &str, global: bool) -> Result<bool>;
@@ -731,6 +732,21 @@ impl RepoActions for Repo {
             Ok(res)
         } else {
             Ok(false)
+        }
+    }
+
+    fn get_upstream_for_branch(&self, branch_name: &str) -> Result<Option<String>> {
+        let branch = self
+            .git_repo
+            .find_branch(branch_name, git2::BranchType::Local)
+            .context(format!("failed to find local branch {branch_name}"))?;
+        let upstream = branch.upstream();
+        match upstream {
+            Ok(upstream_branch) => {
+                let name = upstream_branch.name()?.map(|s| s.to_string());
+                Ok(name)
+            }
+            Err(_) => Ok(None),
         }
     }
 
