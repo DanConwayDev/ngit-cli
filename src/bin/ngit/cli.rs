@@ -111,6 +111,14 @@ pub enum Commands {
         /// Proposal event-id (hex) or nevent (bech32)
         id: String,
     },
+    /// apply proposal patches to current branch
+    Apply {
+        /// Proposal event-id or nevent
+        id: String,
+        /// Output patches to stdout instead of applying
+        #[arg(long)]
+        stdout: bool,
+    },
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
