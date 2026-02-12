@@ -531,6 +531,8 @@ fn validate_pre_fetch(
     args: &SubCommandArgs,
     repo_coordinate: Option<&Nip19Coordinate>,
     user_has_grasp_list: bool,
+    cached_repo_ref: Option<&RepoRef>,
+    my_pubkey: &PublicKey,
 ) -> Result<()> {
     // Interactive mode bypasses pre-fetch validation
     if cli.interactive {
@@ -542,7 +544,30 @@ fn validate_pre_fetch(
         return validate_fresh(cli, args, user_has_grasp_list);
     }
 
-    // Coordinate exists - we need to fetch before we can validate further
+    // If we have cached data and it's MyAnnouncement state, validate early
+    if let (Some(coord), Some(repo_ref)) = (repo_coordinate, cached_repo_ref) {
+        if coord.coordinate.public_key == *my_pubkey {
+            // MyAnnouncement state - validate before network fetch
+            if let Some(new_id) = &args.identifier {
+                if *new_id != repo_ref.identifier && !cli.force {
+                    let suggestion = format!("ngit init --identifier {new_id} --force");
+                    return Err(cli_error(
+                        "changing identifier creates a new repository",
+                        &[],
+                        &[&suggestion],
+                    ));
+                }
+            }
+            if !args.has_substantive_flags() && !cli.force {
+                return Err(cli_error(
+                    "no arguments specified, use --force to publish with new timestamp",
+                    &[],
+                    &["ngit init --force"],
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1479,16 +1504,25 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
 
-    // Phase 2: Pre-fetch validation (fail fast)
+    // Phase 2: Try to get cached repo_ref for early validation
+    let cached_repo_ref = if let Some(coord) = &repo_coordinate {
+        (get_repo_ref_from_cache(Some(git_repo_path), coord).await).ok()
+    } else {
+        None
+    };
+
+    // Phase 3: Pre-fetch validation (fail fast)
     let user_has_grasp_list = !user_ref.grasp_list.urls.is_empty();
     validate_pre_fetch(
         cli_args,
         args,
         repo_coordinate.as_ref(),
         user_has_grasp_list,
+        cached_repo_ref.as_ref(),
+        &user_ref.public_key,
     )?;
 
-    // Phase 3: Network fetch (only if coordinate exists)
+    // Phase 4: Network fetch (only if coordinate exists)
     let repo_ref = if let Some(repo_coordinate) = &repo_coordinate {
         fetching_with_report(git_repo_path, &client, repo_coordinate).await?;
         (get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await).ok()
