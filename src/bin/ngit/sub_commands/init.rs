@@ -231,7 +231,10 @@ fn validate_hashtag(s: &str) -> Result<String> {
     if trimmed.is_empty() {
         bail!("hashtag cannot be empty");
     }
-    if !trimmed.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         bail!("hashtag can only contain lowercase letters (a-z), digits (0-9), and hyphens (-)");
     }
     if trimmed.starts_with('-') || trimmed.ends_with('-') {
@@ -246,15 +249,10 @@ fn validate_hashtag(s: &str) -> Result<String> {
 /// Resolve the `hashtags` field from args or existing announcement.
 fn resolve_hashtags(args_hashtag: &[String], state: &InitState) -> Result<Vec<String>> {
     if !args_hashtag.is_empty() {
-        return args_hashtag
-            .iter()
-            .map(|h| validate_hashtag(h))
-            .collect();
+        return args_hashtag.iter().map(|h| validate_hashtag(h)).collect();
     }
     if let Some(rr) = state.repo_ref() {
-        return Ok(
-            latest_event_repo_ref(rr).map_or_else(|| rr.hashtags.clone(), |lr| lr.hashtags),
-        );
+        return Ok(latest_event_repo_ref(rr).map_or_else(|| rr.hashtags.clone(), |lr| lr.hashtags));
     }
     Ok(vec![])
 }

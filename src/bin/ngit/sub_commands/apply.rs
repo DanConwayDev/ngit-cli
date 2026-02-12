@@ -4,14 +4,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use ngit::client::get_all_proposal_patch_pr_pr_update_events_from_cache;
-use ngit::git_events::get_pr_tip_event_or_most_recent_patch_with_ancestors;
+use ngit::{
+    client::get_all_proposal_patch_pr_pr_update_events_from_cache,
+    git_events::get_pr_tip_event_or_most_recent_patch_with_ancestors,
+};
 use nostr::nips::nip19::Nip19;
 use nostr_sdk::{EventId, FromBech32};
 
-use crate::client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache};
-use crate::git::{Repo, RepoActions};
-use crate::repo_ref::get_repo_coordinates_when_remote_unknown;
+use crate::{
+    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
+    git::{Repo, RepoActions},
+    repo_ref::get_repo_coordinates_when_remote_unknown,
+};
 
 fn run_git_fetch(remote_name: &str) -> Result<()> {
     println!("fetching from {remote_name}...");
@@ -55,11 +59,8 @@ pub async fn launch(id: &str, stdout: bool) -> Result<()> {
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
     let proposals_and_revisions: Vec<nostr::Event> =
-        ngit::client::get_proposals_and_revisions_from_cache(
-            git_repo_path,
-            repo_ref.coordinates(),
-        )
-        .await?;
+        ngit::client::get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
+            .await?;
 
     let proposal = proposals_and_revisions
         .iter()
@@ -79,10 +80,13 @@ pub async fn launch(id: &str, stdout: bool) -> Result<()> {
     let patches = get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
         .context("failed to find any PR or patch events on this proposal")?;
 
-    if patches
-        .iter()
-        .any(|e| [ngit::git_events::KIND_PULL_REQUEST, ngit::git_events::KIND_PULL_REQUEST_UPDATE].contains(&e.kind))
-    {
+    if patches.iter().any(|e| {
+        [
+            ngit::git_events::KIND_PULL_REQUEST,
+            ngit::git_events::KIND_PULL_REQUEST_UPDATE,
+        ]
+        .contains(&e.kind)
+    }) {
         bail!(
             "this proposal uses PR format (not patches). Use `ngit checkout {}` instead.",
             event_id.to_hex()

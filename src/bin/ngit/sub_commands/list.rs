@@ -1,5 +1,7 @@
 use std::{
-    collections::HashSet, io::Write, ops::Add,
+    collections::HashSet,
+    io::Write,
+    ops::Add,
     process::{Command, Stdio},
 };
 
@@ -16,9 +18,11 @@ use ngit::{
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
 };
-use nostr::filter::{Alphabet, SingleLetterTag};
-use nostr::nips::nip19::Nip19;
-use nostr::{FromBech32, ToBech32};
+use nostr::{
+    FromBech32, ToBech32,
+    filter::{Alphabet, SingleLetterTag},
+    nips::nip19::Nip19,
+};
 use nostr_sdk::Kind;
 
 use crate::{
@@ -242,8 +246,7 @@ fn show_proposal_details(
     json: bool,
 ) -> Result<()> {
     let target_id = if event_id_or_nevent.starts_with("nevent") {
-        let nip19 = Nip19::from_bech32(event_id_or_nevent)
-            .context("failed to parse nevent")?;
+        let nip19 = Nip19::from_bech32(event_id_or_nevent).context("failed to parse nevent")?;
         match nip19 {
             Nip19::EventId(id) => id,
             Nip19::Event(event) => event.event_id,
@@ -294,7 +297,10 @@ fn show_proposal_details(
     }
 
     println!();
-    println!("To checkout: ngit checkout {}", &proposal.id.to_string()[..7]);
+    println!(
+        "To checkout: ngit checkout {}",
+        &proposal.id.to_string()[..7]
+    );
     println!("To apply:    ngit apply {}", &proposal.id.to_string()[..7]);
 
     Ok(())
