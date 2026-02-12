@@ -182,9 +182,9 @@ fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) {
         return;
     }
 
-    println!("{:<8} {:<8} TITLE", "ID", "STATUS");
+    println!("{:<66} {:<8} TITLE", "ID", "STATUS");
     for (proposal, status_kind) in proposals {
-        let id = &proposal.id.to_string()[..7];
+        let id = proposal.id.to_string();
         let status = status_kind_to_str(*status_kind);
         let title = if let Ok(cl) = event_to_cover_letter(proposal) {
             cl.title
@@ -193,7 +193,7 @@ fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) {
         } else {
             proposal.id.to_string()
         };
-        println!("{id:<8} {status:<8} {title}");
+        println!("{id:<66} {status:<8} {title}");
     }
 
     println!();
@@ -299,9 +299,9 @@ fn show_proposal_details(
     println!();
     println!(
         "To checkout: ngit checkout {}",
-        &proposal.id.to_string()[..7]
+        proposal.id
     );
-    println!("To apply:    ngit apply {}", &proposal.id.to_string()[..7]);
+    println!("To apply:    ngit apply {}", proposal.id);
 
     Ok(())
 }
