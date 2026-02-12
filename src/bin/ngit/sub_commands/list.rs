@@ -1,4 +1,7 @@
-use std::{collections::HashSet, io::Write, ops::Add};
+use std::{
+    collections::HashSet, io::Write, ops::Add,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
@@ -31,6 +34,21 @@ use crate::{
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
+fn run_git_fetch(remote_name: &str) -> Result<()> {
+    println!("fetching from {remote_name}...");
+    let exit_status = Command::new("git")
+        .args(["fetch", remote_name])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run git fetch")?;
+
+    if !exit_status.success() {
+        bail!("git fetch {remote_name} exited with error: {exit_status}");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn launch(status: String, json: bool, id: Option<String>) -> Result<()> {
     if std::env::var("NGIT_INTERACTIVE_MODE").is_ok() {
@@ -44,7 +62,17 @@ pub async fn launch(status: String, json: bool, id: Option<String>) -> Result<()
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    let nostr_remote = git_repo
+        .get_first_nostr_remote_when_in_ngit_binary()
+        .await
+        .ok()
+        .flatten();
+
+    if let Some((remote_name, _)) = &nostr_remote {
+        run_git_fetch(remote_name)?;
+    } else {
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
@@ -285,7 +313,17 @@ async fn launch_interactive() -> Result<()> {
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    let nostr_remote = git_repo
+        .get_first_nostr_remote_when_in_ngit_binary()
+        .await
+        .ok()
+        .flatten();
+
+    if let Some((remote_name, _)) = &nostr_remote {
+        run_git_fetch(remote_name)?;
+    } else {
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 

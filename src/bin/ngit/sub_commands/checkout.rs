@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
@@ -33,7 +36,17 @@ pub async fn launch(id: &str) -> Result<()> {
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    let nostr_remote = git_repo
+        .get_first_nostr_remote_when_in_ngit_binary()
+        .await
+        .ok()
+        .flatten();
+
+    if let Some((remote_name, _)) = &nostr_remote {
+        run_git_fetch(remote_name)?;
+    } else {
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
@@ -68,14 +81,31 @@ pub async fn launch(id: &str) -> Result<()> {
             &repo_ref,
             &cover_letter,
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
+            nostr_remote.as_ref().map(|(name, _)| name.as_str()),
         )
     } else {
         checkout_patch(
             &git_repo,
             &cover_letter,
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
+            nostr_remote.as_ref().map(|(name, _)| name.as_str()),
         )
     }
+}
+
+fn run_git_fetch(remote_name: &str) -> Result<()> {
+    println!("fetching from {remote_name}...");
+    let exit_status = Command::new("git")
+        .args(["fetch", remote_name])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run git fetch")?;
+
+    if !exit_status.success() {
+        bail!("git fetch {remote_name} exited with error: {exit_status}");
+    }
+    Ok(())
 }
 
 fn parse_event_id(id: &str) -> Result<EventId> {
@@ -97,15 +127,15 @@ fn checkout_pr(
     repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
+    nostr_remote_name: Option<&str>,
 ) -> Result<()> {
     let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
-    let local_branch_tip = git_repo.get_tip_of_branch(&branch_name).ok();
     let proposal_tip_event = most_recent_proposal_patch_chain_or_pr_or_pr_update
         .first()
         .context("most_recent_proposal_patch_chain_or_pr_or_pr_update will always contain an event with c tag")?;
     let proposal_tip = tag_value(proposal_tip_event, "c")?;
 
-    if let Some(local_branch_tip) = local_branch_tip {
+    if let Ok(local_branch_tip) = git_repo.get_tip_of_branch(&branch_name) {
         git_repo
             .checkout(&branch_name)
             .context("cannot checkout existing proposal branch")?;
@@ -121,6 +151,15 @@ fn checkout_pr(
         }
     }
 
+    if let Some(remote_name) = nostr_remote_name {
+        let remote_branch = format!("{remote_name}/{branch_name}");
+        if git_repo.get_tip_of_branch(&remote_branch).is_ok() {
+            checkout_remote_branch_with_tracking(git_repo, remote_name, &branch_name)?;
+            println!("checked out proposal branch '{branch_name}' with tracking to {remote_name}");
+            return Ok(());
+        }
+    }
+
     fetch_oid_for_from_servers_for_pr(
         &proposal_tip,
         git_repo,
@@ -129,11 +168,7 @@ fn checkout_pr(
     )?;
     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
     git_repo.checkout(&branch_name)?;
-    if local_branch_tip.is_some() {
-        println!("checked out proposal branch and pulled updates '{branch_name}'");
-    } else {
-        println!("created and checked out proposal branch '{branch_name}'");
-    }
+    println!("created and checked out proposal branch '{branch_name}'");
     Ok(())
 }
 
@@ -141,6 +176,7 @@ fn checkout_patch(
     git_repo: &Repo,
     cover_letter: &crate::git_events::CoverLetter,
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
+    nostr_remote_name: Option<&str>,
 ) -> Result<()> {
     let no_support_for_patches_as_branch = most_recent_proposal_patch_chain_or_pr_or_pr_update
         .iter()
@@ -184,6 +220,14 @@ fn checkout_patch(
         .any(|n| n.eq(&branch_name));
 
     if !branch_exists {
+        if let Some(remote_name) = nostr_remote_name {
+            let remote_branch = format!("{remote_name}/{branch_name}");
+            if git_repo.get_tip_of_branch(&remote_branch).is_ok() {
+                checkout_remote_branch_with_tracking(git_repo, remote_name, &branch_name)?;
+                println!("checked out proposal branch '{branch_name}' with tracking to {remote_name}");
+                return Ok(());
+            }
+        }
         let _ = git_repo
             .apply_patch_chain(&branch_name, most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec())
             .context("failed to apply patch chain")?;
@@ -265,5 +309,45 @@ fn fetch_oid_for_from_servers_for_pr(
             "cannot find proposal git data from proposal git server hint or repository git servers"
         )
     }
+    Ok(())
+}
+
+fn checkout_remote_branch_with_tracking(
+    git_repo: &Repo,
+    remote_name: &str,
+    branch_name: &str,
+) -> Result<()> {
+    let remote_branch_ref = format!("refs/remotes/{remote_name}/{branch_name}");
+    let remote_branch = git_repo
+        .git_repo
+        .find_reference(&remote_branch_ref)
+        .context(format!("failed to find remote branch {remote_branch_ref}"))?;
+    let commit = remote_branch
+        .peel_to_commit()
+        .context("failed to peel remote branch to commit")?;
+
+    let mut local_branch = git_repo
+        .git_repo
+        .branch(branch_name, &commit, false)
+        .context("failed to create local branch")?;
+
+    local_branch
+        .set_upstream(Some(&format!("{remote_name}/{branch_name}")))
+        .context("failed to set upstream tracking")?;
+
+    let local_branch_ref = local_branch.into_reference();
+    let local_branch_ref_name = local_branch_ref
+        .name()
+        .context("failed to get local branch ref name")?;
+
+    git_repo
+        .git_repo
+        .set_head(local_branch_ref_name)
+        .context("failed to set head to local branch")?;
+    git_repo
+        .git_repo
+        .checkout_head(None)
+        .context("failed to checkout head")?;
+
     Ok(())
 }

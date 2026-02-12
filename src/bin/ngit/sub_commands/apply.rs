@@ -1,4 +1,7 @@
-use std::io::Write;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
 use ngit::client::get_all_proposal_patch_pr_pr_update_events_from_cache;
@@ -6,9 +9,24 @@ use ngit::git_events::get_pr_tip_event_or_most_recent_patch_with_ancestors;
 use nostr::nips::nip19::Nip19;
 use nostr_sdk::{EventId, FromBech32};
 
-use crate::client::{Client, Connect, get_repo_ref_from_cache};
+use crate::client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache};
 use crate::git::{Repo, RepoActions};
 use crate::repo_ref::get_repo_coordinates_when_remote_unknown;
+
+fn run_git_fetch(remote_name: &str) -> Result<()> {
+    println!("fetching from {remote_name}...");
+    let exit_status = Command::new("git")
+        .args(["fetch", remote_name])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run git fetch")?;
+
+    if !exit_status.success() {
+        bail!("git fetch {remote_name} exited with error: {exit_status}");
+    }
+    Ok(())
+}
 
 pub async fn launch(id: &str, stdout: bool) -> Result<()> {
     let event_id = parse_event_id(id)?;
@@ -22,7 +40,17 @@ pub async fn launch(id: &str, stdout: bool) -> Result<()> {
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    crate::client::fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    let nostr_remote = git_repo
+        .get_first_nostr_remote_when_in_ngit_binary()
+        .await
+        .ok()
+        .flatten();
+
+    if let Some((remote_name, _)) = &nostr_remote {
+        run_git_fetch(remote_name)?;
+    } else {
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
