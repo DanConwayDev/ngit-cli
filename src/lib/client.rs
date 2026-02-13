@@ -417,7 +417,15 @@ impl Connect for Client {
                 if let Some(spinner) = spinner_for_timer {
                     spinner.finish_and_clear();
                 }
-                eprintln!("fetching updates...");
+                // Add heading as a finished progress bar so it gets cleared
+                // along with the other bars by progress_reporter.clear()
+                let heading = detail_multi_for_timer.insert(
+                    0,
+                    ProgressBar::new(0).with_style(
+                        ProgressStyle::with_template("{msg}").unwrap(),
+                    ),
+                );
+                heading.finish_with_message("fetching updates...");
                 detail_multi_for_timer
                     .set_draw_target(ProgressDrawTarget::stderr());
             });
