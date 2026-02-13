@@ -2451,11 +2451,84 @@ pub async fn send_events(
         }
     }
 
-    let m = if silent {
+    let verbose = is_verbose();
+    let is_test = std::env::var("NGITTEST").is_ok();
+    let use_concise = !verbose && !is_test && !silent && animate;
+
+    // Set up the two-MultiProgress pattern (same as fetch_all):
+    // 1. A spinner MultiProgress shown immediately (concise mode only)
+    // 2. A detail MultiProgress that starts hidden and becomes visible after a
+    //    delay
+    let spinner_multi = if use_concise {
+        let sm = MultiProgress::new();
+        let spinner = sm.add(
+            ProgressBar::new_spinner()
+                .with_style(
+                    ProgressStyle::with_template("{spinner} {msg}")
+                        .unwrap()
+                        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
+                )
+                .with_message("Publishing to nostr relays..."),
+        );
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        Some((sm, spinner))
+    } else {
+        None
+    };
+
+    let m = if silent || is_test || use_concise {
         MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
     } else {
         MultiProgress::new()
     };
+
+    // Pre-add a heading bar at position 0 so it has a reserved slot
+    // before any relay bars are added.
+    let heading_bar = if use_concise {
+        let bar =
+            m.add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()));
+        Some(bar)
+    } else {
+        None
+    };
+
+    let reveal_state: Option<Arc<BarRevealState>> = if use_concise {
+        Some(Arc::new(BarRevealState {
+            revealed: AtomicBool::new(false),
+            deferred: Mutex::new(Vec::new()),
+        }))
+    } else {
+        None
+    };
+
+    // Spawn a background timer that transitions from spinner to detail view
+    let detail_multi_for_timer = m.clone();
+    let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
+    let reveal_state_for_timer = reveal_state.clone();
+    let heading_bar_for_timer = heading_bar.clone();
+    let timer_handle = if use_concise {
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
+            if let Some(spinner) = spinner_for_timer {
+                spinner.finish_and_clear();
+            }
+            detail_multi_for_timer.set_draw_target(ProgressDrawTarget::stderr());
+            if let Some(heading) = heading_bar_for_timer {
+                heading.finish_with_message("publishing to nostr relays...");
+            }
+            if let Some(state) = reveal_state_for_timer {
+                let mut deferred = state.deferred.lock().unwrap();
+                state.revealed.store(true, Ordering::Release);
+                for df in deferred.drain(..) {
+                    df.bar.finish_with_message(df.message);
+                }
+            }
+        });
+        Some(handle)
+    } else {
+        None
+    };
+
     let pb_style = ProgressStyle::with_template(if animate {
         " {spinner} {prefix} {bar} {pos}/{len} {msg}"
     } else {
@@ -2484,7 +2557,17 @@ pub async fn send_events(
     })?;
 
     #[allow(clippy::borrow_deref_ref)]
-    join_all(relays.iter().map(|&relay| async {
+    join_all(relays.iter().map(|&relay| {
+        let reveal_state_clone = reveal_state.clone();
+        let my_write_relays = my_write_relays.clone();
+        let repo_read_relays = repo_read_relays.clone();
+        let fallback = fallback.clone();
+        let m = m.clone();
+        let events = events.clone();
+        let pb_style = pb_style.clone();
+        let pb_after_style_failed = pb_after_style_failed.clone();
+        let pb_after_style_succeeded = pb_after_style_succeeded.clone();
+        async move {
         let relay_clean = remove_trailing_slash(relay);
         let details = format!(
             "{}{}{} {}",
@@ -2532,8 +2615,7 @@ pub async fn send_events(
                 Ok(_) => pb.inc(1),
                 Err(e) => {
                     pb.set_style(pb_after_style_failed.clone());
-                    pb.finish_with_message(
-                        console::style(format!(
+                    let msg = console::style(format!(
                             "error: {}",
                             e.to_string()
                                 .replace("relay pool error:", "")
@@ -2541,8 +2623,8 @@ pub async fn send_events(
                         ))
                         .for_stderr()
                         .red()
-                        .to_string(),
-                    );
+                        .to_string();
+                    finish_bar(&pb, msg, &reveal_state_clone);
                     failed = true;
                     break;
                 }
@@ -2550,10 +2632,20 @@ pub async fn send_events(
         }
         if !failed {
             pb.set_style(pb_after_style_succeeded.clone());
-            pb.finish_with_message("");
+            finish_bar(&pb, String::new(), &reveal_state_clone);
         }
-    }))
+    }}))
     .await;
+
+    // Cancel the background timer if it hasn't fired yet, and clean up
+    // the spinner. If the timer already fired, the abort is a no-op.
+    if let Some(handle) = timer_handle {
+        handle.abort();
+    }
+    if let Some((_, spinner)) = &spinner_multi {
+        spinner.finish_and_clear();
+    }
+
     Ok(())
 }
 
