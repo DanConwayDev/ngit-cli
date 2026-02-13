@@ -16,7 +16,7 @@ use std::{
     fs::create_dir_all,
     path::Path,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -407,9 +407,14 @@ impl Connect for Client {
             MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
         };
 
+        // Collect all progress bars so the timer can force a redraw after
+        // switching the draw target (finished bars won't redraw on their own)
+        let all_bars: Arc<Mutex<Vec<ProgressBar>>> = Arc::new(Mutex::new(Vec::new()));
+
         // Spawn a background timer that transitions from spinner to detail view
         let detail_multi_for_timer = progress_reporter.clone();
         let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
+        let all_bars_for_timer = all_bars.clone();
         let timer_handle = if !verbose && !is_test {
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
@@ -428,6 +433,15 @@ impl Connect for Client {
                 heading.finish_with_message("fetching updates...");
                 detail_multi_for_timer
                     .set_draw_target(ProgressDrawTarget::stderr());
+                // Force a full redraw of the multi progress (including bars
+                // that finished while the draw target was hidden).
+                // We must use force_draw() rather than tick() because tick()
+                // is a no-op on bars that have enable_steady_tick() active.
+                // A single force_draw() on any bar is sufficient since it
+                // triggers MultiState::draw() which renders all bars.
+                if let Some(bar) = all_bars_for_timer.lock().unwrap().first() {
+                    bar.force_draw();
+                }
             });
             Some(handle)
         } else {
@@ -502,6 +516,7 @@ impl Connect for Client {
                     let current_timeout_clone = current_timeout_for_loop.clone();
                     let progress_reporter_clone = progress_reporter.clone();
                     let total_relays_clone = total_relays;
+                    let all_bars_clone = all_bars.clone();
                     async move {
                         let relay_column_width = request.relay_column_width;
 
@@ -526,6 +541,7 @@ impl Connect for Client {
                                 .with_style(pb_style(current_timeout_clone.clone())?),
                         );
                         pb.enable_steady_tick(Duration::from_millis(300));
+                        all_bars_clone.lock().unwrap().push(pb.clone());
                         let pb = Some(pb);
 
                         fn update_progress_bar_with_error(
