@@ -425,7 +425,8 @@ impl Connect for Client {
 
         // Set up the two-MultiProgress pattern:
         // 1. A spinner MultiProgress shown immediately (concise mode only)
-        // 2. A detail MultiProgress that starts hidden and becomes visible after a delay
+        // 2. A detail MultiProgress that starts hidden and becomes visible after a
+        //    delay
         let spinner_multi = if !verbose && !is_test {
             let m = MultiProgress::new();
             let spinner = m.add(
@@ -435,7 +436,7 @@ impl Connect for Client {
                             .unwrap()
                             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
                     )
-                    .with_message("Checking relays and git servers..."),
+                    .with_message("Checking nostr relays..."),
             );
             spinner.enable_steady_tick(Duration::from_millis(100));
             Some((m, spinner))
@@ -456,9 +457,7 @@ impl Connect for Client {
         // hidden) until the timer reveals it.
         let heading_bar = if !verbose && !is_test {
             let bar = progress_reporter.add(
-                ProgressBar::new(0).with_style(
-                    ProgressStyle::with_template("{msg}").unwrap(),
-                ),
+                ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()),
             );
             Some(bar)
         } else {
@@ -490,8 +489,7 @@ impl Connect for Client {
                     spinner.finish_and_clear();
                 }
                 // Switch draw target to make bars visible
-                detail_multi_for_timer
-                    .set_draw_target(ProgressDrawTarget::stderr());
+                detail_multi_for_timer.set_draw_target(ProgressDrawTarget::stderr());
                 // Finish the pre-added heading bar now that the draw target
                 // is visible so indicatif actually renders it.
                 if let Some(heading) = heading_bar_for_timer {
