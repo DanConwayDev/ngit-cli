@@ -167,6 +167,7 @@ async fn fetching_with_report_for_helper(
             &HashSet::new(),
         )
         .await?;
+    let has_errors = relay_reports.iter().any(std::result::Result::is_err);
     let report = consolidate_fetch_reports(relay_reports);
     if report.to_string().is_empty() {
         if verbose {
@@ -175,6 +176,8 @@ async fn fetching_with_report_for_helper(
     } else {
         term.write_line(&format!("nostr updates: {report}"))?;
     }
-    let _ = progress_reporter.clear();
+    if !has_errors || verbose {
+        let _ = progress_reporter.clear();
+    }
     Ok(())
 }
