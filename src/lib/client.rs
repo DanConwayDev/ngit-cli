@@ -17,7 +17,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -70,6 +70,50 @@ pub fn is_verbose() -> bool {
 }
 
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
+
+/// Holds the final state of a progress bar that finished before the detail
+/// view was revealed. The style and prefix are already set on the bar; only
+/// the `finish_with_message` call is deferred.
+struct DeferredFinish {
+    bar: ProgressBar,
+    message: String,
+}
+
+/// Coordinates the transition from spinner to detail progress bars.
+/// While `revealed` is false, `finish_bar` stores finish operations in
+/// `deferred`. The background timer sets `revealed` to true, switches the
+/// draw target, and flushes all deferred finishes so every bar appears.
+struct BarRevealState {
+    revealed: AtomicBool,
+    deferred: Mutex<Vec<DeferredFinish>>,
+}
+
+/// Finish a progress bar, deferring the operation if the detail view has not
+/// yet been revealed. When `reveal_state` is `None` (verbose or test mode),
+/// the bar is finished immediately.
+fn finish_bar(bar: &ProgressBar, message: String, reveal_state: &Option<Arc<BarRevealState>>) {
+    match reveal_state {
+        None => bar.finish_with_message(message),
+        Some(state) => {
+            // Lock the deferred list and check `revealed` while holding the
+            // lock. The timer also holds this lock when it sets `revealed`
+            // and drains the list, so there is no window where a bar could
+            // be pushed after the drain.
+            let mut deferred = state.deferred.lock().unwrap();
+            if state.revealed.load(Ordering::Acquire) {
+                drop(deferred);
+                bar.finish_with_message(message);
+            } else {
+                // Style and prefix are already set on the bar. Store the
+                // pending finish so the timer can apply it after reveal.
+                deferred.push(DeferredFinish {
+                    bar: bar.clone(),
+                    message,
+                });
+            }
+        }
+    }
+}
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
@@ -407,14 +451,22 @@ impl Connect for Client {
             MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
         };
 
-        // Collect all progress bars so the timer can force a redraw after
-        // switching the draw target (finished bars won't redraw on their own)
-        let all_bars: Arc<Mutex<Vec<ProgressBar>>> = Arc::new(Mutex::new(Vec::new()));
+        // Track whether the detail view has been revealed. Bars that finish
+        // before reveal have their finish_with_message deferred so they render
+        // correctly once the draw target switches from hidden to stderr.
+        let reveal_state: Option<Arc<BarRevealState>> = if !verbose && !is_test {
+            Some(Arc::new(BarRevealState {
+                revealed: AtomicBool::new(false),
+                deferred: Mutex::new(Vec::new()),
+            }))
+        } else {
+            None
+        };
 
         // Spawn a background timer that transitions from spinner to detail view
         let detail_multi_for_timer = progress_reporter.clone();
         let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
-        let all_bars_for_timer = all_bars.clone();
+        let reveal_state_for_timer = reveal_state.clone();
         let timer_handle = if !verbose && !is_test {
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
@@ -431,16 +483,19 @@ impl Connect for Client {
                     ),
                 );
                 heading.finish_with_message("fetching updates...");
+                // Switch draw target to make bars visible
                 detail_multi_for_timer
                     .set_draw_target(ProgressDrawTarget::stderr());
-                // Force a full redraw of the multi progress (including bars
-                // that finished while the draw target was hidden).
-                // We must use force_draw() rather than tick() because tick()
-                // is a no-op on bars that have enable_steady_tick() active.
-                // A single force_draw() on any bar is sufficient since it
-                // triggers MultiState::draw() which renders all bars.
-                if let Some(bar) = all_bars_for_timer.lock().unwrap().first() {
-                    bar.force_draw();
+                // Mark as revealed and flush all bars that finished while
+                // the draw target was hidden. Hold the lock across the flag
+                // update and drain so no bar can slip through unseen (see
+                // the corresponding lock in finish_bar).
+                if let Some(state) = reveal_state_for_timer {
+                    let mut deferred = state.deferred.lock().unwrap();
+                    state.revealed.store(true, Ordering::Release);
+                    for df in deferred.drain(..) {
+                        df.bar.finish_with_message(df.message);
+                    }
                 }
             });
             Some(handle)
@@ -516,7 +571,7 @@ impl Connect for Client {
                     let current_timeout_clone = current_timeout_for_loop.clone();
                     let progress_reporter_clone = progress_reporter.clone();
                     let total_relays_clone = total_relays;
-                    let all_bars_clone = all_bars.clone();
+                    let reveal_state_clone = reveal_state.clone();
                     async move {
                         let relay_column_width = request.relay_column_width;
 
@@ -541,15 +596,23 @@ impl Connect for Client {
                                 .with_style(pb_style(current_timeout_clone.clone())?),
                         );
                         pb.enable_steady_tick(Duration::from_millis(300));
-                        all_bars_clone.lock().unwrap().push(pb.clone());
                         let pb = Some(pb);
 
-                        fn update_progress_bar_with_error(
+                        /// Set error styling on a progress bar without finishing
+                        /// it. Returns the error message so the caller can
+                        /// finish the bar through the deferred mechanism.
+                        fn style_progress_bar_with_error(
                             relay_column_width: usize,
                             relay_url: &RelayUrl,
-                            pb: Option<ProgressBar>,
+                            pb: &Option<ProgressBar>,
                             error: &anyhow::Error,
-                        ) {
+                        ) -> String {
+                            let msg = console::style(
+                                error.to_string().replace("relay pool error:", "error:"),
+                            )
+                            .for_stderr()
+                            .red()
+                            .to_string();
                             if let Some(pb) = pb {
                                 pb.set_style(pb_after_style(false));
                                 pb.set_prefix(
@@ -558,24 +621,20 @@ impl Connect for Client {
                                         .apply_to(format!("{: <relay_column_width$}", &relay_url))
                                         .to_string(),
                                 );
-                                pb.finish_with_message(
-                                    console::style(
-                                        error.to_string().replace("relay pool error:", "error:"),
-                                    )
-                                    .for_stderr()
-                                    .red()
-                                    .to_string(),
-                                );
                             }
+                            msg
                         }
 
                         if let Some(reason) = self.is_relay_skipped_for_session(&relay_url) {
-                            update_progress_bar_with_error(
+                            let msg = style_progress_bar_with_error(
                                 relay_column_width,
                                 &relay_url,
-                                pb,
+                                &pb,
                                 &anyhow!("{reason}"),
                             );
+                            if let Some(ref bar) = pb {
+                                finish_bar(bar, msg, &reveal_state_clone);
+                            }
                             bail!("{reason}");
                         }
 
@@ -628,15 +687,26 @@ impl Connect for Client {
                                 if error.to_string().contains("connection timeout") || error.to_string().contains("timeout after") {
                                     self.skip_relay_for_session(relay_url.clone(), error.to_string());
                                 }
-                                update_progress_bar_with_error(
+                                let msg = style_progress_bar_with_error(
                                     relay_column_width,
                                     &relay_url,
-                                    pb,
+                                    &pb,
                                     &error,
                                 );
+                                if let Some(ref bar) = pb {
+                                    finish_bar(bar, msg, &reveal_state_clone);
+                                }
                                 Err(error)
                             }
-                            Ok(res) => Ok(res),
+                            Ok(res) => {
+                                // The bar's style and prefix were already set
+                                // by fetch_all_from_relay; finish it through
+                                // the deferred mechanism.
+                                if let Some(ref bar) = pb {
+                                    finish_bar(bar, String::new(), &reveal_state_clone);
+                                }
+                                Ok(res)
+                            }
                         }
                     }
                 })
@@ -786,7 +856,9 @@ impl Connect for Client {
                     format!("new events: {report}")
                 },
             ));
-            pb.finish_with_message("");
+            // Don't call finish_with_message here — the caller handles
+            // finishing through the deferred mechanism so bars that complete
+            // before the detail view is revealed still appear correctly.
         }
         Ok(report)
     }
