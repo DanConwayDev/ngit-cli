@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use client::get_state_from_cache;
 use git::RepoActions;
 use ngit::{
-    client,
+    client::{self, is_verbose},
     fetch::fetch_from_git_server,
     git::{self},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
@@ -27,7 +27,9 @@ pub async fn run_list(
 
     let term = console::Term::stderr();
 
-    term.write_line("git servers: listing refs...")?;
+    if is_verbose() {
+        term.write_line("git servers: listing refs...")?;
+    }
     let remote_states = list_from_remotes(
         &term,
         git_repo,

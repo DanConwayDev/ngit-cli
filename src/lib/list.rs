@@ -3,10 +3,10 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
@@ -16,6 +16,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use nostr::hashes::sha1::Hash as Sha1Hash;
 
 use crate::{
+    client::is_verbose,
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
@@ -27,6 +28,61 @@ use crate::{
         set_protocol_preference,
     },
 };
+
+const SPINNER_EXPAND_DELAY_SECS: u64 = 5;
+
+struct GitSpinnerState {
+    spinner: ProgressBar,
+    start_time: Instant,
+    expanded_multi: Option<MultiProgress>,
+}
+
+impl GitSpinnerState {
+    fn new() -> Self {
+        let multi_progress = MultiProgress::new();
+        let spinner = multi_progress.add(
+            ProgressBar::new_spinner()
+                .with_style(
+                    ProgressStyle::with_template("{spinner} {msg}")
+                        .unwrap()
+                        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
+                )
+                .with_message("Checking git servers..."),
+        );
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        Self {
+            spinner,
+            start_time: Instant::now(),
+            expanded_multi: None,
+        }
+    }
+
+    fn should_expand(&self) -> bool {
+        self.expanded_multi.is_none()
+            && self.start_time.elapsed().as_secs() >= SPINNER_EXPAND_DELAY_SECS
+    }
+
+    fn expand(&mut self) -> &MultiProgress {
+        if self.expanded_multi.is_none() {
+            self.spinner.finish_and_clear();
+            self.expanded_multi = Some(MultiProgress::new());
+        }
+        self.expanded_multi.as_ref().unwrap()
+    }
+
+    fn finish(&self, has_errors: bool) {
+        if has_errors {
+            if let Some(ref multi) = self.expanded_multi {
+                let _ = multi.clear();
+            }
+        } else {
+            self.spinner.finish_and_clear();
+            if let Some(ref multi) = self.expanded_multi {
+                let _ = multi.clear();
+            }
+        }
+    }
+}
 
 /// Sync issues identified for a single remote
 #[derive(Default, Debug, Clone)]
@@ -111,18 +167,18 @@ pub async fn list_from_remotes(
         return HashMap::new();
     }
 
-    let progress_reporter = if std::env::var("NGITTEST").is_err() {
-        MultiProgress::new()
+    let verbose = is_verbose();
+    let spinner_state = if !verbose {
+        Some(Arc::new(Mutex::new(GitSpinnerState::new())))
     } else {
-        MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden())
+        None
     };
+    let progress_reporter = MultiProgress::new();
 
-    // Track successful servers for adaptive timeout
     let success_count = Arc::new(AtomicU64::new(0));
     let current_timeout = Arc::new(AtomicU64::new(git_server_long_timeout()));
     let total_servers = git_servers.len() as u64;
 
-    // Calculate column width for alignment
     let server_column_width = git_servers
         .iter()
         .map(|s| get_short_git_server_name(s).chars().count())
@@ -139,11 +195,13 @@ pub async fn list_from_remotes(
             let current_timeout_clone = current_timeout.clone();
             let progress_reporter_clone = progress_reporter.clone();
             let decoded_nostr_url = decoded_nostr_url.clone();
+            let spinner_state_clone = spinner_state.clone();
+            let verbose_for_task = verbose;
 
             async move {
                 let server_name = get_short_git_server_name(&url);
 
-                let pb = if std::env::var("NGITTEST").is_err() {
+                let pb = if verbose_for_task {
                     match git_server_pb_style(current_timeout_clone.clone()) {
                         Ok(style) => {
                             let pb = progress_reporter_clone.add(
@@ -163,6 +221,28 @@ pub async fn list_from_remotes(
                             Some(pb)
                         }
                         Err(_) => None,
+                    }
+                } else if let Some(ref spinner_state_arc) = spinner_state_clone {
+                    let mut state = spinner_state_arc.lock().unwrap();
+                    if state.should_expand() {
+                        let multi = state.expand().clone();
+                        let pb = multi.add(
+                            ProgressBar::new(1)
+                                .with_prefix(
+                                    console::style(format!(
+                                        "{: <server_column_width$} connecting",
+                                        &server_name
+                                    ))
+                                    .for_stderr()
+                                    .yellow()
+                                    .to_string(),
+                                )
+                                .with_style(git_server_pb_style(current_timeout_clone.clone()).unwrap()),
+                        );
+                        pb.enable_steady_tick(Duration::from_millis(300));
+                        Some(pb)
+                    } else {
+                        None
                     }
                 } else {
                     None
@@ -191,7 +271,6 @@ pub async fn list_from_remotes(
                     }
                 }
 
-                // Create the list operation future - spawn_blocking to avoid blocking async runtime
                 let git_repo_path = git_repo.get_path().ok().map(|p| p.to_path_buf());
                 let url_clone = url.clone();
                 let decoded_nostr_url_clone = decoded_nostr_url.clone();
@@ -199,7 +278,6 @@ pub async fn list_from_remotes(
 
                 let list_future = async move {
                     match tokio::task::spawn_blocking(move || {
-                        // Re-open repo in blocking thread (git2::Repository is not Send)
                         let git_repo = match git_repo_path {
                             Some(path) => Repo::from_path(&path).ok(),
                             None => None,
@@ -274,11 +352,9 @@ pub async fn list_from_remotes(
                         Err((url, error))
                     }
                     Ok(state) => {
-                        // Determine sync status message and styling using existing functions
                         let status_msg = if state.is_empty() {
                             "empty repository".to_string()
                         } else if let Some(nostr_state) = nostr_state {
-                            // Use existing generate_remote_sync_warnings to get detailed status
                             let mut temp_states = HashMap::new();
                             temp_states.insert(url.clone(), (state.clone(), is_grasp_server));
                             let remote_issues = identify_remote_sync_issues(git_repo, nostr_state, &temp_states);
@@ -287,7 +363,6 @@ pub async fn list_from_remotes(
                             if warnings.is_empty() {
                                 "in sync".to_string()
                             } else {
-                                // Extract the message after "WARNING: <server> "
                                 let warning = &warnings[0];
                                 let server_name = get_short_git_server_name(&url);
                                 let prefix = format!("WARNING: {} ", server_name);
@@ -296,7 +371,6 @@ pub async fn list_from_remotes(
                                     .to_string()
                             }
                         } else {
-                            // No nostr state to compare against
                             "success".to_string()
                         };
 
@@ -333,20 +407,22 @@ pub async fn list_from_remotes(
         .await;
 
     let mut remote_states = HashMap::new();
-    let mut all_succeeded = true;
+    let mut has_errors = false;
     for result in results {
         match result {
             Ok((url, state, is_grasp_server)) => {
                 remote_states.insert(url, (state, is_grasp_server));
             }
             Err((url, error)) => {
-                all_succeeded = false;
+                has_errors = true;
                 let _ = term.write_line(&format!("failed to list from {}: {}", url, error));
             }
         }
     }
 
-    if all_succeeded {
+    if let Some(ref spinner_state_arc) = spinner_state {
+        spinner_state_arc.lock().unwrap().finish(has_errors);
+    } else if !has_errors {
         let _ = progress_reporter.clear();
     }
 

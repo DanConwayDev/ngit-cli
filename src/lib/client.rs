@@ -16,10 +16,10 @@ use std::{
     fs::create_dir_all,
     path::Path,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -64,6 +64,65 @@ use crate::{
     repo_ref::{RepoRef, normalize_grasp_server_url},
     repo_state::RepoState,
 };
+
+pub fn is_verbose() -> bool {
+    std::env::var("NGIT_VERBOSE").is_ok()
+}
+
+const SPINNER_EXPAND_DELAY_SECS: u64 = 5;
+
+struct SpinnerState {
+    spinner: ProgressBar,
+    start_time: Instant,
+    expanded_multi: Option<MultiProgress>,
+}
+
+impl SpinnerState {
+    fn new() -> Self {
+        let multi_progress = MultiProgress::new();
+        let spinner = multi_progress.add(
+            ProgressBar::new_spinner()
+                .with_style(
+                    ProgressStyle::with_template("{spinner} {msg}")
+                        .unwrap()
+                        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
+                )
+                .with_message("Checking relays and git servers..."),
+        );
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        Self {
+            spinner,
+            start_time: Instant::now(),
+            expanded_multi: None,
+        }
+    }
+
+    fn should_expand(&self) -> bool {
+        self.expanded_multi.is_none()
+            && self.start_time.elapsed().as_secs() >= SPINNER_EXPAND_DELAY_SECS
+    }
+
+    fn expand(&mut self) -> &MultiProgress {
+        if self.expanded_multi.is_none() {
+            self.spinner.finish_and_clear();
+            self.expanded_multi = Some(MultiProgress::new());
+        }
+        self.expanded_multi.as_ref().unwrap()
+    }
+
+    fn finish(&self, has_errors: bool) {
+        if has_errors {
+            if let Some(ref multi) = self.expanded_multi {
+                let _ = multi.clear();
+            }
+        } else {
+            self.spinner.finish_and_clear();
+            if let Some(ref multi) = self.expanded_multi {
+                let _ = multi.clear();
+            }
+        }
+    }
+}
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
@@ -370,14 +429,15 @@ impl Connect for Client {
         )
         .await?;
 
+        let verbose = is_verbose();
+        let spinner_state = if !verbose {
+            Some(Arc::new(Mutex::new(SpinnerState::new())))
+        } else {
+            None
+        };
         let progress_reporter = MultiProgress::new();
 
-        // Track successful relays for adaptive timeout (switch to SHORT when
-        // SUCCESS_THRESHOLD succeed)
         let success_count = Arc::new(AtomicU64::new(0));
-
-        // Track current timeout value for progress bar display (starts at LONG,
-        // switches to SHORT)
         let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
 
         let mut processed_relays = HashSet::new();
@@ -388,7 +448,6 @@ impl Connect for Client {
             let relays = request
                 .repo_relays
                 .union(&request.user_relays_for_profiles)
-                // don't look for events on blaster
                 .filter(|&r| !r.as_str().contains("nostr.mutinywallet.com"))
                 .cloned()
                 .collect::<HashSet<RelayUrl>>()
@@ -412,12 +471,12 @@ impl Connect for Client {
             let success_count_for_loop = success_count.clone();
             let current_timeout_for_loop = current_timeout.clone();
             let total_relays = relays.len() as u64;
+            let spinner_state_clone = spinner_state.clone();
 
             let futures: Vec<_> = relays
                 .iter()
                 .map(|r| {
                     if profile_relays_only.contains(r) {
-                        // if relay isn't a repo relay, just filter for user profile
                         FetchRequest {
                             selected_relay: Some(r.to_owned()),
                             repo_coordinates_without_relays: vec![],
@@ -447,6 +506,8 @@ impl Connect for Client {
                     let current_timeout_clone = current_timeout_for_loop.clone();
                     let progress_reporter_clone = progress_reporter.clone();
                     let total_relays_clone = total_relays;
+                    let spinner_state_for_task = spinner_state_clone.clone();
+                    let verbose_for_task = verbose;
                     async move {
                         let relay_column_width = request.relay_column_width;
 
@@ -455,7 +516,7 @@ impl Connect for Client {
                             .clone()
                             .context("fetch_all_from_relay called without a relay")?;
 
-                        let pb = if std::env::var("NGITTEST").is_err() {
+                        let pb = if verbose_for_task {
                             let pb = progress_reporter_clone.add(
                                 ProgressBar::new(1)
                                     .with_prefix(
@@ -469,6 +530,26 @@ impl Connect for Client {
                             );
                             pb.enable_steady_tick(Duration::from_millis(300));
                             Some(pb)
+                        } else if let Some(ref state) = spinner_state_for_task {
+                            let mut state = state.lock().unwrap();
+                            if state.should_expand() {
+                                let multi = state.expand().clone();
+                                let pb = multi.add(
+                                    ProgressBar::new(1)
+                                        .with_prefix(
+                                            format!(
+                                                "{: <relay_column_width$} connecting",
+                                                &relay_url
+                                            )
+                                            .to_string(),
+                                        )
+                                        .with_style(pb_style(current_timeout_clone.clone())?),
+                                );
+                                pb.enable_steady_tick(Duration::from_millis(300));
+                                Some(pb)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         };
@@ -508,36 +589,27 @@ impl Connect for Client {
                             bail!("{reason}");
                         }
 
-                        // Adaptive timeout using tokio::select!
-                        // Start the fetch operation once and race it against an adaptive timeout
                         let pb_clone = pb.clone();
                         let fetch_future = self.fetch_all_from_relay(git_repo_path, request, &pb_clone);
                         tokio::pin!(fetch_future);
 
-                        // Create an adaptive timeout that switches from long to short
-                        // when SUCCESS_THRESHOLD of relays succeed
                         let timeout_future = async {
-                            // Poll for timeout or SUCCESS_THRESHOLD success threshold
                             let check_interval = Duration::from_millis(100);
                             let long_timeout_end = tokio::time::Instant::now() + Duration::from_secs(long_timeout());
 
                             loop {
-                                // Check if SUCCESS_THRESHOLD of relays have succeeded
                                 let current_success_count = success_count_clone.load(Ordering::Relaxed);
                                 let threshold = (total_relays_clone as f64 * SUCCESS_THRESHOLD).ceil() as u64;
 
                                 if current_success_count >= threshold {
-                                    // SUCCESS_THRESHOLD reached, switch to short timeout
                                     tokio::time::sleep(Duration::from_secs(short_timeout())).await;
                                     return "short";
                                 }
 
-                                // Check if long timeout has expired
                                 if tokio::time::Instant::now() >= long_timeout_end {
                                     return "long";
                                 }
 
-                                // Sleep briefly before checking again
                                 tokio::time::sleep(check_interval).await;
                             }
                         };
@@ -546,11 +618,9 @@ impl Connect for Client {
                         let result = tokio::select! {
                             result = &mut fetch_future => {
                                 if result.is_ok() {
-                                    // Increment success count
                                     let new_count = success_count_clone.fetch_add(1, Ordering::Relaxed) + 1;
                                     let threshold = (total_relays_clone as f64 * SUCCESS_THRESHOLD).ceil() as u64;
 
-                                    // If we've reached SUCCESS_THRESHOLD, update timeout display
                                     if new_count >= threshold {
                                         current_timeout_clone.store(short_timeout(), Ordering::Relaxed);
                                     }
@@ -565,7 +635,6 @@ impl Connect for Client {
 
                         match result {
                             Err(error) => {
-                                // Check error for timeout/connection issues and add to skip list
                                 if error.to_string().contains("connection timeout") || error.to_string().contains("timeout after") {
                                     self.skip_relay_for_session(relay_url.clone(), error.to_string());
                                 }
@@ -619,6 +688,12 @@ impl Connect for Client {
                 set
             };
         }
+
+        if let Some(ref state) = spinner_state {
+            let has_errors = relay_reports.iter().any(Result::is_err);
+            state.lock().unwrap().finish(has_errors);
+        }
+
         Ok((relay_reports, progress_reporter))
     }
 
@@ -2084,8 +2159,11 @@ pub async fn fetching_with_report(
     #[cfg(not(test))] client: &Client,
     trusted_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<FetchReport> {
-    let term = console::Term::stderr();
-    term.write_line("fetching updates...")?;
+    let verbose = is_verbose();
+    if verbose {
+        let term = console::Term::stderr();
+        term.write_line("fetching updates...")?;
+    }
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),

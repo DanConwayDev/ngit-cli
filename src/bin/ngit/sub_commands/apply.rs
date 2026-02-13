@@ -1,9 +1,11 @@
 use std::{
     io::Write,
     process::{Command, Stdio},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use indicatif::{ProgressBar, ProgressStyle};
 use ngit::{
     client::get_all_proposal_patch_pr_pr_update_events_from_cache,
     git_events::get_pr_tip_event_or_most_recent_patch_with_ancestors,
@@ -18,16 +20,55 @@ use crate::{
 };
 
 fn run_git_fetch(remote_name: &str) -> Result<()> {
-    println!("fetching from {remote_name}...");
-    let exit_status = Command::new("git")
+    let verbose = ngit::client::is_verbose();
+    if verbose {
+        println!("fetching from {remote_name}...");
+    }
+
+    let spinner = if verbose {
+        None
+    } else {
+        let pb = ProgressBar::new_spinner()
+            .with_style(
+                ProgressStyle::with_template("{spinner} {msg}")
+                    .unwrap()
+                    .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
+            )
+            .with_message(format!("Fetching from {remote_name}..."));
+        pb.enable_steady_tick(Duration::from_millis(100));
+        Some(pb)
+    };
+
+    let output = Command::new("git")
         .args(["fetch", remote_name])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .stdout(if verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
+        .stderr(if verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
+        .output()
         .context("failed to run git fetch")?;
 
-    if !exit_status.success() {
-        bail!("git fetch {remote_name} exited with error: {exit_status}");
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    if !output.status.success() {
+        if !verbose {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.is_empty() {
+                eprintln!("{stderr}");
+            }
+        }
+        bail!(
+            "git fetch {remote_name} exited with error: {}",
+            output.status
+        );
     }
     Ok(())
 }

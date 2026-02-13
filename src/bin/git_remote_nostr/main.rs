@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache};
+use client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache, is_verbose};
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
     client::{self, Params},
@@ -156,7 +156,10 @@ async fn fetching_with_report_for_helper(
     trusted_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<()> {
     let term = console::Term::stderr();
-    term.write_line("nostr: fetching...")?;
+    let verbose = is_verbose();
+    if verbose {
+        term.write_line("nostr: fetching...")?;
+    }
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
@@ -166,10 +169,12 @@ async fn fetching_with_report_for_helper(
         .await?;
     let report = consolidate_fetch_reports(relay_reports);
     if report.to_string().is_empty() {
-        term.write_line("nostr: no updates")?;
+        if verbose {
+            term.write_line("nostr: no updates")?;
+        }
     } else {
         term.write_line(&format!("nostr updates: {report}"))?;
     }
-    progress_reporter.clear()?;
+    let _ = progress_reporter.clear();
     Ok(())
 }
