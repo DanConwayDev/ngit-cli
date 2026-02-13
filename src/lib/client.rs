@@ -474,8 +474,13 @@ impl Connect for Client {
                 if let Some(spinner) = spinner_for_timer {
                     spinner.finish_and_clear();
                 }
+                // Switch draw target to make bars visible
+                detail_multi_for_timer
+                    .set_draw_target(ProgressDrawTarget::stderr());
                 // Add heading as a finished progress bar so it gets cleared
-                // along with the other bars by progress_reporter.clear()
+                // along with the other bars by progress_reporter.clear().
+                // Must be inserted after the draw target switch so that
+                // finish_with_message renders it.
                 let heading = detail_multi_for_timer.insert(
                     0,
                     ProgressBar::new(0).with_style(
@@ -483,9 +488,6 @@ impl Connect for Client {
                     ),
                 );
                 heading.finish_with_message("fetching updates...");
-                // Switch draw target to make bars visible
-                detail_multi_for_timer
-                    .set_draw_target(ProgressDrawTarget::stderr());
                 // Mark as revealed and flush all bars that finished while
                 // the draw target was hidden. Hold the lock across the flag
                 // update and drain so no bar can slip through unseen (see
