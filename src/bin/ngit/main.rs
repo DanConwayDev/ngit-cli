@@ -15,6 +15,10 @@ use ngit::{
 
 mod sub_commands;
 
+fn is_verbose() -> bool {
+    std::env::var("NGIT_VERBOSE").is_ok() || std::env::var("NGIT_TEST").is_ok()
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -23,6 +27,10 @@ async fn main() {
     // specified
     if cli.interactive {
         std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
+    }
+
+    if cli.verbose || std::env::var("NGIT_TEST").is_ok() {
+        std::env::set_var("NGIT_VERBOSE", "1");
     }
 
     if cli.customize {

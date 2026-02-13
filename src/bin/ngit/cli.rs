@@ -42,6 +42,9 @@ pub struct Cli {
     /// Force operations, bypass safety guards
     #[arg(short = 'f', long, global = true)]
     pub force: bool,
+    /// Enable verbose output
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
 }
 
 pub const CUSTOMISE_TEMPLATE: &str = r"
