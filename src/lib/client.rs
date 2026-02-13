@@ -451,6 +451,20 @@ impl Connect for Client {
             MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
         };
 
+        // Pre-add a heading bar at position 0 so it has a reserved slot
+        // before any relay bars are added. It stays hidden (draw target is
+        // hidden) until the timer reveals it.
+        let heading_bar = if !verbose && !is_test {
+            let bar = progress_reporter.add(
+                ProgressBar::new(0).with_style(
+                    ProgressStyle::with_template("{msg}").unwrap(),
+                ),
+            );
+            Some(bar)
+        } else {
+            None
+        };
+
         // Track whether the detail view has been revealed. Bars that finish
         // before reveal have their finish_with_message deferred so they render
         // correctly once the draw target switches from hidden to stderr.
@@ -467,6 +481,7 @@ impl Connect for Client {
         let detail_multi_for_timer = progress_reporter.clone();
         let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
         let reveal_state_for_timer = reveal_state.clone();
+        let heading_bar_for_timer = heading_bar.clone();
         let timer_handle = if !verbose && !is_test {
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
@@ -477,17 +492,11 @@ impl Connect for Client {
                 // Switch draw target to make bars visible
                 detail_multi_for_timer
                     .set_draw_target(ProgressDrawTarget::stderr());
-                // Add heading as a finished progress bar so it gets cleared
-                // along with the other bars by progress_reporter.clear().
-                // Must be inserted after the draw target switch so that
-                // finish_with_message renders it.
-                let heading = detail_multi_for_timer.insert(
-                    0,
-                    ProgressBar::new(0).with_style(
-                        ProgressStyle::with_template("{msg}").unwrap(),
-                    ),
-                );
-                heading.finish_with_message("fetching updates...");
+                // Finish the pre-added heading bar now that the draw target
+                // is visible so indicatif actually renders it.
+                if let Some(heading) = heading_bar_for_timer {
+                    heading.finish_with_message("fetching updates...");
+                }
                 // Mark as revealed and flush all bars that finished while
                 // the draw target was hidden. Hold the lock across the flag
                 // update and drain so no bar can slip through unseen (see
