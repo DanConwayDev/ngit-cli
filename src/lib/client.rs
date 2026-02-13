@@ -16,10 +16,10 @@ use std::{
     fs::create_dir_all,
     path::Path,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -69,60 +69,7 @@ pub fn is_verbose() -> bool {
     std::env::var("NGIT_VERBOSE").is_ok()
 }
 
-const SPINNER_EXPAND_DELAY_SECS: u64 = 5;
-
-struct SpinnerState {
-    spinner: ProgressBar,
-    start_time: Instant,
-    expanded_multi: Option<MultiProgress>,
-}
-
-impl SpinnerState {
-    fn new() -> Self {
-        let multi_progress = MultiProgress::new();
-        let spinner = multi_progress.add(
-            ProgressBar::new_spinner()
-                .with_style(
-                    ProgressStyle::with_template("{spinner} {msg}")
-                        .unwrap()
-                        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
-                )
-                .with_message("Checking relays and git servers..."),
-        );
-        spinner.enable_steady_tick(Duration::from_millis(100));
-        Self {
-            spinner,
-            start_time: Instant::now(),
-            expanded_multi: None,
-        }
-    }
-
-    fn should_expand(&self) -> bool {
-        self.expanded_multi.is_none()
-            && self.start_time.elapsed().as_secs() >= SPINNER_EXPAND_DELAY_SECS
-    }
-
-    fn expand(&mut self) -> &MultiProgress {
-        if self.expanded_multi.is_none() {
-            self.spinner.finish_and_clear();
-            self.expanded_multi = Some(MultiProgress::new());
-        }
-        self.expanded_multi.as_ref().unwrap()
-    }
-
-    fn finish(&self, has_errors: bool) {
-        if has_errors {
-            if let Some(ref multi) = self.expanded_multi {
-                let _ = multi.clear();
-            }
-        } else {
-            self.spinner.finish_and_clear();
-            if let Some(ref multi) = self.expanded_multi {
-                let _ = multi.clear();
-            }
-        }
-    }
-}
+const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
@@ -430,12 +377,54 @@ impl Connect for Client {
         .await?;
 
         let verbose = is_verbose();
-        let spinner_state = if !verbose {
-            Some(Arc::new(Mutex::new(SpinnerState::new())))
+        let is_test = std::env::var("NGITTEST").is_ok();
+
+        // Set up the two-MultiProgress pattern:
+        // 1. A spinner MultiProgress shown immediately (concise mode only)
+        // 2. A detail MultiProgress that starts hidden and becomes visible after a delay
+        let spinner_multi = if !verbose && !is_test {
+            let m = MultiProgress::new();
+            let spinner = m.add(
+                ProgressBar::new_spinner()
+                    .with_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
+                    )
+                    .with_message("Checking relays and git servers..."),
+            );
+            spinner.enable_steady_tick(Duration::from_millis(100));
+            Some((m, spinner))
         } else {
             None
         };
-        let progress_reporter = MultiProgress::new();
+
+        let progress_reporter = if is_test {
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+        } else if verbose {
+            MultiProgress::new()
+        } else {
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+        };
+
+        // Spawn a background timer that transitions from spinner to detail view
+        let detail_multi_for_timer = progress_reporter.clone();
+        let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
+        let timer_handle = if !verbose && !is_test {
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
+                // Transition: finish spinner, show heading, reveal detail bars
+                if let Some(spinner) = spinner_for_timer {
+                    spinner.finish_and_clear();
+                }
+                eprintln!("fetching updates...");
+                detail_multi_for_timer
+                    .set_draw_target(ProgressDrawTarget::stderr());
+            });
+            Some(handle)
+        } else {
+            None
+        };
 
         let success_count = Arc::new(AtomicU64::new(0));
         let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
@@ -471,7 +460,6 @@ impl Connect for Client {
             let success_count_for_loop = success_count.clone();
             let current_timeout_for_loop = current_timeout.clone();
             let total_relays = relays.len() as u64;
-            let spinner_state_clone = spinner_state.clone();
 
             let futures: Vec<_> = relays
                 .iter()
@@ -506,8 +494,6 @@ impl Connect for Client {
                     let current_timeout_clone = current_timeout_for_loop.clone();
                     let progress_reporter_clone = progress_reporter.clone();
                     let total_relays_clone = total_relays;
-                    let spinner_state_for_task = spinner_state_clone.clone();
-                    let verbose_for_task = verbose;
                     async move {
                         let relay_column_width = request.relay_column_width;
 
@@ -516,43 +502,23 @@ impl Connect for Client {
                             .clone()
                             .context("fetch_all_from_relay called without a relay")?;
 
-                        let pb = if verbose_for_task {
-                            let pb = progress_reporter_clone.add(
-                                ProgressBar::new(1)
-                                    .with_prefix(
-                                        format!(
-                                            "{: <relay_column_width$} connecting",
-                                            &relay_url
-                                        )
-                                        .to_string(),
+                        // Always create a real progress bar added to the detail
+                        // multi. In test mode the multi has a hidden draw target
+                        // so nothing is displayed. In concise mode the multi
+                        // starts hidden and the background timer reveals it.
+                        let pb = progress_reporter_clone.add(
+                            ProgressBar::new(1)
+                                .with_prefix(
+                                    format!(
+                                        "{: <relay_column_width$} connecting",
+                                        &relay_url
                                     )
-                                    .with_style(pb_style(current_timeout_clone.clone())?),
-                            );
-                            pb.enable_steady_tick(Duration::from_millis(300));
-                            Some(pb)
-                        } else if let Some(ref state) = spinner_state_for_task {
-                            let mut state = state.lock().unwrap();
-                            if state.should_expand() {
-                                let multi = state.expand().clone();
-                                let pb = multi.add(
-                                    ProgressBar::new(1)
-                                        .with_prefix(
-                                            format!(
-                                                "{: <relay_column_width$} connecting",
-                                                &relay_url
-                                            )
-                                            .to_string(),
-                                        )
-                                        .with_style(pb_style(current_timeout_clone.clone())?),
-                                );
-                                pb.enable_steady_tick(Duration::from_millis(300));
-                                Some(pb)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
+                                    .to_string(),
+                                )
+                                .with_style(pb_style(current_timeout_clone.clone())?),
+                        );
+                        pb.enable_steady_tick(Duration::from_millis(300));
+                        let pb = Some(pb);
 
                         fn update_progress_bar_with_error(
                             relay_column_width: usize,
@@ -689,9 +655,14 @@ impl Connect for Client {
             };
         }
 
-        if let Some(ref state) = spinner_state {
-            let has_errors = relay_reports.iter().any(Result::is_err);
-            state.lock().unwrap().finish(has_errors);
+        // Cancel the background timer if it hasn't fired yet, and clean up
+        // the spinner. If the timer already fired, the abort is a no-op.
+        if let Some(handle) = timer_handle {
+            handle.abort();
+        }
+        // Clear the spinner (no-op if timer already cleared it)
+        if let Some((_, spinner)) = &spinner_multi {
+            spinner.finish_and_clear();
         }
 
         Ok((relay_reports, progress_reporter))
