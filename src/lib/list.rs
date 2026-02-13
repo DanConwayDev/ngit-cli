@@ -333,16 +333,21 @@ pub async fn list_from_remotes(
         .await;
 
     let mut remote_states = HashMap::new();
+    let mut all_succeeded = true;
     for result in results {
         match result {
             Ok((url, state, is_grasp_server)) => {
                 remote_states.insert(url, (state, is_grasp_server));
             }
             Err((url, error)) => {
-                // Errors are already displayed in progress bars
+                all_succeeded = false;
                 let _ = term.write_line(&format!("failed to list from {}: {}", url, error));
             }
         }
+    }
+
+    if all_succeeded {
+        let _ = progress_reporter.clear();
     }
 
     remote_states

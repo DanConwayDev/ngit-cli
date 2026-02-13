@@ -157,7 +157,7 @@ async fn fetching_with_report_for_helper(
 ) -> Result<()> {
     let term = console::Term::stderr();
     term.write_line("nostr: fetching...")?;
-    let (relay_reports, _progress_reporter) = client
+    let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
             Some(trusted_maintainer_coordinate),
@@ -170,5 +170,6 @@ async fn fetching_with_report_for_helper(
     } else {
         term.write_line(&format!("nostr updates: {report}"))?;
     }
+    progress_reporter.clear()?;
     Ok(())
 }
