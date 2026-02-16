@@ -1851,7 +1851,7 @@ async fn process_fetched_events(
                         event.created_at,
                     ));
                 }
-                // if contains new maintainer
+                // if contains announcement
                 if let Ok(repo_ref) = &RepoRef::try_from((event.clone(), None)) {
                     for m in &repo_ref.maintainers {
                         if !request
@@ -2140,11 +2140,12 @@ pub struct FetchReport {
 
 impl Display for FetchReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // report: "1 new maintainer, 1 announcement, 1 proposal, 3 commits, 2 statuses"
+        // report: "1 announcement, 1 announcement, 1 proposal, 3 commits, 2
+        // statuses"
         let mut display_items: Vec<String> = vec![];
         if !self.repo_coordinates_without_relays.is_empty() {
             display_items.push(format!(
-                "{} new maintainer{}",
+                "{} announcement{}",
                 self.repo_coordinates_without_relays.len(),
                 if self.repo_coordinates_without_relays.len() > 1 {
                     "s"
@@ -2568,54 +2569,54 @@ pub async fn send_events(
         let pb_after_style_failed = pb_after_style_failed.clone();
         let pb_after_style_succeeded = pb_after_style_succeeded.clone();
         async move {
-        let relay_clean = remove_trailing_slash(relay);
-        let details = format!(
-            "{}{}{} {}",
-            if my_write_relays
-                .iter()
-                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
-            {
-                " [my-relay]"
-            } else {
-                ""
-            },
-            if repo_read_relays
-                .iter()
-                .any(|r| relay_clean.eq(&remove_trailing_slash(&r.to_string())))
-            {
-                " [repo-relay]"
-            } else {
-                ""
-            },
-            if fallback
-                .iter()
-                .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
-            {
-                " [default]"
-            } else {
-                ""
-            },
-            relay_clean,
-        );
-        let pb = m.add(
-            ProgressBar::new(events.len() as u64)
-                .with_prefix(details.to_string())
-                .with_style(pb_style.clone()),
-        );
-        if animate {
-            pb.enable_steady_tick(Duration::from_millis(300));
-        }
-        pb.inc(0); // need to make pb display intially
-        let mut failed = false;
-        for event in &events {
-            match client
-                .send_event_to(git_repo_path, relay, event.clone())
-                .await
-            {
-                Ok(_) => pb.inc(1),
-                Err(e) => {
-                    pb.set_style(pb_after_style_failed.clone());
-                    let msg = console::style(format!(
+            let relay_clean = remove_trailing_slash(relay);
+            let details = format!(
+                "{}{}{} {}",
+                if my_write_relays
+                    .iter()
+                    .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+                {
+                    " [my-relay]"
+                } else {
+                    ""
+                },
+                if repo_read_relays
+                    .iter()
+                    .any(|r| relay_clean.eq(&remove_trailing_slash(&r.to_string())))
+                {
+                    " [repo-relay]"
+                } else {
+                    ""
+                },
+                if fallback
+                    .iter()
+                    .any(|r| relay_clean.eq(&remove_trailing_slash(r)))
+                {
+                    " [default]"
+                } else {
+                    ""
+                },
+                relay_clean,
+            );
+            let pb = m.add(
+                ProgressBar::new(events.len() as u64)
+                    .with_prefix(details.to_string())
+                    .with_style(pb_style.clone()),
+            );
+            if animate {
+                pb.enable_steady_tick(Duration::from_millis(300));
+            }
+            pb.inc(0); // need to make pb display intially
+            let mut failed = false;
+            for event in &events {
+                match client
+                    .send_event_to(git_repo_path, relay, event.clone())
+                    .await
+                {
+                    Ok(_) => pb.inc(1),
+                    Err(e) => {
+                        pb.set_style(pb_after_style_failed.clone());
+                        let msg = console::style(format!(
                             "error: {}",
                             e.to_string()
                                 .replace("relay pool error:", "")
@@ -2624,17 +2625,18 @@ pub async fn send_events(
                         .for_stderr()
                         .red()
                         .to_string();
-                    finish_bar(&pb, msg, &reveal_state_clone);
-                    failed = true;
-                    break;
-                }
-            };
+                        finish_bar(&pb, msg, &reveal_state_clone);
+                        failed = true;
+                        break;
+                    }
+                };
+            }
+            if !failed {
+                pb.set_style(pb_after_style_succeeded.clone());
+                finish_bar(&pb, String::new(), &reveal_state_clone);
+            }
         }
-        if !failed {
-            pb.set_style(pb_after_style_succeeded.clone());
-            finish_bar(&pb, String::new(), &reveal_state_clone);
-        }
-    }}))
+    }))
     .await;
 
     // Cancel the background timer if it hasn't fired yet, and clean up

@@ -1514,7 +1514,7 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
     }
     fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
         p.expect("fetching updates...\r\n")?;
-        p.expect("updates: 1 new maintainer, 1 announcement update, 1 proposal\r\n")?;
+        p.expect("updates: 1 announcement, 1 announcement update, 1 proposal\r\n")?;
         let proposal_root_bech32 = get_pretend_proposal_root_event().id.to_bech32().unwrap();
         p.expect(format!(
             "creating proposal revision for: {proposal_root_bech32}\r\n",
