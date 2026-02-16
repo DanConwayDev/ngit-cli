@@ -205,7 +205,7 @@ pub async fn launch(status: String, json: bool, id: Option<String>) -> Result<()
     if json {
         output_json(&filtered_proposals, &repo_ref)?;
     } else {
-        output_table(&filtered_proposals, &repo_ref);
+        output_table(&filtered_proposals, &repo_ref, &status);
     }
 
     Ok(())
@@ -221,9 +221,9 @@ fn status_kind_to_str(kind: Kind) -> &'static str {
     }
 }
 
-fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) {
+fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef, status_filter: &str) {
     if proposals.is_empty() {
-        println!("No proposals found matching the filter.");
+        println!("No proposals found matching status: {status_filter}");
         return;
     }
 
@@ -242,6 +242,7 @@ fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) {
     }
 
     println!();
+    println!("--status {status_filter}");
     println!("To view:     ngit list <id>");
     println!("To checkout: ngit checkout <id>");
     println!("To apply:    ngit apply <id>");
