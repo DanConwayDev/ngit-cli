@@ -493,7 +493,7 @@ impl Connect for Client {
                 // Finish the pre-added heading bar now that the draw target
                 // is visible so indicatif actually renders it.
                 if let Some(heading) = heading_bar_for_timer {
-                    heading.finish_with_message("fetching updates...");
+                    heading.finish_with_message("Checking nostr relays...");
                 }
                 // Mark as revealed and flush all bars that finished while
                 // the draw target was hidden. Hold the lock across the flag
@@ -2239,7 +2239,7 @@ pub async fn fetching_with_report(
     let verbose = is_verbose();
     if verbose {
         let term = console::Term::stderr();
-        term.write_line("fetching updates...")?;
+        term.write_line("Checking nostr relays...")?;
     }
     let (relay_reports, progress_reporter) = client
         .fetch_all(

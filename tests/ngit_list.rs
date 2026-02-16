@@ -114,7 +114,7 @@ mod cannot_find_repo_event {
                         coordinate.identifier,
                     );
                     p.expect(format!("set git remote \"origin\" to {}\r\n", &nostr_url))?;
-                    p.expect("fetching updates...\r\n")?;
+                    p.expect("Checking nostr relays...\r\n")?;
                     // no updates as they were fetched when searching for repo
                     p.expect("no updates\r\n")?;
                     p.expect_end_with("no proposals found... create one? try `ngit send`\r\n")?;
@@ -199,7 +199,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -318,7 +318,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -440,7 +440,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -518,7 +518,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
 
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -640,7 +640,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             // create proposal branch
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -665,7 +665,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.checkout("main")?;
                             // run test
                             p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -736,7 +736,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.populate()?;
                             // create proposal branch
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -761,7 +761,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.checkout("main")?;
                             // run test
                             p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -851,7 +851,7 @@ mod when_main_branch_is_uptodate {
 
                             // run test
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -927,7 +927,7 @@ mod when_main_branch_is_uptodate {
 
                             // run test
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -1040,7 +1040,7 @@ mod when_main_branch_is_uptodate {
 
                             // run test
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -1119,7 +1119,7 @@ mod when_main_branch_is_uptodate {
 
                             // run test
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -1224,7 +1224,7 @@ mod when_main_branch_is_uptodate {
 
                             // run test
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -1306,7 +1306,7 @@ mod when_main_branch_is_uptodate {
 
                             // run test
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -1408,7 +1408,7 @@ mod when_main_branch_is_uptodate {
                             test_repo.checkout("main")?;
 
                             let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                            p.expect("fetching updates...\r\n")?;
+                            p.expect("Checking nostr relays...\r\n")?;
                             p.expect_eventually("\r\n")?; // some updates listed here
                             let mut c = p.expect_choice(
                                 "all proposals",
@@ -1481,7 +1481,7 @@ mod when_main_branch_is_uptodate {
                                 test_repo.checkout("main")?;
 
                                 let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-                                p.expect("fetching updates...\r\n")?;
+                                p.expect("Checking nostr relays...\r\n")?;
                                 p.expect_eventually("\r\n")?; // some updates listed here
                                 let mut c = p.expect_choice(
                                     "all proposals",

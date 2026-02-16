@@ -80,7 +80,7 @@ mod when_commits_behind_ask_to_proceed {
     }
 
     fn expect_confirm_prompt(p: &'_ mut CliTester) -> Result<CliTesterConfirmPrompt<'_>> {
-        p.expect("fetching updates...\r\n")?;
+        p.expect("Checking nostr relays...\r\n")?;
         p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
         p.expect("creating proposal from 2 commits:\r\n")?;
         p.expect("fe973a8 add t4.md\r\n")?;
@@ -230,7 +230,7 @@ fn cli_tester_create_proposal(git_repo: &GitTestRepo, include_cover_letter: bool
 }
 
 fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
-    p.expect("fetching updates...\r\n")?;
+    p.expect("Checking nostr relays...\r\n")?;
     p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
     p.expect("creating proposal from 2 commits:\r\n")?;
     p.expect("fe973a8 add t4.md\r\n")?;
@@ -1307,7 +1307,7 @@ mod when_range_ommited_prompts_for_selection_defaulting_ahead_of_main {
         CliTester::new_from_dir(&git_repo.dir, args)
     }
     fn expect_msgs_first(p: &mut CliTester) -> Result<()> {
-        p.expect("fetching updates...\r\n")?;
+        p.expect("Checking nostr relays...\r\n")?;
         p.expect_eventually("\r\n")?; // may be 'no updates' or some updates
         let mut selector = p.expect_multi_select(
             "select commits for proposal",
@@ -1513,7 +1513,7 @@ mod root_proposal_specified_using_in_reply_to_with_range_of_head_2_and_cover_let
         CliTester::new_from_dir(&git_repo.dir, args)
     }
     fn expect_msgs_first(p: &mut CliTester, include_cover_letter: bool) -> Result<()> {
-        p.expect("fetching updates...\r\n")?;
+        p.expect("Checking nostr relays...\r\n")?;
         p.expect("updates: 1 announcement, 1 announcement update, 1 proposal\r\n")?;
         let proposal_root_bech32 = get_pretend_proposal_root_event().id.to_bech32().unwrap();
         p.expect(format!(

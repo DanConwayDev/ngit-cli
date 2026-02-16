@@ -1493,7 +1493,7 @@ pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
     proposal_number: u16,
 ) -> Result<()> {
     let mut p = CliTester::new_from_dir(&test_repo.dir, ["-i", "list"]);
-    p.expect("fetching updates...\r\n")?;
+    p.expect("Checking nostr relays...\r\n")?;
     p.expect_eventually("\r\n")?; // some updates listed here
     let mut c = p.expect_choice(
         "all proposals",
