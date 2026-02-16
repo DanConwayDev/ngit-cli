@@ -114,7 +114,11 @@ pub async fn launch(status: String, json: bool, id: Option<String>) -> Result<()
         .flatten();
 
     if let Some((remote_name, _)) = &nostr_remote {
-        run_git_fetch(remote_name)?;
+        if std::env::var("NGITTEST").is_ok() {
+            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        } else {
+            run_git_fetch(remote_name)?;
+        }
     } else {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
@@ -364,7 +368,11 @@ async fn launch_interactive() -> Result<()> {
         .flatten();
 
     if let Some((remote_name, _)) = &nostr_remote {
-        run_git_fetch(remote_name)?;
+        if std::env::var("NGITTEST").is_ok() {
+            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        } else {
+            run_git_fetch(remote_name)?;
+        }
     } else {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
