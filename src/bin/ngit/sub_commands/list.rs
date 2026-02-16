@@ -243,9 +243,15 @@ fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef, status
 
     println!();
     println!("--status {status_filter}");
-    println!("To view:     ngit list <id>");
-    println!("To checkout: ngit checkout <id>");
-    println!("To apply:    ngit apply <id>");
+    println!("{}", console::style("To view:     ngit list <id>").yellow());
+    println!(
+        "{}",
+        console::style("To checkout: ngit checkout <id>").yellow()
+    );
+    println!(
+        "{}",
+        console::style("To apply:    ngit apply <id>").yellow()
+    );
 }
 
 fn output_json(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) -> Result<()> {
@@ -344,8 +350,14 @@ fn show_proposal_details(
     }
 
     println!();
-    println!("To checkout: ngit checkout {}", proposal.id);
-    println!("To apply:    ngit apply {}", proposal.id);
+    println!(
+        "{}",
+        console::style(format!("To checkout: ngit checkout {}", proposal.id)).yellow()
+    );
+    println!(
+        "{}",
+        console::style(format!("To apply:    ngit apply {}", proposal.id)).yellow()
+    );
 
     Ok(())
 }
