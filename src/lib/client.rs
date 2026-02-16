@@ -2485,12 +2485,13 @@ pub async fn send_events(
 
     // Pre-add a heading bar at position 0 so it has a reserved slot
     // before any relay bars are added.
-    let heading_bar = if use_concise {
+    let heading_bar = {
         let bar =
             m.add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()));
+        // if !use_concise {
+        bar.set_message("Publishing to nostr relays...");
+        // }
         Some(bar)
-    } else {
-        None
     };
 
     let reveal_state: Option<Arc<BarRevealState>> = if use_concise {
@@ -2645,7 +2646,8 @@ pub async fn send_events(
         handle.abort();
     }
     if let Some((_, spinner)) = &spinner_multi {
-        spinner.finish_and_clear();
+        spinner.set_style(ProgressStyle::with_template("{msg}").unwrap());
+        spinner.finish_with_message("Published to nostr relays");
     }
 
     Ok(())
