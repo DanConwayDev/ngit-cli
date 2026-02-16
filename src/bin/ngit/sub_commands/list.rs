@@ -242,6 +242,7 @@ fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) {
     }
 
     println!();
+    println!("To view:     ngit list <id>");
     println!("To checkout: ngit checkout <id>");
     println!("To apply:    ngit apply <id>");
 }
