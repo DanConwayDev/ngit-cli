@@ -173,7 +173,11 @@ pub async fn list_from_remotes(
     } else {
         None
     };
-    let progress_reporter = MultiProgress::new();
+    let progress_reporter = if !verbose {
+        MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    };
 
     let success_count = Arc::new(AtomicU64::new(0));
     let current_timeout = Arc::new(AtomicU64::new(git_server_long_timeout()));
@@ -422,7 +426,7 @@ pub async fn list_from_remotes(
 
     if let Some(ref spinner_state_arc) = spinner_state {
         spinner_state_arc.lock().unwrap().finish(has_errors);
-    } else if !has_errors {
+    } else if !has_errors || !is_verbose() {
         let _ = progress_reporter.clear();
     }
 
