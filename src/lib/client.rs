@@ -2454,7 +2454,7 @@ pub async fn send_events(
 
     let verbose = is_verbose();
     let is_test = std::env::var("NGITTEST").is_ok();
-    let use_concise = !verbose && !is_test && !silent && animate;
+    let use_concise = !is_test || (!verbose && !silent && animate);
 
     // Set up the two-MultiProgress pattern (same as fetch_all):
     // 1. A spinner MultiProgress shown immediately (concise mode only)
@@ -2477,7 +2477,7 @@ pub async fn send_events(
         None
     };
 
-    let m = if silent || is_test || use_concise {
+    let m = if silent || !is_test || use_concise {
         MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
     } else {
         MultiProgress::new()
@@ -2488,9 +2488,9 @@ pub async fn send_events(
     let heading_bar = {
         let bar =
             m.add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()));
-        // if !use_concise {
-        bar.set_message("Publishing to nostr relays...");
-        // }
+        if !is_test {
+            bar.set_message("Publishing to nostr relays...");
+        }
         Some(bar)
     };
 

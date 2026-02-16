@@ -267,6 +267,15 @@ pub fn expect_send_with_progress(
             break;
         }
     }
+    let mut s = String::new();
+    loop {
+        s.push_str(&p.expect_eventually(&last_relay_outcome)?);
+        s.push_str(&last_relay_outcome);
+        if relays.iter().all(|r| s.contains(&outcome_message(r))) {
+            // all responses have been received with correct outcome
+            break;
+        }
+    }
     Ok(())
 }
 
