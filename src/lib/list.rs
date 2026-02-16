@@ -168,15 +168,21 @@ pub async fn list_from_remotes(
     }
 
     let verbose = is_verbose();
+    let is_test = std::env::var("NGITTEST").is_ok();
     let spinner_state = if !verbose {
         Some(Arc::new(Mutex::new(GitSpinnerState::new())))
     } else {
         None
     };
-    let progress_reporter = if !verbose {
-        MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden())
-    } else {
+    // Under test conditions the draw target must be hidden even though
+    // verbose is true (NGITTEST sets NGIT_VERBOSE). A visible
+    // MultiProgress writes ANSI cursor-movement sequences to stderr and
+    // the subsequent `progress_reporter.clear()` erases lines of real
+    // git-remote-helper output that tests rely on.
+    let progress_reporter = if verbose && !is_test {
         MultiProgress::new()
+    } else {
+        MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden())
     };
 
     let success_count = Arc::new(AtomicU64::new(0));
