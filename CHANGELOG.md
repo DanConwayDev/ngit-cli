@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **AI-friendly commands** all non-interactive by default
+  - Add `--defaults/-d` flag for sensible defaults
+  - Add `--force/-f` flag to bypass safety guards
+  - Add `--interactive/-i` flag to enable prompts
+- **Simplify CLI output**
+  - Add `--verbose/-v` flag for detailed output
+  - show fetch/publish report if taking longer than 5s
+
+### Added
+
+- `ngit checkout <id>` - checkout a proposal branch by event-id or nevent
+- `ngit apply <id>` - apply proposal patches to current branch
+- `ngit account create` - create a new nostr account
+- `ngit list --json` - output proposals as JSON
+- `ngit list --status` - filter by status (open,draft,closed,applied)
+- `ngit init --hashtag` - specify repository hashtag
+
+### Removed
+
+- `--blossoms` flag from `ngit init` (removed from GRASP spec)
+
+### Fixed
+
+- Branch tracking setup when checking out proposals (c85ca81)
+- Handle existing local branch that is behind when checking out PR (1be46b4)
+- Preserve progress bars on relay errors during clone (b8716ed)
+- Various output formatting and wording improvements
+
 ## [2.1.0]
 
 ### Added
