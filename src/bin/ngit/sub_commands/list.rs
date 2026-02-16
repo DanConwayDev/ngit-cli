@@ -95,7 +95,7 @@ fn run_git_fetch(remote_name: &str) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(status: String, json: bool, id: Option<String>) -> Result<()> {
+pub async fn launch(status: String, json: bool, id: Option<String>, offline: bool) -> Result<()> {
     if std::env::var("NGIT_INTERACTIVE_MODE").is_ok() {
         return launch_interactive().await;
     }
@@ -113,14 +113,16 @@ pub async fn launch(status: String, json: bool, id: Option<String>) -> Result<()
         .ok()
         .flatten();
 
-    if let Some((remote_name, _)) = &nostr_remote {
-        if std::env::var("NGITTEST").is_ok() {
-            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    if !offline {
+        if let Some((remote_name, _)) = &nostr_remote {
+            if std::env::var("NGITTEST").is_ok() {
+                fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+            } else {
+                run_git_fetch(remote_name)?;
+            }
         } else {
-            run_git_fetch(remote_name)?;
+            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
         }
-    } else {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;

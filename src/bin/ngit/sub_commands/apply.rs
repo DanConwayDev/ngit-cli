@@ -73,7 +73,7 @@ fn run_git_fetch(remote_name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn launch(id: &str, stdout: bool) -> Result<()> {
+pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
     let event_id = parse_event_id(id)?;
 
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -91,10 +91,12 @@ pub async fn launch(id: &str, stdout: bool) -> Result<()> {
         .ok()
         .flatten();
 
-    if let Some((remote_name, _)) = &nostr_remote {
-        run_git_fetch(remote_name)?;
-    } else {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    if !offline {
+        if let Some((remote_name, _)) = &nostr_remote {
+            run_git_fetch(remote_name)?;
+        } else {
+            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        }
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;

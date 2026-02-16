@@ -49,13 +49,22 @@ async fn main() {
                 }
             },
             Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
-            Commands::List { status, json, id } => {
-                sub_commands::list::launch(status.clone(), *json, id.clone()).await
-            }
+            Commands::List {
+                status,
+                json,
+                id,
+                offline,
+            } => sub_commands::list::launch(status.clone(), *json, id.clone(), *offline).await,
             Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
-            Commands::Checkout { id } => sub_commands::checkout::launch(id).await,
-            Commands::Apply { id, stdout } => sub_commands::apply::launch(id, *stdout).await,
+            Commands::Checkout { id, offline } => {
+                sub_commands::checkout::launch(id, *offline).await
+            }
+            Commands::Apply {
+                id,
+                stdout,
+                offline,
+            } => sub_commands::apply::launch(id, *stdout, *offline).await,
         }
     } else {
         // Handle the case where no command is provided

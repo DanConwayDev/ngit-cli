@@ -117,11 +117,17 @@ pub enum Commands {
         json: bool,
         /// Show details for specific proposal (event-id or nevent)
         id: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
     },
     /// checkout a proposal branch by event-id or nevent
     Checkout {
         /// Proposal event-id (hex) or nevent (bech32)
         id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
     },
     /// apply proposal patches to current branch
     Apply {
@@ -130,6 +136,9 @@ pub enum Commands {
         /// Output patches to stdout instead of applying
         #[arg(long)]
         stdout: bool,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
     },
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
