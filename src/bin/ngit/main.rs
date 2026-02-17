@@ -67,9 +67,9 @@ async fn main() {
             } => sub_commands::apply::launch(id, *stdout, *offline).await,
         }
     } else {
-        // Handle the case where no command is provided
-        eprintln!("Error: A command must be provided. Use '--help' for more information.");
-        std::process::exit(1);
+        // Show help when no command is provided
+        Cli::parse_from(["ngit", "--help"]);
+        std::process::exit(0);
     };
 
     if let Err(err) = result {
