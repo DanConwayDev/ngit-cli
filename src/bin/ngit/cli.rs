@@ -8,7 +8,7 @@ use crate::sub_commands;
 #[command(
     author,
     version,
-    help_template = "{name} {version}\nnostr plugin for git\n - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier\n - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs\n - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options\n   set title and description via push options:\n     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch\n- publish a repository to nostr with `ngit init`\n\n{usage}\n{all-args}"
+    help_template = "{name} {version}\nnostr plugin for git\n includes a remote helper so native git commands (clone, fetch, push) work with nostr:// URLs\n - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier\n - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs\n - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options\n   set title and description via push options:\n     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch\n - publish a repository to nostr with `ngit init`\n\n{usage}\n{all-args}"
 )]
 #[command(propagate_version = true)]
 #[allow(clippy::struct_excessive_bools)]
@@ -103,11 +103,15 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// signal you are this repo's maintainer accepting PRs and issues via nostr
+    /// publish a repository to nostr; signal you are its maintainer accepting
+    /// PRs and issues
     Init(sub_commands::init::SubCommandArgs),
     /// submit PR with advanced options
+    #[command(
+        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
+    )]
     Send(sub_commands::send::SubCommandArgs),
-    /// list PRs; checkout, apply or download selected
+    /// list PRs and view details
     List {
         /// Filter by status (comma-separated: open,draft,closed,applied)
         #[arg(long, default_value = "open,draft")]
@@ -122,6 +126,9 @@ pub enum Commands {
         offline: bool,
     },
     /// checkout a proposal branch by event-id or nevent
+    #[command(
+        long_about = "checkout a proposal branch by event-id or nevent\n\nuse `ngit list` to find proposal IDs"
+    )]
     Checkout {
         /// Proposal event-id (hex) or nevent (bech32)
         id: String,
@@ -130,6 +137,9 @@ pub enum Commands {
         offline: bool,
     },
     /// apply proposal patches to current branch
+    #[command(
+        long_about = "apply proposal patches to current branch\n\nuse `ngit list` to find proposal IDs"
+    )]
     Apply {
         /// Proposal event-id or nevent
         id: String,
@@ -143,7 +153,7 @@ pub enum Commands {
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
-    /// login, logout or export keys
+    /// create account, login, logout or export keys
     Account(AccountSubCommandArgs),
 }
 
