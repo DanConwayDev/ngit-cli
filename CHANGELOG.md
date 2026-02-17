@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - `--blossoms` flag from `ngit init` (removed from GRASP spec)
+- `relay.nostr.band` from default relays (relay is now offline)
 
 ### Fixed
 
