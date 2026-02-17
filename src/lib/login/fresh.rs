@@ -35,6 +35,7 @@ pub async fn fresh_login_or_signup(
     #[cfg(not(test))] client: Option<&Client>,
     signer_info: Option<SignerInfo>,
     save_local: bool,
+    signer_relays: &[String],
 ) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
     let (signer, public_key, signer_info, source) = loop {
         if let Some(signer_info) = signer_info {
@@ -71,7 +72,7 @@ pub async fn fresh_login_or_signup(
                     continue;
                 }
             },
-            1 => match get_fresh_nip46_signer(client).await {
+            1 => match get_fresh_nip46_signer(client, signer_relays).await {
                 Ok(Some(res)) => break res,
                 Ok(None) => continue,
                 Err(e) => {
@@ -247,6 +248,7 @@ fn shorten_string(s: &str) -> String {
 pub async fn get_fresh_nip46_signer(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
+    signer_relays: &[String],
 ) -> Result<
     Option<(
         Arc<dyn NostrSigner>,
@@ -255,7 +257,7 @@ pub async fn get_fresh_nip46_signer(
         SignerInfoSource,
     )>,
 > {
-    let (app_key, nostr_connect_url) = generate_nostr_connect_app(client)?;
+    let (app_key, nostr_connect_url) = generate_nostr_connect_app(client, signer_relays)?;
     let printer = Arc::new(Mutex::new(Printer::default()));
     let signer_choice = Interactor::default().choice(
         PromptChoiceParms::default()
@@ -366,9 +368,22 @@ pub async fn get_fresh_nip46_signer(
 pub fn generate_nostr_connect_app(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
+    signer_relays: &[String],
 ) -> Result<(Keys, NostrConnectURI)> {
     let app_key = Keys::generate();
-    let relays = if let Some(client) = client {
+    let relays = if !signer_relays.is_empty() {
+        signer_relays
+            .iter()
+            .map(|s| {
+                if s.starts_with("ws://") || s.starts_with("wss://") {
+                    s.clone()
+                } else {
+                    format!("wss://{s}")
+                }
+            })
+            .flat_map(|s| RelayUrl::parse(&s))
+            .collect::<Vec<RelayUrl>>()
+    } else if let Some(client) = client {
         client
             .get_fallback_signer_relays()
             .iter()

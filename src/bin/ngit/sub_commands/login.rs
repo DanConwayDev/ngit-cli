@@ -23,6 +23,10 @@ pub struct SubCommandArgs {
     /// don't fetch user metadata and relay list from relays
     #[arg(long, action)]
     offline: bool,
+
+    /// signer relay for nostrconnect (can be used multiple times)
+    #[arg(long = "signer-relay")]
+    signer_relays: Vec<String>,
 }
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
@@ -62,6 +66,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
             client.as_ref(),
             signer_info,
             log_in_locally_only || command_args.local,
+            &command_args.signer_relays,
         )
         .await?;
     }
