@@ -30,6 +30,37 @@ struct PushOptions {
     description: Option<String>,
 }
 
+/// Strip git's c-style quoting from a push-option value.
+///
+/// When a push-option value contains special characters (like
+/// backslashes), git wraps the entire `key=value` string in double
+/// quotes and doubles every backslash. This function reverses that:
+/// it strips the surrounding quotes and un-doubles backslashes.
+///
+/// If the string is not quoted, it is returned unchanged.
+fn strip_git_quoting(s: &str) -> String {
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        let inner = &s[1..s.len() - 1];
+        let mut result = String::with_capacity(inner.len());
+        let mut chars = inner.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    chars.next();
+                    result.push(next);
+                } else {
+                    result.push(c);
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    } else {
+        s.to_string()
+    }
+}
+
 /// Decode escape sequences in push-option values.
 ///
 /// Git push-options are transmitted one per line, so literal newlines
@@ -145,7 +176,7 @@ async fn main() -> Result<()> {
                 println!("ok");
             }
             ["option", "push-option", rest @ ..] => {
-                let option = rest.join(" ");
+                let option = strip_git_quoting(&rest.join(" "));
                 if let Some((key, value)) = option.split_once('=') {
                     match key {
                         "title" => {
@@ -327,5 +358,47 @@ mod tests {
             decode_push_option_escapes(r"line1\nline2\\nstill line2\nline3"),
             "line1\nline2\\nstill line2\nline3"
         );
+    }
+
+    #[test]
+    fn strip_git_quoting_removes_quotes_and_unescapes() {
+        // Git sends: "description=First line\\nSecond line"
+        // After strip: description=First line\nSecond line
+        assert_eq!(
+            strip_git_quoting(r#""description=First line\\nSecond line""#),
+            r"description=First line\nSecond line"
+        );
+    }
+
+    #[test]
+    fn strip_git_quoting_no_quotes_unchanged() {
+        assert_eq!(
+            strip_git_quoting("description=plain text"),
+            "description=plain text"
+        );
+    }
+
+    #[test]
+    fn strip_git_quoting_then_decode_produces_newlines() {
+        // Simulates the full pipeline for a git-quoted push option:
+        // User writes: description=line1\n\nline2
+        // Git sends:   "description=line1\\n\\nline2"
+        let git_quoted = r#""description=line1\\n\\nline2""#;
+        let unquoted = strip_git_quoting(git_quoted);
+        assert_eq!(unquoted, r"description=line1\n\nline2");
+        let (key, value) = unquoted.split_once('=').unwrap();
+        assert_eq!(key, "description");
+        assert_eq!(decode_push_option_escapes(value), "line1\n\nline2");
+    }
+
+    #[test]
+    fn strip_git_quoting_preserves_user_double_backslash() {
+        // User writes: description=keep \\n literal
+        // Git sends:   "description=keep \\\\n literal"
+        let git_quoted = r#""description=keep \\\\n literal""#;
+        let unquoted = strip_git_quoting(git_quoted);
+        assert_eq!(unquoted, r"description=keep \\n literal");
+        let (_, value) = unquoted.split_once('=').unwrap();
+        assert_eq!(decode_push_option_escapes(value), "keep \\n literal");
     }
 }
