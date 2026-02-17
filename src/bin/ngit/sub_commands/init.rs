@@ -301,10 +301,10 @@ fn apply_grasp_infrastructure(
             }
         }
 
-        // Always add grasp-derived relay
+        // Always add grasp-derived relay at the beginning (for relay hint)
         let relay_url = format_grasp_server_url_as_relay_url(grasp_server)?;
         if !relays.contains(&relay_url) {
-            relays.push(relay_url);
+            relays.insert(0, relay_url);
         }
     }
     Ok(())
