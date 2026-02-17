@@ -30,6 +30,21 @@ struct PushOptions {
     description: Option<String>,
 }
 
+impl PushOptions {
+    fn validate(&self) -> Result<Option<(String, String)>> {
+        match (&self.title, &self.description) {
+            (Some(t), Some(d)) => Ok(Some((t.clone(), d.clone()))),
+            (Some(_), None) => bail!(
+                "error: 'title' push-option provided without 'description'. Both title and description are required together, or neither to use defaults."
+            ),
+            (None, Some(_)) => bail!(
+                "error: 'description' push-option provided without 'title'. Both title and description are required together, or neither to use defaults."
+            ),
+            (None, None) => Ok(None),
+        }
+    }
+}
+
 mod fetch;
 mod list;
 mod push;
@@ -110,6 +125,7 @@ async fn main() -> Result<()> {
                 fetch::run_fetch(&git_repo, &repo_ref, &stdin, oid, refstr).await?;
             }
             ["push", refspec] => {
+                let title_description = push_options.validate()?;
                 push::run_push(
                     &git_repo,
                     &repo_ref,
@@ -117,7 +133,7 @@ async fn main() -> Result<()> {
                     refspec,
                     &client,
                     list_outputs.clone(),
-                    push_options.title.as_ref().zip(push_options.description.as_ref()).map(|(t, d)| (t.clone(), d.clone())),
+                    title_description,
                 )
                 .await?;
                 push_options = PushOptions::default();
