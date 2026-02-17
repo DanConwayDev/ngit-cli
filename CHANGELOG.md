@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ngit list --json` - output proposals as JSON
 - `ngit list --status` - filter by status (open,draft,closed,applied)
 - `ngit init --hashtag` - specify repository hashtag
+- Push options for PR title/description: `git push --push-option=title="..." --push-option=description="..."`
 
 ### Removed
 

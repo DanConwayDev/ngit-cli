@@ -24,6 +24,12 @@ use nostr::nips::nip19::Nip19Coordinate;
 
 use crate::{client::Client, git::Repo};
 
+#[derive(Default, Clone)]
+struct PushOptions {
+    title: Option<String>,
+    description: Option<String>,
+}
+
 mod fetch;
 mod list;
 mod push;
@@ -71,6 +77,7 @@ async fn main() -> Result<()> {
     let mut line = String::new();
 
     let mut list_outputs = None;
+    let mut push_options: PushOptions = PushOptions::default();
     loop {
         let tokens = read_line(&stdin, &mut line)?;
 
@@ -79,9 +86,21 @@ async fn main() -> Result<()> {
                 println!("option");
                 println!("push");
                 println!("fetch");
+                println!("push-options");
                 println!();
             }
             ["option", "verbosity"] => {
+                println!("ok");
+            }
+            ["option", "push-option", rest @ ..] => {
+                let option = rest.join(" ");
+                if let Some((key, value)) = option.split_once('=') {
+                    match key {
+                        "title" => push_options.title = Some(value.to_string()),
+                        "description" => push_options.description = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
                 println!("ok");
             }
             ["option", ..] => {
@@ -98,8 +117,10 @@ async fn main() -> Result<()> {
                     refspec,
                     &client,
                     list_outputs.clone(),
+                    push_options.title.as_ref().zip(push_options.description.as_ref()).map(|(t, d)| (t.clone(), d.clone())),
                 )
                 .await?;
+                push_options = PushOptions::default();
             }
             ["list"] => {
                 list_outputs = Some(list::run_list(&git_repo, &repo_ref, false).await?);

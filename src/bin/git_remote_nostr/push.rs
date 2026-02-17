@@ -52,6 +52,7 @@ pub async fn run_push(
     initial_refspec: &str,
     client: &Client,
     list_outputs: Option<HashMap<String, (HashMap<String, String>, bool)>>,
+    title_description: Option<(String, String)>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
 
@@ -129,6 +130,7 @@ pub async fn run_push(
             client,
             existing_state,
             &term,
+            title_description.as_ref(),
         )
         .await?;
 
@@ -174,6 +176,7 @@ pub async fn run_push(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn create_and_publish_events_and_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -182,6 +185,7 @@ async fn create_and_publish_events_and_proposals(
     client: &Client,
     existing_state: HashMap<String, String>,
     term: &Term,
+    title_description: Option<&(String, String)>,
 ) -> Result<(Vec<String>, bool)> {
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
@@ -276,6 +280,7 @@ async fn create_and_publish_events_and_proposals(
         &mut user_ref,
         &signer,
         term,
+        title_description,
     )
     .await?;
     for e in proposal_events {
@@ -300,6 +305,7 @@ async fn create_and_publish_events_and_proposals(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn process_proposal_refspecs(
     client: &Client,
     git_repo: &Repo,
@@ -308,6 +314,7 @@ async fn process_proposal_refspecs(
     user_ref: &mut UserRef,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
+    title_description: Option<&(String, String)>,
 ) -> Result<(Vec<Event>, Vec<String>)> {
     let mut events = vec![];
     let mut rejected_proposal_refspecs = vec![];
@@ -349,6 +356,7 @@ async fn process_proposal_refspecs(
                         Some(proposal),
                         signer,
                         term,
+                        title_description,
                     )
                     .await?
                     {
@@ -389,6 +397,7 @@ async fn process_proposal_refspecs(
                                 Some(proposal),
                                 signer,
                                 term,
+                                title_description,
                             )
                             .await?
                             {
@@ -451,7 +460,15 @@ async fn process_proposal_refspecs(
                 );
             }
             for event in generate_patches_or_pr_event_or_pr_updates(
-                client, git_repo, repo_ref, &ahead, user_ref, None, signer, term,
+                client,
+                git_repo,
+                repo_ref,
+                &ahead,
+                user_ref,
+                None,
+                signer,
+                term,
+                title_description,
             )
             .await?
             {
@@ -474,6 +491,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     root_proposal: Option<&Event>,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
+    title_description: Option<&(String, String)>,
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
     let use_pr = parent_is_pr || git_repo.are_commits_too_big_for_patches(ahead);
@@ -490,7 +508,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             git_repo.get_commit_parent(first_commit).ok().as_ref(),
             user_ref,
             root_proposal,
-            &None,
+            &title_description.map(|(t, d)| (t.clone(), d.clone())),
             signer,
             false,
             term,
