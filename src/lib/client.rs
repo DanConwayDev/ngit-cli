@@ -1064,7 +1064,10 @@ impl Default for Params {
             fallback_signer_relays: if std::env::var("NGITTEST").is_ok() {
                 vec!["ws://localhost:8051".to_string()]
             } else {
-                vec!["wss://relay.nsec.app".to_string()]
+                vec![
+                    "wss://relay.nsec.app".to_string(),
+                    "wss://relay.ditto.pub".to_string(),
+                ]
             },
             grasp_default_set: if std::env::var("NGITTEST").is_ok() {
                 vec![]

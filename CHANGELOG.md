@@ -16,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Simplify CLI output**
   - Add `--verbose/-v` flag for detailed output
   - show fetch/publish report if taking longer than 5s
+- Add second default signer relay (`wss://relay.ditto.pub`) for resilience during nostrconnect login
 
 ### Added
 
+- `ngit account login --signer-relay` - specify custom relays for nostrconnect (auto-prefixes with `wss://` if no scheme)
 - `ngit checkout <id>` - checkout a proposal branch by event-id or nevent
 - `ngit apply <id>` - apply proposal patches to current branch
 - `ngit account create` - create a new nostr account
