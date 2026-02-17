@@ -524,7 +524,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         ))
     } else {
         generate_cover_letter_and_patch_events(
-            None,
+            title_description.cloned(),
             git_repo,
             ahead,
             signer,
