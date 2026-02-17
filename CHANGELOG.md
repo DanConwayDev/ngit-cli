@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ngit list --status` - filter by status (open,draft,closed,applied)
 - `ngit init --hashtag` - specify repository hashtag
 - Push options for PR title/description: `git push --push-option=title="..." --push-option=description="..."`
+  - Multiline support: use `\n` for newlines in values (e.g. `--push-option=description='line1\n\nline2'`). Use single quotes to prevent shell interpretation. Use `\\n` for a literal backslash-n.
 
 ### Removed
 

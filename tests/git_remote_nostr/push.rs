@@ -1895,6 +1895,114 @@ async fn push_new_pr_branch_with_title_description_options_creates_pr_with_custo
     Ok(())
 }
 
+#[tokio::test]
+#[serial]
+async fn push_with_escaped_newlines_in_description_creates_pr_with_multiline_description()
+-> Result<()> {
+    let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
+
+    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+        Relay::new(8051, None, None),
+        Relay::new(8052, None, None),
+        Relay::new(8053, None, None),
+        Relay::new(8055, None, None),
+        Relay::new(8056, None, None),
+        Relay::new(8057, None, None),
+    );
+    r51.events = events.clone();
+    r55.events = events.clone();
+
+    #[allow(clippy::mutable_key_type)]
+    let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
+    let branch_name = "pr/my-pr-multiline";
+
+    let cli_tester_handle = std::thread::spawn(move || -> Result<String> {
+        let mut git_repo = clone_git_repo_with_nostr_url()?;
+        git_repo.delete_dir_on_drop = false;
+        git_repo.create_branch(branch_name)?;
+        git_repo.checkout(branch_name)?;
+
+        let large_content = "x".repeat(70 * 1024);
+        std::fs::write(git_repo.dir.join("large_file.txt"), large_content)?;
+        git_repo.stage_and_commit("large_file.txt")?;
+
+        // Use \\n in the push-option value — the two-character escape sequence
+        let mut p = CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            [
+                "push",
+                "--push-option=title=Multiline PR",
+                r"--push-option=description=First line\n\nSecond paragraph\nThird line",
+                "-u",
+                "origin",
+                branch_name,
+            ],
+        );
+        cli_expect_nostr_fetch(&mut p)?;
+        p.expect("git servers: listing refs...\r\n")?;
+        p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        let output = p.expect_end_eventually()?;
+
+        for p in [51, 52, 53, 55, 56, 57] {
+            relay::shutdown_relay(8000 + p)?;
+        }
+
+        Ok(output)
+    });
+    let _ = join!(
+        r51.listen_until_close(),
+        r52.listen_until_close(),
+        r53.listen_until_close(),
+        r55.listen_until_close(),
+        r56.listen_until_close(),
+        r57.listen_until_close(),
+    );
+
+    let output = cli_tester_handle.join().unwrap()?;
+
+    assert_eq!(
+        output,
+        format!(" * [new branch]      {branch_name} -> {branch_name}\r\nbranch '{branch_name}' set up to track 'origin/{branch_name}'.\r\n").as_str(),
+    );
+
+    let new_events = r55
+        .events
+        .iter()
+        .cloned()
+        .collect::<HashSet<Event>>()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<Event>>();
+    assert_eq!(new_events.len(), 1, "should create exactly 1 PR event");
+
+    let pr_event = new_events.first().unwrap();
+
+    assert!(
+        pr_event.kind.eq(&KIND_PULL_REQUEST),
+        "event should be a PR event"
+    );
+
+    let title_tag = pr_event.tags.iter().find(|t| t.as_slice()[0].eq("subject"));
+    assert!(
+        title_tag.is_some(),
+        "PR event should have a subject tag for title"
+    );
+    assert_eq!(
+        title_tag.unwrap().as_slice()[1],
+        "Multiline PR",
+        "title should match push-option"
+    );
+
+    // The \\n sequences should have been decoded into real newlines
+    assert_eq!(
+        pr_event.content, "First line\n\nSecond paragraph\nThird line",
+        "description should contain real newlines from escaped \\n sequences"
+    );
+
+    Ok(())
+}
+
 mod push_from_another_maintainer {
 
     // TODO that has issued announcement

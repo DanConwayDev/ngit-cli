@@ -30,6 +30,43 @@ struct PushOptions {
     description: Option<String>,
 }
 
+/// Decode escape sequences in push-option values.
+///
+/// Git push-options are transmitted one per line, so literal newlines
+/// cannot appear in a value. To support multiline titles and
+/// descriptions users can write the two-character sequence `\n` which
+/// this function converts to a real newline. A literal backslash
+/// before `n` can be preserved by doubling it (`\\n`).
+///
+/// # Examples
+/// ```text
+/// "first line\\nsecond line"  -> "first line\nsecond line"
+/// "keep \\\\n literal"        -> "keep \\n literal"
+/// "no escapes here"           -> "no escapes here"
+/// ```
+fn decode_push_option_escapes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('n') => {
+                    chars.next();
+                    result.push('\n');
+                }
+                Some('\\') => {
+                    chars.next();
+                    result.push('\\');
+                }
+                _ => result.push(c),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 impl PushOptions {
     fn validate(&self) -> Result<Option<(String, String)>> {
         match (&self.title, &self.description) {
@@ -111,8 +148,12 @@ async fn main() -> Result<()> {
                 let option = rest.join(" ");
                 if let Some((key, value)) = option.split_once('=') {
                     match key {
-                        "title" => push_options.title = Some(value.to_string()),
-                        "description" => push_options.description = Some(value.to_string()),
+                        "title" => {
+                            push_options.title = Some(decode_push_option_escapes(value));
+                        }
+                        "description" => {
+                            push_options.description = Some(decode_push_option_escapes(value));
+                        }
                         _ => {}
                     }
                 }
@@ -168,13 +209,19 @@ async fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
         println!("nostr plugin for git");
         println!("Usage:");
         println!(
-            " - clone a nostr repository, or add as a remote, by using the url format nostr://pub123/identifier"
+            " - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier"
         );
         println!(
             " - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs"
         );
         println!(
             " - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options"
+        );
+        println!(" - set PR title/description via push options:");
+        println!("     git push -o 'title=My PR' -o 'description=Details' -u origin pr/branch");
+        println!("   for multiline descriptions, use \\n:");
+        println!(
+            "     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch"
         );
         println!("- publish a repository to nostr with `ngit init`");
         return Ok(None);
@@ -221,4 +268,64 @@ async fn fetching_with_report_for_helper(
         term.write_line(&format!("nostr updates: {report}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_backslash_n_to_newline() {
+        assert_eq!(
+            decode_push_option_escapes(r"first line\nsecond line"),
+            "first line\nsecond line"
+        );
+    }
+
+    #[test]
+    fn decode_multiple_newlines() {
+        assert_eq!(
+            decode_push_option_escapes(r"line1\n\nline3\nline4"),
+            "line1\n\nline3\nline4"
+        );
+    }
+
+    #[test]
+    fn decode_double_backslash_n_to_literal_backslash_n() {
+        assert_eq!(
+            decode_push_option_escapes(r"keep \\n literal"),
+            "keep \\n literal"
+        );
+    }
+
+    #[test]
+    fn decode_no_escapes_unchanged() {
+        assert_eq!(
+            decode_push_option_escapes("no escapes here"),
+            "no escapes here"
+        );
+    }
+
+    #[test]
+    fn decode_trailing_backslash_preserved() {
+        assert_eq!(decode_push_option_escapes(r"ends with \"), "ends with \\");
+    }
+
+    #[test]
+    fn decode_backslash_followed_by_other_char_preserved() {
+        assert_eq!(decode_push_option_escapes(r"a \t tab"), "a \\t tab");
+    }
+
+    #[test]
+    fn decode_empty_string() {
+        assert_eq!(decode_push_option_escapes(""), "");
+    }
+
+    #[test]
+    fn decode_mixed_escapes() {
+        assert_eq!(
+            decode_push_option_escapes(r"line1\nline2\\nstill line2\nline3"),
+            "line1\nline2\\nstill line2\nline3"
+        );
+    }
 }
