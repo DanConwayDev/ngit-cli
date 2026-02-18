@@ -576,15 +576,23 @@ impl RepoActions for Repo {
         let mut patches_to_apply: Vec<nostr::Event> = patch_and_ancestors
             .into_iter()
             .filter(|e| {
-                let commit_id = get_commit_id_from_patch(e).unwrap();
-                if let Ok(branch_tip) = branch_tip_result {
-                    !branch_tip.to_string().eq(&commit_id)
-                        && !self
-                            .ancestor_of(&branch_tip, &str_to_sha1(&commit_id).unwrap())
-                            .unwrap()
-                } else {
-                    true
-                }
+                // When the commit tag is absent, the commit id from the mbox envelope
+                // may not match the reconstructed commit's OID (e.g. GPG-signed commits).
+                // In that case we conservatively include the patch for application —
+                // create_commit_from_patch handles idempotency via content-addressed storage.
+                let Ok(commit_id) = get_commit_id_from_patch(e) else {
+                    return true;
+                };
+                let Ok(branch_tip) = branch_tip_result else {
+                    return true;
+                };
+                let Ok(commit_sha1) = str_to_sha1(&commit_id) else {
+                    // Commit id is not a valid SHA1 (e.g. placeholder from mbox envelope).
+                    // Include conservatively.
+                    return true;
+                };
+                !branch_tip.to_string().eq(&commit_id)
+                    && !self.ancestor_of(&branch_tip, &commit_sha1).unwrap_or(false)
             })
             .collect();
 
@@ -612,12 +620,26 @@ impl RepoActions for Repo {
         patches_to_apply.reverse();
 
         for patch in &patches_to_apply {
-            let commit_id = get_commit_id_from_patch(patch)?;
-            // only create new commits - otherwise make them the tip
-            if !self.does_commit_exist(&commit_id)? {
-                self.create_commit_from_patch(patch, None)?;
-            }
-            self.create_branch_at_commit(branch_name, &commit_id)?;
+            // The commit id from the tag (or mbox envelope) is the authoritative id
+            // when the optional `commit` nostr tag is present. When it is absent the
+            // mbox envelope SHA1 is used as a best-effort value — it will often differ
+            // from the reconstructed commit's actual OID (e.g. GPG-signed commits).
+            // We therefore always use the OID returned by create_commit_from_patch as
+            // the branch tip, falling back to the tag commit id only when the commit
+            // already exists in the repo (meaning it was previously applied correctly).
+            let tag_commit_id = get_commit_id_from_patch(patch).ok();
+            let applied_oid = if let Some(ref id) = tag_commit_id {
+                if self.does_commit_exist(id)? {
+                    // Commit already exists (e.g. previously fetched), use it directly.
+                    id.clone()
+                } else {
+                    self.create_commit_from_patch(patch, None)?.to_string()
+                }
+            } else {
+                // No commit id available at all — apply and use the resulting OID.
+                self.create_commit_from_patch(patch, None)?.to_string()
+            };
+            self.create_branch_at_commit(branch_name, &applied_oid)?;
             self.checkout(branch_name)?;
         }
         Ok(patches_to_apply)
@@ -641,8 +663,10 @@ impl RepoActions for Repo {
         } else {
             let metadata = crate::mbox_parser::parse_mbox_patch(&patch.content)
                 .context("failed to parse patch for timestamp")?;
-            let timestamp = metadata.committer_timestamp.unwrap_or(metadata.author_timestamp);
-            
+            let timestamp = metadata
+                .committer_timestamp
+                .unwrap_or(metadata.author_timestamp);
+
             let best_guess = self
                 .find_best_guess_parent_commit(timestamp)
                 .context("failed to find best guess parent commit")?;
@@ -684,8 +708,10 @@ impl RepoActions for Repo {
             None
         };
 
-        let author_data = extract_signature_data_with_fallback(&patch.tags, "author", &patch.content)?;
-        let committer_data = extract_signature_data_with_fallback(&patch.tags, "committer", &patch.content)?;
+        let author_data =
+            extract_signature_data_with_fallback(&patch.tags, "author", &patch.content)?;
+        let committer_data =
+            extract_signature_data_with_fallback(&patch.tags, "committer", &patch.content)?;
         let author_sig = author_data.to_signature()?;
         let committer_sig = committer_data.to_signature()?;
 
@@ -983,7 +1009,9 @@ fn extract_signature_data_from_tags(tags: &Tags, tag_name: &str) -> Result<Signa
         name: v[1].clone(),
         email: v[2].clone(),
         timestamp: v[3].parse().context("tag time is incorrectly formatted")?,
-        offset_minutes: v[4].parse().context("tag time offset is incorrectly formatted")?,
+        offset_minutes: v[4]
+            .parse()
+            .context("tag time offset is incorrectly formatted")?,
     })
 }
 
@@ -1007,7 +1035,9 @@ fn extract_signature_data_with_fallback(
             offset_minutes: metadata.author_offset_minutes,
         })
     } else if tag_name == "committer" {
-        let timestamp = metadata.committer_timestamp.unwrap_or(metadata.author_timestamp);
+        let timestamp = metadata
+            .committer_timestamp
+            .unwrap_or(metadata.author_timestamp);
         Ok(SignatureData {
             name: metadata.author_name,
             email: metadata.author_email,
