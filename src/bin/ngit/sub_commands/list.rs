@@ -35,7 +35,7 @@ use crate::{
     git::{Repo, RepoActions, str_to_sha1},
     git_events::{
         commit_msg_from_patch_oneliner, event_is_revision_root, event_to_cover_letter,
-        get_parent_commit_from_patch, patch_supports_commit_ids,
+        get_parent_commit_from_patch,
     },
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
@@ -623,72 +623,6 @@ async fn launch_interactive() -> Result<()> {
             }
         }
 
-        let binding_patch_text_ref = format!(
-            "{} commits",
-            most_recent_proposal_patch_chain_or_pr_or_pr_update.len()
-        );
-        let patch_text_ref = if most_recent_proposal_patch_chain_or_pr_or_pr_update
-            .len()
-            .gt(&1)
-        {
-            binding_patch_text_ref.as_str()
-        } else {
-            "1 commit"
-        };
-
-        let no_support_for_patches_as_branch = most_recent_proposal_patch_chain_or_pr_or_pr_update
-            .iter()
-            .any(|event| !patch_supports_commit_ids(event));
-
-        if no_support_for_patches_as_branch {
-            println!("{patch_text_ref}");
-            return match Interactor::default().choice(
-                PromptChoiceParms::default()
-                    .with_default(0)
-                    .with_choices(vec![
-                        "learn why this proposals can't be checked out".to_string(),
-                        format!("apply to current branch with `git am`"),
-                        format!("download to ./patches"),
-                        "back".to_string(),
-                    ]),
-            )? {
-                0 => {
-                    println!(
-                        "Some proposals are posted as patch without listing a parent commit\n"
-                    );
-                    println!(
-                        "they are not anchored against a particular state of the code base like a standard patch or a pull request can be\n"
-                    );
-                    println!(
-                        "they are designed to reviewed by studying the diff (in a tool like gitworkshop.dev) and if acceptable by a maintainer, applied to the latest version of master with any conflicts resolved as the do so\n"
-                    );
-                    println!(
-                        "this has proven to be a smoother workflow for large scale projects with a high frequency of changes, even when patches are exchanged via email\n"
-                    );
-                    println!(
-                        "by default ngit posts proposals with a parent commit so either workflow can be used"
-                    );
-                    Interactor::default().choice(
-                        PromptChoiceParms::default()
-                            .with_default(0)
-                            .with_choices(vec!["back".to_string()]),
-                    )?;
-                    continue;
-                }
-                1 => {
-                    launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update)
-                }
-                2 => save_patches_to_dir(
-                    most_recent_proposal_patch_chain_or_pr_or_pr_update,
-                    &git_repo,
-                ),
-                3 => continue,
-                _ => {
-                    bail!("unexpected choice")
-                }
-            };
-        }
-
         let branch_exists = git_repo
             .get_local_branch_names()
             .context("gitlib2 will not show a list of local branch names")?
@@ -705,35 +639,36 @@ async fn launch_interactive() -> Result<()> {
 
         let last_patch = most_recent_proposal_patch_chain_or_pr_or_pr_update
             .last()
-            .context(
-                "there should be at least one patch as we have already checked for this",
-            )?;
+            .context("there should be at least one patch as we have already checked for this")?;
 
-        let proposal_base_commit = str_to_sha1(&get_parent_commit_from_patch(last_patch, Some(&git_repo))?)
-            .context("failed to get valid parent commit id from patch")?;
+        let proposal_base_commit = get_parent_commit_from_patch(last_patch, Some(&git_repo))
+            .ok()
+            .and_then(|s| str_to_sha1(&s).ok());
 
         let (main_branch_name, master_tip) = git_repo.get_main_or_master_branch()?;
 
-        if !git_repo.does_commit_exist(&proposal_base_commit.to_string())? {
-            println!("your '{main_branch_name}' branch may not be up-to-date.");
-            println!("the proposal parent commit doesnt exist in your local repository.");
-            return match Interactor::default().choice(PromptChoiceParms::default().with_default(0).with_choices(
-                vec![
-                    format!(
-                        "manually run `git pull` on '{main_branch_name}' and select proposal again"
-                    ),
-                    format!("apply to current branch with `git am`"),
-                    format!("download to ./patches"),
-                    "back".to_string(),
-                ],
-            ))? {
-                0 | 3 => continue,
-                1 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
-                2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, &git_repo),
-                _ => {
-                    bail!("unexpected choice")
-                }
-            };
+        if let Some(ref base_commit) = proposal_base_commit {
+            if !git_repo.does_commit_exist(&base_commit.to_string())? {
+                println!("your '{main_branch_name}' branch may not be up-to-date.");
+                println!("the proposal parent commit doesnt exist in your local repository.");
+                return match Interactor::default().choice(PromptChoiceParms::default().with_default(0).with_choices(
+                    vec![
+                        format!(
+                            "manually run `git pull` on '{main_branch_name}' and select proposal again"
+                        ),
+                        format!("apply to current branch with `git am`"),
+                        format!("download to ./patches"),
+                        "back".to_string(),
+                    ],
+                ))? {
+                    0 | 3 => continue,
+                    1 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
+                    2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, &git_repo),
+                    _ => {
+                        bail!("unexpected choice")
+                    }
+                };
+            }
         }
 
         let proposal_tip = str_to_sha1(
@@ -748,8 +683,14 @@ async fn launch_interactive() -> Result<()> {
         )
         .context("failed to get valid commit_id from patch")?;
 
-        let (_, proposal_behind_main) =
-            git_repo.get_commits_ahead_behind(&master_tip, &proposal_base_commit)?;
+        let proposal_behind_main_len = if let Some(ref base_commit) = proposal_base_commit {
+            git_repo
+                .get_commits_ahead_behind(&master_tip, base_commit)
+                .map(|(_, behind)| behind.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
         // branch doesnt exist
         if !branch_exists {
@@ -758,7 +699,7 @@ async fn launch_interactive() -> Result<()> {
                 format!(
                     "create and checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
                     most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
-                    proposal_behind_main.len(),
+                    proposal_behind_main_len,
                 ),
                 format!("apply to current branch with `git am`"),
                 format!("download to ./patches"),
@@ -815,7 +756,7 @@ async fn launch_interactive() -> Result<()> {
                         format!(
                             "checkout proposal branch ({} ahead {} behind '{main_branch_name}')",
                             most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
-                            proposal_behind_main.len(),
+                            proposal_behind_main_len,
                         ),
                         format!("apply to current branch with `git am`"),
                         format!("download to ./patches"),
@@ -913,7 +854,7 @@ async fn launch_interactive() -> Result<()> {
             println!(
                 "updated proposal available ({} ahead {} behind '{main_branch_name}'). existing version is {} ahead {} behind '{main_branch_name}'",
                 most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
-                proposal_behind_main.len(),
+                proposal_behind_main_len,
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
             );
@@ -930,13 +871,6 @@ async fn launch_interactive() -> Result<()> {
             )? {
                 0 => {
                     check_clean(&git_repo)?;
-                    git_repo.create_branch_at_commit(
-                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                        &proposal_base_commit.to_string(),
-                    )?;
-                    git_repo.checkout(
-                        &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                    )?;
                     let chain_length = most_recent_proposal_patch_chain_or_pr_or_pr_update.len();
                     let _ = git_repo
                         .apply_patch_chain(
@@ -947,7 +881,7 @@ async fn launch_interactive() -> Result<()> {
                     println!(
                         "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
                         chain_length,
-                        proposal_behind_main.len(),
+                        proposal_behind_main_len,
                         local_ahead_of_main.len(),
                         local_beind_main.len(),
                     );
@@ -991,7 +925,7 @@ async fn launch_interactive() -> Result<()> {
                 "local proposal branch exists with {} unpublished commits on top of the most up-to-date version of the proposal ({} ahead {} behind '{main_branch_name}')",
                 local_ahead_of_proposal.len(),
                 local_ahead_of_main.len(),
-                proposal_behind_main.len(),
+                proposal_behind_main_len,
             );
             return match Interactor::default().choice(
                 PromptChoiceParms::default()
@@ -1012,7 +946,7 @@ async fn launch_interactive() -> Result<()> {
                         "checked out proposal branch with {} unpublished commits ({} ahead {} behind '{main_branch_name}')",
                         local_ahead_of_proposal.len(),
                         local_ahead_of_main.len(),
-                        proposal_behind_main.len(),
+                        proposal_behind_main_len,
                     );
                     Ok(())
                 }
@@ -1032,7 +966,7 @@ async fn launch_interactive() -> Result<()> {
             println!(
                 "you have previously applied the latest version of the proposal ({} ahead {} behind '{main_branch_name}') but your local proposal branch has amended or rebased it ({} ahead {} behind '{main_branch_name}')",
                 most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
-                proposal_behind_main.len(),
+                proposal_behind_main_len,
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
             );
@@ -1045,7 +979,7 @@ async fn launch_interactive() -> Result<()> {
                 local_ahead_of_main.len(),
                 local_beind_main.len(),
                 most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
-                proposal_behind_main.len(),
+                proposal_behind_main_len,
             );
 
             println!(
@@ -1085,10 +1019,6 @@ async fn launch_interactive() -> Result<()> {
             }
             1 => {
                 check_clean(&git_repo)?;
-                git_repo.create_branch_at_commit(
-                    &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                    &proposal_base_commit.to_string(),
-                )?;
                 let chain_length = most_recent_proposal_patch_chain_or_pr_or_pr_update.len();
                 let _ = git_repo
                     .apply_patch_chain(
@@ -1102,7 +1032,7 @@ async fn launch_interactive() -> Result<()> {
                 println!(
                     "checked out latest version of proposal ({} ahead {} behind '{main_branch_name}'), replacing unpublished version ({} ahead {} behind '{main_branch_name}')",
                     chain_length,
-                    proposal_behind_main.len(),
+                    proposal_behind_main_len,
                     local_ahead_of_main.len(),
                     local_beind_main.len(),
                 );

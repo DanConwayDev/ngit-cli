@@ -40,17 +40,16 @@ pub fn get_commit_id_from_patch(event: &Event) -> Result<String> {
     }
 }
 
-pub fn get_parent_commit_from_patch(
-    event: &Event,
-    git_repo: Option<&Repo>,
-) -> Result<String> {
+pub fn get_parent_commit_from_patch(event: &Event, git_repo: Option<&Repo>) -> Result<String> {
     if let Ok(parent) = tag_value(event, "parent-commit") {
         return Ok(parent);
     }
 
     let metadata = crate::mbox_parser::parse_mbox_patch(&event.content)
         .context("failed to parse patch for timestamp")?;
-    let timestamp = metadata.committer_timestamp.unwrap_or(metadata.author_timestamp);
+    let timestamp = metadata
+        .committer_timestamp
+        .unwrap_or(metadata.author_timestamp);
 
     if let Some(repo) = git_repo {
         if let Some(best_guess) = repo

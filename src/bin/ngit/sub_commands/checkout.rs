@@ -24,7 +24,7 @@ use nostr_sdk::{EventId, FromBech32};
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
     git::{Repo, RepoActions, str_to_sha1},
-    git_events::{event_to_cover_letter, get_parent_commit_from_patch, patch_supports_commit_ids},
+    git_events::event_to_cover_letter,
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
@@ -261,32 +261,7 @@ fn checkout_patch(
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
     nostr_remote_name: Option<&str>,
 ) -> Result<()> {
-    let no_support_for_patches_as_branch = most_recent_proposal_patch_chain_or_pr_or_pr_update
-        .iter()
-        .any(|event| !patch_supports_commit_ids(event));
-
-    if no_support_for_patches_as_branch {
-        bail!(
-            "this proposal cannot be checked out as a branch because some patches do not have a parent commit.\n\
-             Try `ngit apply --stdout` to apply patches to the current branch, or use `ngit list` for interactive options."
-        );
-    }
-
-    let last_patch = most_recent_proposal_patch_chain_or_pr_or_pr_update
-        .last()
-        .context("there should be at least one patch")?;
-
-    let proposal_base_commit = str_to_sha1(&get_parent_commit_from_patch(last_patch, Some(git_repo))?)
-        .context("failed to get valid parent commit id from patch")?;
-
-    let (main_branch_name, _master_tip) = git_repo.get_main_or_master_branch()?;
-
-    if !git_repo.does_commit_exist(&proposal_base_commit.to_string())? {
-        bail!(
-            "the proposal parent commit doesn't exist in your local repository.\n\
-             Try running `git pull` on '{main_branch_name}' first, or use `ngit apply --stdout` to apply patches to the current branch."
-        );
-    }
+    let (_, _master_tip) = git_repo.get_main_or_master_branch()?;
 
     if git_repo.has_outstanding_changes()? {
         bail!("working directory is not clean. Discard or stash (un)staged changes and try again.");
@@ -322,23 +297,25 @@ fn checkout_patch(
 
     let local_branch_tip = git_repo.get_tip_of_branch(&branch_name)?;
 
-    let proposal_tip = str_to_sha1(
-        &get_commit_id_from_patch(
-            most_recent_proposal_patch_chain_or_pr_or_pr_update
-                .first()
-                .context("there should be at least one patch")?,
-        )
-        .context("failed to get valid commit_id from patch")?,
-    )
-    .context("failed to get valid commit_id from patch")?;
-
-    if proposal_tip.eq(&local_branch_tip) {
-        git_repo.checkout(&branch_name)?;
-        println!("branch '{branch_name}' checked out and up-to-date");
-        return Ok(());
+    // If we can reliably determine the proposal tip commit, use it to skip
+    // re-applying when already up-to-date. If the commit tag is absent or
+    // unreliable, skip this check and let apply_patch_chain handle idempotency.
+    if let Ok(proposal_tip_str) = get_commit_id_from_patch(
+        most_recent_proposal_patch_chain_or_pr_or_pr_update
+            .first()
+            .context("there should be at least one patch")?,
+    ) {
+        if let Ok(proposal_tip) = str_to_sha1(&proposal_tip_str) {
+            if proposal_tip.eq(&local_branch_tip) {
+                git_repo.checkout(&branch_name)?;
+                println!("branch '{branch_name}' checked out and up-to-date");
+                return Ok(());
+            }
+        }
     }
 
-    git_repo.create_branch_at_commit(&branch_name, &proposal_base_commit.to_string())?;
+    // Branch exists but may need updating — re-apply the chain.
+    // apply_patch_chain handles already-applied commits idempotently.
     git_repo.checkout(&branch_name)?;
     let _ = git_repo
         .apply_patch_chain(

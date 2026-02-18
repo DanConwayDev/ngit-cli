@@ -10,7 +10,7 @@ use ngit::{
     git::{Repo, RepoActions},
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        identify_clone_urls_for_oids_from_pr_pr_update_events, tag_value,
+        identify_clone_urls_for_oids_from_pr_pr_update_events,
     },
     login::get_curent_user,
     repo_ref::{RepoRef, is_grasp_server_in_list},
@@ -126,19 +126,13 @@ pub fn make_commits_for_proposal(
     patches_ancestor_last: &[Event],
 ) -> Result<String> {
     let patches_ancestor_first: Vec<&Event> = patches_ancestor_last.iter().rev().collect();
-    let mut tip_commit_id = if let Ok(parent_commit) = tag_value(
-        patches_ancestor_first
-            .first()
-            .context("proposal should have at least one patch")?,
-        "parent-commit",
-    ) {
-        parent_commit
-    } else {
-        // TODO choose most recent commit on master before patch timestamp so it doesnt
-        // constantly get rebased
-        let (_, hash) = git_repo.get_main_or_master_branch()?;
-        hash.to_string()
-    };
+    let first_patch = patches_ancestor_first
+        .first()
+        .context("proposal should have at least one patch")?;
+
+    let mut tip_commit_id =
+        ngit::git_events::get_parent_commit_from_patch(first_patch, Some(git_repo))
+            .context("failed to determine parent commit for proposal")?;
 
     for patch in &patches_ancestor_first {
         let commit_id = git_repo

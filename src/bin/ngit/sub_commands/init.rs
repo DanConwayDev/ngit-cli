@@ -1724,10 +1724,7 @@ struct PollContext {
     reveal_state: Arc<ServerRevealState>,
 }
 
-fn create_server_bars(
-    clone_urls: &[String],
-    detail_multi: &MultiProgress,
-) -> Vec<ProgressBar> {
+fn create_server_bars(clone_urls: &[String], detail_multi: &MultiProgress) -> Vec<ProgressBar> {
     let waiting_style = ProgressStyle::with_template("  {spinner} {msg}")
         .unwrap()
         .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
@@ -1779,12 +1776,7 @@ fn spawn_expand_timer(
     })
 }
 
-fn finalize_spinner(
-    all_ready: bool,
-    spinner_pb: &ProgressBar,
-    final_ready: u64,
-    total: u64,
-) {
+fn finalize_spinner(all_ready: bool, spinner_pb: &ProgressBar, final_ready: u64, total: u64) {
     if all_ready {
         spinner_pb.finish_and_clear();
     } else {
