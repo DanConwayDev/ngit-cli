@@ -619,26 +619,31 @@ impl RepoActions for Repo {
         // apply commits
         patches_to_apply.reverse();
 
+        // When optional tags are absent, the reconstructed OID of each applied patch
+        // may differ from its tagged commit id (e.g. GPG-signed commits, different
+        // tooling). We therefore thread the actual applied OID forward as the
+        // parent override for the next patch, so the chain builds correctly
+        // even when parent-commit tags are absent or point to a
+        // pre-reconstruction OID.
+        let mut next_parent_override: Option<String> = None;
+
         for patch in &patches_to_apply {
-            // The commit id from the tag (or mbox envelope) is the authoritative id
-            // when the optional `commit` nostr tag is present. When it is absent the
-            // mbox envelope SHA1 is used as a best-effort value — it will often differ
-            // from the reconstructed commit's actual OID (e.g. GPG-signed commits).
-            // We therefore always use the OID returned by create_commit_from_patch as
-            // the branch tip, falling back to the tag commit id only when the commit
-            // already exists in the repo (meaning it was previously applied correctly).
             let tag_commit_id = get_commit_id_from_patch(patch).ok();
             let applied_oid = if let Some(ref id) = tag_commit_id {
-                if self.does_commit_exist(id)? {
-                    // Commit already exists (e.g. previously fetched), use it directly.
+                if self.does_commit_exist(id)? && next_parent_override.is_none() {
+                    // Commit already exists and we have no override from a prior
+                    // reconstruction — use the existing commit directly.
                     id.clone()
                 } else {
-                    self.create_commit_from_patch(patch, None)?.to_string()
+                    self.create_commit_from_patch(patch, next_parent_override.take())?
+                        .to_string()
                 }
             } else {
                 // No commit id available at all — apply and use the resulting OID.
-                self.create_commit_from_patch(patch, None)?.to_string()
+                self.create_commit_from_patch(patch, next_parent_override.take())?
+                    .to_string()
             };
+            next_parent_override = Some(applied_oid.clone());
             self.create_branch_at_commit(branch_name, &applied_oid)?;
             self.checkout(branch_name)?;
         }
@@ -650,9 +655,11 @@ impl RepoActions for Repo {
         parent_commit_id_override: Option<String>,
     ) -> Result<Oid> {
         let commit_id = get_commit_id_from_patch(patch);
-        if let Ok(commit_id) = &commit_id {
-            if self.does_commit_exist(commit_id).unwrap_or(false) {
-                return Ok(Oid::from_str(commit_id)?);
+        if parent_commit_id_override.is_none() {
+            if let Ok(commit_id) = &commit_id {
+                if self.does_commit_exist(commit_id).unwrap_or(false) {
+                    return Ok(Oid::from_str(commit_id)?);
+                }
             }
         }
 
