@@ -3,14 +3,18 @@ use std::{
     env,
     process::{Command, Stdio},
     str::FromStr,
-    sync::Arc,
-    thread,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use console::{Style, Term};
+use futures::future::join_all;
 use git2::Oid;
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ngit::{
     cli_interactor::{
         PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
@@ -1391,17 +1395,13 @@ async fn publish_and_finalize(
         if fields.selected_grasp_servers.is_empty() {
             println!("running `ngit push` to publish your repository data");
         } else {
-            let countdown_start = 5;
-            println!(
-                "waiting {countdown_start}s for grasp servers to create your repo before we push your data"
-            );
-            let term = Term::stdout();
-            for i in (1..=countdown_start).rev() {
-                term.write_line(format!("\rrunning `git push` in {i}s").as_str())?;
-                thread::sleep(Duration::new(1, 0)); // Sleep for 1 second
-                term.clear_last_lines(1)?;
-            }
-            term.flush().unwrap(); // Ensure the output is flushed to the terminal
+            wait_for_grasp_servers(
+                git_repo,
+                &fields.selected_grasp_servers,
+                &user_ref.public_key,
+                &fields.identifier,
+            )
+            .await?;
         }
 
         if let Err(err) = push_main_or_master_branch(git_repo) {
@@ -1416,17 +1416,13 @@ async fn publish_and_finalize(
                 "running `ngit sync` to ensure your repository data is available on repository git servers"
             );
         } else {
-            let countdown_start = 5;
-            println!(
-                "waiting {countdown_start}s for any new grasp servers to create your repo before we sync your data"
-            );
-            let term = Term::stdout();
-            for i in (1..=countdown_start).rev() {
-                term.write_line(format!("\rrunning `ngit sync` in {i}s").as_str())?;
-                thread::sleep(Duration::new(1, 0)); // Sleep for 1 second
-                term.clear_last_lines(1)?;
-            }
-            term.flush().unwrap(); // Ensure the output is flushed to the terminal
+            wait_for_grasp_servers(
+                git_repo,
+                &fields.selected_grasp_servers,
+                &user_ref.public_key,
+                &fields.identifier,
+            )
+            .await?;
         }
 
         if let Err(err) = run_ngit_sync() {
@@ -1689,4 +1685,278 @@ fn run_ngit_sync() -> Result<()> {
     } else {
         bail!("ngit sync process exited with an error: {exit_status}");
     }
+}
+
+fn check_git_server_ready(git_repo_path: &std::path::Path, git_server_url: &str) -> bool {
+    let Ok(git_repo) = git2::Repository::open(git_repo_path) else {
+        return false;
+    };
+    let Ok(mut remote) = git_repo.remote_anonymous(git_server_url) else {
+        return false;
+    };
+    match remote.connect(git2::Direction::Fetch) {
+        Ok(()) => {
+            let _ = remote.disconnect();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Holds the final style+message for a bar that completed before the detail
+/// view was revealed.
+struct DeferredServerFinish {
+    bar: ProgressBar,
+    style: ProgressStyle,
+    message: String,
+}
+
+/// Coordinates the delayed reveal of per-server detail bars.
+/// Bars that finish before the expand timer fires store their final
+/// style+message here. The timer applies them all at reveal time so
+/// every bar — completed or still waiting — appears in the expanded view.
+struct ServerRevealState {
+    revealed: AtomicBool,
+    deferred: Mutex<Vec<DeferredServerFinish>>,
+}
+
+fn finish_server_bar(
+    bar: &ProgressBar,
+    style: ProgressStyle,
+    message: String,
+    reveal_state: &Arc<ServerRevealState>,
+) {
+    let mut deferred = reveal_state.deferred.lock().unwrap();
+    if reveal_state.revealed.load(Ordering::Acquire) {
+        drop(deferred);
+        bar.set_style(style);
+        bar.finish_with_message(message);
+    } else {
+        // Style is set now so the timer can drain it correctly; finish is
+        // deferred until the detail view becomes visible.
+        bar.set_style(style.clone());
+        deferred.push(DeferredServerFinish {
+            bar: bar.clone(),
+            style,
+            message,
+        });
+    }
+}
+
+/// Poll grasp servers in parallel until all are ready or timeout is reached.
+///
+/// Shows a concise spinner with `x/y - complete` progress. After 5s without
+/// all servers responding, expands to show per-server status bars (including
+/// any that already finished). Times out after 15s (2s in tests) and proceeds
+/// anyway rather than failing.
+async fn wait_for_grasp_servers(
+    git_repo: &Repo,
+    grasp_servers: &[String],
+    public_key: &PublicKey,
+    identifier: &str,
+) -> Result<()> {
+    let clone_urls: Vec<String> = grasp_servers
+        .iter()
+        .filter_map(|gs| format_grasp_server_url_as_clone_url(gs, public_key, identifier).ok())
+        .collect();
+
+    if clone_urls.is_empty() {
+        return Ok(());
+    }
+
+    let is_test = std::env::var("NGITTEST").is_ok();
+    let timeout_secs: u64 = if is_test { 2 } else { 15 };
+    let expand_delay_ms: u64 = if is_test { 500 } else { 5000 };
+    let total = clone_urls.len() as u64;
+
+    // Spinner shown immediately with x/y count
+    let spinner_multi = MultiProgress::new();
+    let spinner_pb = spinner_multi.add(
+        ProgressBar::new_spinner()
+            .with_style(
+                ProgressStyle::with_template("{spinner} {msg}")
+                    .unwrap()
+                    .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
+            )
+            .with_message(format!(
+                "waiting for servers to create bare git repo... (0/{total} - complete)"
+            )),
+    );
+    spinner_pb.enable_steady_tick(Duration::from_millis(100));
+
+    // Detail MultiProgress starts hidden; revealed after expand_delay_ms.
+    // A heading bar is pre-added at position 0 so it holds its slot before
+    // any per-server bars are added.
+    let detail_multi = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+    let heading_bar = detail_multi
+        .add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()));
+
+    let ready_count = Arc::new(AtomicU64::new(0));
+    let reveal_state = Arc::new(ServerRevealState {
+        revealed: AtomicBool::new(false),
+        deferred: Mutex::new(Vec::new()),
+    });
+
+    // Per-server spinner bars (added to hidden detail_multi)
+    let waiting_style = ProgressStyle::with_template("  {spinner} {msg}")
+        .unwrap()
+        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+    let server_bars: Vec<ProgressBar> = clone_urls
+        .iter()
+        .map(|url| {
+            let name = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .to_string();
+            detail_multi.add(
+                ProgressBar::new_spinner()
+                    .with_style(waiting_style.clone())
+                    .with_message(
+                        console::style(format!("{name} - waiting"))
+                            .for_stderr()
+                            .dim()
+                            .to_string(),
+                    ),
+            )
+        })
+        .collect();
+
+    // Background timer: after expand_delay_ms reveal the detail view and
+    // flush any bars that already finished (the BarRevealState pattern).
+    let detail_multi_for_timer = detail_multi.clone();
+    let spinner_for_timer = spinner_pb.clone();
+    let reveal_state_for_timer = reveal_state.clone();
+    let server_bars_for_timer = server_bars.clone();
+    let heading_bar_for_timer = heading_bar.clone();
+    let timer_handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(expand_delay_ms)).await;
+        spinner_for_timer.finish_and_clear();
+        detail_multi_for_timer.set_draw_target(ProgressDrawTarget::stderr());
+        // Show the heading in the expanded view.
+        heading_bar_for_timer.finish_with_message("waiting for servers to create bare git repo...");
+        // Lock deferred list, mark revealed, and flush bars that already
+        // finished. Must hold the lock across the revealed.store so that
+        // finish_server_bar cannot push after the drain.
+        let mut deferred = reveal_state_for_timer.deferred.lock().unwrap();
+        reveal_state_for_timer
+            .revealed
+            .store(true, Ordering::Release);
+        for df in deferred.drain(..) {
+            df.bar.set_style(df.style);
+            df.bar.finish_with_message(df.message);
+        }
+        // Kick still-waiting bars into drawing by enabling their tick.
+        for bar in &server_bars_for_timer {
+            if !bar.is_finished() {
+                bar.enable_steady_tick(Duration::from_millis(100));
+            }
+        }
+    });
+
+    // Poll each server in parallel
+    let git_repo_path = git_repo.get_path()?.to_path_buf();
+    let futures: Vec<_> = clone_urls
+        .iter()
+        .enumerate()
+        .map(|(i, url)| {
+            let url = url.clone();
+            let ready_count = ready_count.clone();
+            let spinner_pb = spinner_pb.clone();
+            let bar = server_bars[i].clone();
+            let git_repo_path = git_repo_path.clone();
+            let reveal_state = reveal_state.clone();
+            async move {
+                let poll_interval = Duration::from_millis(500);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+                let mut ready = false;
+                loop {
+                    let is_ready = tokio::task::spawn_blocking({
+                        let url = url.clone();
+                        let path = git_repo_path.clone();
+                        move || check_git_server_ready(&path, &url)
+                    })
+                    .await
+                    .unwrap_or(false);
+
+                    if is_ready {
+                        ready = true;
+                        break;
+                    }
+
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+
+                    tokio::time::sleep(poll_interval).await;
+                }
+
+                let count = if ready {
+                    ready_count.fetch_add(1, Ordering::Relaxed) + 1
+                } else {
+                    ready_count.load(Ordering::Relaxed)
+                };
+
+                // Update spinner message
+                spinner_pb.set_message(format!(
+                    "waiting for servers to create bare git repo... ({count}/{total} - complete)"
+                ));
+
+                // Finish per-server bar (deferred if detail not yet visible)
+                let name = url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_string();
+                if ready {
+                    let style = ProgressStyle::with_template(&format!(
+                        "  {} {{msg}}",
+                        console::style("✔").for_stderr().green()
+                    ))
+                    .unwrap();
+                    let msg = console::style(format!("{name} - ready"))
+                        .for_stderr()
+                        .green()
+                        .to_string();
+                    finish_server_bar(&bar, style, msg, &reveal_state);
+                } else {
+                    let style = ProgressStyle::with_template(&format!(
+                        "  {} {{msg}}",
+                        console::style("✘").for_stderr().red()
+                    ))
+                    .unwrap();
+                    let msg = console::style(format!("{name} - timeout"))
+                        .for_stderr()
+                        .red()
+                        .to_string();
+                    finish_server_bar(&bar, style, msg, &reveal_state);
+                }
+
+                ready
+            }
+        })
+        .collect();
+
+    let results = join_all(futures).await;
+    let final_ready = ready_count.load(Ordering::Relaxed);
+
+    // Cancel the expand timer if it hasn't fired yet.
+    timer_handle.abort();
+
+    // If detail view was revealed, clear the detail bars.
+    if reveal_state.revealed.load(Ordering::Acquire) {
+        let _ = detail_multi.clear();
+    }
+
+    let all_ready = results.iter().all(|&r| r);
+    if all_ready {
+        // Success — erase the spinner line entirely, leave nothing behind.
+        spinner_pb.finish_and_clear();
+    } else {
+        // Partial timeout — leave a message so the user knows we proceeded.
+        spinner_pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
+        spinner_pb.finish_with_message(format!(
+            "timed out waiting for servers to create bare git repo ({final_ready}/{total} - complete), proceeding anyway"
+        ));
+    }
+
+    Ok(())
 }
