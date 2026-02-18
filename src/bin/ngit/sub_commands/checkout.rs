@@ -24,7 +24,7 @@ use nostr_sdk::{EventId, FromBech32};
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
     git::{Repo, RepoActions, str_to_sha1},
-    git_events::{event_to_cover_letter, patch_supports_commit_ids},
+    git_events::{event_to_cover_letter, get_parent_commit_from_patch, patch_supports_commit_ids},
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
@@ -272,13 +272,12 @@ fn checkout_patch(
         );
     }
 
-    let proposal_base_commit = str_to_sha1(&tag_value(
-        most_recent_proposal_patch_chain_or_pr_or_pr_update
-            .last()
-            .context("there should be at least one patch")?,
-        "parent-commit",
-    )?)
-    .context("failed to get valid parent commit id from patch")?;
+    let last_patch = most_recent_proposal_patch_chain_or_pr_or_pr_update
+        .last()
+        .context("there should be at least one patch")?;
+
+    let proposal_base_commit = str_to_sha1(&get_parent_commit_from_patch(last_patch, Some(git_repo))?)
+        .context("failed to get valid parent commit id from patch")?;
 
     let (main_branch_name, _master_tip) = git_repo.get_main_or_master_branch()?;
 

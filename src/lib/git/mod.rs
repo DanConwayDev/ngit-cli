@@ -62,6 +62,8 @@ pub trait RepoActions {
     /// returns vector ["name", "email", "unixtime", "offset"]
     /// eg ["joe bloggs", "joe@pm.me", "12176","-300"]
     fn get_commit_comitter(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
+    fn get_commit_committer_time(&self, commit: &Sha1Hash) -> Result<i64>;
+    fn find_best_guess_parent_commit(&self, patch_timestamp: i64) -> Result<Option<Sha1Hash>>;
     fn get_commits_ahead_behind(
         &self,
         base_commit: &Sha1Hash,
@@ -339,6 +341,50 @@ impl RepoActions for Repo {
         Ok(git_sig_to_tag_vec(&sig))
     }
 
+    fn get_commit_committer_time(&self, commit_hash: &Sha1Hash) -> Result<i64> {
+        let commit = self
+            .git_repo
+            .find_commit(sha1_to_oid(commit_hash)?)
+            .context(format!("could not find commit {commit_hash}"))?;
+        let time = commit.committer().when().seconds();
+        Ok(time)
+    }
+
+    fn find_best_guess_parent_commit(&self, patch_timestamp: i64) -> Result<Option<Sha1Hash>> {
+        let (main_branch_name, _) = self
+            .get_main_or_master_branch()
+            .context("failed to get main/master branch")?;
+
+        let mut revwalk = self
+            .git_repo
+            .revwalk()
+            .context("failed to create revwalk")?;
+
+        revwalk
+            .push_ref(&format!("refs/heads/{}", main_branch_name))
+            .context("failed to push main branch to revwalk")?;
+
+        let mut best_commit: Option<(i64, Sha1Hash)> = None;
+
+        for oid_result in revwalk {
+            let oid = oid_result.context("failed to get oid from revwalk")?;
+            let commit = self
+                .git_repo
+                .find_commit(oid)
+                .context("failed to find commit")?;
+
+            let committer_time = commit.committer().when().seconds();
+
+            if committer_time < patch_timestamp
+                && (best_commit.is_none() || committer_time > best_commit.as_ref().unwrap().0)
+            {
+                best_commit = Some((committer_time, oid_to_sha1(&oid)));
+            }
+        }
+
+        Ok(best_commit.map(|(_, sha1)| sha1))
+    }
+
     fn get_refs(&self, commit: &Sha1Hash) -> Result<Vec<String>> {
         Ok(self
             .git_repo
@@ -542,16 +588,16 @@ impl RepoActions for Repo {
             })
             .collect();
 
-        let parent_commit_id = tag_value(
-            if let Ok(last_patch) = patches_to_apply.last().context("no patches") {
-                last_patch
-            } else {
+        let parent_commit_id = match patches_to_apply.last() {
+            Some(last_patch) => {
+                crate::git_events::get_parent_commit_from_patch(last_patch, Some(self))?
+            }
+            None => {
                 self.checkout(branch_name)
                     .context("no patches and so failed to create a proposal branch")?;
                 return Ok(vec![]);
-            },
-            "parent-commit",
-        )?;
+            }
+        };
 
         // check patches can be applied
         if !self.does_commit_exist(&parent_commit_id)? {
@@ -590,8 +636,23 @@ impl RepoActions for Repo {
 
         let parent_commit_id = if let Some(commit_id) = parent_commit_id_override.clone() {
             commit_id
+        } else if let Ok(parent) = tag_value(patch, "parent-commit") {
+            parent
         } else {
-            tag_value(patch, "parent-commit")?
+            let metadata = crate::mbox_parser::parse_mbox_patch(&patch.content)
+                .context("failed to parse patch for timestamp")?;
+            let timestamp = metadata.committer_timestamp.unwrap_or(metadata.author_timestamp);
+            
+            let best_guess = self
+                .find_best_guess_parent_commit(timestamp)
+                .context("failed to find best guess parent commit")?;
+
+            match best_guess {
+                Some(sha1) => sha1.to_string(),
+                None => bail!(
+                    "no parent-commit tag and could not determine best guess parent from patch timestamp"
+                ),
+            }
         };
 
         let parent_commit = self
@@ -623,10 +684,15 @@ impl RepoActions for Repo {
             None
         };
 
+        let author_data = extract_signature_data_with_fallback(&patch.tags, "author", &patch.content)?;
+        let committer_data = extract_signature_data_with_fallback(&patch.tags, "committer", &patch.content)?;
+        let author_sig = author_data.to_signature()?;
+        let committer_sig = committer_data.to_signature()?;
+
         let commit_buff = self.git_repo.commit_create_buffer(
-            &extract_sig_from_patch_tags(&patch.tags, "author")?,
-            &extract_sig_from_patch_tags(&patch.tags, "committer")?,
-            tag_value(patch, "description")?.as_str(),
+            &author_sig,
+            &committer_sig,
+            extract_description_from_patch(patch)?.as_str(),
             &tree,
             &[&parent_commit],
         )?;
@@ -897,7 +963,14 @@ fn git_sig_to_tag_vec(sig: &git2::Signature) -> Vec<String> {
     ]
 }
 
-fn extract_sig_from_patch_tags<'a>(tags: &'a Tags, tag_name: &str) -> Result<git2::Signature<'a>> {
+struct SignatureData {
+    name: String,
+    email: String,
+    timestamp: i64,
+    offset_minutes: i32,
+}
+
+fn extract_signature_data_from_tags(tags: &Tags, tag_name: &str) -> Result<SignatureData> {
     let v = tags
         .iter()
         .find(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq(tag_name))
@@ -906,16 +979,64 @@ fn extract_sig_from_patch_tags<'a>(tags: &'a Tags, tag_name: &str) -> Result<git
     if v.len() != 5 {
         bail!("tag '{tag_name}' is incorrectly formatted")
     }
-    git2::Signature::new(
-        v[1].as_str(),
-        v[2].as_str(),
-        &git2::Time::new(
-            v[3].parse().context("tag time is incorrectly formatted")?,
-            v[4].parse()
-                .context("tag time offset is incorrectly formatted")?,
-        ),
-    )
-    .context("failed to create git signature")
+    Ok(SignatureData {
+        name: v[1].clone(),
+        email: v[2].clone(),
+        timestamp: v[3].parse().context("tag time is incorrectly formatted")?,
+        offset_minutes: v[4].parse().context("tag time offset is incorrectly formatted")?,
+    })
+}
+
+fn extract_signature_data_with_fallback(
+    tags: &Tags,
+    tag_name: &str,
+    patch_content: &str,
+) -> Result<SignatureData> {
+    if let Ok(data) = extract_signature_data_from_tags(tags, tag_name) {
+        return Ok(data);
+    }
+
+    let metadata = crate::mbox_parser::parse_mbox_patch(patch_content)
+        .context("failed to parse patch content for fallback metadata")?;
+
+    if tag_name == "author" {
+        Ok(SignatureData {
+            name: metadata.author_name,
+            email: metadata.author_email,
+            timestamp: metadata.author_timestamp,
+            offset_minutes: metadata.author_offset_minutes,
+        })
+    } else if tag_name == "committer" {
+        let timestamp = metadata.committer_timestamp.unwrap_or(metadata.author_timestamp);
+        Ok(SignatureData {
+            name: metadata.author_name,
+            email: metadata.author_email,
+            timestamp,
+            offset_minutes: metadata.author_offset_minutes,
+        })
+    } else {
+        bail!("unknown tag name for signature extraction: {}", tag_name)
+    }
+}
+
+impl SignatureData {
+    fn to_signature(&self) -> Result<git2::Signature<'_>> {
+        git2::Signature::new(
+            &self.name,
+            &self.email,
+            &git2::Time::new(self.timestamp, self.offset_minutes),
+        )
+        .context("failed to create git signature")
+    }
+}
+
+fn extract_description_from_patch(patch: &nostr::Event) -> Result<String> {
+    if let Ok(desc) = tag_value(patch, "description") {
+        return Ok(desc);
+    }
+
+    crate::mbox_parser::extract_description_from_patch(&patch.content)
+        .context("failed to extract description from patch content")
 }
 
 pub fn get_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<Option<String>> {
@@ -1182,19 +1303,20 @@ mod tests {
             }
         }
 
-        mod extract_sig_from_patch_tags {
+        mod extract_signature_data_from_tags {
             use super::*;
 
             fn test(time: git2::Time) -> Result<()> {
+                let data = extract_signature_data_from_tags(
+                    &Tags::from_list(vec![nostr::Tag::custom(
+                        nostr::TagKind::Custom("author".to_string().into()),
+                        prep(&time)?,
+                    )]),
+                    "author",
+                )?;
+                let sig = data.to_signature()?;
                 assert_eq!(
-                    extract_sig_from_patch_tags(
-                        &Tags::from_list(vec![nostr::Tag::custom(
-                            nostr::TagKind::Custom("author".to_string().into()),
-                            prep(&time)?,
-                        )]),
-                        "author",
-                    )?
-                    .to_string(),
+                    sig.to_string(),
                     git2::Signature::new(NAME, EMAIL, &time)?.to_string(),
                 );
                 Ok(())

@@ -35,7 +35,7 @@ use crate::{
     git::{Repo, RepoActions, str_to_sha1},
     git_events::{
         commit_msg_from_patch_oneliner, event_is_revision_root, event_to_cover_letter,
-        patch_supports_commit_ids,
+        get_parent_commit_from_patch, patch_supports_commit_ids,
     },
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
@@ -703,15 +703,14 @@ async fn launch_interactive() -> Result<()> {
             .get_checked_out_branch_name()?
             .eq(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?);
 
-        let proposal_base_commit = str_to_sha1(&tag_value(
-            most_recent_proposal_patch_chain_or_pr_or_pr_update
-                .last()
-                .context(
-                    "there should be at least one patch as we have already checked for this",
-                )?,
-            "parent-commit",
-        )?)
-        .context("failed to get valid parent commit id from patch")?;
+        let last_patch = most_recent_proposal_patch_chain_or_pr_or_pr_update
+            .last()
+            .context(
+                "there should be at least one patch as we have already checked for this",
+            )?;
+
+        let proposal_base_commit = str_to_sha1(&get_parent_commit_from_patch(last_patch, Some(&git_repo))?)
+            .context("failed to get valid parent commit id from patch")?;
 
         let (main_branch_name, master_tip) = git_repo.get_main_or_master_branch()?;
 

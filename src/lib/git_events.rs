@@ -40,6 +40,30 @@ pub fn get_commit_id_from_patch(event: &Event) -> Result<String> {
     }
 }
 
+pub fn get_parent_commit_from_patch(
+    event: &Event,
+    git_repo: Option<&Repo>,
+) -> Result<String> {
+    if let Ok(parent) = tag_value(event, "parent-commit") {
+        return Ok(parent);
+    }
+
+    let metadata = crate::mbox_parser::parse_mbox_patch(&event.content)
+        .context("failed to parse patch for timestamp")?;
+    let timestamp = metadata.committer_timestamp.unwrap_or(metadata.author_timestamp);
+
+    if let Some(repo) = git_repo {
+        if let Some(best_guess) = repo
+            .find_best_guess_parent_commit(timestamp)
+            .context("failed to find best guess parent commit")?
+        {
+            return Ok(best_guess.to_string());
+        }
+    }
+
+    bail!("no parent-commit tag and could not determine best guess parent")
+}
+
 pub fn get_event_root(event: &nostr::Event) -> Result<EventId> {
     Ok(EventId::parse(
         event
@@ -88,11 +112,27 @@ pub fn event_is_revision_root(event: &Event) -> bool {
 }
 
 pub fn patch_supports_commit_ids(event: &Event) -> bool {
-    event.kind.eq(&Kind::GitPatch)
-        && event
-            .tags
-            .iter()
-            .any(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq("commit-pgp-sig"))
+    if !event.kind.eq(&Kind::GitPatch) {
+        return false;
+    }
+
+    if event
+        .tags
+        .iter()
+        .any(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq("commit-pgp-sig"))
+    {
+        return true;
+    }
+
+    if event
+        .tags
+        .iter()
+        .any(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq("parent-commit"))
+    {
+        return true;
+    }
+
+    crate::mbox_parser::parse_mbox_patch(&event.content).is_ok()
 }
 
 pub fn event_is_valid_pr_or_pr_update(event: &Event) -> bool {

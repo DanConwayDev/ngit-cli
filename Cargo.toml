@@ -16,6 +16,7 @@ anyhow = "1.0.98"
 async-trait = "0.1.88"
 auth-git2 = "0.5.8"
 chacha20poly1305 = "0.10.1"
+chrono = "0.4"
 clap = { version = "4.5.41", features = ["derive"] }
 console = "0.16.0"
 dialoguer = "0.12.0"
