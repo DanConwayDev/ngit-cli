@@ -274,6 +274,7 @@ fn apply_grasp_infrastructure(
     public_key: &PublicKey,
     identifier: &str,
 ) -> Result<()> {
+    let mut grasp_relay_insert_idx = 0;
     for grasp_server in grasp_servers {
         // Always add grasp-derived clone URL
         let clone_url = format_grasp_server_url_as_clone_url(grasp_server, public_key, identifier)?;
@@ -305,11 +306,13 @@ fn apply_grasp_infrastructure(
             }
         }
 
-        // Always add grasp-derived relay at the beginning (for relay hint)
+        // Prepend grasp-derived relay in order (for relay hint) so that the
+        // first grasp server in the list ends up at relays[0].
         let relay_url = format_grasp_server_url_as_relay_url(grasp_server)?;
         if !relays.contains(&relay_url) {
-            relays.insert(0, relay_url);
+            relays.insert(grasp_relay_insert_idx, relay_url);
         }
+        grasp_relay_insert_idx += 1;
     }
     Ok(())
 }
