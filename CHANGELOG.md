@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Compatibility with clients that omit optional patch tags
 - Branch tracking setup when checking out proposals (c85ca81)
 - Handle existing local branch that is behind when checking out PR (1be46b4)
 - Preserve progress bars on relay errors during clone (b8716ed)
