@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Datelike};
+use chrono::DateTime;
+use mailparse::{MailHeaderMap, parse_headers};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PatchMetadata {
@@ -17,7 +18,7 @@ pub fn parse_mbox_patch(content: &str) -> Result<PatchMetadata> {
     let commit_id = extract_commit_id_from_mbox(content)?;
     let (author_name, author_email) = extract_author_from_from_header(content)?;
     let (author_timestamp, author_offset_minutes) = extract_date_from_header(content)?;
-    let committer_timestamp = extract_committer_date_from_mbox(content)?;
+    let committer_timestamp = None;
     let subject = extract_subject(content)?;
     let body = extract_commit_message_body(content)?;
 
@@ -48,7 +49,33 @@ fn extract_commit_id_from_mbox(content: &str) -> Result<String> {
     Ok(parts[1].to_string())
 }
 
+/// Extract the header section from the mbox content (everything after the first
+/// line up to the first blank line that ends the headers).
+fn extract_header_section(content: &str) -> &str {
+    // Skip the mbox envelope line ("From <sha> <date>"), then pass the rest
+    // to mailparse which understands where headers end.
+    let after_envelope = content
+        .find('\n')
+        .map(|pos| &content[pos + 1..])
+        .unwrap_or("");
+    // Return only up to (and including) the blank line that terminates headers,
+    // so mailparse doesn't try to parse the diff body.
+    let header_end = after_envelope
+        .find("\n\n")
+        .map(|pos| pos + 2)
+        .unwrap_or(after_envelope.len());
+    &after_envelope[..header_end]
+}
+
 fn extract_author_from_from_header(content: &str) -> Result<(String, String)> {
+    let header_bytes = extract_header_section(content).as_bytes();
+    if let Ok((headers, _)) = parse_headers(header_bytes) {
+        if let Some(from_value) = headers.get_first_value("From") {
+            return parse_from_header_value(&from_value);
+        }
+    }
+
+    // Fallback: manual search
     let from_line = content
         .lines()
         .find(|line| line.starts_with("From:"))
@@ -105,34 +132,16 @@ fn parse_rfc2822_date(value: &str) -> Result<(i64, i32)> {
     Ok((timestamp, offset_minutes))
 }
 
-fn extract_committer_date_from_mbox(content: &str) -> Result<Option<i64>> {
-    let first_line = content.lines().next().context("patch content is empty")?;
-
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-
-    if parts.len() >= 6 {
-        let date_str = parts[3..6].join(" ");
-        if let Ok(dt) = DateTime::parse_from_rfc2822(&date_str) {
-            return Ok(Some(dt.timestamp()));
-        }
-    }
-
-    if parts.len() >= 7 {
-        let date_str = format!("{} {} {}", parts[3], parts[4], parts[5]);
-        if let Ok(dt) = chrono::DateTime::parse_from_str(&date_str, "%a %b %d") {
-            if let Ok(year) = parts[6].parse::<i32>() {
-                let with_year = dt.with_year(year);
-                if let Some(dt_with_year) = with_year {
-                    return Ok(Some(dt_with_year.timestamp()));
-                }
-            }
-        }
-    }
-
-    Ok(None)
-}
-
 fn extract_subject(content: &str) -> Result<String> {
+    // Use mailparse to handle RFC 2047 encoded-words and RFC 2822 header folding.
+    let header_bytes = extract_header_section(content).as_bytes();
+    if let Ok((headers, _)) = parse_headers(header_bytes) {
+        if let Some(subject_value) = headers.get_first_value("Subject") {
+            return Ok(cleanup_subject(&subject_value));
+        }
+    }
+
+    // Fallback: manual single-line extraction.
     let subject_line = content
         .lines()
         .find(|line| line.starts_with("Subject:"))
@@ -200,7 +209,10 @@ fn extract_commit_message_body(content: &str) -> Result<String> {
             break;
         }
 
-        if line.starts_with("-- ") || line.starts_with("--\n") {
+        // The email signature separator is exactly "-- " (dash dash space, nothing
+        // after). Lines that merely start with "-- " followed by other text are
+        // body content.
+        if line == "-- " {
             break;
         }
 
@@ -369,6 +381,58 @@ Body
     }
 
     #[test]
+    fn parse_subject_folded_rfc2822() {
+        // RFC 2822 header folding: continuation lines start with whitespace.
+        let patch = "\
+From abc123 Mon Sep 17 00:00:00 2001
+From: Joe <joe@example.com>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] fix: this is a very long commit message subject line
+ that has been folded across two lines by RFC 2822 rules
+
+Body
+";
+        let subject = extract_subject(patch).unwrap();
+        assert_eq!(
+            subject,
+            "fix: this is a very long commit message subject line that has been folded across two lines by RFC 2822 rules"
+        );
+    }
+
+    #[test]
+    fn parse_subject_mime_q_encoded() {
+        // RFC 2047 Q-encoding: =?UTF-8?q?...?=
+        let patch = "\
+From abc123 Mon Sep 17 00:00:00 2001
+From: Joe <joe@example.com>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] =?UTF-8?q?fix=3A_add_=E2=9C=93_check?=
+
+Body
+";
+        let subject = extract_subject(patch).unwrap();
+        // Q-decoded: "fix: add ✓ check"
+        assert_eq!(subject, "fix: add \u{2713} check");
+    }
+
+    #[test]
+    fn parse_subject_mime_b_encoded() {
+        // RFC 2047 B-encoding: =?UTF-8?b?...?= (base64)
+        // "fix: résumé" base64 encoded
+        let patch = "\
+From abc123 Mon Sep 17 00:00:00 2001
+From: Joe <joe@example.com>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] =?UTF-8?b?Zml4OiByw6lzdW3DqQ==?=
+
+Body
+";
+        let subject = extract_subject(patch).unwrap();
+        // B-decoded: "fix: résumé"
+        assert_eq!(subject, "fix: r\u{e9}sum\u{e9}");
+    }
+
+    #[test]
     fn parse_body() {
         let patch = sample_patch();
         let body = extract_commit_message_body(&patch).unwrap();
@@ -395,6 +459,48 @@ diff --git a/file.txt b/file.txt
     }
 
     #[test]
+    fn parse_body_stops_at_exact_email_sig_separator() {
+        // "-- " (dash dash space, nothing after) is the email sig separator.
+        let patch = "\
+From abc123 Mon Sep 17 00:00:00 2001
+From: Joe <joe@example.com>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] test
+
+This is the body.
+-- 
+libgit2 1.9.1
+
+diff --git a/file.txt b/file.txt
+";
+        let body = extract_commit_message_body(patch).unwrap();
+        assert_eq!(body, "This is the body.");
+    }
+
+    #[test]
+    fn parse_body_does_not_stop_at_double_dash_with_text() {
+        // "-- some text" must NOT be treated as an email sig separator.
+        let patch = "\
+From abc123 Mon Sep 17 00:00:00 2001
+From: Joe <joe@example.com>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] test
+
+This is the body.
+-- some CLI flag description
+More body text.
+
+---
+diff --git a/file.txt b/file.txt
+";
+        let body = extract_commit_message_body(patch).unwrap();
+        assert_eq!(
+            body,
+            "This is the body.\n-- some CLI flag description\nMore body text."
+        );
+    }
+
+    #[test]
     fn parse_full_metadata() {
         let patch = sample_patch();
         let metadata = parse_mbox_patch(&patch).unwrap();
@@ -407,6 +513,7 @@ diff --git a/file.txt b/file.txt
         assert_eq!(metadata.author_email, "joe.bloggs@pm.me");
         assert_eq!(metadata.author_timestamp, 0);
         assert_eq!(metadata.author_offset_minutes, 0);
+        assert_eq!(metadata.committer_timestamp, None);
         assert_eq!(metadata.subject, "add t2.md");
         assert_eq!(
             metadata.body,
