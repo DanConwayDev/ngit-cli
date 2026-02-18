@@ -2459,6 +2459,8 @@ pub async fn send_events(
     let is_test = std::env::var("NGITTEST").is_ok();
     let use_concise = !is_test || (!verbose && !silent && animate);
 
+    let events_description = describe_events(&events);
+
     // Set up the two-MultiProgress pattern (same as fetch_all):
     // 1. A spinner MultiProgress shown immediately (concise mode only)
     // 2. A detail MultiProgress that starts hidden and becomes visible after a
@@ -2472,7 +2474,9 @@ pub async fn send_events(
                         .unwrap()
                         .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
                 )
-                .with_message("Publishing to nostr relays..."),
+                .with_message(format!(
+                    "Publishing {events_description} to nostr relays..."
+                )),
         );
         spinner.enable_steady_tick(Duration::from_millis(100));
         Some((sm, spinner))
@@ -2492,7 +2496,9 @@ pub async fn send_events(
         let bar =
             m.add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()));
         if !is_test {
-            bar.set_message("Publishing to nostr relays...");
+            bar.set_message(format!(
+                "Publishing {events_description} to nostr relays..."
+            ));
         }
         Some(bar)
     };
@@ -2511,6 +2517,7 @@ pub async fn send_events(
     let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
     let reveal_state_for_timer = reveal_state.clone();
     let heading_bar_for_timer = heading_bar.clone();
+    let events_description_for_timer = events_description.clone();
     let timer_handle = if use_concise {
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
@@ -2519,7 +2526,9 @@ pub async fn send_events(
             }
             detail_multi_for_timer.set_draw_target(ProgressDrawTarget::stderr());
             if let Some(heading) = heading_bar_for_timer {
-                heading.finish_with_message("publishing to nostr relays...");
+                heading.finish_with_message(format!(
+                    "Publishing {events_description_for_timer} to nostr relays..."
+                ));
             }
             if let Some(state) = reveal_state_for_timer {
                 let mut deferred = state.deferred.lock().unwrap();
@@ -2650,10 +2659,74 @@ pub async fn send_events(
     }
     if let Some((_, spinner)) = &spinner_multi {
         spinner.set_style(ProgressStyle::with_template("{msg}").unwrap());
-        spinner.finish_with_message("Published to nostr relays");
+        spinner.finish_with_message(format!("Published {events_description} to nostr relays"));
     }
 
     Ok(())
+}
+
+/// Builds a human-readable description of what is being published, e.g.
+/// "3 patches", "1 announcement and 1 state event", "2 patches and 1 cover
+/// letter".
+fn describe_events(events: &[nostr::Event]) -> String {
+    use crate::git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_USER_GRASP_LIST};
+
+    // key = singular, value = (plural, count)
+    let mut counts: std::collections::BTreeMap<&str, (&str, usize)> =
+        std::collections::BTreeMap::new();
+
+    for event in events {
+        let (singular, plural) = if event.kind.eq(&Kind::GitRepoAnnouncement) {
+            ("announcement", "announcements")
+        } else if event.kind.eq(&STATE_KIND) {
+            ("state event", "state events")
+        } else if event_is_cover_letter(event) {
+            ("cover letter", "cover letters")
+        } else if event.kind.eq(&Kind::GitPatch) {
+            ("patch", "patches")
+        } else if event.kind.eq(&KIND_PULL_REQUEST) {
+            ("PR", "PRs")
+        } else if event.kind.eq(&KIND_PULL_REQUEST_UPDATE) {
+            ("PR update", "PR updates")
+        } else if [
+            Kind::GitStatusOpen,
+            Kind::GitStatusDraft,
+            Kind::GitStatusClosed,
+            Kind::GitStatusApplied,
+        ]
+        .contains(&event.kind)
+        {
+            ("status update", "status updates")
+        } else if event.kind.eq(&KIND_USER_GRASP_LIST) {
+            ("user relay list", "user relay lists")
+        } else {
+            ("event", "events")
+        };
+        counts
+            .entry(singular)
+            .and_modify(|(_, c)| *c += 1)
+            .or_insert((plural, 1));
+    }
+
+    let parts: Vec<String> = counts
+        .iter()
+        .map(|(singular, (plural, n))| {
+            if *n == 1 {
+                format!("1 {singular}")
+            } else {
+                format!("{n} {plural}")
+            }
+        })
+        .collect();
+
+    match parts.len() {
+        0 => "0 events".to_string(),
+        1 => parts[0].clone(),
+        _ => {
+            let (last, rest) = parts.split_last().unwrap();
+            format!("{} and {last}", rest.join(", "))
+        }
+    }
 }
 
 fn remove_trailing_slash(s: &str) -> String {

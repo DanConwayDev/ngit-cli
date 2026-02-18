@@ -1261,7 +1261,6 @@ async fn publish_and_finalize(
     };
 
     // Step 2: Create event
-    println!("publishing repostory announcement to nostr...");
     let repo_event = repo_ref.to_event(&signer).await?;
 
     // Step 3: Build nostr URL
