@@ -2265,6 +2265,42 @@ pub async fn fetching_with_report(
     Ok(report)
 }
 
+/// Like `fetching_with_report` but suppresses the "no updates" / "updates: X"
+/// summary line. Returns `true` if any relay reported an error (so the caller
+/// can print a blank line to visually separate relay-error output from
+/// subsequent content).
+pub async fn fetching_quietly(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    trusted_maintainer_coordinate: &Nip19Coordinate,
+) -> Result<(FetchReport, bool)> {
+    let verbose = is_verbose();
+    if verbose {
+        let term = console::Term::stderr();
+        term.write_line("Checking nostr relays...")?;
+    }
+    let (relay_reports, progress_reporter) = client
+        .fetch_all(
+            Some(git_repo_path),
+            Some(trusted_maintainer_coordinate),
+            &HashSet::new(),
+        )
+        .await?;
+    let had_errors = relay_reports.iter().any(std::result::Result::is_err);
+    if !had_errors {
+        let _ = progress_reporter.clear();
+    }
+    // Drop the MultiProgress now so all buffered stderr output is flushed
+    // before we write the separator blank line.
+    drop(progress_reporter);
+    if had_errors {
+        let _ = console::Term::stderr().write_line("");
+    }
+    let report = consolidate_fetch_reports(relay_reports);
+    Ok((report, had_errors))
+}
+
 pub async fn get_proposals_and_revisions_from_cache(
     git_repo_path: &Path,
     repo_coordinates: HashSet<Nip19Coordinate>,
