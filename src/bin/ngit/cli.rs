@@ -106,6 +106,11 @@ pub enum Commands {
     /// publish a repository to nostr; signal you are its maintainer accepting
     /// PRs and issues
     Init(sub_commands::init::SubCommandArgs),
+    /// manage repository metadata and maintainership
+    #[command(
+        long_about = "manage repository metadata and maintainership\n\nrun without a subcommand to show repository info"
+    )]
+    Repo(RepoSubCommandArgs),
     /// submit PR with advanced options
     #[command(
         long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
@@ -176,4 +181,28 @@ pub enum AccountCommands {
 pub struct AccountSubCommandArgs {
     #[command(subcommand)]
     pub account_command: AccountCommands,
+}
+
+#[derive(clap::Parser)]
+pub struct RepoSubCommandArgs {
+    #[command(subcommand)]
+    pub repo_command: Option<RepoCommands>,
+}
+
+#[derive(Subcommand)]
+pub enum RepoCommands {
+    /// publish a repository to nostr (alias for `ngit init`)
+    Init(sub_commands::init::SubCommandArgs),
+    /// update repository metadata on nostr
+    #[command(
+        long_about = "update repository metadata on nostr\n\nlike `ngit init` but makes clear you are editing an existing repository"
+    )]
+    Edit(sub_commands::init::SubCommandArgs),
+    /// accept an invitation to co-maintain a repository
+    #[command(long_about = "accept an invitation to co-maintain a repository\n\n\
+            publishes your repository announcement to nostr, confirming your co-maintainership.\n\n\
+            This is required because your signed announcement is what ties your git state events\n\
+            to a specific repository coordinate chain, preventing scammers from attributing your\n\
+            commits to a fake repository. See `ngit repo info` for details on the maintainer model.")]
+    Accept(sub_commands::repo::accept::SubCommandArgs),
 }
