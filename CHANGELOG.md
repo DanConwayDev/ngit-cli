@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Simplify CLI output**
   - Add `--verbose/-v` flag for detailed output
   - show fetch/publish report if taking longer than 5s
-- Add second default signer relay (`wss://relay.ditto.pub`) for resilience during nostrconnect login
+- **Default relay updates**: replace `nos.lol` with `relay.ditto.pub` (nos.lol requires NIP-42 auth even for reads); add `relay.ditto.pub` as second default signer relay for nostrconnect resilience
 
 ### Added
 

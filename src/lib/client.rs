@@ -1053,7 +1053,9 @@ impl Default for Params {
                     "wss://relay.damus.io".to_string(), /* free, good reliability, have been
                                                          * known
                                                          * to delete all messages */
-                    "wss://nos.lol".to_string(),
+                    "wss://relay.ditto.pub".to_string(),
+                    // "wss://nos.lol".to_string(), // always prompts for nip42 auth even for
+                    // reading
                 ]
             },
             blaster_relays: if std::env::var("NGITTEST").is_ok() {
