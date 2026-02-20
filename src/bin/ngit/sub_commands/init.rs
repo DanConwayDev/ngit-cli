@@ -729,13 +729,9 @@ fn resolve_fields(
             .filter(|r| !is_grasp_derived_relay(r, &my_existing_grasp_servers))
             .collect()
     } else if let Ok(config) = repo_config_result {
-        if config.relays.is_empty() {
-            client.get_relay_default_set().clone()
-        } else {
-            config.relays.clone()
-        }
+        config.relays.clone()
     } else {
-        client.get_relay_default_set().clone()
+        vec![]
     };
 
     let mut git_servers = if args.clone.is_empty() {
@@ -795,20 +791,12 @@ fn resolve_fields(
             .iter()
             .filter_map(|r| format_grasp_server_url_as_relay_url(r).ok())
             .collect();
-        let mut options: Vec<String> = relay_strings
+        let options: Vec<String> = relay_strings
             .iter()
             .filter(|s| !grasp_relay_urls.iter().any(|r| s.as_str() == r))
             .cloned()
             .collect();
-        let mut selections: Vec<bool> = vec![true; options.len()];
-        for relay in client.get_relay_default_set().clone() {
-            if !options.iter().any(|r| r.contains(&relay))
-                && !grasp_relay_urls.iter().any(|r| relay.contains(r))
-            {
-                options.push(relay);
-                selections.push(selections.is_empty());
-            }
-        }
+        let selections: Vec<bool> = vec![true; options.len()];
         let selected = multi_select_with_custom_value(
             "additional nostr relays on top of nostr-relays - 1 or 2 public relays are reccomended",
             "nostr relay",

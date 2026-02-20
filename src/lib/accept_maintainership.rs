@@ -69,11 +69,7 @@ pub async fn accept_maintainership_with_defaults(
     let selected_grasp_servers = grasp_servers_from_user_or_fallback(user_ref, client);
 
     let mut git_servers: Vec<String> = vec![];
-    let mut relay_strings: Vec<String> = client
-        .get_relay_default_set()
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
+    let mut relay_strings: Vec<String> = vec![];
 
     apply_grasp_infrastructure(
         &selected_grasp_servers,
