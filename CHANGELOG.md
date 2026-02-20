@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0]
+
 ### Changed
 
 - **AI-friendly commands** all non-interactive by default
@@ -17,19 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Add `--verbose/-v` flag for detailed output
   - show fetch/publish report if taking longer than 5s
 - **Default relay updates**: replace `nos.lol` with `relay.ditto.pub` (nos.lol requires NIP-42 auth even for reads); add `relay.ditto.pub` as second default signer relay for nostrconnect resilience
+- **Grasp server readiness**: poll grasp servers for readiness instead of a fixed 5-second wait
 
 ### Added
 
+- **`ngit repo` subcommand group**: new command group for repository management operations
 - **Auto-accept co-maintainership on push**: when pushing to a repo where you are listed as a maintainer but have not yet published an announcement, ngit now automatically publishes your announcement (using your grasp servers or the trusted maintainer's as fallback) and provisions your grasp server instead of failing
 - `ngit account login --signer-relay` - specify custom relays for nostrconnect (auto-prefixes with `wss://` if no scheme)
 - `ngit checkout <id>` - checkout a proposal branch by event-id or nevent
-- `ngit apply <id>` - apply proposal patches to current branch
+- `ngit apply <id>` - apply proposal patches to current branch; supports both patch and PR-format proposals
 - `ngit account create` - create a new nostr account
 - `ngit list --json` - output proposals as JSON
 - `ngit list --status` - filter by status (open,draft,closed,applied)
+- `ngit list --offline` / `ngit checkout --offline` / `ngit apply --offline` - skip relay fetching and use local cache
 - `ngit init --hashtag` - specify repository hashtag
 - Push options for PR title/description: `git push --push-option=title="..." --push-option=description="..."`
   - Multiline support: use `\n` for newlines in values (e.g. `--push-option=description='line1\n\nline2'`). Use single quotes to prevent shell interpretation. Use `\\n` for a literal backslash-n.
+- `ngit list` output improvements: show active filter, 'To view' hint, and yellow hint lines
 
 ### Removed
 
@@ -42,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Branch tracking setup when checking out proposals (c85ca81)
 - Handle existing local branch that is behind when checking out PR (1be46b4)
 - Preserve progress bars on relay errors during clone (b8716ed)
+- Show help menu when `ngit` is run without arguments (972e220)
 - Various output formatting and wording improvements
 
 ## [2.1.0]
