@@ -409,7 +409,7 @@ where
 
         // Create default selections based on the provided defaults
         let mut current_defaults = defaults.clone();
-        current_defaults.push(current_choices.len() == 1); // 'add another' should not be selected by default
+        current_defaults.push(false); // 'add'/'add another' should not be selected by default
 
         // Prompt for selections
         let selected_indices: Vec<usize> = Interactor::default().multi_choice(
