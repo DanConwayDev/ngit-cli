@@ -219,7 +219,8 @@ async fn create_and_publish_events_and_proposals(
         for refspec in git_server_refspecs {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
             eprintln!(
-                "error {to} you must run `ngit init` before pushing updates. you've been offered maintainership but you must accept it before pushing",
+                "error {to} you have been offered co-maintainership of '{}'. to accept, run `ngit init` which will publish your own repository announcement. use `ngit init -d` to accept with defaults and no interactive prompts.",
+                repo_ref.name,
             );
         }
         if proposal_refspecs.is_empty() {
