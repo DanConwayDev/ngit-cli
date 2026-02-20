@@ -798,7 +798,7 @@ fn resolve_fields(
             .collect();
         let selections: Vec<bool> = vec![true; options.len()];
         let selected = multi_select_with_custom_value(
-            "additional nostr relays on top of nostr-relays - 1 or 2 public relays are reccomended",
+            "extra nostr relays (grasp servers are sufficient; public relays optional)",
             "nostr relay",
             options,
             selections,
