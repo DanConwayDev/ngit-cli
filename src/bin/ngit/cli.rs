@@ -187,6 +187,9 @@ pub struct AccountSubCommandArgs {
 pub struct RepoSubCommandArgs {
     #[command(subcommand)]
     pub repo_command: Option<RepoCommands>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Subcommand)]

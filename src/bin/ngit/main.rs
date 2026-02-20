@@ -50,7 +50,7 @@ async fn main() {
             },
             Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
             Commands::Repo(args) => {
-                sub_commands::repo::launch(&cli, args.repo_command.as_ref()).await
+                sub_commands::repo::launch(&cli, args.repo_command.as_ref(), args.offline).await
             }
             Commands::List {
                 status,

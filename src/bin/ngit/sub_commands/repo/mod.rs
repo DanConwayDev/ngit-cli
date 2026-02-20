@@ -23,13 +23,13 @@ use crate::{
     sub_commands::init,
 };
 
-pub async fn launch(cli_args: &Cli, repo_command: Option<&RepoCommands>) -> Result<()> {
+pub async fn launch(cli_args: &Cli, repo_command: Option<&RepoCommands>, offline: bool) -> Result<()> {
     match repo_command {
         Some(RepoCommands::Init(args) | RepoCommands::Edit(args)) => {
             init::launch(cli_args, args).await
         }
         Some(RepoCommands::Accept(args)) => accept::launch(cli_args, args).await,
-        None => show_info(cli_args).await,
+        None => show_info(cli_args, offline).await,
     }
 }
 
@@ -37,7 +37,7 @@ pub async fn launch(cli_args: &Cli, repo_command: Option<&RepoCommands>) -> Resu
 // `ngit repo` (no subcommand) — show repository info
 // ---------------------------------------------------------------------------
 
-async fn show_info(cli_args: &Cli) -> Result<()> {
+async fn show_info(cli_args: &Cli, offline: bool) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
@@ -69,7 +69,9 @@ async fn show_info(cli_args: &Cli) -> Result<()> {
     // Fetch latest data from relays — suppress the summary line.
     // fetching_quietly writes a blank line to stderr after errors so there
     // is clear separation before the repo info below.
-    let _ = fetching_quietly(git_repo_path, &client, &repo_coordinate).await;
+    if !offline {
+        let _ = fetching_quietly(git_repo_path, &client, &repo_coordinate).await;
+    }
 
     let Some(repo_ref) =
         (get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await).ok()
@@ -95,8 +97,13 @@ async fn print_repo_info(
     coordinate: &Nip19Coordinate,
     git_repo_path: &Path,
 ) {
-    let heading = Style::new().bold();
+    let title = Style::new().bold().yellow();
+    let heading = Style::new().bold().dim();
     let dim = Style::new().dim();
+
+    let term_width = console::Term::stdout().size().1 as usize;
+    let rule_width = term_width.clamp(20, 60);
+    let rule = dim.apply_to("─".repeat(rule_width));
 
     let multi_maintainer = repo_ref.maintainers.len() > 1
         || repo_ref
@@ -105,38 +112,31 @@ async fn print_repo_info(
             .is_some_and(|v| !v.is_empty());
 
     // --- Basic metadata ---
-    println!("{}", heading.apply_to(&repo_ref.name));
+    println!("{rule}");
+    println!(" {}", title.apply_to(&repo_ref.name));
 
     // Show identifier only when it differs from the name
     let identifier_slug = repo_ref.identifier.to_lowercase().replace(' ', "-");
     let name_slug = repo_ref.name.to_lowercase().replace(' ', "-");
     if identifier_slug != name_slug {
         println!(
-            "{}",
+            " {}",
             dim.apply_to(format!("identifier: {}", repo_ref.identifier))
         );
     }
 
     if !repo_ref.description.is_empty() {
-        println!("{}", repo_ref.description);
+        println!(" {}", repo_ref.description);
     }
     if !repo_ref.web.is_empty() {
         for url in &repo_ref.web {
-            println!("{}", dim.apply_to(url));
+            println!(" {}", dim.apply_to(url));
         }
     }
     if !repo_ref.hashtags.is_empty() {
-        println!("{}", dim.apply_to(repo_ref.hashtags.join("  ")));
+        println!(" {}", dim.apply_to(repo_ref.hashtags.join("  ")));
     }
-    if !repo_ref.root_commit.is_empty() {
-        println!(
-            "{}",
-            dim.apply_to(format!(
-                "earliest unique commit: {}",
-                &repo_ref.root_commit[..7.min(repo_ref.root_commit.len())]
-            ))
-        );
-    }
+    println!("{rule}");
     println!();
 
     // --- Maintainers ---
@@ -314,6 +314,17 @@ async fn print_repo_info(
                 println!("  {display}");
             }
         }
+        println!();
+    }
+
+    if !repo_ref.root_commit.is_empty() {
+        println!(
+            "{}",
+            dim.apply_to(format!(
+                "earliest unique commit: {}",
+                &repo_ref.root_commit[..7.min(repo_ref.root_commit.len())]
+            ))
+        );
         println!();
     }
 
