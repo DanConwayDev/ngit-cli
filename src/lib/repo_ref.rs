@@ -814,6 +814,71 @@ pub fn format_grasp_server_url_as_clone_url(
     ))
 }
 
+/// Find the latest announcement event (by `created_at`) across all maintainer
+/// events and parse it into a `RepoRef` for shared metadata (name, description,
+/// web, etc.).
+pub fn latest_event_repo_ref(repo_ref: &RepoRef) -> Option<RepoRef> {
+    repo_ref
+        .events
+        .values()
+        .max_by_key(|e| e.created_at)
+        .and_then(|e| RepoRef::try_from((e.clone(), None)).ok())
+}
+
+/// Derive clone-URLs and relay URLs from selected grasp servers.
+///
+/// For each grasp server, adds or replaces the corresponding clone URL in
+/// `git_servers` and prepends a relay URL in `relays`. Grasp-derived
+/// infrastructure always takes priority — the other lists contain *additional*
+/// infrastructure beyond what grasp servers provide.
+pub fn apply_grasp_infrastructure(
+    grasp_servers: &[String],
+    git_servers: &mut Vec<String>,
+    relays: &mut Vec<String>,
+    public_key: &PublicKey,
+    identifier: &str,
+) -> Result<()> {
+    for (grasp_relay_insert_idx, grasp_server) in grasp_servers.iter().enumerate() {
+        // Always add grasp-derived clone URL
+        let clone_url = format_grasp_server_url_as_clone_url(grasp_server, public_key, identifier)?;
+
+        let grasp_server_clone_root = if clone_url.contains("https://") {
+            format!("https://{grasp_server}")
+        } else {
+            grasp_server.to_string()
+        };
+
+        let matching_positions: Vec<usize> = git_servers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, url)| {
+                if url.contains(&grasp_server_clone_root) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if matching_positions.is_empty() {
+            git_servers.push(clone_url);
+        } else {
+            git_servers[matching_positions[0]] = clone_url;
+            for &position in matching_positions.iter().skip(1).rev() {
+                git_servers.remove(position);
+            }
+        }
+
+        // Prepend grasp-derived relay in order (for relay hint) so that the
+        // first grasp server in the list ends up at relays[0].
+        let relay_url = format_grasp_server_url_as_relay_url(grasp_server)?;
+        if !relays.contains(&relay_url) {
+            relays.insert(grasp_relay_insert_idx, relay_url);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use test_utils::*;

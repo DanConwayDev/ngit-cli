@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
                     &repo_ref,
                     &stdin,
                     refspec,
-                    &client,
+                    &mut client,
                     list_outputs.clone(),
                     title_description,
                 )

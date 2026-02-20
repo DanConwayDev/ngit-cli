@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-accept co-maintainership on push**: when pushing to a repo where you are listed as a maintainer but have not yet published an announcement, ngit now automatically publishes your announcement (using your grasp servers or the trusted maintainer's as fallback) and provisions your grasp server instead of failing
 - `ngit account login --signer-relay` - specify custom relays for nostrconnect (auto-prefixes with `wss://` if no scheme)
 - `ngit checkout <id>` - checkout a proposal branch by event-id or nevent
 - `ngit apply <id>` - apply proposal patches to current branch

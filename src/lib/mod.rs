@@ -1,3 +1,4 @@
+pub mod accept_maintainership;
 pub mod cli_interactor;
 pub mod client;
 pub mod fetch;

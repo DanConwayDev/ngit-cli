@@ -14,6 +14,7 @@ use git_events::{
 };
 use git2::{Oid, Repository};
 use ngit::{
+    accept_maintainership::accept_maintainership_with_defaults,
     client::{self, get_event_from_cache_by_id},
     git::{self, nostr_url::NostrUrlDecoded},
     git_events::{
@@ -50,7 +51,7 @@ pub async fn run_push(
     repo_ref: &RepoRef,
     stdin: &Stdin,
     initial_refspec: &str,
-    client: &Client,
+    client: &mut Client,
     list_outputs: Option<HashMap<String, (HashMap<String, String>, bool)>>,
     title_description: Option<(String, String)>,
 ) -> Result<()> {
@@ -127,7 +128,7 @@ pub async fn run_push(
             repo_ref,
             &git_state_refspecs,
             &proposal_refspecs,
-            client,
+            client, // &mut Client
             existing_state,
             &term,
             title_description.as_ref(),
@@ -182,7 +183,7 @@ async fn create_and_publish_events_and_proposals(
     repo_ref: &RepoRef,
     git_server_refspecs: &Vec<String>,
     proposal_refspecs: &Vec<String>,
-    client: &Client,
+    client: &mut Client,
     existing_state: HashMap<String, String>,
     term: &Term,
     title_description: Option<&(String, String)>,
@@ -216,16 +217,14 @@ async fn create_and_publish_events_and_proposals(
         .clone()
         .is_some_and(|ms| ms.contains(&user_ref.public_key))
     {
-        for refspec in git_server_refspecs {
-            let (_, to) = refspec_to_from_to(refspec).unwrap();
-            eprintln!(
-                "error {to} you have been offered co-maintainership of '{}'. to accept, run `ngit init` which will publish your own repository announcement. use `ngit init -d` to accept with defaults and no interactive prompts.",
-                repo_ref.name,
-            );
-        }
-        if proposal_refspecs.is_empty() {
-            return Ok((vec![], true));
-        }
+        // Auto-accept co-maintainership: publish the user's own announcement
+        // with defaults before proceeding with the push. The announcement is
+        // required (not just for consent, but to prevent scammers from
+        // attributing a person's state events to a fake project with the same
+        // identifier). See docs/design/co-maintainer-announcement-rationale.md.
+        accept_maintainership_with_defaults(git_repo, repo_ref, &user_ref, client, &signer)
+            .await
+            .context("failed to auto-accept co-maintainership")?;
     }
 
     let mut events = vec![];
