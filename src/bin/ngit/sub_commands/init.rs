@@ -1231,7 +1231,7 @@ fn prompt_git_servers(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn publish_and_finalize(
     fields: ResolvedFields,
     signer: Arc<dyn nostr::prelude::NostrSigner>,
@@ -1240,6 +1240,7 @@ async fn publish_and_finalize(
     cli: &Cli,
     git_repo: &Repo,
     repo_config_result: &Result<ngit::repo_ref::RepoConfigYaml>,
+    is_co_maintainer_first_acceptance: bool,
 ) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
 
@@ -1432,12 +1433,22 @@ async fn publish_and_finalize(
         }
     }
 
-    // Step 9: Print share URLs
+    // Step 9: Print share URLs / completion message
     let gitworkshop_url = nostr_url_decoded
         .to_string()
         .replace("nostr://", "https://gitworkshop.dev/");
-    println!("share your repository: {gitworkshop_url}");
-    println!("clone url: {nostr_url}");
+    if is_co_maintainer_first_acceptance {
+        println!("co-maintainership accepted.");
+        println!("your announcement was published to nostr. you can now push updates.");
+        println!("your repository URL: {gitworkshop_url}");
+        println!("your clone URL: {nostr_url}");
+        println!(
+            "note: run `ngit init` at any time to update your announcement (relays, git servers, etc.)"
+        );
+    } else {
+        println!("share your repository: {gitworkshop_url}");
+        println!("clone url: {nostr_url}");
+    }
 
     // Step 10: Update maintainers.yaml if needed
     let relays = fields
@@ -1552,6 +1563,41 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     validate_post_fetch(cli_args, args, &state)?;
 
+    // Print CoMaintainer-specific context before proceeding so the user
+    // understands they are accepting (or updating) a co-maintainership
+    // offer, NOT creating a new repository.
+    let is_co_maintainer_first_acceptance =
+        if let InitState::CoMaintainer { repo_ref: rr, .. } = &state {
+            rr.maintainers_without_annoucnement
+                .as_ref()
+                .is_some_and(|ms| ms.contains(&user_ref.public_key))
+        } else {
+            false
+        };
+
+    if let InitState::CoMaintainer { repo_ref: rr, .. } = &state {
+        if is_co_maintainer_first_acceptance {
+            println!(
+                "accepting co-maintainership of '{}' (offered by {})",
+                rr.name,
+                rr.trusted_maintainer
+                    .to_bech32()
+                    .unwrap_or_else(|_| rr.trusted_maintainer.to_string()),
+            );
+            println!(
+                "publishing your repository announcement to nostr to confirm your co-maintainership..."
+            );
+            if cli_args.interactive {
+                println!("tip: run `ngit init -d` to accept with defaults and skip all prompts");
+            }
+        } else {
+            println!(
+                "updating your co-maintainer announcement for '{}' on nostr...",
+                rr.name
+            );
+        }
+    }
+
     // Phase 5: Resolve all fields
     let repo_config_result = get_repo_config_from_yaml(&git_repo);
     let fields = resolve_fields(
@@ -1575,6 +1621,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         cli_args,
         &git_repo,
         &repo_config_result,
+        is_co_maintainer_first_acceptance,
     )
     .await
 }
