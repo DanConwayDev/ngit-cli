@@ -23,7 +23,11 @@ use crate::{
     sub_commands::init,
 };
 
-pub async fn launch(cli_args: &Cli, repo_command: Option<&RepoCommands>, offline: bool) -> Result<()> {
+pub async fn launch(
+    cli_args: &Cli,
+    repo_command: Option<&RepoCommands>,
+    offline: bool,
+) -> Result<()> {
     match repo_command {
         Some(RepoCommands::Init(args) | RepoCommands::Edit(args)) => {
             init::launch(cli_args, args).await
@@ -57,6 +61,9 @@ async fn show_info(cli_args: &Cli, offline: bool) -> Result<()> {
     .ok()
     .map(|(_, user_ref, _)| user_ref.public_key);
 
+    println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
+    println!();
+
     let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
 
     let Some(repo_coordinate) = repo_coordinate else {
@@ -86,7 +93,13 @@ async fn show_info(cli_args: &Cli, offline: bool) -> Result<()> {
         return Ok(());
     };
 
-    print_repo_info(&repo_ref, my_pubkey.as_ref(), &repo_coordinate, git_repo_path).await;
+    print_repo_info(
+        &repo_ref,
+        my_pubkey.as_ref(),
+        &repo_coordinate,
+        git_repo_path,
+    )
+    .await;
     Ok(())
 }
 
@@ -274,7 +287,9 @@ async fn print_repo_info(
         for server in &extra_git_servers {
             let short = get_short_git_server_name(server);
             if multi_maintainer {
-                let owners = find_server_owners(repo_ref, server, coordinate, my_pubkey, git_repo_path).await;
+                let owners =
+                    find_server_owners(repo_ref, server, coordinate, my_pubkey, git_repo_path)
+                        .await;
                 if owners.is_empty() {
                     println!("  {short}");
                 } else {
@@ -300,8 +315,14 @@ async fn print_repo_info(
                 .trim_start_matches("ws://")
                 .trim_end_matches('/');
             if multi_maintainer {
-                let owners =
-                    find_relay_owners(repo_ref, relay.as_str(), coordinate, my_pubkey, git_repo_path).await;
+                let owners = find_relay_owners(
+                    repo_ref,
+                    relay.as_str(),
+                    coordinate,
+                    my_pubkey,
+                    git_repo_path,
+                )
+                .await;
                 if owners.is_empty() {
                     println!("  {display}");
                 } else {
@@ -328,7 +349,8 @@ async fn print_repo_info(
         println!();
     }
 
-    // --- Maintainer model note (only relevant when there are multiple maintainers) ---
+    // --- Maintainer model note (only relevant when there are multiple maintainers)
+    // ---
     if multi_maintainer {
         println!(
             "{}",
