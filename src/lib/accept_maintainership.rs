@@ -66,7 +66,8 @@ pub async fn accept_maintainership_with_defaults(
 
     // --- Step 1: resolve infrastructure ---
 
-    let selected_grasp_servers = grasp_servers_from_user_or_fallback(user_ref, client);
+    let selected_grasp_servers =
+        grasp_servers_from_user_or_fallback(user_ref, Some(repo_ref), client);
 
     let mut git_servers: Vec<String> = vec![];
     let mut relay_strings: Vec<String> = vec![];
@@ -208,26 +209,56 @@ pub async fn accept_maintainership_with_defaults(
 // Grasp server helpers
 // ---------------------------------------------------------------------------
 
-/// Return the user's saved grasp servers, falling back to client defaults.
+/// Return grasp servers for a co-maintainer using the following priority:
+///
+/// 1. User's own saved grasp server list (if non-empty).
+/// 2. Trusted maintainer's grasp servers derived from
+///    `trusted_maintainer_repo_ref` (if provided and non-empty). If the trusted
+///    maintainer only uses a single grasp server, the first system-default
+///    grasp server is appended so the co-maintainer has at least two servers
+///    for redundancy.
+/// 3. System / client default grasp servers.
 pub fn grasp_servers_from_user_or_fallback(
     user_ref: &UserRef,
+    trusted_maintainer_repo_ref: Option<&RepoRef>,
     #[cfg(test)] client: &MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Vec<String> {
-    if user_ref.grasp_list.urls.is_empty() {
-        client
-            .get_grasp_default_set()
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect()
-    } else {
-        user_ref
+    // Priority 1: user's own grasp list.
+    if !user_ref.grasp_list.urls.is_empty() {
+        return user_ref
             .grasp_list
             .urls
             .iter()
             .map(std::string::ToString::to_string)
-            .collect()
+            .collect();
     }
+
+    // Priority 2: trusted maintainer's grasp servers.
+    if let Some(rr) = trusted_maintainer_repo_ref {
+        let maintainer_servers = rr.grasp_servers();
+        if !maintainer_servers.is_empty() {
+            if maintainer_servers.len() == 1 {
+                // Supplement a single server with the first system default for
+                // redundancy, avoiding duplicates.
+                let mut servers = maintainer_servers;
+                if let Some(first_default) = client.get_grasp_default_set().first() {
+                    if !servers.contains(first_default) {
+                        servers.push(first_default.clone());
+                    }
+                }
+                return servers;
+            }
+            return maintainer_servers;
+        }
+    }
+
+    // Priority 3: system defaults.
+    client
+        .get_grasp_default_set()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -282,12 +282,23 @@ fn resolve_grasp_servers(
 
     if !interactive || cli.defaults || state.has_coordinate() || cli.force {
         // Prefer grasp servers from my existing announcement, then user's grasp
-        // list, then system fallbacks
+        // list (or trusted maintainer's servers as fallback), then system defaults
         let existing = detect_existing_grasp_servers(my_ref.as_ref(), &args.relay, &[], identifier);
         if !existing.is_empty() {
             return Ok(existing);
         }
-        return Ok(grasp_servers_from_user_or_fallback(user_ref, client));
+        // For co-maintainer state, pass the repo_ref so the trusted
+        // maintainer's grasp servers can be used as a fallback.
+        let trusted_maintainer_repo_ref = if matches!(state, InitState::CoMaintainer { .. }) {
+            state.repo_ref()
+        } else {
+            None
+        };
+        return Ok(grasp_servers_from_user_or_fallback(
+            user_ref,
+            trusted_maintainer_repo_ref,
+            client,
+        ));
     }
 
     // Interactive prompt
