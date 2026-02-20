@@ -120,6 +120,7 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
         /// Show details for specific proposal (event-id or nevent)
+        #[arg(value_name = "ID|nevent")]
         id: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
@@ -131,6 +132,7 @@ pub enum Commands {
     )]
     Checkout {
         /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
         id: String,
         /// Use local cache only, skip network fetch
         #[arg(long)]
@@ -142,6 +144,7 @@ pub enum Commands {
     )]
     Apply {
         /// Proposal event-id or nevent
+        #[arg(value_name = "ID|nevent")]
         id: String,
         /// Output patches to stdout instead of applying
         #[arg(long)]
