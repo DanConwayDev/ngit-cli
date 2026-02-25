@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-02-25
+
 ### Fixed
 
 - IPv6 connection failures with Happy Eyeballs (RFC 8305)
 
-## [2.2.0]
+## [2.2.0] - 2026-02-20
 
 ### Changed
 
@@ -55,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Show help menu when `ngit` is run without arguments (972e220)
 - Various output formatting and wording improvements
 
-## [2.1.0]
+## [2.1.0] - 2025-11-18
 
 ### Added
 
