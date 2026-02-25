@@ -333,7 +333,7 @@ index 0000000..a66525d
 +some content1
 \\ No newline at end of file
 --
-libgit2 1.9.1
+libgit2 1.9.2
 
 "
         .to_string()
@@ -531,7 +531,7 @@ Subject: [PATCH] test
 
 This is the body.
 -- 
-libgit2 1.9.1
+libgit2 1.9.2
 
 diff --git a/file.txt b/file.txt
 ";
