@@ -49,6 +49,7 @@ pub fn push_to_remote(
     remote_refspecs: &[String],
     term: &Term,
     is_grasp_server: bool,
+    git_server_push_options: &[&str],
 ) -> Result<HashMap<String, Option<String>>> {
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
@@ -69,6 +70,7 @@ pub fn push_to_remote(
             decoded_nostr_url.ssh_key_file_path().as_ref(),
             remote_refspecs,
             term,
+            git_server_push_options,
         ) {
             Err(error) => {
                 term.write_line(
@@ -149,6 +151,7 @@ pub fn push_to_remote_url(
     ssh_key_file: Option<&String>,
     remote_refspecs: &[String],
     term: &Term,
+    git_server_push_options: &[&str],
 ) -> Result<HashMap<String, Option<String>>> {
     let git_config = git_repo.git_repo.config()?;
     let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
@@ -262,6 +265,9 @@ pub fn push_to_remote_url(
         }
     });
     push_options.remote_callbacks(remote_callbacks);
+    if !git_server_push_options.is_empty() {
+        push_options.remote_push_options(git_server_push_options);
+    }
     git_server_remote.push(remote_refspecs, Some(&mut push_options))?;
     let _ = git_server_remote.disconnect();
     let reporter = push_reporter.lock().unwrap();
@@ -417,6 +423,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     signer: &Arc<dyn NostrSigner>,
     interactive: bool,
     term: &Term,
+    git_server_push_options: &[&str],
 ) -> Result<Vec<Event>> {
     let git_repo_path = git_repo.get_path()?;
     let mut to_try = vec![];
@@ -483,6 +490,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
             git_ref.clone(),
             signer,
             term,
+            git_server_push_options,
         )
         .await?;
         for url in to_try {
@@ -717,6 +725,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     git_ref: Option<String>,
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
+    git_server_push_options: &[&str],
 ) -> Result<(Option<Vec<Event>>, Vec<(String, Result<()>)>)> {
     let mut responses: Vec<(String, Result<()>)> = vec![];
 
@@ -747,7 +756,14 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
         let refspec = format!("{tip}:{git_ref_used}");
 
         let res = if is_grasp_server_clone_url(clone_url) {
-            push_to_remote_url(git_repo, clone_url, None, &[refspec], term)
+            push_to_remote_url(
+                git_repo,
+                clone_url,
+                None,
+                &[refspec],
+                term,
+                git_server_push_options,
+            )
         } else {
             // anticipated only when pushing to user's own repo or a personal-fork with
             // non-grasp git servers. this is used to extract prefered protocols / ssh
@@ -769,6 +785,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 &[refspec],
                 term,
                 false,
+                git_server_push_options,
             )
         };
 

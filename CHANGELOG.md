@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- git server push option passthrough, enabling `-o secret-scanning.skip` for grasp servers
+
 ## [2.2.1] - 2026-02-25
 
 ### Fixed

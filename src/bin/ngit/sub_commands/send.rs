@@ -50,6 +50,9 @@ pub struct SubCommandArgs {
     /// publish as Patches even if they may be > 60kb
     #[arg(long, action)]
     pub(crate) force_patch: bool,
+    #[clap(long = "push-option", short = 'o', value_parser, num_args = 0..)]
+    /// git push options to pass to the git server (eg. -o secret-scanning.skip)
+    pub(crate) push_options: Vec<String>,
 }
 
 /// Validates send command arguments for non-interactive mode.
@@ -351,21 +354,26 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let events = if as_pr {
         let tip = commits.last().context("no commits")?; // commits has been reversed to oldest first
         let first_commit = commits.first().context("no commits")?;
-        select_servers_push_refs_and_generate_pr_or_pr_update_event(
-            &client,
-            &git_repo,
-            &repo_ref,
-            tip,
-            first_commit,
-            git_repo.get_commit_parent(first_commit).ok().as_ref(),
-            &mut user_ref,
-            root_proposal.as_ref(),
-            &cover_letter_title_description,
-            &signer,
-            true,
-            &console::Term::stdout(),
-        )
-        .await?
+        {
+            let push_options_refs: Vec<&str> =
+                args.push_options.iter().map(String::as_str).collect();
+            select_servers_push_refs_and_generate_pr_or_pr_update_event(
+                &client,
+                &git_repo,
+                &repo_ref,
+                tip,
+                first_commit,
+                git_repo.get_commit_parent(first_commit).ok().as_ref(),
+                &mut user_ref,
+                root_proposal.as_ref(),
+                &cover_letter_title_description,
+                &signer,
+                true,
+                &console::Term::stdout(),
+                &push_options_refs,
+            )
+            .await?
+        }
     } else {
         let events = generate_cover_letter_and_patch_events(
             cover_letter_title_description.clone(),

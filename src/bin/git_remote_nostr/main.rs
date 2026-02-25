@@ -28,6 +28,7 @@ use crate::{client::Client, git::Repo};
 struct PushOptions {
     title: Option<String>,
     description: Option<String>,
+    git_server_extras: Vec<String>,
 }
 
 /// Strip git's c-style quoting from a push-option value.
@@ -118,6 +119,7 @@ mod list;
 mod push;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     if std::env::var("NGITTEST").is_ok() {
         std::env::set_var("NGIT_VERBOSE", "1");
@@ -177,16 +179,23 @@ async fn main() -> Result<()> {
             }
             ["option", "push-option", rest @ ..] => {
                 let option = strip_git_quoting(&rest.join(" "));
-                if let Some((key, value)) = option.split_once('=') {
+                let handled_by_ngit = if let Some((key, value)) = option.split_once('=') {
                     match key {
                         "title" => {
                             push_options.title = Some(decode_push_option_escapes(value));
+                            true
                         }
                         "description" => {
                             push_options.description = Some(decode_push_option_escapes(value));
+                            true
                         }
-                        _ => {}
+                        _ => false,
                     }
+                } else {
+                    false
+                };
+                if !handled_by_ngit {
+                    push_options.git_server_extras.push(option);
                 }
                 println!("ok");
             }
@@ -206,6 +215,7 @@ async fn main() -> Result<()> {
                     &mut client,
                     list_outputs.clone(),
                     title_description,
+                    push_options.git_server_extras.clone(),
                 )
                 .await?;
                 push_options = PushOptions::default();

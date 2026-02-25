@@ -45,6 +45,7 @@ use repo_state::RepoState;
 use crate::{client::Client, git::Repo};
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub async fn run_push(
     git_repo: &Repo,
@@ -54,6 +55,7 @@ pub async fn run_push(
     client: &mut Client,
     list_outputs: Option<HashMap<String, (HashMap<String, String>, bool)>>,
     title_description: Option<(String, String)>,
+    git_server_push_options: Vec<String>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
 
@@ -132,6 +134,7 @@ pub async fn run_push(
             existing_state,
             &term,
             title_description.as_ref(),
+            &git_server_push_options,
         )
         .await?;
 
@@ -159,6 +162,8 @@ pub async fn run_push(
                     .cloned()
                     .collect::<Vec<String>>();
                 if !refspecs.is_empty() {
+                    let push_options_refs: Vec<&str> =
+                        git_server_push_options.iter().map(String::as_str).collect();
                     let _ = push_to_remote(
                         git_repo,
                         &git_server_url,
@@ -166,6 +171,7 @@ pub async fn run_push(
                         &remote_refspecs,
                         &term,
                         is_grasp_server_clone_url(&git_server_url),
+                        &push_options_refs,
                     );
                 }
             }
@@ -187,6 +193,7 @@ async fn create_and_publish_events_and_proposals(
     existing_state: HashMap<String, String>,
     term: &Term,
     title_description: Option<&(String, String)>,
+    git_server_push_options: &[String],
 ) -> Result<(Vec<String>, bool)> {
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
@@ -281,6 +288,7 @@ async fn create_and_publish_events_and_proposals(
         &signer,
         term,
         title_description,
+        git_server_push_options,
     )
     .await?;
     for e in proposal_events {
@@ -315,6 +323,7 @@ async fn process_proposal_refspecs(
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
     title_description: Option<&(String, String)>,
+    git_server_push_options: &[String],
 ) -> Result<(Vec<Event>, Vec<String>)> {
     let mut events = vec![];
     let mut rejected_proposal_refspecs = vec![];
@@ -357,6 +366,7 @@ async fn process_proposal_refspecs(
                         signer,
                         term,
                         title_description,
+                        git_server_push_options,
                     )
                     .await?
                     {
@@ -398,6 +408,7 @@ async fn process_proposal_refspecs(
                                 signer,
                                 term,
                                 title_description,
+                                git_server_push_options,
                             )
                             .await?
                             {
@@ -469,6 +480,7 @@ async fn process_proposal_refspecs(
                 signer,
                 term,
                 title_description,
+                git_server_push_options,
             )
             .await?
             {
@@ -492,6 +504,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
     title_description: Option<&(String, String)>,
+    git_server_push_options: &[String],
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
     let use_pr = parent_is_pr || git_repo.are_commits_too_big_for_patches(ahead);
@@ -499,6 +512,8 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     if use_pr {
         let tip = ahead.first().context("no commits")?; // ahead is youngest first
         let first_commit = ahead.last().context("no commits")?;
+        let push_options_refs: Vec<&str> =
+            git_server_push_options.iter().map(String::as_str).collect();
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
             git_repo,
@@ -512,6 +527,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             signer,
             false,
             term,
+            &push_options_refs,
         )
         .await
         .context(format!(
