@@ -1087,6 +1087,7 @@ fn sanatize(s: String) -> String {
         .collect::<String>()
 }
 
+#[allow(deprecated)]
 pub fn rexpect_with<I, S>(args: I, timeout_ms: u64) -> Result<PtySession, rexpect::error::Error>
 where
     I: IntoIterator<Item = S>,
@@ -1106,6 +1107,7 @@ where
     )
 }
 
+#[allow(deprecated)]
 pub fn rexpect_with_from_dir<I, S>(
     dir: &PathBuf,
     args: I,
@@ -1130,6 +1132,7 @@ where
     )
 }
 
+#[allow(deprecated)]
 pub fn remote_helper_rexpect_with_from_dir(
     dir: &PathBuf,
     nostr_remote_url: &str,
@@ -1151,6 +1154,7 @@ pub fn remote_helper_rexpect_with_from_dir(
     )
 }
 
+#[allow(deprecated)]
 pub fn git_with_remote_helper_rexpect_with_from_dir<I, S>(
     dir: &PathBuf,
     args: I,
