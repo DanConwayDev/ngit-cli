@@ -1538,6 +1538,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
+ "async-wsocket",
  "auth-git2",
  "chacha20poly1305",
  "chrono",
@@ -1568,6 +1569,7 @@ dependencies = [
  "serial_test",
  "test_utils",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "urlencoding",
  "zeroize",
 ]

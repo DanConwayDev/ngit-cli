@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- IPv6 connection failures with Happy Eyeballs (RFC 8305)
+
 ## [2.2.0]
 
 ### Changed

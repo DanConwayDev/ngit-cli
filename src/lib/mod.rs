@@ -10,6 +10,9 @@ pub mod mbox_parser;
 pub mod push;
 pub mod repo_ref;
 pub mod repo_state;
+// TEMPORARY: Remove when async-wsocket includes Happy Eyeballs support.
+// See src/lib/transport.rs header for full removal instructions.
+pub mod transport;
 pub mod utils;
 
 use anyhow::{Result, anyhow};

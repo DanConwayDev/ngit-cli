@@ -14,6 +14,7 @@ categories = ["command-line-utilities","development-tools"]
 [dependencies]
 anyhow = "1.0.98"
 async-trait = "0.1.88"
+async-wsocket = "0.13.1" # TEMPORARY: remove when transport.rs is deleted. See transport.rs header.
 auth-git2 = "0.5.8"
 chacha20poly1305 = "0.10.1"
 chrono = "0.4"
@@ -39,6 +40,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 tokio = { version = "1.46.1", features = ["full"] }
+tokio-tungstenite = "0.26.2" # TEMPORARY: remove when transport.rs is deleted. See transport.rs header.
 urlencoding = "2.1.3"
 zeroize = "1.8.1"
 

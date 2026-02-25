@@ -63,6 +63,9 @@ use crate::{
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
     repo_ref::{RepoRef, normalize_grasp_server_url},
     repo_state::RepoState,
+    // TEMPORARY: Remove when async-wsocket includes Happy Eyeballs support.
+    // See src/lib/transport.rs header for full removal instructions.
+    transport::HappyEyeballsTransport,
 };
 
 pub fn is_verbose() -> bool {
@@ -206,6 +209,7 @@ impl Connect for Client {
                             .verify_subscriptions(true),
                     )
                     .signer(keys)
+                    .websocket_transport(HappyEyeballsTransport) // TEMPORARY: see transport.rs
                     .build()
             } else {
                 nostr_sdk::ClientBuilder::new()
@@ -214,6 +218,7 @@ impl Connect for Client {
                             .relay_limits(RelayLimits::disable())
                             .verify_subscriptions(true),
                     )
+                    .websocket_transport(HappyEyeballsTransport) // TEMPORARY: see transport.rs
                     .build()
             },
             relay_default_set: opts.relay_default_set,
