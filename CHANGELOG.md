@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - git server push option passthrough, enabling `-o secret-scanning.skip` for grasp servers
 - `ngit sync` now publishes the current state event to grasp server relays that are missing it or have a stale version before attempting git pushes, preventing rejections; per-relay state visibility is captured during the nostr fetch and surfaced via `FetchReport::state_per_relay`
+- Fetch filters now request kind-5 deletion events for cached state and repo announcement events by `#e` tag (NIP-09), in addition to the existing `#a`-tagged filter; ensures deletions of these events are received even from clients that do not embed a repo coordinate in their deletion event
 
 ### Fixed
 

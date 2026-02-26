@@ -798,6 +798,9 @@ impl Connect for Client {
             )
             .copied()
             .collect();
+        // Only request non-proposal event deletions on the first loop iteration;
+        // cleared after first use so subsequent iterations don't re-request them.
+        let mut fresh_non_proposal_event_ids = request.non_proposal_event_ids.clone();
 
         let mut report = FetchReport::default();
 
@@ -813,8 +816,13 @@ impl Connect for Client {
         let dim = Style::new().color256(247);
 
         loop {
-            let filters =
-                get_fetch_filters(&fresh_coordinates, &fresh_proposal_roots, &fresh_profiles);
+            let filters = get_fetch_filters(
+                &fresh_coordinates,
+                &fresh_proposal_roots,
+                &fresh_non_proposal_event_ids,
+                &fresh_profiles,
+            );
+            fresh_non_proposal_event_ids = HashSet::new();
 
             if let Some(pb) = &pb {
                 pb.set_prefix(
@@ -1727,6 +1735,8 @@ async fn create_relays_request(
         for filter in get_fetch_filters(
             &repo_coordinates_without_relays,
             &proposals,
+            &HashSet::new(), /* non_proposal_event_ids not yet computed; deletion events are not
+                              * cached locally */
             &missing_contributor_profiles
                 .union(
                     &profiles_to_fetch_from_user_relays
@@ -1827,6 +1837,21 @@ async fn create_relays_request(
             }
         } else {
             None
+        },
+        non_proposal_event_ids: {
+            let mut ids: HashSet<EventId> = HashSet::new();
+            // Include repo announcement event IDs so we can request kind-5
+            // deletions for them by #e tag (NIP-09 style).
+            if let Some(repo_ref) = &repo_ref {
+                for event in repo_ref.events.values() {
+                    ids.insert(event.id);
+                }
+                // Also include the state event ID if we have one.
+                if let Ok(existing_state) = get_state_from_cache(git_repo_path, repo_ref).await {
+                    ids.insert(existing_state.event.id);
+                }
+            }
+            ids
         },
         proposals,
         contributors,
@@ -2075,6 +2100,7 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
 pub fn get_fetch_filters(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     proposal_ids: &HashSet<EventId>,
+    non_proposal_event_ids: &HashSet<EventId>,
     required_profiles: &HashSet<PublicKey>,
 ) -> Vec<nostr::Filter> {
     [
@@ -2122,6 +2148,19 @@ pub fn get_fetch_filters(
                         ]
                         .concat(),
                     ),
+            ]
+        },
+        // Request kind-5 deletions for state events and repo announcements by
+        // their event ID (#e tag), as per NIP-09. The #a-tagged filter above
+        // covers addressable-event deletions; this covers the specific event IDs
+        // of the state and announcement events we already have cached.
+        if non_proposal_event_ids.is_empty() {
+            vec![]
+        } else {
+            vec![
+                nostr::Filter::default()
+                    .kind(Kind::EventDeletion)
+                    .events(non_proposal_event_ids.clone()),
             ]
         },
         if required_profiles.is_empty() {
@@ -2290,6 +2329,9 @@ pub struct FetchRequest {
     repo_coordinates_without_relays: Vec<(Nip19Coordinate, Option<Timestamp>)>,
     state: Option<(Timestamp, EventId)>,
     proposals: HashSet<EventId>,
+    /// Event IDs of non-proposal events (state events, repo announcements) for
+    /// which we should also request kind-5 deletion events by `#e` tag.
+    non_proposal_event_ids: HashSet<EventId>,
     contributors: HashSet<PublicKey>,
     missing_contributor_profiles: HashSet<PublicKey>,
     existing_events: HashSet<EventId>,
