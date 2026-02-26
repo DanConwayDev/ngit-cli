@@ -840,6 +840,33 @@ impl Connect for Client {
             let events: Vec<nostr::Event> = get_events_of(&relay, filters.clone(), pb).await?;
             // TODO: try reconcile
 
+            // Track the best state event seen from this relay so callers can
+            // determine which relays have a stale or absent state event.
+            // We must do this before process_fetched_events because the local
+            // database only stores the canonical latest event; per-relay
+            // visibility is only available here.
+            for event in &events {
+                if event.kind.eq(&STATE_KIND) {
+                    let entry = report
+                        .state_per_relay
+                        .entry(relay_url.clone())
+                        .or_insert(None);
+                    let is_newer = entry.as_ref().is_none_or(|existing: &nostr::Event| {
+                        event.created_at.gt(&existing.created_at)
+                            || (event.created_at.eq(&existing.created_at)
+                                && event.id.gt(&existing.id))
+                    });
+                    if is_newer {
+                        *entry = Some(event.clone());
+                    }
+                }
+            }
+            // Mark relay as queried even if no state event was returned.
+            report
+                .state_per_relay
+                .entry(relay_url.clone())
+                .or_insert(None);
+
             process_fetched_events(
                 events,
                 &request,
@@ -2018,6 +2045,30 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
         for c in relay_report.profile_updates {
             report.profile_updates.insert(c);
         }
+        // Per-relay state events are independent: each relay entry is kept as-is.
+        // If a relay appears in multiple per-relay reports (shouldn't happen in
+        // practice but possible in tests), keep the newer event.
+        for (relay_url, maybe_event) in relay_report.state_per_relay {
+            match report.state_per_relay.entry(relay_url) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(maybe_event);
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    let keep = match (e.get(), &maybe_event) {
+                        (None, Some(_)) => true,
+                        (Some(existing), Some(incoming)) => {
+                            incoming.created_at.gt(&existing.created_at)
+                                || (incoming.created_at.eq(&existing.created_at)
+                                    && incoming.id.gt(&existing.id))
+                        }
+                        _ => false,
+                    };
+                    if keep {
+                        e.insert(maybe_event);
+                    }
+                }
+            }
+        }
     }
     report
 }
@@ -2146,6 +2197,12 @@ pub struct FetchReport {
     statuses: HashSet<EventId>,
     contributor_profiles: HashSet<PublicKey>,
     profile_updates: HashSet<PublicKey>,
+    /// The best (newest) state event seen on each relay during the fetch.
+    /// `None` as a value means the relay was queried but returned no state
+    /// event at all.  Relays that were never queried are absent from the map.
+    /// This is the only point at which per-relay state visibility is available;
+    /// the local database only stores the canonical latest event.
+    pub state_per_relay: HashMap<RelayUrl, Option<nostr::Event>>,
 }
 
 impl Display for FetchReport {

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - git server push option passthrough, enabling `-o secret-scanning.skip` for grasp servers
+- `ngit sync` now publishes the current state event to grasp server relays that are missing it or have a stale version before attempting git pushes, preventing rejections; per-relay state visibility is captured during the nostr fetch and surfaced via `FetchReport::state_per_relay`
 
 ### Fixed
 

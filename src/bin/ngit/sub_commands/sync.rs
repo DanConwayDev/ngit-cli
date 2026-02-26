@@ -6,16 +6,21 @@ use git2::Oid;
 use ngit::{
     client::{
         Client, Connect, Params, fetching_with_report, get_repo_ref_from_cache,
-        get_state_from_cache,
+        get_state_from_cache, send_events,
     },
     fetch::fetch_from_git_server,
     git::{Repo, RepoActions, nostr_url::NostrUrlDecoded},
     list::{get_ahead_behind, list_from_remotes},
+    login::existing::load_existing_login,
     push::push_to_remote,
-    repo_ref::{get_repo_coordinates_when_remote_unknown, is_grasp_server_clone_url},
+    repo_ref::{
+        format_grasp_server_url_as_relay_url, get_repo_coordinates_when_remote_unknown,
+        is_grasp_server_clone_url,
+    },
     repo_state::RepoState,
     utils::{get_short_git_server_name, join_with_and},
 };
+use nostr_sdk::RelayUrl;
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
@@ -58,7 +63,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         None
     };
 
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     let (nostr_remote_name, decoded_nostr_url) = git_repo
         .get_first_nostr_remote_when_in_ngit_binary()
@@ -67,13 +72,83 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     let repo_coordinate = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    let _ = fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;
-
-    // TODO push announcement event, then state event to grasps
+    let fetch_report = fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await?;
 
     let nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
+
+    // Publish the current state event to any grasp server relays that are
+    // missing it or have a stale version.  Grasp servers reject git pushes
+    // unless the state event is already present on their relay, so we must
+    // do this before attempting any git push.
+    //
+    // We use the per-relay state events captured during the fetch rather than
+    // the local database, because the database only stores the canonical latest
+    // event and cannot tell us what each individual relay holds.
+    let grasp_relays_needing_state: Vec<RelayUrl> = repo_ref
+        .git_server
+        .iter()
+        .filter(|url| is_grasp_server_clone_url(url))
+        .filter_map(|url| {
+            format_grasp_server_url_as_relay_url(url)
+                .ok()
+                .and_then(|relay_str| RelayUrl::parse(&relay_str).ok())
+        })
+        .filter(|relay_url| {
+            // Include this relay if it was absent from the fetch results, had
+            // no state event, or had a state event older than the canonical one.
+            match fetch_report.state_per_relay.get(relay_url) {
+                // relay wasn't queried, or returned no state event
+                None | Some(None) => true,
+                Some(Some(relay_event)) => relay_event.id != nostr_state.event.id,
+            }
+        })
+        .collect();
+
+    // relay URL -> whether the state event was successfully published to it.
+    // Only populated for grasp relays that needed the state event; grasp
+    // relays that already had the current state event are considered succeeded.
+    let mut grasp_relay_publish_results: HashMap<String, bool> = HashMap::new();
+
+    if !grasp_relays_needing_state.is_empty() {
+        // Attempt to load an existing login silently so the signer is
+        // available for NIP-42 auth if a relay requests it.  We do not
+        // prompt the user, do not fetch profile updates, and ignore any
+        // failure — the events are already signed so publishing works
+        // without a signer.
+        if let Ok((signer, _, _)) = load_existing_login(
+            &Some(&git_repo),
+            &None,
+            &None,
+            &None,
+            Some(&client),
+            true,  // silent
+            false, // prompt_for_password
+            false, // fetch_profile_updates
+        )
+        .await
+        {
+            client.set_signer(signer).await;
+        }
+        // Send only to the specific grasp relays that are missing or have a
+        // stale state event — no user write relays.
+        if let Ok(results) = send_events(
+            &client,
+            Some(git_repo_path),
+            vec![nostr_state.event.clone()],
+            vec![], // no user write relays
+            grasp_relays_needing_state,
+            true,
+            false,
+        )
+        .await
+        {
+            for (relay_url, succeeded) in results {
+                grasp_relay_publish_results.insert(relay_url, succeeded);
+            }
+        }
+    }
 
     let term = console::Term::stderr();
 
@@ -175,6 +250,24 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 refspecs.push(format!(
                     "refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
                 ));
+            }
+        }
+
+        // Skip grasp servers whose relay did not receive the state event —
+        // they would reject the git push anyway.
+        if (*is_grasp_server || is_grasp_server_clone_url(url))
+            && !grasp_relay_publish_results.is_empty()
+        {
+            if let Ok(relay_url) = format_grasp_server_url_as_relay_url(url) {
+                if grasp_relay_publish_results
+                    .get(&relay_url)
+                    .is_some_and(|succeeded| !succeeded)
+                {
+                    term.write_line(&format!(
+                        "WARNING: skipping {remote_name} - state event failed to reach its relay"
+                    ))?;
+                    continue;
+                }
             }
         }
 
