@@ -1524,7 +1524,7 @@ fn update_remote_refs_pushed(
     refspec: &str,
     nostr_remote_url: &str,
 ) -> Result<()> {
-    let (from, _) = refspec_to_from_to(refspec)?;
+    let (from, to) = refspec_to_from_to(refspec)?;
 
     let target_ref_name = refspec_remote_ref_name(git_repo, refspec, nostr_remote_url)?;
 
@@ -1533,14 +1533,30 @@ fn update_remote_refs_pushed(
             remote_ref.delete()?;
         }
     } else {
-        let commit = reference_to_commit(git_repo, from)
-            .context(format!("failed to get commit of reference {from}"))?;
+        // For annotated tags, store the tag object OID (not the peeled commit)
+        // to match what generate_updated_state puts in the nostr state event.
+        // For branches and lightweight tags, store the commit OID as before.
+        let oid = if to.starts_with("refs/tags/") {
+            if let Ok(tag_obj) = git_repo
+                .find_reference(from)
+                .context(format!("failed to find reference: {from}"))?
+                .peel(git2::ObjectType::Tag)
+            {
+                tag_obj.id()
+            } else {
+                reference_to_commit(git_repo, from)
+                    .context(format!("failed to get commit of reference {from}"))?
+            }
+        } else {
+            reference_to_commit(git_repo, from)
+                .context(format!("failed to get commit of reference {from}"))?
+        };
         if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
-            remote_ref.set_target(commit, "updated by nostr remote helper")?;
+            remote_ref.set_target(oid, "updated by nostr remote helper")?;
         } else {
             git_repo.reference(
                 &target_ref_name,
-                commit,
+                oid,
                 false,
                 "created by nostr remote helper",
             )?;

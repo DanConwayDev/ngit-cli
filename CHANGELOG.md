@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `git-remote-nostr` list now advertises the newest state event whose OIDs are all confirmed present on a git server or locally, rather than unconditionally using the latest nostr state event; this prevents catastrophic fetch/clone failures when a state event was published before the corresponding git push completed
 - Tag tracking refs written with wrong path (`refs/remotes/origin/refs/tags/v1.0.0` instead of `refs/remotes/origin/v1.0.0`) after a push via `git-remote-nostr`, causing `ngit sync` to fail with "src refspec does not match any existing object" when syncing tags
+- Annotated tag tracking refs stored with the peeled commit OID instead of the tag object OID after a push via `git-remote-nostr`; this caused `ngit sync` to push the wrong object to grasp servers, which rejected it because the nostr state event referenced the tag object OID
+- `ngit sync --verbose` detailed per-relay view not shown; `--verbose` flag was ignored due to a logic error in `send_events`
 - `ngit sync` using wrong refspec source (`refs/remotes/origin/refs/heads/master` instead of `refs/remotes/origin/master`), causing sync to fail with "src refspec does not match any existing object"
 - State event publish failures silently swallowed during push; summary now shows `"Published to X/N relays (failed: relay1 relay2)"` instead of unconditional success message
 - Grasp servers whose internal relay did not receive the state event are now skipped during push, with a clear warning; push fails with an error message when no servers remain
