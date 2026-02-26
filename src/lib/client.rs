@@ -1962,6 +1962,8 @@ async fn process_fetched_events(
                         report.updated_state = Some((event.created_at, event.id));
                     }
                 }
+            } else if event.kind.eq(&Kind::EventDeletion) {
+                report.deletions += 1;
             } else if event_is_patch_set_root(event) || event.kind.eq(&KIND_PULL_REQUEST) {
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
@@ -2064,6 +2066,7 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
         for c in relay_report.statuses {
             report.statuses.insert(c);
         }
+        report.deletions += relay_report.deletions;
         for c in relay_report.contributor_profiles {
             report.contributor_profiles.insert(c);
         }
@@ -2234,6 +2237,8 @@ pub struct FetchReport {
     /// commits against existing propoals
     commits: HashSet<EventId>,
     statuses: HashSet<EventId>,
+    /// Count of kind-5 deletion events received (for display purposes).
+    deletions: u32,
     contributor_profiles: HashSet<PublicKey>,
     profile_updates: HashSet<PublicKey>,
     /// The best (newest) state event seen on each relay during the fetch.
@@ -2293,6 +2298,13 @@ impl Display for FetchReport {
                 "{} status{}",
                 self.statuses.len(),
                 if self.statuses.len() > 1 { "es" } else { "" },
+            ));
+        }
+        if self.deletions > 0 {
+            display_items.push(format!(
+                "{} deletion{}",
+                self.deletions,
+                if self.deletions > 1 { "s" } else { "" },
             ));
         }
         if !self.contributor_profiles.is_empty() {
