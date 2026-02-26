@@ -23,7 +23,10 @@ use ngit::{
     list::list_from_remotes,
     login::{existing::load_existing_login, user::UserRef},
     push::{push_to_remote, select_servers_push_refs_and_generate_pr_or_pr_update_event},
-    repo_ref::{self, get_repo_config_from_yaml, is_grasp_server_clone_url},
+    repo_ref::{
+        self, format_grasp_server_url_as_relay_url, get_repo_config_from_yaml,
+        is_grasp_server_clone_url,
+    },
     repo_state,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
@@ -125,18 +128,19 @@ pub async fn run_push(
 
     // all refspecs aren't rejected
     if !(git_state_refspecs.is_empty() && proposal_refspecs.is_empty()) {
-        let (rejected_proposal_refspecs, rejected) = create_and_publish_events_and_proposals(
-            git_repo,
-            repo_ref,
-            &git_state_refspecs,
-            &proposal_refspecs,
-            client, // &mut Client
-            existing_state,
-            &term,
-            title_description.as_ref(),
-            &git_server_push_options,
-        )
-        .await?;
+        let (rejected_proposal_refspecs, rejected, relay_results) =
+            create_and_publish_events_and_proposals(
+                git_repo,
+                repo_ref,
+                &git_state_refspecs,
+                &proposal_refspecs,
+                client, // &mut Client
+                existing_state,
+                &term,
+                title_description.as_ref(),
+                &git_server_push_options,
+            )
+            .await?;
 
         if !rejected {
             for refspec in git_state_refspecs.iter().chain(proposal_refspecs.iter()) {
@@ -155,24 +159,59 @@ pub async fn run_push(
 
             // TODO make async - check gitlib2 callbacks work async
 
-            for (git_server_url, remote_refspecs) in remote_refspecs {
-                let remote_refspecs = remote_refspecs
+            // Filter out grasp servers whose relay did not receive the state event
+            let mut servers_to_push: Vec<(String, Vec<String>)> = vec![];
+            for (git_server_url, server_refspecs) in remote_refspecs {
+                let server_refspecs = server_refspecs
                     .iter()
                     .filter(|refspec| git_state_refspecs.contains(refspec))
                     .cloned()
                     .collect::<Vec<String>>();
-                if !refspecs.is_empty() {
-                    let push_options_refs: Vec<&str> =
-                        git_server_push_options.iter().map(String::as_str).collect();
-                    let _ = push_to_remote(
-                        git_repo,
-                        &git_server_url,
-                        &repo_ref.to_nostr_git_url(&None),
-                        &remote_refspecs,
-                        &term,
-                        is_grasp_server_clone_url(&git_server_url),
-                        &push_options_refs,
+                if is_grasp_server_clone_url(&git_server_url)
+                    && !relay_results.is_empty()
+                {
+                    if let Ok(relay_url) =
+                        format_grasp_server_url_as_relay_url(&git_server_url)
+                    {
+                        let relay_failed = relay_results
+                            .iter()
+                            .any(|(url, succeeded)| url == &relay_url && !succeeded);
+                        if relay_failed {
+                            let short_name = get_short_git_server_name(&git_server_url);
+                            eprintln!(
+                                "WARNING: skipping {short_name} - state event failed to reach its relay"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                servers_to_push.push((git_server_url, server_refspecs));
+            }
+
+            // If all git servers were skipped and there were refspecs to push,
+            // emit error lines for each ref using the git remote helper protocol
+            if servers_to_push.is_empty() && !git_state_refspecs.is_empty() {
+                for refspec in &git_state_refspecs {
+                    let (_, to) = refspec_to_from_to(refspec)?;
+                    println!(
+                        "error {to} state event failed to reach any git server relay"
                     );
+                }
+            } else {
+                for (git_server_url, server_refspecs) in &servers_to_push {
+                    if !server_refspecs.is_empty() {
+                        let push_options_refs: Vec<&str> =
+                            git_server_push_options.iter().map(String::as_str).collect();
+                        let _ = push_to_remote(
+                            git_repo,
+                            git_server_url,
+                            &repo_ref.to_nostr_git_url(&None),
+                            server_refspecs,
+                            &term,
+                            is_grasp_server_clone_url(git_server_url),
+                            &push_options_refs,
+                        );
+                    }
                 }
             }
         }
@@ -194,7 +233,7 @@ async fn create_and_publish_events_and_proposals(
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
-) -> Result<(Vec<String>, bool)> {
+) -> Result<(Vec<String>, bool, Vec<(String, bool)>)> {
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
         &None,
@@ -217,7 +256,7 @@ async fn create_and_publish_events_and_proposals(
             );
         }
         if proposal_refspecs.is_empty() {
-            return Ok((vec![], true));
+            return Ok((vec![], true, vec![]));
         }
     } else if repo_ref
         .maintainers_without_annoucnement
@@ -297,8 +336,8 @@ async fn create_and_publish_events_and_proposals(
 
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
-    if !events.is_empty() {
-        let _relay_results = send_events(
+    let relay_results = if !events.is_empty() {
+        send_events(
             client,
             Some(git_repo.get_path()?),
             events,
@@ -307,9 +346,11 @@ async fn create_and_publish_events_and_proposals(
             true,
             false,
         )
-        .await?;
-    }
-    Ok((rejected_proposal_refspecs, false))
+        .await?
+    } else {
+        vec![]
+    };
+    Ok((rejected_proposal_refspecs, false, relay_results))
 }
 
 #[allow(clippy::too_many_lines)]

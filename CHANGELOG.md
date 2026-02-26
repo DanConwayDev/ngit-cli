@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ngit sync` using wrong refspec source (`refs/remotes/origin/refs/heads/master` instead of `refs/remotes/origin/master`), causing sync to fail with "src refspec does not match any existing object"
 - State event publish failures silently swallowed during push; summary now shows `"Published to X/N relays (failed: relay1 relay2)"` instead of unconditional success message
+- Grasp servers whose internal relay did not receive the state event are now skipped during push, with a clear warning; push fails with an error message when no servers remain
 
 ## [2.2.1] - 2026-02-25
 
