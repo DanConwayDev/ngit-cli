@@ -2801,6 +2801,17 @@ fn describe_events(events: &[nostr::Event]) -> String {
     }
 }
 
+pub async fn delete_event_from_local_cache(
+    git_repo_path: &Path,
+    event_id: nostr::EventId,
+) -> Result<()> {
+    let db = get_local_cache_database(git_repo_path).await?;
+    db.delete(nostr::Filter::default().id(event_id))
+        .await
+        .map_err(|e| anyhow!("failed to delete event from local cache: {e}"))?;
+    Ok(())
+}
+
 fn remove_trailing_slash(s: &str) -> String {
     match s.strip_suffix('/') {
         Some(s) => s,

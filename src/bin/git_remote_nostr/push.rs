@@ -6,7 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use client::{get_events_from_local_cache, get_state_from_cache, send_events, sign_event};
+use client::{
+    delete_event_from_local_cache, get_events_from_local_cache, get_state_from_cache, send_events,
+    sign_event,
+};
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
 use git_events::{
@@ -15,7 +18,9 @@ use git_events::{
 use git2::{Oid, Repository};
 use ngit::{
     accept_maintainership::accept_maintainership_with_defaults,
-    client::{self, get_event_from_cache_by_id},
+    client::{
+        self, get_event_from_cache_by_id, get_filter_state_events, save_event_in_local_cache,
+    },
     git::{self, nostr_url::NostrUrlDecoded},
     git_events::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
@@ -128,19 +133,24 @@ pub async fn run_push(
 
     // all refspecs aren't rejected
     if !(git_state_refspecs.is_empty() && proposal_refspecs.is_empty()) {
-        let (rejected_proposal_refspecs, rejected, relay_results) =
-            create_and_publish_events_and_proposals(
-                git_repo,
-                repo_ref,
-                &git_state_refspecs,
-                &proposal_refspecs,
-                client, // &mut Client
-                existing_state,
-                &term,
-                title_description.as_ref(),
-                &git_server_push_options,
-            )
-            .await?;
+        let (
+            rejected_proposal_refspecs,
+            rejected,
+            relay_results,
+            old_state_event,
+            new_state_event_id,
+        ) = create_and_publish_events_and_proposals(
+            git_repo,
+            repo_ref,
+            &git_state_refspecs,
+            &proposal_refspecs,
+            client, // &mut Client
+            existing_state,
+            &term,
+            title_description.as_ref(),
+            &git_server_push_options,
+        )
+        .await?;
 
         if !rejected {
             for refspec in git_state_refspecs.iter().chain(proposal_refspecs.iter()) {
@@ -167,12 +177,8 @@ pub async fn run_push(
                     .filter(|refspec| git_state_refspecs.contains(refspec))
                     .cloned()
                     .collect::<Vec<String>>();
-                if is_grasp_server_clone_url(&git_server_url)
-                    && !relay_results.is_empty()
-                {
-                    if let Ok(relay_url) =
-                        format_grasp_server_url_as_relay_url(&git_server_url)
-                    {
+                if is_grasp_server_clone_url(&git_server_url) && !relay_results.is_empty() {
+                    if let Ok(relay_url) = format_grasp_server_url_as_relay_url(&git_server_url) {
                         let relay_failed = relay_results
                             .iter()
                             .any(|(url, succeeded)| url == &relay_url && !succeeded);
@@ -190,19 +196,23 @@ pub async fn run_push(
 
             // If all git servers were skipped and there were refspecs to push,
             // emit error lines for each ref using the git remote helper protocol
+            // and roll back the state event in the local cache
             if servers_to_push.is_empty() && !git_state_refspecs.is_empty() {
                 for refspec in &git_state_refspecs {
                     let (_, to) = refspec_to_from_to(refspec)?;
-                    println!(
-                        "error {to} state event failed to reach any git server relay"
-                    );
+                    println!("error {to} state event failed to reach any git server relay");
+                }
+                if let Some(new_id) = new_state_event_id {
+                    rollback_state_event(git_repo.get_path()?, new_id, old_state_event.as_ref())
+                        .await;
                 }
             } else {
+                let mut any_push_succeeded = false;
                 for (git_server_url, server_refspecs) in &servers_to_push {
                     if !server_refspecs.is_empty() {
                         let push_options_refs: Vec<&str> =
                             git_server_push_options.iter().map(String::as_str).collect();
-                        let _ = push_to_remote(
+                        if push_to_remote(
                             git_repo,
                             git_server_url,
                             &repo_ref.to_nostr_git_url(&None),
@@ -210,7 +220,22 @@ pub async fn run_push(
                             &term,
                             is_grasp_server_clone_url(git_server_url),
                             &push_options_refs,
-                        );
+                        )
+                        .is_ok()
+                        {
+                            any_push_succeeded = true;
+                        }
+                    }
+                }
+                // If every git server push failed, roll back the state event
+                if !any_push_succeeded && !git_state_refspecs.is_empty() {
+                    if let Some(new_id) = new_state_event_id {
+                        rollback_state_event(
+                            git_repo.get_path()?,
+                            new_id,
+                            old_state_event.as_ref(),
+                        )
+                        .await;
                     }
                 }
             }
@@ -219,6 +244,25 @@ pub async fn run_push(
 
     println!();
     Ok(())
+}
+
+/// Remove the newly-published state event from the local nostr cache and
+/// restore the previous state event (if any). This prevents a subsequent
+/// `ngit sync` or push from using a state that no git server ever accepted.
+async fn rollback_state_event(
+    git_repo_path: &std::path::Path,
+    new_state_event_id: EventId,
+    old_state_event: Option<&Event>,
+) {
+    if let Err(e) = delete_event_from_local_cache(git_repo_path, new_state_event_id).await {
+        eprintln!("WARNING: failed to roll back state event from local cache: {e}");
+        return;
+    }
+    if let Some(old_event) = old_state_event {
+        if let Err(e) = save_event_in_local_cache(git_repo_path, old_event).await {
+            eprintln!("WARNING: failed to restore previous state event in local cache: {e}");
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -233,7 +277,13 @@ async fn create_and_publish_events_and_proposals(
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
-) -> Result<(Vec<String>, bool, Vec<(String, bool)>)> {
+) -> Result<(
+    Vec<String>,
+    bool,
+    Vec<(String, bool)>,
+    Option<Event>,
+    Option<EventId>,
+)> {
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
         &None,
@@ -256,7 +306,7 @@ async fn create_and_publish_events_and_proposals(
             );
         }
         if proposal_refspecs.is_empty() {
-            return Ok((vec![], true, vec![]));
+            return Ok((vec![], true, vec![], None, None));
         }
     } else if repo_ref
         .maintainers_without_annoucnement
@@ -274,6 +324,8 @@ async fn create_and_publish_events_and_proposals(
     }
 
     let mut events = vec![];
+    let mut old_state_event: Option<Event> = None;
+    let mut new_state_event_id: Option<EventId> = None;
 
     if !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, git_server_refspecs)?;
@@ -286,8 +338,22 @@ async fn create_and_publish_events_and_proposals(
             };
 
         if store_state {
+            // Capture the existing state event before publishing the new one,
+            // so we can restore it if all git server pushes fail.
+            old_state_event = get_events_from_local_cache(
+                git_repo.get_path()?,
+                vec![get_filter_state_events(&repo_ref.coordinates(), true)],
+            )
+            .await
+            .ok()
+            .and_then(|mut events| {
+                events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+                events.into_iter().next()
+            });
+
             let new_repo_state =
                 RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
+            new_state_event_id = Some(new_repo_state.event.id);
             events.push(new_repo_state.event);
         }
 
@@ -336,7 +402,9 @@ async fn create_and_publish_events_and_proposals(
 
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
-    let relay_results = if !events.is_empty() {
+    let relay_results = if events.is_empty() {
+        vec![]
+    } else {
         send_events(
             client,
             Some(git_repo.get_path()?),
@@ -347,10 +415,14 @@ async fn create_and_publish_events_and_proposals(
             false,
         )
         .await?
-    } else {
-        vec![]
     };
-    Ok((rejected_proposal_refspecs, false, relay_results))
+    Ok((
+        rejected_proposal_refspecs,
+        false,
+        relay_results,
+        old_state_event,
+        new_state_event_id,
+    ))
 }
 
 #[allow(clippy::too_many_lines)]
