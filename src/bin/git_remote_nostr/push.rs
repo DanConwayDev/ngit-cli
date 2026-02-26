@@ -1573,11 +1573,17 @@ fn refspec_remote_ref_name(
     let nostr_remote = git_repo
         .find_remote(&get_remote_name_by_url(git_repo, nostr_remote_url)?)
         .context("we should have just located this remote")?;
+    let short_name = if let Some(s) = to.strip_prefix("refs/heads/") {
+        s.to_string()
+    } else if let Some(s) = to.strip_prefix("refs/tags/") {
+        s.to_string()
+    } else {
+        to.to_string()
+    };
     Ok(format!(
         "refs/remotes/{}/{}",
         nostr_remote.name().context("remote should have a name")?,
-        to.replace("refs/heads/", ""), /* TODO only replace if it begins with this
-                                        * TODO what about tags? */
+        short_name,
     ))
 }
 

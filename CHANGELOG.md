@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tag tracking refs written with wrong path (`refs/remotes/origin/refs/tags/v1.0.0` instead of `refs/remotes/origin/v1.0.0`) after a push via `git-remote-nostr`, causing `ngit sync` to fail with "src refspec does not match any existing object" when syncing tags
 - `ngit sync` using wrong refspec source (`refs/remotes/origin/refs/heads/master` instead of `refs/remotes/origin/master`), causing sync to fail with "src refspec does not match any existing object"
 - State event publish failures silently swallowed during push; summary now shows `"Published to X/N relays (failed: relay1 relay2)"` instead of unconditional success message
 - Grasp servers whose internal relay did not receive the state event are now skipped during push, with a clear warning; push fails with an error message when no servers remain
