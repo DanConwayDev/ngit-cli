@@ -2122,6 +2122,105 @@ async fn force_push_to_existing_patch_series_with_title_description_options_crea
     Ok(())
 }
 
+#[tokio::test]
+#[serial]
+async fn push_new_pr_branch_with_multiple_commits_sets_merge_base_to_main_tip() -> Result<()> {
+    let (events, source_git_repo) = prep_source_repo_and_events_including_proposals().await?;
+    let _source_path = source_git_repo.dir.to_str().unwrap().to_string();
+
+    let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
+        Relay::new(8051, None, None),
+        Relay::new(8052, None, None),
+        Relay::new(8053, None, None),
+        Relay::new(8055, None, None),
+        Relay::new(8056, None, None),
+        Relay::new(8057, None, None),
+    );
+    r51.events = events.clone();
+    r55.events = events.clone();
+
+    #[allow(clippy::mutable_key_type)]
+    let before = r55.events.iter().cloned().collect::<HashSet<Event>>();
+    let branch_name = "pr/multi-commit-pr";
+
+    let cli_tester_handle = std::thread::spawn(move || -> Result<String> {
+        let mut git_repo = clone_git_repo_with_nostr_url()?;
+        git_repo.delete_dir_on_drop = false;
+
+        // Record the main tip — this should become the merge-base in the PR event
+        let main_tip = git_repo.get_tip_of_local_branch("main")?.to_string();
+
+        git_repo.create_branch(branch_name)?;
+        git_repo.checkout(branch_name)?;
+
+        // Add two large commits so the push is forced into PR (not patch) mode
+        let large_content = "x".repeat(70 * 1024);
+        std::fs::write(git_repo.dir.join("large1.txt"), &large_content)?;
+        git_repo.stage_and_commit("add large1")?;
+
+        std::fs::write(git_repo.dir.join("large2.txt"), &large_content)?;
+        git_repo.stage_and_commit("add large2")?;
+
+        let mut p = CliTester::new_git_with_remote_helper_from_dir(
+            &git_repo.dir,
+            ["push", "-u", "origin", branch_name],
+        );
+        cli_expect_nostr_fetch(&mut p)?;
+        p.expect("git servers: listing refs...\r\n")?;
+        p.expect_eventually_and_print(format!("To {}\r\n", get_nostr_remote_url()?).as_str())?;
+        let output = p.expect_end_eventually()?;
+
+        for p in [51, 52, 53, 55, 56, 57] {
+            relay::shutdown_relay(8000 + p)?;
+        }
+
+        Ok(format!("{main_tip}\n{output}"))
+    });
+    let _ = join!(
+        r51.listen_until_close(),
+        r52.listen_until_close(),
+        r53.listen_until_close(),
+        r55.listen_until_close(),
+        r56.listen_until_close(),
+        r57.listen_until_close(),
+    );
+
+    let result = cli_tester_handle.join().unwrap()?;
+    let (main_tip, _output) = result.split_once('\n').unwrap();
+
+    let new_events = r55
+        .events
+        .iter()
+        .cloned()
+        .collect::<HashSet<Event>>()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<Event>>();
+    assert_eq!(new_events.len(), 1, "should create exactly 1 PR event");
+
+    let pr_event = new_events.first().unwrap();
+    assert!(
+        pr_event.kind.eq(&KIND_PULL_REQUEST),
+        "event should be a PR event"
+    );
+
+    let merge_base_tag = pr_event
+        .tags
+        .iter()
+        .find(|t| t.as_slice()[0].eq("merge-base"));
+    assert!(
+        merge_base_tag.is_some(),
+        "PR event should have a merge-base tag"
+    );
+    assert_eq!(
+        merge_base_tag.unwrap().as_slice()[1],
+        main_tip,
+        "merge-base should be the main branch tip at the time of branching, not the parent of the PR tip"
+    );
+
+    Ok(())
+}
+
 mod push_from_another_maintainer {
 
     // TODO that has issued announcement
