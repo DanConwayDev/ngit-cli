@@ -12,7 +12,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache, is_verbose};
+use client::{
+    Connect, FetchReport, consolidate_fetch_reports, get_repo_ref_from_cache, is_verbose,
+};
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
     client::{self, Params},
@@ -149,7 +151,9 @@ async fn main() -> Result<()> {
         client.set_signer(signer).await;
     }
 
-    fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinate).await?;
+    let fetch_report =
+        fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinate)
+            .await?;
 
     let mut repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
@@ -221,10 +225,12 @@ async fn main() -> Result<()> {
                 push_options = PushOptions::default();
             }
             ["list"] => {
-                list_outputs = Some(list::run_list(&git_repo, &repo_ref, false).await?);
+                list_outputs =
+                    Some(list::run_list(&git_repo, &repo_ref, false, &fetch_report).await?);
             }
             ["list", "for-push"] => {
-                list_outputs = Some(list::run_list(&git_repo, &repo_ref, true).await?);
+                list_outputs =
+                    Some(list::run_list(&git_repo, &repo_ref, true, &fetch_report).await?);
             }
             [] => {
                 return Ok(());
@@ -283,7 +289,7 @@ async fn fetching_with_report_for_helper(
     git_repo_path: &Path,
     client: &Client,
     trusted_maintainer_coordinate: &Nip19Coordinate,
-) -> Result<()> {
+) -> Result<FetchReport> {
     let term = console::Term::stderr();
     let verbose = is_verbose();
     if verbose {
@@ -308,7 +314,7 @@ async fn fetching_with_report_for_helper(
     } else {
         term.write_line(&format!("nostr updates: {report}"))?;
     }
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]

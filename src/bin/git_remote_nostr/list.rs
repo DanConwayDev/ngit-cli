@@ -4,13 +4,14 @@ use anyhow::{Context, Result};
 use client::get_state_from_cache;
 use git::RepoActions;
 use ngit::{
-    client::{self, is_verbose},
+    client::{self, FetchReport, is_verbose},
     fetch::fetch_from_git_server,
     git::{self},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
     list::list_from_remotes,
     login::get_curent_user,
     repo_ref::{self},
+    repo_state::RepoState,
     utils::{get_all_proposals, get_open_or_draft_proposals},
 };
 use repo_ref::RepoRef;
@@ -22,6 +23,7 @@ pub async fn run_list(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     for_push: bool,
+    fetch_report: &FetchReport,
 ) -> Result<HashMap<String, (HashMap<String, String>, bool)>> {
     let nostr_state = (get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await).ok();
 
@@ -30,6 +32,8 @@ pub async fn run_list(
     if is_verbose() {
         term.write_line("git servers: listing refs...")?;
     }
+    // nostr_state is passed to list_from_remotes only for the sync-status
+    // display; the actual ref state we advertise is determined below.
     let remote_states = list_from_remotes(
         &term,
         git_repo,
@@ -39,9 +43,55 @@ pub async fn run_list(
     )
     .await;
 
-    let mut state = if let Some(nostr_state) = nostr_state {
-        nostr_state.state
+    // Collect all OIDs confirmed present on at least one git server.
+    let git_server_oids: std::collections::HashSet<String> = remote_states
+        .values()
+        .flat_map(|(state, _)| state.values())
+        .filter(|v| !v.starts_with("ref: "))
+        .cloned()
+        .collect();
+
+    // From the per-relay state events captured during the nostr fetch, find
+    // the newest state event whose every OID is either:
+    //   (a) confirmed present on at least one git server, or
+    //   (b) already available locally.
+    // This prevents advertising refs whose git objects haven't been pushed to
+    // any server yet, which would cause `git clone` / `git fetch` to fail.
+    let mut candidates: Vec<&nostr::Event> = fetch_report
+        .state_per_relay
+        .values()
+        .filter_map(|maybe| maybe.as_ref())
+        .collect();
+    // Sort newest-first (by created_at, then by id for tie-breaking).
+    candidates.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    // Deduplicate by event id so we don't check the same event twice.
+    candidates.dedup_by_key(|e| e.id);
+
+    let best_state: Option<HashMap<String, String>> = candidates.into_iter().find_map(|event| {
+        if let Ok(rs) = RepoState::try_from(vec![event.clone()]) {
+            let all_resolvable = rs.state.values().all(|v| {
+                v.starts_with("ref: ")
+                    || git_server_oids.contains(v)
+                    || git_repo.does_commit_exist(v).is_ok_and(|exists| exists)
+            });
+            if all_resolvable { Some(rs.state) } else { None }
+        } else {
+            None
+        }
+    });
+
+    let mut state = if let Some(state) = best_state {
+        state
     } else {
+        // No relay returned a state event whose OIDs are all resolvable
+        // (either no state events were seen on any relay, or every candidate
+        // references git objects not yet on any server).  Fall back to
+        // whatever the git servers actually report so we never advertise OIDs
+        // that cannot be fetched.
         let (state, _is_grasp_server) = repo_ref
             .git_server
             .iter()
