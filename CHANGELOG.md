@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - git server push option passthrough, enabling `-o secret-scanning.skip` for grasp servers
 
+### Fixed
+
+- `ngit sync` using wrong refspec source (`refs/remotes/origin/refs/heads/master` instead of `refs/remotes/origin/master`), causing sync to fail with "src refspec does not match any existing object"
+
 ## [2.2.1] - 2026-02-25
 
 ### Fixed

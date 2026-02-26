@@ -130,6 +130,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             if missing_refs.contains(nostr_ref_name) {
                 continue;
             }
+            // strip refs/heads/ or refs/tags/ prefix to get the tracking ref segment
+            // e.g. refs/heads/master -> master, refs/tags/v1.0.0 -> v1.0.0
+            let tracking_ref_name = nostr_ref_name
+                .strip_prefix("refs/heads/")
+                .or_else(|| nostr_ref_name.strip_prefix("refs/tags/"))
+                .unwrap_or(nostr_ref_name.as_str());
             if invalid_nostr_state_ref(nostr_ref_name) {
                 // ensure nostr_state only supports refs/heads and refs/tags/
                 // and not refs/heads/prs/*
@@ -155,11 +161,11 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                     // dont try and sync push symbolic refs
                 } else if !force_required {
                     refspecs.push(format!(
-                        "refs/remotes/{nostr_remote_name}/{nostr_ref_name}:{nostr_ref_name}",
+                        "refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
                     ));
                 } else if *is_grasp_server || args.force {
                     refspecs.push(format!(
-                        "+refs/remotes/{nostr_remote_name}/{nostr_ref_name}:{nostr_ref_name}",
+                        "+refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
                     ));
                 } else {
                     not_updated.push(nostr_ref_name);
@@ -167,7 +173,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             } else {
                 // add missing refs
                 refspecs.push(format!(
-                    "refs/remotes/{nostr_remote_name}/{nostr_ref_name}:{nostr_ref_name}",
+                    "refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
                 ));
             }
         }
