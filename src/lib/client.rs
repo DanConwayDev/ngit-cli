@@ -2557,7 +2557,7 @@ pub async fn send_events(
 
     let verbose = is_verbose();
     let is_test = std::env::var("NGITTEST").is_ok();
-    let use_concise = !is_test || (!verbose && !silent && animate);
+    let use_concise = !is_test && !verbose && !silent && animate;
 
     let events_description = describe_events(&events);
 
@@ -2584,7 +2584,7 @@ pub async fn send_events(
         None
     };
 
-    let m = if silent || !is_test || use_concise {
+    let m = if silent || use_concise {
         MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
     } else {
         MultiProgress::new()
