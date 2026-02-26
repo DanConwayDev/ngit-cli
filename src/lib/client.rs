@@ -2447,7 +2447,7 @@ pub async fn send_events(
     repo_read_relays: Vec<RelayUrl>,
     animate: bool,
     silent: bool,
-) -> Result<()> {
+) -> Result<Vec<(String, bool)>> {
     // Only include default relays as fallback when there are no repo relays
     // (bootstrapping case, e.g. new account signup). When repo relays exist,
     // trust the repo and user relay configuration.
@@ -2614,7 +2614,7 @@ pub async fn send_events(
     })?;
 
     #[allow(clippy::borrow_deref_ref)]
-    join_all(relays.iter().map(|&relay| {
+    let relay_results: Vec<(String, bool)> = join_all(relays.iter().map(|&relay| {
         let reveal_state_clone = reveal_state.clone();
         let my_write_relays = my_write_relays.clone();
         let repo_read_relays = repo_read_relays.clone();
@@ -2691,6 +2691,7 @@ pub async fn send_events(
                 pb.set_style(pb_after_style_succeeded.clone());
                 finish_bar(&pb, String::new(), &reveal_state_clone);
             }
+            (relay_clean.to_string(), !failed)
         }
     }))
     .await;
@@ -2700,12 +2701,40 @@ pub async fn send_events(
     if let Some(handle) = timer_handle {
         handle.abort();
     }
+
+    let succeeded_count = relay_results.iter().filter(|(_, ok)| *ok).count();
+    let total_count = relay_results.len();
+    let failed_relays: Vec<&str> = relay_results
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(url, _)| {
+            url.strip_prefix("wss://")
+                .or_else(|| url.strip_prefix("ws://"))
+                .unwrap_or(url)
+                .trim_end_matches('/')
+        })
+        .collect();
+
+    let finish_message = if succeeded_count == total_count {
+        format!("Published {events_description} to {total_count} relays")
+    } else if succeeded_count > 0 {
+        format!(
+            "Published {events_description} to {succeeded_count}/{total_count} relays (failed: {})",
+            failed_relays.join(" ")
+        )
+    } else {
+        format!(
+            "failed to publish {events_description} to any relay (failed: {})",
+            failed_relays.join(" ")
+        )
+    };
+
     if let Some((_, spinner)) = &spinner_multi {
         spinner.set_style(ProgressStyle::with_template("{msg}").unwrap());
-        spinner.finish_with_message(format!("Published {events_description} to nostr relays"));
+        spinner.finish_with_message(finish_message);
     }
 
-    Ok(())
+    Ok(relay_results)
 }
 
 /// Builds a human-readable description of what is being published, e.g.

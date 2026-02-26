@@ -149,7 +149,7 @@ pub async fn accept_maintainership_with_defaults(
 
     client.set_signer(signer.clone()).await;
 
-    send_events(
+    let _ = send_events(
         client,
         Some(git_repo.get_path()?),
         vec![repo_event],

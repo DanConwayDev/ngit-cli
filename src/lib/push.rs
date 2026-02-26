@@ -665,7 +665,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         };
         // pubish event to my-relays and my-fork-relays
         new_grasp_server_events.push(updated_user_repo_ref.to_event(signer).await?);
-        send_events(
+        let _ = send_events(
             client,
             Some(git_repo_path),
             new_grasp_server_events,

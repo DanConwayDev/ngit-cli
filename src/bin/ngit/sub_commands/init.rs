@@ -1266,7 +1266,7 @@ async fn publish_and_finalize(
     // Step 5: Publish events
     client.set_signer(signer).await;
 
-    send_events(
+    let _ = send_events(
         client,
         Some(git_repo_path),
         events,

@@ -409,7 +409,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         events
     };
 
-    send_events(
+    let _ = send_events(
         &client,
         Some(git_repo_path),
         events.clone(),

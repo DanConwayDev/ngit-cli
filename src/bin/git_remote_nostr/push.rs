@@ -298,7 +298,7 @@ async fn create_and_publish_events_and_proposals(
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
     if !events.is_empty() {
-        send_events(
+        let _relay_results = send_events(
             client,
             Some(git_repo.get_path()?),
             events,

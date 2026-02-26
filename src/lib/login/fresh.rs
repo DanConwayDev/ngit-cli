@@ -810,7 +810,7 @@ pub async fn signup_non_interactive(
         save_event_in_global_cache(git_repo_path, &relay_list).await?;
 
         if publish {
-            send_events(
+            let _ = send_events(
                 client,
                 git_repo_path,
                 vec![profile, relay_list],
