@@ -23,7 +23,8 @@ use crate::client::MockConnect;
 use crate::{
     cli_interactor::{
         Interactor, InteractorPrompt, Printer, PromptChoiceParms, PromptConfirmParms,
-        PromptInputParms, PromptPasswordParms,
+        PromptInputParms, PromptPasswordParms, multi_select_with_custom_value,
+        show_multi_input_prompt_success,
     },
     client::{Connect, nip05_query, save_event_in_global_cache, send_events},
     git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
@@ -273,7 +274,46 @@ pub async fn get_fresh_nip46_signer(
             .dont_report(),
     )?;
     let url = match signer_choice {
-        0 | 1 => nostr_connect_url,
+        0 | 1 => {
+            // Loop so the user can change relays and see a refreshed QR/URL.
+            let mut current_url = nostr_connect_url;
+            loop {
+                // Display QR or URL with the current relay list.
+                display_nostr_connect(signer_choice, &current_url)?;
+
+                // Offer the option to change relays or proceed.
+                let action = Interactor::default().choice(
+                    PromptChoiceParms::default()
+                        .with_prompt(format!(
+                            "signer relays: {}",
+                            current_url
+                                .relays()
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                        .with_default(0)
+                        .with_choices(vec![
+                            "waiting for signer app to connect...".to_string(),
+                            "change signer relays".to_string(),
+                        ])
+                        .dont_report(),
+                )?;
+
+                if action == 0 {
+                    break current_url;
+                }
+
+                // User wants to change relays — run the multiselect and rebuild URL.
+                let selected = select_signer_relays(&current_url)?;
+                if !selected.is_empty() {
+                    let new_relays: Vec<RelayUrl> =
+                        selected.iter().flat_map(|s| RelayUrl::parse(s)).collect();
+                    current_url = NostrConnectURI::client(app_key.public_key(), new_relays, "ngit");
+                }
+            }
+        }
         2 => {
             let mut error = None;
             loop {
@@ -316,26 +356,16 @@ pub async fn get_fresh_nip46_signer(
     {
         let printer_clone = Arc::clone(&printer);
         let mut printer_locked = printer_clone.lock().await;
+        // For choices 0 and 1 the content was already printed by display_nostr_connect
+        // inside the relay-selection loop above; only the "waiting" hint is added here.
         match signer_choice {
             0 => {
-                printer_locked
-                    .println("login to nostr with remote signer via nostr connect".to_string());
-                printer_locked.println("scan QR code in signer app (eg Amber):".to_string());
-                printer_locked.printlns(generate_qr(&url.to_string())?);
                 printer_locked.println(
                     "scan QR code in signer app or use ctrl + c to go back to login menu..."
                         .to_string(),
                 );
             }
             1 => {
-                printer_locked
-                    .println("login to nostr with remote signer via nostr connect".to_string());
-                printer_locked.println("".to_string());
-                printer_locked.println_with_custom_formatting(
-                    format!("{}", Style::new().bold().apply_to(url.to_string()),),
-                    url.to_string(),
-                );
-                printer_locked.println("".to_string());
                 printer_locked.println(
                     "paste this url into signer app or use ctrl + c to go back to login menu..."
                         .to_string(),
@@ -394,6 +424,57 @@ pub fn generate_nostr_connect_app(
     };
     let nostr_connect_url = NostrConnectURI::client(app_key.public_key(), relays.clone(), "ngit");
     Ok((app_key, nostr_connect_url))
+}
+
+/// Print the QR code or nostrconnect URL to stderr.
+///
+/// `choice` must be 0 (QR) or 1 (URL).  Output goes directly to stderr so it
+/// is visible before the relay-selection choice prompt that follows.
+fn display_nostr_connect(choice: usize, url: &NostrConnectURI) -> Result<()> {
+    eprintln!("login to nostr with remote signer via nostr connect");
+    if choice == 0 {
+        eprintln!("scan QR code in signer app (eg Amber):");
+        for line in generate_qr(&url.to_string())? {
+            eprintln!("{line}");
+        }
+    } else {
+        eprintln!();
+        eprintln!("{}", Style::new().bold().apply_to(url.to_string()));
+        eprintln!();
+    }
+    Ok(())
+}
+
+/// Present the multiselect UI for choosing signer relays.
+///
+/// Returns the selected relay list as strings.  An empty return means the user
+/// submitted without selecting anything (caller should keep the existing URL).
+fn select_signer_relays(nostr_connect_url: &NostrConnectURI) -> Result<Vec<String>> {
+    let current_relays: Vec<String> = nostr_connect_url
+        .relays()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let defaults = vec![true; current_relays.len()];
+    let selected = multi_select_with_custom_value(
+        "signer relays",
+        "signer relay",
+        current_relays,
+        defaults,
+        |s| {
+            let url = if s.starts_with("ws://") || s.starts_with("wss://") {
+                s.to_string()
+            } else {
+                format!("wss://{s}")
+            };
+            RelayUrl::parse(&url)
+                .map(|r| r.to_string())
+                .context(format!("invalid relay URL: {s}"))
+        },
+    )?;
+    show_multi_input_prompt_success("signer relays", &selected);
+    Ok(selected)
 }
 
 pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
