@@ -3,6 +3,7 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
+use indicatif::{ProgressBar, ProgressStyle};
 use nostr::nips::nip46::NostrConnectURI;
 use nostr_connect::client::NostrConnect;
 use nostr_sdk::{EventBuilder, Keys, Metadata, NostrSigner, PublicKey, RelayUrl, ToBech32};
@@ -337,7 +338,72 @@ pub async fn get_fresh_nip46_signer(
                 // Display QR or URL with the current relay list.
                 display_nostr_connect(signer_choice, &current_url)?;
 
-                // Offer the option to change relays or proceed.
+                // Start listening for the signer immediately after displaying
+                // the QR/URL — don't wait for the user to press anything.
+                let nostr_connect = Arc::new(NostrConnect::new(
+                    current_url.clone(),
+                    app_key.clone(),
+                    Duration::from_secs(10 * 60),
+                    None,
+                )?);
+                let signer_arc: Arc<dyn NostrSigner> = nostr_connect.clone();
+                let pubkey_handle = tokio::spawn(async move { signer_arc.get_public_key().await });
+
+                // Show a spinner while waiting; Ctrl+C lets the user change
+                // relays or go back instead of waiting indefinitely.
+                eprintln!();
+                // TODO: remove the dim delay note once the rust-nostr
+                // NostrConnect handshake delay bug is fixed.
+                let spinner_msg = format!(
+                    "{} {}",
+                    console::style("waiting for signer app to connect...").bold(),
+                    console::style("(may take 10s+ to connect once added)").color256(247),
+                );
+                let spinner = ProgressBar::new_spinner()
+                    .with_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
+                    )
+                    .with_message(spinner_msg);
+                spinner.enable_steady_tick(Duration::from_millis(100));
+
+                let res = tokio::select! {
+                    result = pubkey_handle => {
+                        spinner.finish_and_clear();
+                        match result {
+                            Ok(Ok(pk)) => Some(pk),
+                            _ => None,
+                        }
+                    },
+                    _ = signal::ctrl_c() => {
+                        spinner.finish_and_clear();
+                        None
+                    }
+                };
+
+                if let Some(public_key) = res {
+                    // Connection succeeded — retrieve the canonical bunker URI
+                    // and return.
+                    let bunker_url = nostr_connect
+                        .bunker_uri()
+                        .await
+                        .context("failed to get bunker URI from NostrConnect client")?;
+                    let signer_info = SignerInfo::Bunker {
+                        bunker_uri: bunker_url.to_string(),
+                        bunker_app_key: app_key.secret_key().to_secret_hex(),
+                        npub: Some(public_key.to_bech32()?),
+                    };
+                    return Ok(Some((
+                        nostr_connect as Arc<dyn NostrSigner>,
+                        public_key,
+                        signer_info,
+                        SignerInfoSource::GitGlobal,
+                    )));
+                }
+
+                // Ctrl+C was pressed — offer the user a chance to change
+                // relays or go back to the top-level login menu.
                 let action = Interactor::default().choice(
                     PromptChoiceParms::default()
                         .with_prompt(format!(
@@ -351,22 +417,29 @@ pub async fn get_fresh_nip46_signer(
                         ))
                         .with_default(0)
                         .with_choices(vec![
-                            "waiting for signer app to connect...".to_string(),
+                            "try again".to_string(),
                             "change signer relays".to_string(),
+                            "back".to_string(),
                         ])
                         .dont_report(),
                 )?;
 
-                if action == 0 {
-                    break current_url;
-                }
-
-                // User wants to change relays — run the multiselect and rebuild URL.
-                let selected = select_signer_relays(&current_url)?;
-                if !selected.is_empty() {
-                    let new_relays: Vec<RelayUrl> =
-                        selected.iter().flat_map(|s| RelayUrl::parse(s)).collect();
-                    current_url = NostrConnectURI::client(app_key.public_key(), new_relays, "ngit");
+                match action {
+                    0 => {
+                        // Redisplay QR/URL and start listening again.
+                        continue;
+                    }
+                    1 => {
+                        // Change relays and rebuild URL.
+                        let selected = select_signer_relays(&current_url)?;
+                        if !selected.is_empty() {
+                            let new_relays: Vec<RelayUrl> =
+                                selected.iter().flat_map(|s| RelayUrl::parse(s)).collect();
+                            current_url =
+                                NostrConnectURI::client(app_key.public_key(), new_relays, "ngit");
+                        }
+                    }
+                    _ => return Ok(None),
                 }
             }
         }
@@ -412,28 +485,9 @@ pub async fn get_fresh_nip46_signer(
     {
         let printer_clone = Arc::clone(&printer);
         let mut printer_locked = printer_clone.lock().await;
-        // For choices 0 and 1 the content was already printed by display_nostr_connect
-        // inside the relay-selection loop above; only the "waiting" hint is added here.
-        match signer_choice {
-            0 => {
-                printer_locked.println(
-                    "scan QR code in signer app or use ctrl + c to go back to login menu..."
-                        .to_string(),
-                );
-            }
-            1 => {
-                printer_locked.println(
-                    "paste this url into signer app or use ctrl + c to go back to login menu..."
-                        .to_string(),
-                );
-            }
-            _ => {
-                printer_locked.println(
-                    "add / approve in your signer or use ctrl + c to go back to login menu..."
-                        .to_string(),
-                );
-            }
-        }
+        printer_locked.println(
+            "add / approve in your signer or use ctrl + c to go back to login menu...".to_string(),
+        );
     }
 
     let (signer, user_public_key, bunker_url) =
@@ -487,17 +541,43 @@ pub fn generate_nostr_connect_app(
 /// `choice` must be 0 (QR) or 1 (URL).  Output goes directly to stderr so it
 /// is visible before the relay-selection choice prompt that follows.
 fn display_nostr_connect(choice: usize, url: &NostrConnectURI) -> Result<()> {
-    eprintln!("login to nostr with remote signer via nostr connect");
+    let dim = Style::new().for_stderr().color256(247);
+    let hint = dim.apply_to("(ctrl+c to change)");
+    eprintln!(
+        "{}",
+        Style::new().for_stderr().bold().apply_to("nostr connect")
+    );
     if choice == 0 {
-        eprintln!("scan QR code in signer app (eg Amber):");
+        eprintln!(
+            "{}",
+            dim.apply_to("scan QR code in signer app (eg. Amber):")
+        );
         for line in generate_qr(&url.to_string())? {
             eprintln!("{line}");
         }
     } else {
         eprintln!();
-        eprintln!("{}", Style::new().bold().apply_to(url.to_string()));
+        eprintln!(
+            "{}",
+            Style::new()
+                .for_stderr()
+                .bold()
+                .cyan()
+                .apply_to(url.to_string())
+        );
         eprintln!();
     }
+    let relays = url
+        .relays()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "{} {}",
+        dim.apply_to(format!("signer relays: {relays}")),
+        hint
+    );
     Ok(())
 }
 
