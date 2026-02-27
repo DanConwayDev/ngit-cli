@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-02-27
+
 ### Fixed
 
 - Regression introduced in 28ad5440: `ngit sync` crashed with "invalid refspec refs/remotes/origin/v1.4.4^{}:refs/tags/v1.4.4^{}" on repos with annotated tags; `RepoState::try_from` now retains `^{}` peeled-tag entries in state, but the sync refspec builder did not skip them; fixed by guarding all three iteration sites in sync.rs and `identify_remote_sync_issues` in list.rs; also corrected the always-false logic bug in `invalid_nostr_state_ref`
 
-## [2.2.2] - 2026-02-27
+## [2.2.2] - 2026-02-27 [YANKED]
 
 ### Added
 
