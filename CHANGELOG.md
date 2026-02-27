@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-02-27
+
 ### Added
 
 - `ngit sync --force` now republishes the state event with a fresh timestamp even when no refs have changed, allowing users to repair repos with a corrupt or incomplete state event (e.g. missing `^{}` peeled refs for annotated tags) without needing to push a new ref
