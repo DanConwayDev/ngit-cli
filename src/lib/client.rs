@@ -1645,7 +1645,7 @@ async fn create_relays_request(
                 git_repo_path,
                 vec![
                     nostr::Filter::default()
-                        .kinds(vec![Kind::GitPatch])
+                        .kinds(vec![Kind::GitPatch, KIND_PULL_REQUEST])
                         .custom_tags(
                             SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                             repo_coordinates_without_relays
@@ -1657,7 +1657,10 @@ async fn create_relays_request(
             )
             .await?
             {
-                if event_is_patch_set_root(event) || event_is_revision_root(event) {
+                if event_is_patch_set_root(event)
+                    || event_is_revision_root(event)
+                    || event.kind.eq(&KIND_PULL_REQUEST)
+                {
                     proposals.insert(event.id);
                     contributors.insert(event.pubkey);
                 }

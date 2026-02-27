@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - git server push option passthrough, enabling `-o secret-scanning.skip` for grasp servers
 - `ngit sync` now publishes the current state event to grasp server relays that are missing it or have a stale version before attempting git pushes, preventing rejections; per-relay state visibility is captured during the nostr fetch and surfaced via `FetchReport::state_per_relay`
 - Fetch filters now request kind-5 deletion events for cached state and repo announcement events by `#e` tag (NIP-09), in addition to the existing `#a`-tagged filter; ensures deletions of these events are received even from clients that do not embed a repo coordinate in their deletion event
+- `KIND_PULL_REQUEST` (kind 1618) event IDs are now included in `proposal_ids` when building fetch filters, so kind-5 deletion events that only `#e`-tag a PR Kind event (without an `#a` repo coordinate tag) are fetched and applied; previously deleted PR Kind events remained in the local cache and continued to appear as remote refs
 - `FetchReport` now tracks and displays a count of kind-5 deletion events received (e.g. `"1 deletion"` in the fetch summary)
 - `ngit account login` nostrconnect flow now shows current signer relays and allows changing them
 - `ngit account login --bunker-url` - specify bunker URL for non-interactive nostrconnect login
