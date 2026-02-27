@@ -10,7 +10,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
-    client::{Connect, get_event_from_global_cache, sign_event},
+    client::{Connect, get_event_from_global_cache, is_verbose, sign_event},
     git_events::KIND_USER_GRASP_LIST,
 };
 
@@ -100,13 +100,17 @@ pub async fn get_user_details(
         if fetch_profile_updates {
             if let Some(client) = client {
                 let term = console::Term::stderr();
-                term.write_line("searching for profile updates...")?;
+                if is_verbose() {
+                    term.write_line("searching for profile updates...")?;
+                }
                 let (reports, progress_reporter) = client
                     .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
                     .await?;
                 if !reports.iter().any(|r| r.is_err()) {
                     progress_reporter.clear()?;
-                    term.clear_last_lines(1)?;
+                    if is_verbose() {
+                        term.clear_last_lines(1)?;
+                    }
                 }
                 return get_user_ref_from_cache(git_repo_path, public_key).await;
             }
@@ -125,13 +129,14 @@ pub async fn get_user_details(
             Ok(empty)
         } else if let Some(client) = client {
             let term = console::Term::stderr();
-            term.write_line("searching for profile...")?;
+            if is_verbose() {
+                term.write_line("searching for profile...")?;
+            }
             let (_, progress_reporter) = client
                 .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
                 .await?;
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
                 progress_reporter.clear()?;
-                // if std::env::var("NGITTEST").is_err() {term.clear_last_lines(1)?;}
                 Ok(user_ref)
             } else {
                 Ok(empty)

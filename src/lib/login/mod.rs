@@ -9,7 +9,10 @@ use nostr_sdk::{NostrSigner, Timestamp, ToBech32};
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
-use crate::git::{Repo, RepoActions};
+use crate::{
+    client::is_verbose,
+    git::{Repo, RepoActions},
+};
 
 pub mod existing;
 mod key_encryption;
@@ -70,14 +73,16 @@ fn print_logged_in_as(
     offline_mode: bool,
     source: &SignerInfoSource,
 ) -> Result<()> {
-    if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
-        eprintln!("failed to find profile...");
-    } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
-        eprintln!("failed to extract account name from account metadata...");
-    } else if !offline_mode && user_ref.relays.created_at.eq(&Timestamp::from(0)) {
-        eprintln!(
-            "failed to find your relay list. consider using another nostr client to create one to enhance your nostr experience."
-        );
+    if is_verbose() {
+        if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
+            eprintln!("failed to find profile...");
+        } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
+            eprintln!("failed to extract account name from account metadata...");
+        } else if !offline_mode && user_ref.relays.created_at.eq(&Timestamp::from(0)) {
+            eprintln!(
+                "failed to find your relay list. consider using another nostr client to create one to enhance your nostr experience."
+            );
+        }
     }
     eprintln!(
         "logged in as {}{}",
