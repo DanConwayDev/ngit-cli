@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fetch filters now request kind-5 deletion events for cached state and repo announcement events by `#e` tag (NIP-09), in addition to the existing `#a`-tagged filter; ensures deletions of these events are received even from clients that do not embed a repo coordinate in their deletion event
 - `FetchReport` now tracks and displays a count of kind-5 deletion events received (e.g. `"1 deletion"` in the fetch summary)
 - `ngit account login` nostrconnect flow now shows current signer relays and allows changing them
+- `ngit account login --bunker-url` - specify bunker URL for non-interactive nostrconnect login
 
 ### Fixed
 

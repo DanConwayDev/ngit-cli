@@ -11,7 +11,7 @@ use crate::{
     cli::{Cli, extract_signer_cli_arguments},
     client::{Client, Connect},
     git::Repo,
-    login::fresh::fresh_login_or_signup,
+    login::fresh::{fresh_login_or_signup, login_with_bunker_url},
 };
 
 #[derive(clap::Args)]
@@ -27,22 +27,31 @@ pub struct SubCommandArgs {
     /// signer relay for nostrconnect (can be used multiple times)
     #[arg(long = "signer-relay")]
     signer_relays: Vec<String>,
+
+    /// bunker:// URL from signer app for non-interactive remote signer login
+    #[arg(long = "bunker-url")]
+    bunker_url: Option<String>,
 }
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     // Early validation: check if we have required parameters in non-interactive
     // mode
     let signer_info = extract_signer_cli_arguments(args)?;
-    if Interactor::is_non_interactive() && signer_info.is_none() {
+    if Interactor::is_non_interactive()
+        && signer_info.is_none()
+        && command_args.bunker_url.is_none()
+    {
         use ngit::cli_interactor::cli_error;
         return Err(cli_error(
-            "requires --nsec or --interactive",
+            "requires --nsec, --bunker-url, or --interactive",
             &[
                 ("--nsec <key>", "provide secret key (nsec or hex)"),
-                ("--interactive", "for nostr connect or bunker login"),
+                ("--bunker-url <url>", "bunker:// URL from signer app"),
+                ("--interactive", "for interactive nostr connect login"),
             ],
             &[
                 "ngit account login --nsec <your-nsec>",
+                "ngit account login --bunker-url <bunker-url>",
                 "ngit account create",
             ],
         ));
@@ -61,14 +70,25 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
 
     let (logged_out, log_in_locally_only) = logout(git_repo.as_ref(), command_args.local).await?;
     if logged_out || log_in_locally_only {
-        fresh_login_or_signup(
-            &git_repo.as_ref(),
-            client.as_ref(),
-            signer_info,
-            log_in_locally_only || command_args.local,
-            &command_args.signer_relays,
-        )
-        .await?;
+        if let Some(bunker_url) = &command_args.bunker_url {
+            login_with_bunker_url(
+                &git_repo.as_ref(),
+                client.as_ref(),
+                bunker_url,
+                log_in_locally_only || command_args.local,
+                &command_args.signer_relays,
+            )
+            .await?;
+        } else {
+            fresh_login_or_signup(
+                &git_repo.as_ref(),
+                client.as_ref(),
+                signer_info,
+                log_in_locally_only || command_args.local,
+                &command_args.signer_relays,
+            )
+            .await?;
+        }
     }
 
     // If not offline, disconnect the client

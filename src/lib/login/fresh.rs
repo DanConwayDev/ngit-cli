@@ -112,6 +112,62 @@ pub async fn fresh_login_or_signup(
     Ok((signer, user_ref, source))
 }
 
+/// Non-interactive login using a `bunker://` URL provided directly.
+///
+/// Parses the URL, generates a fresh app key, connects to the remote signer,
+/// and saves the resulting credentials to git config.
+pub async fn login_with_bunker_url(
+    git_repo: &Option<&Repo>,
+    #[cfg(test)] client: Option<&MockConnect>,
+    #[cfg(not(test))] client: Option<&Client>,
+    bunker_url: &str,
+    save_local: bool,
+    signer_relays: &[String],
+) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
+    let url = NostrConnectURI::parse(bunker_url)
+        .context("invalid bunker:// URL - must be a valid bunker:// URI")?;
+
+    let (app_key, _) = generate_nostr_connect_app(client, signer_relays)?;
+
+    let printer = Arc::new(Mutex::new(Printer::default()));
+    {
+        let mut p = printer.lock().await;
+        p.println("connecting to remote signer...".to_string());
+    }
+
+    let (signer, user_public_key, bunker_uri) =
+        listen_for_remote_signer(&app_key, &url, printer).await?;
+
+    let signer_info = SignerInfo::Bunker {
+        bunker_uri: bunker_uri.to_string(),
+        bunker_app_key: app_key.secret_key().to_secret_hex(),
+        npub: Some(user_public_key.to_bech32()?),
+    };
+
+    let _ = save_to_git_config(git_repo, &signer_info, !save_local).await;
+
+    let user_ref = get_user_details(
+        &user_public_key,
+        client,
+        if let Some(git_repo) = git_repo {
+            Some(git_repo.get_path()?)
+        } else {
+            None
+        },
+        false,
+        false,
+    )
+    .await?;
+
+    let source = if save_local {
+        SignerInfoSource::GitLocal
+    } else {
+        SignerInfoSource::GitGlobal
+    };
+    print_logged_in_as(&user_ref, client.is_none(), &source)?;
+    Ok((signer, user_ref, source))
+}
+
 pub async fn get_fresh_nsec_signer() -> Result<
     Option<(
         Arc<dyn NostrSigner>,
