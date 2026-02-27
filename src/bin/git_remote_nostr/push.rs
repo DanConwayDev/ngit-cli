@@ -925,6 +925,37 @@ fn generate_updated_state(
 ) -> Result<HashMap<String, String>> {
     let mut new_state = existing_state.clone();
 
+    // Backfill missing ^{} peeled refs for any annotated tags already in the
+    // state.  State events published before this fix only stored the tag object
+    // OID; without the corresponding ^{} entry git cannot resolve the tag to a
+    // commit and treats it as missing (git fetch --prune deletes it).  We fix
+    // this opportunistically on every push so affected repos self-heal without
+    // requiring manual intervention.
+    let tag_refs: Vec<(String, String)> = new_state
+        .iter()
+        .filter(|(k, _)| k.starts_with("refs/tags/") && !k.ends_with("^{}"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (ref_name, tag_oid) in tag_refs {
+        let peeled_key = format!("{ref_name}^{{}}");
+        if new_state.contains_key(&peeled_key) {
+            continue;
+        }
+        // check if the stored OID is a tag object (annotated tag)
+        if let Ok(oid) = git2::Oid::from_str(&tag_oid) {
+            if git_repo
+                .git_repo
+                .find_object(oid, Some(git2::ObjectType::Tag))
+                .is_ok()
+            {
+                // peel to the commit the annotated tag points to
+                if let Ok(commit_oid) = git_repo.get_commit_or_tip_of_reference(&ref_name) {
+                    new_state.insert(peeled_key, commit_oid.to_string());
+                }
+            }
+        }
+    }
+
     for refspec in refspecs {
         let (from, to) = refspec_to_from_to(refspec)?;
         if from.is_empty() {

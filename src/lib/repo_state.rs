@@ -22,11 +22,14 @@ impl RepoState {
         let mut state = HashMap::new();
         for tag in event.tags.iter() {
             if let Some(name) = tag.as_slice().first() {
+                // include ^{} peeled refs for annotated tags: git requires
+                // both "<tag-oid> refs/tags/v1.0.0" and
+                // "<commit-oid> refs/tags/v1.0.0^{}" in the list output so
+                // it can resolve the tag to a commit. without the ^{} line
+                // git fetch --prune deletes the tag as unresolvable.
                 if ["refs/heads/", "refs/tags", "HEAD"]
                     .iter()
                     .any(|s| name.starts_with(*s))
-                    // dont include dereferenced tags
-                    && !name.ends_with("^{}")
                 {
                     if let Some(value) = tag.as_slice().get(1) {
                         if Oid::from_str(value).is_ok() || value.contains("ref: refs/") {
