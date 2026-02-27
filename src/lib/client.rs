@@ -1107,7 +1107,8 @@ impl Default for Params {
                 vec!["ws://localhost:8051".to_string()]
             } else {
                 vec![
-                    "wss://relay.nsec.app".to_string(),
+                    "wss://bucket.coracle.social".to_string(),
+                    "wss://nos.lol".to_string(),
                     "wss://relay.ditto.pub".to_string(),
                 ]
             },
