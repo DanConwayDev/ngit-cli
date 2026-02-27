@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit sync --force` now republishes the state event with a fresh timestamp even when no refs have changed, allowing users to repair repos with a corrupt or incomplete state event (e.g. missing `^{}` peeled refs for annotated tags) without needing to push a new ref
 - git server push option passthrough, enabling `-o secret-scanning.skip` for grasp servers
 - `ngit sync` now publishes the current state event to grasp server relays that are missing it or have a stale version before attempting git pushes, preventing rejections; per-relay state visibility is captured during the nostr fetch and surfaced via `FetchReport::state_per_relay`
 - Fetch filters now request kind-5 deletion events for cached state and repo announcement events by `#e` tag (NIP-09), in addition to the existing `#a`-tagged filter; ensures deletions of these events are received even from clients that do not embed a repo coordinate in their deletion event

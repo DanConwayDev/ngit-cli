@@ -78,6 +78,64 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     let nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
 
+    // When --force is given, rebuild and republish the state event even if
+    // nothing has changed.  This lets users repair repos whose state event is
+    // missing ^{} peeled refs for annotated tags (or any other corruption)
+    // without needing to push a new ref.  A fresh event is signed (new
+    // created_at) and broadcast to all repo relays and the user's write relays.
+    if args.force {
+        let (signer, user_ref, _) = load_existing_login(
+            &Some(&git_repo),
+            &None,
+            &None,
+            &None,
+            Some(&client),
+            false, // not silent — we need the user to authenticate if required
+            false, // prompt_for_password
+            false, // fetch_profile_updates
+        )
+        .await
+        .context("authentication required to republish state; run 'ngit account login' first")?;
+        client.set_signer(signer.clone()).await;
+        // Backfill any missing ^{} peeled refs before rebuilding — the existing
+        // state event may predate the fix that started storing them.
+        let mut state = nostr_state.state.clone();
+        let tag_refs: Vec<(String, String)> = state
+            .iter()
+            .filter(|(k, _)| k.starts_with("refs/tags/") && !k.ends_with("^{}"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (ref_name, tag_oid) in tag_refs {
+            let peeled_key = format!("{ref_name}^{{}}");
+            if state.contains_key(&peeled_key) {
+                continue;
+            }
+            if let Ok(oid) = git2::Oid::from_str(&tag_oid) {
+                if git_repo
+                    .git_repo
+                    .find_object(oid, Some(git2::ObjectType::Tag))
+                    .is_ok()
+                {
+                    if let Ok(commit_oid) = git_repo.get_commit_or_tip_of_reference(&ref_name) {
+                        state.insert(peeled_key, commit_oid.to_string());
+                    }
+                }
+            }
+        }
+        let new_state = RepoState::build(repo_ref.identifier.clone(), state, &signer).await?;
+        send_events(
+            &client,
+            Some(git_repo_path),
+            vec![new_state.event],
+            user_ref.relays.write(),
+            repo_ref.relays.clone(),
+            true,
+            false,
+        )
+        .await?;
+        println!("state event republished");
+    }
+
     // Publish the current state event to any grasp server relays that are
     // missing it or have a stale version.  Grasp servers reject git pushes
     // unless the state event is already present on their relay, so we must
@@ -129,7 +187,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         )
         .await
         {
-            client.set_signer(signer).await;
+            client.set_signer(signer.clone()).await;
         }
         // Send only to the specific grasp relays that are missing or have a
         // stale state event — no user write relays.
