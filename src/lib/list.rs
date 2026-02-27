@@ -605,6 +605,10 @@ pub fn identify_remote_sync_issues(
     let mut remote_issues: HashMap<String, RemoteIssues> = HashMap::new();
 
     for (name, value) in &nostr_state.state {
+        // skip peeled-tag dereference markers — not real refs
+        if name.ends_with("^{}") {
+            continue;
+        }
         for (url, (remote_state, _is_grasp_server)) in remote_states {
             let remote_name = get_short_git_server_name(url);
             let issues = remote_issues.entry(remote_name.clone()).or_default();

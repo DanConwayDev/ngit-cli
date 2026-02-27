@@ -228,6 +228,10 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         // delete ref from remote
         let mut not_deleted = vec![];
         for remote_ref_name in remote_state.keys() {
+            // skip peeled-tag dereference markers — not real refs
+            if remote_ref_name.ends_with("^{}") {
+                continue;
+            }
             // skip unspecified refs
             if let Some(full_ref_name) = &full_ref_name {
                 if remote_ref_name != full_ref_name {
@@ -253,6 +257,11 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         // add or update ref on remote
         let mut not_updated = vec![];
         for nostr_ref_name in nostr_state.state.keys() {
+            // skip peeled-tag dereference markers (e.g. refs/tags/v1.0.0^{})
+            // — these are not real git refs and cannot appear in refspecs
+            if nostr_ref_name.ends_with("^{}") {
+                continue;
+            }
             // skip unspecified refs
             if let Some(full_ref_name) = &full_ref_name {
                 if nostr_ref_name != full_ref_name {
@@ -391,8 +400,9 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 }
 
 fn invalid_nostr_state_ref(ref_name: &str) -> bool {
-    ref_name.starts_with("refs/heads/pr/")
-        && !(ref_name.starts_with("refs/heads/") || ref_name.starts_with("refs/tags/"))
+    ref_name.ends_with("^{}")
+        || ref_name.starts_with("refs/heads/pr/")
+        || (!ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/"))
 }
 
 fn identify_missing_refs(git_repo: &Repo, state: &HashMap<String, String>) -> Vec<String> {
@@ -488,5 +498,63 @@ fn fetch_missing_refs(
             join_with_and(&missing_refs)
         );
         missing_refs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalid_nostr_state_ref;
+
+    // Regression test: annotated-tag peeled refs (ending with ^{}) must be
+    // treated as invalid nostr state refs so they are never used to build
+    // git refspecs.  Before the fix, these passed through and caused git2 to
+    // reject the push with "invalid refspec refs/remotes/origin/v1.4.4^{}:…".
+    #[test]
+    fn annotated_tag_peeled_ref_is_invalid() {
+        assert!(
+            invalid_nostr_state_ref("refs/tags/v1.4.4^{}"),
+            "peeled annotated-tag ref must be invalid"
+        );
+        assert!(
+            invalid_nostr_state_ref("refs/tags/v1.0.0^{}"),
+            "peeled annotated-tag ref must be invalid"
+        );
+    }
+
+    #[test]
+    fn pr_ref_is_invalid() {
+        assert!(
+            invalid_nostr_state_ref("refs/heads/pr/42"),
+            "PR branch refs must be invalid"
+        );
+    }
+
+    #[test]
+    fn arbitrary_non_heads_non_tags_ref_is_invalid() {
+        assert!(
+            invalid_nostr_state_ref("refs/notes/commits"),
+            "refs outside heads/tags must be invalid"
+        );
+        assert!(invalid_nostr_state_ref("HEAD"), "HEAD must be invalid");
+    }
+
+    #[test]
+    fn normal_branch_and_tag_refs_are_valid() {
+        assert!(
+            !invalid_nostr_state_ref("refs/heads/main"),
+            "normal branch must be valid"
+        );
+        assert!(
+            !invalid_nostr_state_ref("refs/heads/feature/foo"),
+            "feature branch must be valid"
+        );
+        assert!(
+            !invalid_nostr_state_ref("refs/tags/v1.4.4"),
+            "lightweight tag must be valid"
+        );
+        assert!(
+            !invalid_nostr_state_ref("refs/tags/v2.0.0-rc1"),
+            "release-candidate tag must be valid"
+        );
     }
 }
