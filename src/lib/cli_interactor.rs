@@ -420,8 +420,12 @@ where
                 .with_defaults(current_defaults),
         )?;
 
-        // Collect selected choices
+        // Collect selected choices and update defaults to reflect the user's actual
+        // selections
         selected_choices.clear(); // Clear previous selections to update
+        for (i, default) in defaults.iter_mut().enumerate() {
+            *default = selected_indices.contains(&i);
+        }
         for &index in &selected_indices {
             if index < choices.len() {
                 // Exclude 'add another' option
