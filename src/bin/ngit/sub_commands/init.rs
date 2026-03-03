@@ -430,6 +430,10 @@ pub struct SubCommandArgs {
     #[clap(long)]
     /// usually root commit but will be more recent commit for forks
     earliest_unique_commit: Option<String>,
+    #[clap(long)]
+    /// only publish nostr events to repo relays, not to user or default relays
+    /// (sets nostr.repo-relay-only in local git config)
+    repo_relay_only: bool,
 }
 
 impl SubCommandArgs {
@@ -444,6 +448,7 @@ impl SubCommandArgs {
             || !self.other_maintainers.is_empty()
             || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
+            || self.repo_relay_only
     }
 }
 
@@ -1266,11 +1271,21 @@ async fn publish_and_finalize(
     // Step 5: Publish events
     client.set_signer(signer).await;
 
+    let repo_relay_only = git_repo
+        .get_git_config_item("nostr.repo-relay-only", None)
+        .ok()
+        .flatten()
+        .is_some_and(|s| s == "true");
+
     let _ = send_events(
         client,
         Some(git_repo_path),
         events,
-        user_ref.relays.write(),
+        if repo_relay_only {
+            vec![]
+        } else {
+            user_ref.relays.write()
+        },
         fields.relays.clone(),
         !cli.disable_cli_spinners,
         false,
@@ -1522,7 +1537,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         cli_args.interactive,
     )?;
 
-    // Phase 6: Build and publish
+    // Phase 6: Persist --repo-relay-only flag to local git config if supplied
+    if args.repo_relay_only {
+        git_repo.save_git_config_item("nostr.repo-relay-only", "true", false)?;
+    }
+
+    // Phase 7: Build and publish
     publish_and_finalize(
         fields,
         signer,

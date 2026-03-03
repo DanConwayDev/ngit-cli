@@ -67,6 +67,9 @@ Or just for this repository:
 
 Other useful settings:
  - 'nostr.nostate true' to avoid publishing a state event when pushing to a nostr remote.
+ - 'nostr.repo-relay-only true' to only publish nostr events to repo relays, skipping user and
+   default relays. Useful for repositories where you don't want to broadcast to your personal
+   relay set. Set via `git config nostr.repo-relay-only true` or `ngit init --repo-relay-only`.
  - Login settings configured during `ngit account login`:
    - nostr.nsec - nsec or ncryptsec
    - nostr.npub - used for ncryptsec and remote signer

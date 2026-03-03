@@ -402,6 +402,13 @@ async fn create_and_publish_events_and_proposals(
 
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
+    let repo_relay_only =
+        if let Ok(Some(v)) = git_repo.get_git_config_item("nostr.repo-relay-only", None) {
+            v == "true"
+        } else {
+            false
+        };
+
     let relay_results = if events.is_empty() {
         vec![]
     } else {
@@ -409,7 +416,11 @@ async fn create_and_publish_events_and_proposals(
             client,
             Some(git_repo.get_path()?),
             events,
-            user_ref.relays.write(),
+            if repo_relay_only {
+                vec![]
+            } else {
+                user_ref.relays.write()
+            },
             repo_ref.relays.clone(),
             true,
             false,

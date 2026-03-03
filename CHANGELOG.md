@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `nostr.repo-relay-only` git config key: when set to `true`, nostr events are sent only to the repository's own relays, skipping the user's personal write relays and default/blaster relays; set persistently via `git config nostr.repo-relay-only true` or in one step with `ngit init --repo-relay-only`
+
 ## [2.2.3] - 2026-02-27
 
 ### Fixed
