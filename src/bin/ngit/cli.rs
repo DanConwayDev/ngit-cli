@@ -177,6 +177,10 @@ pub enum PrCommands {
         /// Filter by status (comma-separated: open,draft,closed,applied)
         #[arg(long, default_value = "open,draft")]
         status: String,
+        /// Filter by label (repeatable, OR logic: --label bug --label
+        /// help-wanted)
+        #[arg(long = "label", value_name = "LABEL")]
+        labels: Vec<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -311,9 +315,10 @@ pub enum IssueCommands {
         /// Filter by status (comma-separated: open,draft,closed,applied)
         #[arg(long, default_value = "open")]
         status: String,
-        /// Filter by hashtag/label (comma-separated)
-        #[arg(long)]
-        hashtag: Option<String>,
+        /// Filter by label (repeatable, OR logic: --label bug --label
+        /// help-wanted)
+        #[arg(long = "label", value_name = "LABEL")]
+        labels: Vec<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -347,7 +352,7 @@ pub enum IssueCommands {
         /// Issue body / description
         #[arg(long)]
         body: Option<String>,
-        /// Hashtag labels (repeatable: --label bug --label help-wanted)
+        /// Labels to apply (repeatable: --label bug --label help-wanted)
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
     },

@@ -57,12 +57,20 @@ async fn main() {
             Commands::Pr(args) => match &args.pr_command {
                 PrCommands::List {
                     status,
+                    labels,
                     json,
                     id,
                     offline,
                 } => {
-                    sub_commands::list::launch(status.clone(), *json, false, id.clone(), *offline)
-                        .await
+                    sub_commands::list::launch(
+                        status.clone(),
+                        labels.clone(),
+                        *json,
+                        false,
+                        id.clone(),
+                        *offline,
+                    )
+                    .await
                 }
                 PrCommands::View {
                     id,
@@ -72,6 +80,7 @@ async fn main() {
                 } => {
                     sub_commands::list::launch(
                         "open,draft,closed,applied".to_string(),
+                        vec![],
                         *json,
                         *comments,
                         Some(id.clone()),
@@ -122,14 +131,14 @@ async fn main() {
             Commands::Issue(args) => match &args.issue_command {
                 IssueCommands::List {
                     status,
-                    hashtag,
+                    labels,
                     json,
                     id,
                     offline,
                 } => {
                     sub_commands::issue_list::launch(
                         status.clone(),
-                        hashtag.clone(),
+                        labels.clone(),
                         *json,
                         false,
                         id.clone(),
@@ -145,7 +154,7 @@ async fn main() {
                 } => {
                     sub_commands::issue_list::launch(
                         "open,draft,closed,applied".to_string(),
-                        None,
+                        vec![],
                         *json,
                         *comments,
                         Some(id.clone()),

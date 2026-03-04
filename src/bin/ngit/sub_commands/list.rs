@@ -97,6 +97,7 @@ fn run_git_fetch(remote_name: &str) -> Result<()> {
 #[allow(clippy::too_many_lines)]
 pub async fn launch(
     status: String,
+    labels: Vec<String>,
     json: bool,
     show_comments: bool,
     id: Option<String>,
@@ -187,6 +188,9 @@ pub async fn launch(
 
     let status_filter: HashSet<&str> = status.split(',').map(str::trim).collect();
 
+    // OR filter: proposal must have at least one of the requested labels.
+    let label_filter: HashSet<String> = labels.iter().map(|l| l.trim().to_lowercase()).collect();
+
     let filtered_proposals: Vec<(&nostr::Event, Kind)> = proposals
         .iter()
         .filter_map(|p| {
@@ -198,11 +202,24 @@ pub async fn launch(
                 Kind::GitStatusApplied => "applied",
                 _ => "unknown",
             };
-            if status_filter.contains(status_str) || status_filter.contains("unknown") {
-                Some((p, status_kind))
-            } else {
-                None
+            if !status_filter.contains(status_str) && !status_filter.contains("unknown") {
+                return None;
             }
+            if !label_filter.is_empty() {
+                let proposal_labels: HashSet<String> = p
+                    .tags
+                    .iter()
+                    .filter(|t| {
+                        let s = t.as_slice();
+                        s.len() >= 2 && s[0].eq("t")
+                    })
+                    .map(|t| t.as_slice()[1].to_lowercase())
+                    .collect();
+                if !label_filter.iter().any(|l| proposal_labels.contains(l)) {
+                    return None;
+                }
+            }
+            Some((p, status_kind))
         })
         .collect();
 
@@ -236,7 +253,7 @@ pub async fn launch(
     if json {
         output_json(&filtered_proposals, &repo_ref)?;
     } else {
-        output_table(&filtered_proposals, &repo_ref, &status);
+        output_table(&filtered_proposals, &repo_ref, &status, &label_filter);
     }
 
     Ok(())
@@ -299,13 +316,18 @@ fn status_kind_to_str(kind: Kind) -> &'static str {
     }
 }
 
-fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef, status_filter: &str) {
+fn output_table(
+    proposals: &[(&nostr::Event, Kind)],
+    _repo_ref: &RepoRef,
+    status_filter: &str,
+    label_filter: &HashSet<String>,
+) {
     if proposals.is_empty() {
         println!("No proposals found matching status: {status_filter}");
         return;
     }
 
-    println!("{:<66} {:<8} TITLE", "ID", "STATUS");
+    println!("{:<66} {:<8} TITLE  LABELS", "ID", "STATUS");
     for (proposal, status_kind) in proposals {
         let id = proposal.id.to_string();
         let status = status_kind_to_str(*status_kind);
@@ -316,11 +338,31 @@ fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef, status
         } else {
             proposal.id.to_string()
         };
-        println!("{id:<66} {status:<8} {title}");
+        let labels_str: String = proposal
+            .tags
+            .iter()
+            .filter(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0].eq("t")
+            })
+            .map(|t| format!("#{}", t.as_slice()[1]))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if labels_str.is_empty() {
+            println!("{id:<66} {status:<8} {title}");
+        } else {
+            println!("{id:<66} {status:<8} {title}  {labels_str}");
+        }
     }
 
     println!();
-    println!("--status {status_filter}");
+    print!("--status {status_filter}");
+    if !label_filter.is_empty() {
+        for l in label_filter {
+            print!("  --label {l}");
+        }
+    }
+    println!();
     println!(
         "{}",
         console::style("To view:     ngit pr view <id>").yellow()
@@ -359,12 +401,22 @@ fn output_json(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) -> Resu
                     String::new(),
                 )
             };
+            let labels: Vec<String> = proposal
+                .tags
+                .iter()
+                .filter(|t| {
+                    let s = t.as_slice();
+                    s.len() >= 2 && s[0].eq("t")
+                })
+                .map(|t| t.as_slice()[1].clone())
+                .collect();
             serde_json::json!({
                 "id": id,
                 "status": status,
                 "title": title,
                 "author": author,
-                "branch": branch
+                "branch": branch,
+                "labels": labels,
             })
         })
         .collect();
@@ -400,6 +452,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn show_proposal_details(
     proposals: &[(&nostr::Event, Kind)],
     _repo_ref: &RepoRef,
@@ -420,6 +473,16 @@ fn show_proposal_details(
 
     let cover_letter = event_to_cover_letter(proposal)
         .context("failed to extract proposal details from proposal root event")?;
+
+    let proposal_labels: Vec<String> = proposal
+        .tags
+        .iter()
+        .filter(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0].eq("t")
+        })
+        .map(|t| t.as_slice()[1].clone())
+        .collect();
 
     if json {
         let json_output = if show_comments {
@@ -442,6 +505,7 @@ fn show_proposal_details(
                 "title": cover_letter.title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
                 "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                "labels": proposal_labels,
                 "comment_count": comment_count,
                 "comments": comments_json,
                 "description": cover_letter.description,
@@ -453,6 +517,7 @@ fn show_proposal_details(
                 "title": cover_letter.title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
                 "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                "labels": proposal_labels,
                 "comment_count": comment_count,
                 "description": cover_letter.description,
             })
@@ -471,6 +536,14 @@ fn show_proposal_details(
         "Branch:   {}",
         cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
     );
+    if !proposal_labels.is_empty() {
+        let labels_str = proposal_labels
+            .iter()
+            .map(|l| format!("#{l}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("Labels:   {labels_str}");
+    }
 
     if !cover_letter.description.is_empty() {
         println!();
