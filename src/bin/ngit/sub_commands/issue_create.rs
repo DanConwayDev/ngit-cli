@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use ngit::client::{Params, send_events, sign_event};
+use ngit::{
+    client::{Params, send_events, sign_event},
+    content_tags::{dedup_tags, tags_from_content},
+};
 use nostr::{EventBuilder, Tag, TagStandard, ToBech32, nips::nip19::Nip19Event};
 use nostr_sdk::Kind;
 
@@ -73,6 +76,11 @@ pub async fn launch(
     for pk in &repo_ref.maintainers {
         tags.push(Tag::public_key(*pk));
     }
+
+    // NIP-21 mention tags: q tags for cited events/addresses, p tags for cited
+    // pubkeys
+    tags.extend(tags_from_content(&body, Some(git_repo_path)).await?);
+    let tags = dedup_tags(tags);
 
     let issue_event = sign_event(
         EventBuilder::new(Kind::GitIssue, body).tags(tags),

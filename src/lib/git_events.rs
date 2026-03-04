@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use nostr::{
@@ -13,6 +13,7 @@ use nostr_sdk::{
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::sign_event,
+    content_tags::tags_from_content,
     git::{Repo, RepoActions},
     repo_ref::RepoRef,
     utils::get_open_or_draft_proposals,
@@ -169,6 +170,146 @@ pub async fn generate_patch_event(
         .context("failed to get parent commit")?;
     let relay_hint = repo_ref.relays.first().cloned();
 
+    // NIP-21 mention tags from commit message (description tag value, with mbox
+    // fallback)
+    let commit_message = git_repo.get_commit_message(commit).unwrap_or_default();
+    let patch_content_tags = tags_from_content(&commit_message, git_repo.get_path().ok()).await?;
+
+    let patch_tags = crate::content_tags::dedup_tags(
+        [
+            repo_ref
+                .maintainers
+                .iter()
+                .map(|m| {
+                    Tag::from_standardized(TagStandard::Coordinate {
+                        coordinate: Coordinate {
+                            kind: nostr::Kind::GitRepoAnnouncement,
+                            public_key: *m,
+                            identifier: repo_ref.identifier.to_string(),
+                        },
+                        relay_url: repo_ref.relays.first().cloned(),
+                        uppercase: false,
+                    })
+                })
+                .collect::<Vec<Tag>>(),
+            vec![
+                Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
+                // commit id reference is a trade-off. its now
+                // unclear which one is the root commit id but it
+                // enables easier location of code comments againt
+                // code that makes it into the main branch, assuming
+                // the commit id is correct
+                Tag::from_standardized(TagStandard::Reference(commit.to_string())),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                    vec![format!(
+                        "git patch: {}",
+                        git_repo
+                            .get_commit_message_summary(commit)
+                            .unwrap_or_default()
+                    )],
+                ),
+            ],
+            if let Some(thread_event_id) = thread_event_id {
+                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
+                    event_id: thread_event_id,
+                    relay_url: relay_hint.clone(),
+                    marker: Some(Marker::Root),
+                    public_key: None,
+                    uppercase: false,
+                })]
+            } else if let Some(event_ref) = root_proposal_id.clone() {
+                vec![
+                    Tag::hashtag("root"),
+                    Tag::hashtag("root-revision"),
+                    // TODO check if id is for a root proposal (perhaps its for an issue?)
+                    event_tag_from_nip19_or_hex(
+                        &event_ref,
+                        "proposal",
+                        EventRefType::Reply,
+                        false,
+                        false,
+                    )?,
+                ]
+            } else {
+                vec![Tag::hashtag("root")]
+            },
+            mentions.to_vec(),
+            if let Some(id) = parent_patch_event_id {
+                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
+                    event_id: id,
+                    relay_url: relay_hint.clone(),
+                    marker: Some(Marker::Reply),
+                    public_key: None,
+                    uppercase: false,
+                })]
+            } else {
+                vec![]
+            },
+            // see comment on branch names in cover letter event creation
+            if let Some(branch_name) = branch_name {
+                if thread_event_id.is_none() {
+                    vec![Tag::custom(
+                        TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
+                        vec![branch_name.chars().take(60).collect::<String>()],
+                    )]
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            },
+            // whilst it is in nip34 draft to tag the maintainers
+            // I'm not sure it is a good idea because if they are
+            // interested in all patches then their specialised
+            // client should subscribe to patches tagged with the
+            // repo reference. maintainers of large repos will not
+            // be interested in every patch.
+            repo_ref
+                .maintainers
+                .iter()
+                .map(|pk| Tag::public_key(*pk))
+                .collect(),
+            vec![
+                // a fallback is now in place to extract this from the patch
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
+                    vec![commit.to_string()],
+                ),
+                // this is required as patches cannot be relied upon to include the 'base
+                // commit'
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("parent-commit")),
+                    vec![commit_parent.to_string()],
+                ),
+                // this is required to ensure the commit id matches
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("commit-pgp-sig")),
+                    vec![
+                        git_repo
+                            .extract_commit_pgp_signature(commit)
+                            .unwrap_or_default(),
+                    ],
+                ),
+                // removing description tag will not cause anything to break
+                Tag::from_standardized(nostr_sdk::TagStandard::Description(
+                    git_repo.get_commit_message(commit)?.to_string(),
+                )),
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("author")),
+                    git_repo.get_commit_author(commit)?,
+                ),
+                // this is required to ensure the commit id matches
+                Tag::custom(
+                    TagKind::Custom(std::borrow::Cow::Borrowed("committer")),
+                    git_repo.get_commit_comitter(commit)?,
+                ),
+            ],
+            patch_content_tags,
+        ]
+        .concat(),
+    );
+
     sign_event(
         EventBuilder::new(
             nostr::event::Kind::GitPatch,
@@ -176,139 +317,7 @@ pub async fn generate_patch_event(
                 .make_patch_from_commit(commit, &series_count)
                 .context(format!("failed to make patch for commit {commit}"))?,
         )
-        .tags(
-            [
-                repo_ref
-                    .maintainers
-                    .iter()
-                    .map(|m| {
-                        Tag::from_standardized(TagStandard::Coordinate {
-                            coordinate: Coordinate {
-                                kind: nostr::Kind::GitRepoAnnouncement,
-                                public_key: *m,
-                                identifier: repo_ref.identifier.to_string(),
-                            },
-                            relay_url: repo_ref.relays.first().cloned(),
-                            uppercase: false,
-                        })
-                    })
-                    .collect::<Vec<Tag>>(),
-                vec![
-                    Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
-                    // commit id reference is a trade-off. its now
-                    // unclear which one is the root commit id but it
-                    // enables easier location of code comments againt
-                    // code that makes it into the main branch, assuming
-                    // the commit id is correct
-                    Tag::from_standardized(TagStandard::Reference(commit.to_string())),
-                    Tag::custom(
-                        TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec![format!(
-                            "git patch: {}",
-                            git_repo
-                                .get_commit_message_summary(commit)
-                                .unwrap_or_default()
-                        )],
-                    ),
-                ],
-                if let Some(thread_event_id) = thread_event_id {
-                    vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                        event_id: thread_event_id,
-                        relay_url: relay_hint.clone(),
-                        marker: Some(Marker::Root),
-                        public_key: None,
-                        uppercase: false,
-                    })]
-                } else if let Some(event_ref) = root_proposal_id.clone() {
-                    vec![
-                        Tag::hashtag("root"),
-                        Tag::hashtag("root-revision"),
-                        // TODO check if id is for a root proposal (perhaps its for an issue?)
-                        event_tag_from_nip19_or_hex(
-                            &event_ref,
-                            "proposal",
-                            EventRefType::Reply,
-                            false,
-                            false,
-                        )?,
-                    ]
-                } else {
-                    vec![Tag::hashtag("root")]
-                },
-                mentions.to_vec(),
-                if let Some(id) = parent_patch_event_id {
-                    vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                        event_id: id,
-                        relay_url: relay_hint.clone(),
-                        marker: Some(Marker::Reply),
-                        public_key: None,
-                        uppercase: false,
-                    })]
-                } else {
-                    vec![]
-                },
-                // see comment on branch names in cover letter event creation
-                if let Some(branch_name) = branch_name {
-                    if thread_event_id.is_none() {
-                        vec![Tag::custom(
-                            TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
-                            vec![branch_name.chars().take(60).collect::<String>()],
-                        )]
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                },
-                // whilst it is in nip34 draft to tag the maintainers
-                // I'm not sure it is a good idea because if they are
-                // interested in all patches then their specialised
-                // client should subscribe to patches tagged with the
-                // repo reference. maintainers of large repos will not
-                // be interested in every patch.
-                repo_ref
-                    .maintainers
-                    .iter()
-                    .map(|pk| Tag::public_key(*pk))
-                    .collect(),
-                vec![
-                    // a fallback is now in place to extract this from the patch
-                    Tag::custom(
-                        TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
-                        vec![commit.to_string()],
-                    ),
-                    // this is required as patches cannot be relied upon to include the 'base
-                    // commit'
-                    Tag::custom(
-                        TagKind::Custom(std::borrow::Cow::Borrowed("parent-commit")),
-                        vec![commit_parent.to_string()],
-                    ),
-                    // this is required to ensure the commit id matches
-                    Tag::custom(
-                        TagKind::Custom(std::borrow::Cow::Borrowed("commit-pgp-sig")),
-                        vec![
-                            git_repo
-                                .extract_commit_pgp_signature(commit)
-                                .unwrap_or_default(),
-                        ],
-                    ),
-                    // removing description tag will not cause anything to break
-                    Tag::from_standardized(nostr_sdk::TagStandard::Description(
-                        git_repo.get_commit_message(commit)?.to_string(),
-                    )),
-                    Tag::custom(
-                        TagKind::Custom(std::borrow::Cow::Borrowed("author")),
-                        git_repo.get_commit_author(commit)?,
-                    ),
-                    // this is required to ensure the commit id matches
-                    Tag::custom(
-                        TagKind::Custom(std::borrow::Cow::Borrowed("committer")),
-                        git_repo.get_commit_comitter(commit)?,
-                    ),
-                ],
-            ]
-            .concat(),
-        ),
+        .tags(patch_tags),
         signer,
         if let Some((n, total)) = series_count {
             format!("commit {n}/{total}")
@@ -420,7 +429,7 @@ pub fn event_tag_from_nip19_or_hex(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn generate_unsigned_pr_or_update_event(
+pub async fn generate_unsigned_pr_or_update_event(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     signing_public_key: &PublicKey,
@@ -431,6 +440,7 @@ pub fn generate_unsigned_pr_or_update_event(
     merge_base: Option<&Sha1Hash>,
     clone_url_hint: &[&str],
     mentions: &[nostr::Tag],
+    git_repo_path: Option<&Path>,
 ) -> Result<UnsignedEvent> {
     let root_patch_cover_letter = if let Some(root_proposal) = root_proposal {
         if root_proposal.kind.eq(&Kind::GitPatch) {
@@ -526,64 +536,74 @@ pub fn generate_unsigned_pr_or_update_event(
         vec![]
     };
 
-    Ok(
-        if root_proposal.is_some() && root_patch_cover_letter.is_none() {
-            EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
-        } else {
-            EventBuilder::new(KIND_PULL_REQUEST, description)
-        }
-        .tags(
-            [
-                repo_ref
-                    .maintainers
-                    .iter()
-                    .map(|m| {
-                        Tag::from_standardized(TagStandard::Coordinate {
-                            coordinate: Coordinate {
-                                kind: nostr::Kind::GitRepoAnnouncement,
-                                public_key: *m,
-                                identifier: repo_ref.identifier.to_string(),
-                            },
-                            relay_url: repo_ref.relays.first().cloned(),
-                            uppercase: false,
-                        })
+    // NIP-21 mention tags from PR description content (only for new PRs, not
+    // updates)
+    let is_pr_update = root_proposal.is_some() && root_patch_cover_letter.is_none();
+    let content_mention_tags = if is_pr_update {
+        vec![]
+    } else {
+        tags_from_content(&description, git_repo_path).await?
+    };
+
+    let all_tags = crate::content_tags::dedup_tags(
+        [
+            repo_ref
+                .maintainers
+                .iter()
+                .map(|m| {
+                    Tag::from_standardized(TagStandard::Coordinate {
+                        coordinate: Coordinate {
+                            kind: nostr::Kind::GitRepoAnnouncement,
+                            public_key: *m,
+                            identifier: repo_ref.identifier.to_string(),
+                        },
+                        relay_url: repo_ref.relays.first().cloned(),
+                        uppercase: false,
                     })
-                    .collect::<Vec<Tag>>(),
-                mentions.to_vec(),
-                if let Some(root_proposal) = root_proposal {
-                    if root_patch_cover_letter.is_none() {
-                        pr_update_specific_tags(root_proposal)
-                    } else {
-                        pr_specific_tags()
-                    }
+                })
+                .collect::<Vec<Tag>>(),
+            mentions.to_vec(),
+            if let Some(root_proposal) = root_proposal {
+                if root_patch_cover_letter.is_none() {
+                    pr_update_specific_tags(root_proposal)
                 } else {
                     pr_specific_tags()
-                },
-                vec![
-                    Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
-                        vec![format!("{tip}")],
-                    ),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                        clone_url_hint
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect::<Vec<String>>(),
-                    ),
-                ],
-                merge_base_tag,
-                repo_ref
-                    .maintainers
-                    .iter()
-                    .map(|pk| Tag::public_key(*pk))
-                    .collect(),
-            ]
-            .concat(),
-        )
-        .build(*signing_public_key),
-    )
+                }
+            } else {
+                pr_specific_tags()
+            },
+            vec![
+                Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
+                Tag::custom(
+                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
+                    vec![format!("{tip}")],
+                ),
+                Tag::custom(
+                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
+                    clone_url_hint
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<String>>(),
+                ),
+            ],
+            merge_base_tag,
+            repo_ref
+                .maintainers
+                .iter()
+                .map(|pk| Tag::public_key(*pk))
+                .collect(),
+            content_mention_tags,
+        ]
+        .concat(),
+    );
+
+    Ok(if is_pr_update {
+        EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
+    } else {
+        EventBuilder::new(KIND_PULL_REQUEST, description)
+    }
+    .tags(all_tags)
+    .build(*signing_public_key))
 }
 
 fn make_branch_name_tag_from_check_out_branch(git_repo: &Repo) -> Option<Tag> {
@@ -624,6 +644,7 @@ pub async fn generate_cover_letter_and_patch_events(
     root_proposal_id: &Option<String>,
     mentions: &[nostr::Tag],
 ) -> Result<Vec<nostr::Event>> {
+    let git_repo_path = git_repo.get_path().ok();
     let root_commit = git_repo
         .get_root_commit()
         .context("failed to get root commit of the repository")?;
@@ -631,6 +652,74 @@ pub async fn generate_cover_letter_and_patch_events(
     let mut events = vec![];
 
     if let Some((title, description)) = cover_letter_title_description {
+        // NIP-21 mention tags from cover letter title and description
+        let cover_letter_text = format!("{title}\n\n{description}");
+        let cover_letter_content_tags =
+            tags_from_content(&cover_letter_text, git_repo_path).await?;
+
+        let cover_letter_tags = crate::content_tags::dedup_tags(
+            [
+                repo_ref
+                    .maintainers
+                    .iter()
+                    .map(|m| {
+                        Tag::from_standardized(TagStandard::Coordinate {
+                            coordinate: Coordinate {
+                                kind: nostr::Kind::GitRepoAnnouncement,
+                                public_key: *m,
+                                identifier: repo_ref.identifier.to_string(),
+                            },
+                            relay_url: repo_ref.relays.first().cloned(),
+                            uppercase: false,
+                        })
+                    })
+                    .collect::<Vec<Tag>>(),
+                vec![
+                    Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
+                    Tag::hashtag("cover-letter"),
+                    Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
+                        vec![format!("git patch cover letter: {}", title.clone())],
+                    ),
+                ],
+                if let Some(event_ref) = root_proposal_id.clone() {
+                    vec![
+                        Tag::hashtag("root"),
+                        Tag::hashtag("root-revision"),
+                        // TODO check if id is for a root proposal (perhaps its for an issue?)
+                        event_tag_from_nip19_or_hex(
+                            &event_ref,
+                            "proposal",
+                            EventRefType::Reply,
+                            false,
+                            false,
+                        )?,
+                    ]
+                } else {
+                    vec![Tag::hashtag("root")]
+                },
+                mentions.to_vec(),
+                // this is not strictly needed but makes for prettier branch names
+                // eventually a prefix will be needed of the event id to stop 2 proposals with the
+                // same name colliding a change like this, or the removal of this
+                // tag will require the actual branch name to be tracked so pulling
+                // and pushing still work
+                if let Some(branch_name_tag) = make_branch_name_tag_from_check_out_branch(git_repo)
+                {
+                    vec![branch_name_tag]
+                } else {
+                    vec![]
+                },
+                repo_ref
+                    .maintainers
+                    .iter()
+                    .map(|pk| Tag::public_key(*pk))
+                    .collect(),
+                cover_letter_content_tags,
+            ]
+            .concat(),
+        );
+
         events.push(sign_event(EventBuilder::new(
         nostr::event::Kind::GitPatch,
         format!(
@@ -638,55 +727,7 @@ pub async fn generate_cover_letter_and_patch_events(
             commits.last().unwrap(),
             commits.len()
         ))
-        .tags(
-        [
-            repo_ref.maintainers.iter().map(|m|
-                Tag::from_standardized(TagStandard::Coordinate {
-                    coordinate: Coordinate {
-                        kind: nostr::Kind::GitRepoAnnouncement,
-                        public_key: *m,
-                        identifier: repo_ref.identifier.to_string(),
-                    },
-                    relay_url: repo_ref.relays.first().cloned(),
-                    uppercase: false,
-                })
-            ).collect::<Vec<Tag>>(),
-            vec![
-                Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
-                Tag::hashtag("cover-letter"),
-                Tag::custom(
-                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                    vec![format!("git patch cover letter: {}", title.clone())],
-                ),
-            ],
-            if let Some(event_ref) = root_proposal_id.clone() {
-                vec![
-                    Tag::hashtag("root"),
-                    Tag::hashtag("root-revision"),
-                    // TODO check if id is for a root proposal (perhaps its for an issue?)
-                    event_tag_from_nip19_or_hex(&event_ref,"proposal",EventRefType::Reply, false, false)?,
-                ]
-            } else {
-                vec![
-                    Tag::hashtag("root"),
-                ]
-            },
-            mentions.to_vec(),
-            // this is not strictly needed but makes for prettier branch names
-            // eventually a prefix will be needed of the event id to stop 2 proposals with the same name colliding
-            // a change like this, or the removal of this tag will require the actual branch name to be tracked
-            // so pulling and pushing still work
-            if let Some(branch_name_tag) = make_branch_name_tag_from_check_out_branch(git_repo) {
-                vec![branch_name_tag]
-            } else {
-                vec![]
-            },
-            repo_ref.maintainers
-                .iter()
-                .map(|pk| Tag::public_key(*pk))
-                .collect(),
-        ].concat(),
-    ),
+        .tags(cover_letter_tags),
     signer,
     format!("commit 0/{}",commits.len()),
 ).await

@@ -745,7 +745,9 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 merge_base,
                 &[clone_url],
                 &[],
-            )?
+                git_repo.get_path().ok(),
+            )
+            .await?
         };
 
         let git_ref_used = git_ref

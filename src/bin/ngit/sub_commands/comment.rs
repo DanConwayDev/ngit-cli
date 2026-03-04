@@ -4,6 +4,7 @@ use ngit::{
         Params, get_events_from_local_cache, get_issues_from_cache,
         get_proposals_and_revisions_from_cache, send_events, sign_event,
     },
+    content_tags::{dedup_tags, tags_from_content},
     git_events::KIND_COMMENT,
 };
 use nostr::{EventBuilder, Tag, nips::nip19::Nip19};
@@ -102,36 +103,43 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
     let root_kind_str = root_kind.as_u16().to_string();
     let parent_kind_str = parent_kind.as_u16().to_string();
 
-    // NIP-22 compliant tags
+    // NIP-22 compliant threading tags
+    let mut comment_tags: Vec<Tag> = vec![
+        // Root scope: uppercase E with root pubkey as 4th element
+        Tag::parse(vec![
+            "E".to_string(),
+            root_event_id.to_hex(),
+            relay_hint.clone(),
+            root_pubkey.to_hex(),
+        ])?,
+        // Root kind
+        Tag::parse(vec!["K".to_string(), root_kind_str])?,
+        // Root author pubkey
+        Tag::parse(vec![
+            "P".to_string(),
+            root_pubkey.to_hex(),
+            relay_hint.clone(),
+        ])?,
+        // Parent item: lowercase e with parent pubkey as 4th element
+        Tag::parse(vec![
+            "e".to_string(),
+            parent_event_id.to_hex(),
+            relay_hint.clone(),
+            parent_pubkey.to_hex(),
+        ])?,
+        // Parent kind
+        Tag::parse(vec!["k".to_string(), parent_kind_str])?,
+        // Parent author pubkey
+        Tag::parse(vec!["p".to_string(), parent_pubkey.to_hex(), relay_hint])?,
+    ];
+
+    // NIP-21 mention tags: q tags for cited events/addresses, p tags for cited
+    // pubkeys
+    comment_tags.extend(tags_from_content(body, Some(git_repo_path)).await?);
+    let comment_tags = dedup_tags(comment_tags);
+
     let comment_event = sign_event(
-        EventBuilder::new(KIND_COMMENT, body).tags(vec![
-            // Root scope: uppercase E with root pubkey as 4th element
-            Tag::parse(vec![
-                "E".to_string(),
-                root_event_id.to_hex(),
-                relay_hint.clone(),
-                root_pubkey.to_hex(),
-            ])?,
-            // Root kind
-            Tag::parse(vec!["K".to_string(), root_kind_str])?,
-            // Root author pubkey
-            Tag::parse(vec![
-                "P".to_string(),
-                root_pubkey.to_hex(),
-                relay_hint.clone(),
-            ])?,
-            // Parent item: lowercase e with parent pubkey as 4th element
-            Tag::parse(vec![
-                "e".to_string(),
-                parent_event_id.to_hex(),
-                relay_hint.clone(),
-                parent_pubkey.to_hex(),
-            ])?,
-            // Parent kind
-            Tag::parse(vec!["k".to_string(), parent_kind_str])?,
-            // Parent author pubkey
-            Tag::parse(vec!["p".to_string(), parent_pubkey.to_hex(), relay_hint])?,
-        ]),
+        EventBuilder::new(KIND_COMMENT, body).tags(comment_tags),
         &signer,
         format!("comment on {entity_name}"),
     )
