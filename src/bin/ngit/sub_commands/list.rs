@@ -15,7 +15,7 @@ use ngit::{
     },
     fetch::fetch_from_git_server,
     git_events::{
-        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
+        KIND_COMMENT, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
@@ -201,7 +201,16 @@ pub async fn launch(status: String, json: bool, id: Option<String>, offline: boo
         .collect();
 
     if let Some(ref event_id_or_nevent) = id {
-        return show_proposal_details(&filtered_proposals, &repo_ref, event_id_or_nevent, json);
+        // Resolve the target proposal ID so we can fetch its comment count.
+        let target_id = resolve_event_id(event_id_or_nevent)?;
+        let comment_count = get_comment_count_for_proposal(git_repo_path, &target_id).await?;
+        return show_proposal_details(
+            &filtered_proposals,
+            &repo_ref,
+            event_id_or_nevent,
+            json,
+            comment_count,
+        );
     }
 
     if json {
@@ -211,6 +220,52 @@ pub async fn launch(status: String, json: bool, id: Option<String>, offline: boo
     }
 
     Ok(())
+}
+
+fn resolve_event_id(event_id_or_nevent: &str) -> Result<nostr::EventId> {
+    if event_id_or_nevent.starts_with("nevent") {
+        let nip19 = Nip19::from_bech32(event_id_or_nevent).context("failed to parse nevent")?;
+        match nip19 {
+            Nip19::EventId(id) => Ok(id),
+            Nip19::Event(event) => Ok(event.event_id),
+            _ => bail!("invalid nevent format"),
+        }
+    } else {
+        nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")
+    }
+}
+
+/// Count NIP-22 kind-1111 comments whose root `#E` tag matches `proposal_id`.
+async fn get_comment_count_for_proposal(
+    git_repo_path: &std::path::Path,
+    proposal_id: &nostr::EventId,
+) -> Result<usize> {
+    let comments = get_events_from_local_cache(
+        git_repo_path,
+        vec![nostr::Filter::default()
+            .custom_tags(
+                SingleLetterTag::uppercase(Alphabet::E),
+                std::iter::once(*proposal_id),
+            )
+            .kind(KIND_COMMENT)],
+    )
+    .await?;
+    // Only count comments whose uppercase E tag actually points to this proposal
+    // (the filter is best-effort; verify explicitly).
+    let count = comments
+        .iter()
+        .filter(|c| {
+            c.tags.iter().any(|t| {
+                let s = t.as_slice();
+                s.len() >= 2
+                    && s[0].eq("E")
+                    && nostr::EventId::parse(&s[1])
+                        .map(|id| id == *proposal_id)
+                        .unwrap_or(false)
+            })
+        })
+        .count();
+    Ok(count)
 }
 
 fn status_kind_to_str(kind: Kind) -> &'static str {
@@ -299,17 +354,9 @@ fn show_proposal_details(
     _repo_ref: &RepoRef,
     event_id_or_nevent: &str,
     json: bool,
+    comment_count: usize,
 ) -> Result<()> {
-    let target_id = if event_id_or_nevent.starts_with("nevent") {
-        let nip19 = Nip19::from_bech32(event_id_or_nevent).context("failed to parse nevent")?;
-        match nip19 {
-            Nip19::EventId(id) => id,
-            Nip19::Event(event) => event.event_id,
-            _ => bail!("invalid nevent format"),
-        }
-    } else {
-        nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
-    };
+    let target_id = resolve_event_id(event_id_or_nevent)?;
 
     let (proposal, status_kind) = proposals
         .iter()
@@ -326,22 +373,24 @@ fn show_proposal_details(
             "title": cover_letter.title,
             "author": proposal.pubkey.to_bech32().unwrap_or_default(),
             "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+            "comments": comment_count,
             "description": cover_letter.description,
         });
         println!("{}", serde_json::to_string_pretty(&json_output)?);
         return Ok(());
     }
 
-    println!("Title: {}", cover_letter.title);
+    println!("Title:    {}", cover_letter.title);
     println!(
-        "Author: {}",
+        "Author:   {}",
         proposal.pubkey.to_bech32().unwrap_or_default()
     );
-    println!("Status: {}", status_kind_to_str(*status_kind));
+    println!("Status:   {}", status_kind_to_str(*status_kind));
     println!(
-        "Branch: {}",
+        "Branch:   {}",
         cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
     );
+    println!("Comments: {comment_count}");
 
     if !cover_letter.description.is_empty() {
         println!();

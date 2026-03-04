@@ -1,19 +1,19 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
-    client::{Params, get_issues_from_cache},
-    git_events::{get_status, status_kinds, tag_value},
+    client::{Params, get_events_from_local_cache, get_issues_from_cache},
+    git_events::{KIND_COMMENT, get_status, status_kinds, tag_value},
 };
 use nostr::{
-    FromBech32,
+    FromBech32, ToBech32,
     filter::{Alphabet, SingleLetterTag},
     nips::nip19::Nip19,
 };
 use nostr_sdk::Kind;
 
 use crate::{
-    client::{Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache},
+    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
@@ -52,6 +52,46 @@ fn status_kind_to_str(kind: Kind) -> &'static str {
         Kind::GitStatusApplied => "applied",
         _ => "unknown",
     }
+}
+
+/// Fetch NIP-22 kind-1111 comment counts per issue from the local cache.
+/// Returns a map from issue `EventId` to comment count.
+async fn get_comment_counts(
+    git_repo_path: &std::path::Path,
+    issues: &[nostr::Event],
+) -> Result<HashMap<nostr::EventId, usize>> {
+    if issues.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Comments use an uppercase `E` tag pointing to the root event ID.
+    let comments = get_events_from_local_cache(
+        git_repo_path,
+        vec![nostr::Filter::default()
+            .custom_tags(
+                SingleLetterTag::uppercase(Alphabet::E),
+                issues.iter().map(|e| e.id),
+            )
+            .kind(KIND_COMMENT)],
+    )
+    .await?;
+
+    let mut counts: HashMap<nostr::EventId, usize> = HashMap::new();
+    for comment in &comments {
+        // Find the uppercase E tag that matches one of our issue IDs.
+        for tag in comment.tags.iter() {
+            let s = tag.as_slice();
+            if s.len() >= 2 && s[0].eq("E") {
+                if let Ok(root_id) = nostr::EventId::parse(&s[1]) {
+                    if issues.iter().any(|e| e.id == root_id) {
+                        *counts.entry(root_id).or_insert(0) += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(counts)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -104,6 +144,8 @@ pub async fn launch(
         statuses
     };
 
+    let comment_counts = get_comment_counts(git_repo_path, &issues).await?;
+
     let status_filter: HashSet<&str> = status.split(',').map(str::trim).collect();
 
     let hashtag_filter: Option<HashSet<String>> = hashtag.map(|h| {
@@ -116,7 +158,7 @@ pub async fn launch(
     // revisions, so we pass an empty slice.
     let empty_proposals: Vec<nostr::Event> = vec![];
 
-    let filtered: Vec<(&nostr::Event, Kind, Vec<String>)> = issues
+    let filtered: Vec<(&nostr::Event, Kind, Vec<String>, usize)> = issues
         .iter()
         .filter_map(|issue| {
             let status_kind = get_status(issue, &repo_ref, &statuses, &empty_proposals);
@@ -132,7 +174,8 @@ pub async fn launch(
                     return None;
                 }
             }
-            Some((issue, status_kind, tags))
+            let comment_count = comment_counts.get(&issue.id).copied().unwrap_or(0);
+            Some((issue, status_kind, tags, comment_count))
         })
         .collect();
 
@@ -155,7 +198,7 @@ pub async fn launch(
 }
 
 fn show_issue_details(
-    issues: &[(&nostr::Event, Kind, Vec<String>)],
+    issues: &[(&nostr::Event, Kind, Vec<String>, usize)],
     event_id_or_nevent: &str,
     json: bool,
 ) -> Result<()> {
@@ -170,35 +213,35 @@ fn show_issue_details(
         nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
     };
 
-    let (issue, status_kind, tags) = issues
+    let (issue, status_kind, tags, comment_count) = issues
         .iter()
-        .find(|(e, _, _)| e.id == target_id)
+        .find(|(e, _, _, _)| e.id == target_id)
         .context("issue not found")?;
 
     let title = get_issue_title(issue);
     let status = status_kind_to_str(*status_kind);
 
     if json {
-        use nostr::ToBech32;
         let json_output = serde_json::json!({
             "id": issue.id.to_string(),
             "status": status,
             "title": title,
             "author": issue.pubkey.to_bech32().unwrap_or_default(),
             "hashtags": tags,
+            "comments": comment_count,
             "description": issue.content,
         });
         println!("{}", serde_json::to_string_pretty(&json_output)?);
         return Ok(());
     }
 
-    println!("Title:  {title}");
-    use nostr::ToBech32;
-    println!("Author: {}", issue.pubkey.to_bech32().unwrap_or_default());
-    println!("Status: {status}");
+    println!("Title:    {title}");
+    println!("Author:   {}", issue.pubkey.to_bech32().unwrap_or_default());
+    println!("Status:   {status}");
+    println!("Comments: {comment_count}");
     if !tags.is_empty() {
         let tags_str = tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ");
-        println!("Tags:   {tags_str}");
+        println!("Tags:     {tags_str}");
     }
 
     if !issue.content.is_empty() {
@@ -212,12 +255,12 @@ fn show_issue_details(
 }
 
 fn output_table(
-    issues: &[(&nostr::Event, Kind, Vec<String>)],
+    issues: &[(&nostr::Event, Kind, Vec<String>, usize)],
     status_filter: &str,
     hashtag_filter: Option<&HashSet<String>>,
 ) {
-    println!("{:<66} {:<8} TITLE  HASHTAGS", "ID", "STATUS");
-    for (issue, status_kind, tags) in issues {
+    println!("{:<66} {:<8} {:<5} TITLE  HASHTAGS", "ID", "STATUS", "CMTS");
+    for (issue, status_kind, tags, comment_count) in issues {
         let id = issue.id.to_string();
         let status = status_kind_to_str(*status_kind);
         let title = get_issue_title(issue);
@@ -230,9 +273,9 @@ fn output_table(
                 .join(" ")
         };
         if tags_str.is_empty() {
-            println!("{id:<66} {status:<8} {title}");
+            println!("{id:<66} {status:<8} {comment_count:<5} {title}");
         } else {
-            println!("{id:<66} {status:<8} {title}  {tags_str}");
+            println!("{id:<66} {status:<8} {comment_count:<5} {title}  {tags_str}");
         }
     }
 
@@ -245,17 +288,17 @@ fn output_table(
     println!();
 }
 
-fn output_json(issues: &[(&nostr::Event, Kind, Vec<String>)]) -> Result<()> {
-    use nostr::ToBech32;
+fn output_json(issues: &[(&nostr::Event, Kind, Vec<String>, usize)]) -> Result<()> {
     let json_output: Vec<serde_json::Value> = issues
         .iter()
-        .map(|(issue, status_kind, tags)| {
+        .map(|(issue, status_kind, tags, comment_count)| {
             serde_json::json!({
                 "id": issue.id.to_string(),
                 "status": status_kind_to_str(*status_kind),
                 "title": get_issue_title(issue),
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),
                 "hashtags": tags,
+                "comments": comment_count,
             })
         })
         .collect();

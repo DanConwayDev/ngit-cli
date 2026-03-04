@@ -88,6 +88,8 @@ pub fn status_kinds() -> Vec<Kind> {
 pub const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
 pub const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
 pub const KIND_USER_GRASP_LIST: Kind = Kind::Custom(10317);
+/// NIP-22 comment (kind 1111) — threaded comments on any event.
+pub const KIND_COMMENT: Kind = Kind::Custom(1111);
 
 pub fn event_is_patch_set_root(event: &Event) -> bool {
     event.kind.eq(&Kind::GitPatch)

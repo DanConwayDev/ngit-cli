@@ -56,9 +56,9 @@ use crate::{
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
-        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_USER_GRASP_LIST, event_is_cover_letter,
-        event_is_patch_set_root, event_is_revision_root, event_is_valid_pr_or_pr_update,
-        status_kinds,
+        KIND_COMMENT, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_USER_GRASP_LIST,
+        event_is_cover_letter, event_is_patch_set_root, event_is_revision_root,
+        event_is_valid_pr_or_pr_update, status_kinds,
     },
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
     repo_ref::{RepoRef, normalize_grasp_server_url},
@@ -1877,7 +1877,7 @@ async fn create_relays_request(
     })
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn process_fetched_events(
     events: Vec<nostr::Event>,
     request: &FetchRequest,
@@ -1996,6 +1996,8 @@ async fn process_fetched_events(
                 {
                     fresh_profiles.insert(event.pubkey);
                 }
+            } else if event.kind.eq(&KIND_COMMENT) {
+                report.comments.insert(event.id);
             } else if [Kind::RelayList, Kind::Metadata, KIND_USER_GRASP_LIST].contains(&event.kind)
             {
                 if request.missing_contributor_profiles.contains(&event.pubkey) {
@@ -2023,9 +2025,7 @@ async fn process_fetched_events(
     for event in &events {
         if !request.existing_events.contains(&event.id) {
             let tagged_root_id = event.tags.iter().find_map(|t| {
-                if t.as_slice().len() > 1
-                    && (t.as_slice()[0].eq("E") || t.as_slice()[0].eq("e"))
-                {
+                if t.as_slice().len() > 1 && (t.as_slice()[0].eq("E") || t.as_slice()[0].eq("e")) {
                     EventId::parse(&t.as_slice()[1]).ok()
                 } else {
                     None
@@ -2038,9 +2038,11 @@ async fn process_fetched_events(
                 // as their parent (new issues/proposals already inflate the count).
                 if let Some(root_id) = &tagged_root_id {
                     if report.issues.contains(root_id) {
-                        // status for a new issue in this batch — skip (counted via issues)
+                        // status for a new issue in this batch — skip (counted
+                        // via issues)
                     } else if report.proposals.contains(root_id) {
-                        // status for a new proposal in this batch — skip (counted via proposals)
+                        // status for a new proposal in this batch — skip
+                        // (counted via proposals)
                     } else if request.issue_ids.contains(root_id) {
                         report.issue_statuses.insert(event.id);
                     } else {
@@ -2052,12 +2054,11 @@ async fn process_fetched_events(
                 let not_tagged_with_new_proposal = tagged_root_id
                     .as_ref()
                     .is_none_or(|id| !report.proposals.contains(id));
-                if not_tagged_with_new_proposal {
-                    if (event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event))
-                        || event.kind.eq(&KIND_PULL_REQUEST_UPDATE)
-                    {
-                        report.commits.insert(event.id);
-                    }
+                if not_tagged_with_new_proposal
+                    && ((event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event))
+                        || event.kind.eq(&KIND_PULL_REQUEST_UPDATE))
+                {
+                    report.commits.insert(event.id);
                 }
             }
         }
@@ -2116,6 +2117,9 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
         }
         for c in relay_report.issue_statuses {
             report.issue_statuses.insert(c);
+        }
+        for c in relay_report.comments {
+            report.comments.insert(c);
         }
         report.deletions += relay_report.deletions;
         for c in relay_report.contributor_profiles {
@@ -2223,6 +2227,24 @@ pub fn get_fetch_filters(
                     .kinds(status_kinds()),
             ]
         },
+        // Fetch NIP-22 kind-1111 comments for issues and proposals (patches/PRs).
+        // Comments use an uppercase `E` tag pointing to the root event ID.
+        {
+            let all_root_ids: HashSet<EventId> = issue_ids
+                .iter()
+                .chain(proposal_ids.iter())
+                .copied()
+                .collect();
+            if all_root_ids.is_empty() {
+                vec![]
+            } else {
+                vec![
+                    nostr::Filter::default()
+                        .custom_tags(SingleLetterTag::uppercase(Alphabet::E), all_root_ids)
+                        .kind(KIND_COMMENT),
+                ]
+            }
+        },
         // Request kind-5 deletions for state events and repo announcements by
         // their event ID (#e tag), as per NIP-09. The #a-tagged filter above
         // covers addressable-event deletions; this covers the specific event IDs
@@ -2309,6 +2331,8 @@ pub struct FetchReport {
     statuses: HashSet<EventId>,
     issues: HashSet<EventId>,
     issue_statuses: HashSet<EventId>,
+    /// NIP-22 kind-1111 comments against issues, patches, and PRs.
+    comments: HashSet<EventId>,
     /// Count of kind-5 deletion events received (for display purposes).
     deletions: u32,
     contributor_profiles: HashSet<PublicKey>,
@@ -2383,7 +2407,18 @@ impl Display for FetchReport {
             display_items.push(format!(
                 "{} issue status{}",
                 self.issue_statuses.len(),
-                if self.issue_statuses.len() > 1 { "es" } else { "" },
+                if self.issue_statuses.len() > 1 {
+                    "es"
+                } else {
+                    ""
+                },
+            ));
+        }
+        if !self.comments.is_empty() {
+            display_items.push(format!(
+                "{} comment{}",
+                self.comments.len(),
+                if self.comments.len() > 1 { "s" } else { "" },
             ));
         }
         if self.deletions > 0 {
