@@ -787,6 +787,7 @@ impl Connect for Client {
             fresh_coordinates.insert(c);
         }
         let mut fresh_proposal_roots = request.proposals.clone();
+        let mut fresh_issue_roots = request.issue_ids.clone();
         let mut fresh_profiles: HashSet<PublicKey> = request
             .missing_contributor_profiles
             .union(
@@ -819,6 +820,7 @@ impl Connect for Client {
             let filters = get_fetch_filters(
                 &fresh_coordinates,
                 &fresh_proposal_roots,
+                &fresh_issue_roots,
                 &fresh_non_proposal_event_ids,
                 &fresh_profiles,
             );
@@ -842,6 +844,7 @@ impl Connect for Client {
 
             fresh_coordinates = HashSet::new();
             fresh_proposal_roots = HashSet::new();
+            fresh_issue_roots = HashSet::new();
             fresh_profiles = HashSet::new();
 
             let relay = self.client.relay(&relay_url).await?;
@@ -881,6 +884,7 @@ impl Connect for Client {
                 git_repo_path,
                 &mut fresh_coordinates,
                 &mut fresh_proposal_roots,
+                &mut fresh_issue_roots,
                 &mut fresh_profiles,
                 &mut report,
             )
@@ -888,6 +892,7 @@ impl Connect for Client {
 
             if fresh_coordinates.is_empty()
                 && fresh_proposal_roots.is_empty()
+                && fresh_issue_roots.is_empty()
                 && fresh_profiles.is_empty()
             {
                 break;
@@ -1630,6 +1635,7 @@ async fn create_relays_request(
     };
 
     let mut proposals: HashSet<EventId> = HashSet::new();
+    let mut issue_ids: HashSet<EventId> = HashSet::new();
     let mut missing_contributor_profiles: HashSet<PublicKey> = HashSet::new();
     let mut contributors: HashSet<PublicKey> = HashSet::new();
 
@@ -1645,7 +1651,7 @@ async fn create_relays_request(
                 git_repo_path,
                 vec![
                     nostr::Filter::default()
-                        .kinds(vec![Kind::GitPatch, KIND_PULL_REQUEST])
+                        .kinds(vec![Kind::GitPatch, KIND_PULL_REQUEST, Kind::GitIssue])
                         .custom_tags(
                             SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                             repo_coordinates_without_relays
@@ -1662,6 +1668,9 @@ async fn create_relays_request(
                     || event.kind.eq(&KIND_PULL_REQUEST)
                 {
                     proposals.insert(event.id);
+                    contributors.insert(event.pubkey);
+                } else if event.kind.eq(&Kind::GitIssue) {
+                    issue_ids.insert(event.id);
                     contributors.insert(event.pubkey);
                 }
             }
@@ -1739,6 +1748,7 @@ async fn create_relays_request(
         for filter in get_fetch_filters(
             &repo_coordinates_without_relays,
             &proposals,
+            &issue_ids,
             &HashSet::new(), /* non_proposal_event_ids not yet computed; deletion events are not
                               * cached locally */
             &missing_contributor_profiles
@@ -1746,7 +1756,7 @@ async fn create_relays_request(
                     &profiles_to_fetch_from_user_relays
                         .clone()
                         .into_keys()
-                        .collect(),
+                        .collect::<HashSet<PublicKey>>(),
                 )
                 .copied()
                 .collect(),
@@ -1858,6 +1868,7 @@ async fn create_relays_request(
             ids
         },
         proposals,
+        issue_ids,
         contributors,
         missing_contributor_profiles,
         existing_events,
@@ -1873,6 +1884,7 @@ async fn process_fetched_events(
     git_repo_path: Option<&Path>,
     fresh_coordinates: &mut HashSet<Nip19Coordinate>,
     fresh_proposal_roots: &mut HashSet<EventId>,
+    fresh_issue_roots: &mut HashSet<EventId>,
     fresh_profiles: &mut HashSet<PublicKey>,
     report: &mut FetchReport,
 ) -> Result<()> {
@@ -1976,6 +1988,14 @@ async fn process_fetched_events(
                 {
                     fresh_profiles.insert(event.pubkey);
                 }
+            } else if event.kind.eq(&Kind::GitIssue) {
+                fresh_issue_roots.insert(event.id);
+                report.issues.insert(event.id);
+                if !request.contributors.contains(&event.pubkey)
+                    && !fresh_profiles.contains(&event.pubkey)
+                {
+                    fresh_profiles.insert(event.pubkey);
+                }
             } else if [Kind::RelayList, Kind::Metadata, KIND_USER_GRASP_LIST].contains(&event.kind)
             {
                 if request.missing_contributor_profiles.contains(&event.pubkey) {
@@ -2001,23 +2021,44 @@ async fn process_fetched_events(
         }
     }
     for event in &events {
-        if !request.existing_events.contains(&event.id)
-            && !event.tags.iter().any(|t| {
-                t.as_slice().len() > 1
+        if !request.existing_events.contains(&event.id) {
+            let tagged_root_id = event.tags.iter().find_map(|t| {
+                if t.as_slice().len() > 1
                     && (t.as_slice()[0].eq("E") || t.as_slice()[0].eq("e"))
-                    && if let Ok(id) = EventId::parse(&t.as_slice()[1]) {
-                        report.proposals.contains(&id)
+                {
+                    EventId::parse(&t.as_slice()[1]).ok()
+                } else {
+                    None
+                }
+            });
+            if status_kinds().contains(&event.kind) {
+                // Route status events to the correct counter based on whether
+                // the root event is a known issue or a proposal (patch/PR).
+                // Don't double-count statuses that arrived in the same batch
+                // as their parent (new issues/proposals already inflate the count).
+                if let Some(root_id) = &tagged_root_id {
+                    if report.issues.contains(root_id) {
+                        // status for a new issue in this batch — skip (counted via issues)
+                    } else if report.proposals.contains(root_id) {
+                        // status for a new proposal in this batch — skip (counted via proposals)
+                    } else if request.issue_ids.contains(root_id) {
+                        report.issue_statuses.insert(event.id);
                     } else {
-                        false
+                        report.statuses.insert(event.id);
                     }
-            })
-        {
-            if (event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event))
-                || event.kind.eq(&KIND_PULL_REQUEST_UPDATE)
-            {
-                report.commits.insert(event.id);
-            } else if status_kinds().contains(&event.kind) {
-                report.statuses.insert(event.id);
+                }
+            } else {
+                // Non-status events: commits/PR-updates for proposals only.
+                let not_tagged_with_new_proposal = tagged_root_id
+                    .as_ref()
+                    .is_none_or(|id| !report.proposals.contains(id));
+                if not_tagged_with_new_proposal {
+                    if (event.kind.eq(&Kind::GitPatch) && !event_is_patch_set_root(event))
+                        || event.kind.eq(&KIND_PULL_REQUEST_UPDATE)
+                    {
+                        report.commits.insert(event.id);
+                    }
+                }
             }
         }
     }
@@ -2070,6 +2111,12 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
         for c in relay_report.statuses {
             report.statuses.insert(c);
         }
+        for c in relay_report.issues {
+            report.issues.insert(c);
+        }
+        for c in relay_report.issue_statuses {
+            report.issue_statuses.insert(c);
+        }
         report.deletions += relay_report.deletions;
         for c in relay_report.contributor_profiles {
             report.contributor_profiles.insert(c);
@@ -2107,6 +2154,7 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
 pub fn get_fetch_filters(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     proposal_ids: &HashSet<EventId>,
+    issue_ids: &HashSet<EventId>,
     non_proposal_event_ids: &HashSet<EventId>,
     required_profiles: &HashSet<PublicKey>,
 ) -> Vec<nostr::Filter> {
@@ -2118,7 +2166,12 @@ pub fn get_fetch_filters(
                 get_filter_state_events(repo_coordinates, false),
                 get_filter_repo_ann_events(repo_coordinates, false),
                 nostr::Filter::default()
-                    .kinds(vec![Kind::GitPatch, Kind::EventDeletion, KIND_PULL_REQUEST])
+                    .kinds(vec![
+                        Kind::GitPatch,
+                        Kind::EventDeletion,
+                        KIND_PULL_REQUEST,
+                        Kind::GitIssue,
+                    ])
                     .custom_tags(
                         SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
                         repo_coordinates
@@ -2155,6 +2208,19 @@ pub fn get_fetch_filters(
                         ]
                         .concat(),
                     ),
+            ]
+        },
+        // Fetch status events for known issues.
+        if issue_ids.is_empty() {
+            vec![]
+        } else {
+            vec![
+                nostr::Filter::default()
+                    .events(issue_ids.clone())
+                    .kinds(status_kinds()),
+                nostr::Filter::default()
+                    .custom_tags(SingleLetterTag::uppercase(Alphabet::E), issue_ids.clone())
+                    .kinds(status_kinds()),
             ]
         },
         // Request kind-5 deletions for state events and repo announcements by
@@ -2241,6 +2307,8 @@ pub struct FetchReport {
     /// commits against existing propoals
     commits: HashSet<EventId>,
     statuses: HashSet<EventId>,
+    issues: HashSet<EventId>,
+    issue_statuses: HashSet<EventId>,
     /// Count of kind-5 deletion events received (for display purposes).
     deletions: u32,
     contributor_profiles: HashSet<PublicKey>,
@@ -2304,6 +2372,20 @@ impl Display for FetchReport {
                 if self.statuses.len() > 1 { "es" } else { "" },
             ));
         }
+        if !self.issues.is_empty() {
+            display_items.push(format!(
+                "{} issue{}",
+                self.issues.len(),
+                if self.issues.len() > 1 { "s" } else { "" },
+            ));
+        }
+        if !self.issue_statuses.is_empty() {
+            display_items.push(format!(
+                "{} issue status{}",
+                self.issue_statuses.len(),
+                if self.issue_statuses.len() > 1 { "es" } else { "" },
+            ));
+        }
         if self.deletions > 0 {
             display_items.push(format!(
                 "{} deletion{}",
@@ -2345,6 +2427,8 @@ pub struct FetchRequest {
     repo_coordinates_without_relays: Vec<(Nip19Coordinate, Option<Timestamp>)>,
     state: Option<(Timestamp, EventId)>,
     proposals: HashSet<EventId>,
+    /// Known issue event IDs, used to fetch their status events.
+    issue_ids: HashSet<EventId>,
     /// Event IDs of non-proposal events (state events, repo announcements) for
     /// which we should also request kind-5 deletion events by `#e` tag.
     non_proposal_event_ids: HashSet<EventId>,
