@@ -134,6 +134,8 @@ pub enum Commands {
         #[arg(long)]
         offline: bool,
     },
+    /// list issues
+    Issue(IssueSubCommandArgs),
     /// checkout a proposal branch by event-id or nevent
     #[command(
         long_about = "checkout a proposal branch by event-id or nevent\n\nuse `ngit list` to find proposal IDs"
@@ -193,6 +195,34 @@ pub struct RepoSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+}
+
+#[derive(clap::Parser)]
+pub struct IssueSubCommandArgs {
+    #[command(subcommand)]
+    pub issue_command: IssueCommands,
+}
+
+#[derive(Subcommand)]
+pub enum IssueCommands {
+    /// list issues and their statuses
+    List {
+        /// Filter by status (comma-separated: open,draft,closed,applied)
+        #[arg(long, default_value = "open")]
+        status: String,
+        /// Filter by hashtag/label (comma-separated)
+        #[arg(long)]
+        hashtag: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Show details for a specific issue (event-id or nevent)
+        #[arg(value_name = "ID|nevent")]
+        id: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 #[derive(Subcommand)]

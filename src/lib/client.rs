@@ -2505,6 +2505,30 @@ pub async fn fetching_quietly(
     Ok((report, had_errors))
 }
 
+pub async fn get_issues_from_cache(
+    git_repo_path: &Path,
+    repo_coordinates: HashSet<Nip19Coordinate>,
+) -> Result<Vec<nostr::Event>> {
+    let mut issues = get_events_from_local_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .kinds([nostr::Kind::GitIssue])
+                .custom_tags(
+                    nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                    repo_coordinates
+                        .iter()
+                        .map(|c| c.coordinate.to_string())
+                        .collect::<Vec<String>>(),
+                ),
+        ],
+    )
+    .await?;
+    issues.sort_by_key(|e| e.created_at);
+    issues.reverse();
+    Ok(issues)
+}
+
 pub async fn get_proposals_and_revisions_from_cache(
     git_repo_path: &Path,
     repo_coordinates: HashSet<Nip19Coordinate>,

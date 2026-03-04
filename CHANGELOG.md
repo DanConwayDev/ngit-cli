@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit issue list` command: lists NIP-34 issues with their status; supports `--status` (comma-separated: open,draft,closed,applied; default: open), `--hashtag` (comma-separated label filter), `--json`, `--offline`, and an optional `<id>` positional argument to show full details of a specific issue; hashtags are shown at the end of each row
 - `nostr.repo-relay-only` git config key: when set to `true`, nostr events are sent only to the repository's own relays, skipping the user's personal write relays and default/blaster relays; set persistently via `git config nostr.repo-relay-only true` or in one step with `ngit init --repo-relay-only`
 
 ## [2.2.3] - 2026-02-27
