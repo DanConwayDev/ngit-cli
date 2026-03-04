@@ -60,11 +60,20 @@ async fn main() {
                     json,
                     id,
                     offline,
-                } => sub_commands::list::launch(status.clone(), *json, id.clone(), *offline).await,
-                PrCommands::View { id, json, offline } => {
+                } => {
+                    sub_commands::list::launch(status.clone(), *json, false, id.clone(), *offline)
+                        .await
+                }
+                PrCommands::View {
+                    id,
+                    json,
+                    comments,
+                    offline,
+                } => {
                     sub_commands::list::launch(
                         "open,draft,closed,applied".to_string(),
                         *json,
+                        *comments,
                         Some(id.clone()),
                         *offline,
                     )
@@ -122,16 +131,23 @@ async fn main() {
                         status.clone(),
                         hashtag.clone(),
                         *json,
+                        false,
                         id.clone(),
                         *offline,
                     )
                     .await
                 }
-                IssueCommands::View { id, json, offline } => {
+                IssueCommands::View {
+                    id,
+                    json,
+                    comments,
+                    offline,
+                } => {
                     sub_commands::issue_list::launch(
                         "open,draft,closed,applied".to_string(),
                         None,
                         *json,
+                        *comments,
                         Some(id.clone()),
                         *offline,
                     )

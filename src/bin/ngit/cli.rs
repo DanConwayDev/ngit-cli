@@ -187,7 +187,7 @@ pub enum PrCommands {
         #[arg(long)]
         offline: bool,
     },
-    /// view a PR and its comments
+    /// view a PR; use --comments to include comment thread
     View {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
@@ -195,6 +195,9 @@ pub enum PrCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Include full comment thread (default: show count only)
+        #[arg(long)]
+        comments: bool,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -321,7 +324,7 @@ pub enum IssueCommands {
         #[arg(long)]
         offline: bool,
     },
-    /// view an issue and its comments
+    /// view an issue; use --comments to include comment thread
     View {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
@@ -329,6 +332,9 @@ pub enum IssueCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Include full comment thread (default: show count only)
+        #[arg(long)]
+        comments: bool,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

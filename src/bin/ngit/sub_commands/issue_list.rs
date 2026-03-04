@@ -138,6 +138,7 @@ pub async fn launch(
     status: String,
     hashtag: Option<String>,
     json: bool,
+    show_comments: bool,
     id: Option<String>,
     offline: bool,
 ) -> Result<()> {
@@ -236,8 +237,18 @@ pub async fn launch(
         } else {
             nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
         };
-        let comments = get_comments_for_issue(git_repo_path, &target_id).await?;
-        return show_issue_details(&filtered, event_id_or_nevent, json, &comments);
+        let comments = if show_comments {
+            get_comments_for_issue(git_repo_path, &target_id).await?
+        } else {
+            vec![]
+        };
+        return show_issue_details(
+            &filtered,
+            event_id_or_nevent,
+            json,
+            show_comments,
+            &comments,
+        );
     }
 
     if json {
@@ -249,10 +260,38 @@ pub async fn launch(
     Ok(())
 }
 
+/// Extract the parent comment ID from a NIP-22 comment event.
+/// Returns `Some(id)` when the lowercase `e` tag differs from the root `E` tag
+/// (i.e. the comment is a reply to another comment, not a top-level comment).
+fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
+    let root_id = comment.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        if s.len() >= 2 && s[0].eq("E") {
+            nostr::EventId::parse(&s[1]).ok()
+        } else {
+            None
+        }
+    })?;
+    comment.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        if s.len() >= 2 && s[0].eq("e") {
+            let parent_id = nostr::EventId::parse(&s[1]).ok()?;
+            if parent_id == root_id {
+                None
+            } else {
+                Some(parent_id)
+            }
+        } else {
+            None
+        }
+    })
+}
+
 fn show_issue_details(
     issues: &[(&nostr::Event, Kind, Vec<String>, usize)],
     event_id_or_nevent: &str,
     json: bool,
+    show_comments: bool,
     comments: &[nostr::Event],
 ) -> Result<()> {
     let target_id = if event_id_or_nevent.starts_with("nevent") {
@@ -266,7 +305,7 @@ fn show_issue_details(
         nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
     };
 
-    let (issue, status_kind, tags, _comment_count) = issues
+    let (issue, status_kind, tags, comment_count) = issues
         .iter()
         .find(|(e, _, _, _)| e.id == target_id)
         .context("issue not found")?;
@@ -275,26 +314,41 @@ fn show_issue_details(
     let status = status_kind_to_str(*status_kind);
 
     if json {
-        let comments_json: Vec<serde_json::Value> = comments
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "id": c.id.to_string(),
-                    "author": c.pubkey.to_bech32().unwrap_or_default(),
-                    "created_at": c.created_at.as_secs(),
-                    "body": c.content,
+        let json_output = if show_comments {
+            let comments_json: Vec<serde_json::Value> = comments
+                .iter()
+                .map(|c| {
+                    let reply_to = comment_reply_to(c).map(|id| id.to_string());
+                    serde_json::json!({
+                        "id": c.id.to_string(),
+                        "author": c.pubkey.to_bech32().unwrap_or_default(),
+                        "created_at": c.created_at.as_secs(),
+                        "reply_to": reply_to,
+                        "body": c.content,
+                    })
                 })
+                .collect();
+            serde_json::json!({
+                "id": issue.id.to_string(),
+                "status": status,
+                "title": title,
+                "author": issue.pubkey.to_bech32().unwrap_or_default(),
+                "hashtags": tags,
+                "comment_count": comment_count,
+                "comments": comments_json,
+                "description": issue.content,
             })
-            .collect();
-        let json_output = serde_json::json!({
-            "id": issue.id.to_string(),
-            "status": status,
-            "title": title,
-            "author": issue.pubkey.to_bech32().unwrap_or_default(),
-            "hashtags": tags,
-            "comments": comments_json,
-            "description": issue.content,
-        });
+        } else {
+            serde_json::json!({
+                "id": issue.id.to_string(),
+                "status": status,
+                "title": title,
+                "author": issue.pubkey.to_bech32().unwrap_or_default(),
+                "hashtags": tags,
+                "comment_count": comment_count,
+                "description": issue.content,
+            })
+        };
         println!("{}", serde_json::to_string_pretty(&json_output)?);
         return Ok(());
     }
@@ -318,21 +372,31 @@ fn show_issue_details(
         }
     }
 
-    if comments.is_empty() {
-        println!("Comments: 0");
-    } else {
-        println!();
-        println!("Comments ({}):", comments.len());
-        let dim = console::Style::new().color256(247);
-        for comment in comments {
-            let author = comment.pubkey.to_bech32().unwrap_or_default();
-            let ts = chrono_timestamp(comment.created_at.as_secs());
+    if show_comments {
+        if comments.is_empty() {
+            println!("Comments: 0");
+        } else {
             println!();
-            println!("{}", dim.apply_to(format!("  {author}  {ts}")));
-            for line in comment.content.lines() {
-                println!("  {line}");
+            println!("Comments ({}):", comments.len());
+            let dim = console::Style::new().color256(247);
+            for comment in comments {
+                let author = comment.pubkey.to_bech32().unwrap_or_default();
+                let ts = chrono_timestamp(comment.created_at.as_secs());
+                println!();
+                if let Some(parent_id) = comment_reply_to(comment) {
+                    println!(
+                        "{}",
+                        dim.apply_to(format!("  ↳ reply to {}", &parent_id.to_hex()[..8]))
+                    );
+                }
+                println!("{}", dim.apply_to(format!("  {author}  {ts}")));
+                for line in comment.content.lines() {
+                    println!("  {line}");
+                }
             }
         }
+    } else {
+        println!("Comments: {comment_count}  (use --comments to view)");
     }
 
     Ok(())

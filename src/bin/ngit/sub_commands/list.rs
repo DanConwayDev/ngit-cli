@@ -95,7 +95,13 @@ fn run_git_fetch(remote_name: &str) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(status: String, json: bool, id: Option<String>, offline: bool) -> Result<()> {
+pub async fn launch(
+    status: String,
+    json: bool,
+    show_comments: bool,
+    id: Option<String>,
+    offline: bool,
+) -> Result<()> {
     if std::env::var("NGIT_INTERACTIVE_MODE").is_ok() {
         return launch_interactive().await;
     }
@@ -203,12 +209,26 @@ pub async fn launch(status: String, json: bool, id: Option<String>, offline: boo
     if let Some(ref event_id_or_nevent) = id {
         // Resolve the target proposal ID so we can fetch its comments.
         let target_id = resolve_event_id(event_id_or_nevent)?;
-        let comments = get_comments_for_proposal(git_repo_path, &target_id).await?;
+        let comments = if show_comments {
+            get_comments_for_proposal(git_repo_path, &target_id).await?
+        } else {
+            vec![]
+        };
+        // Always fetch the count so we can display it even without --comments.
+        let comment_count = if show_comments {
+            comments.len()
+        } else {
+            get_comments_for_proposal(git_repo_path, &target_id)
+                .await?
+                .len()
+        };
         return show_proposal_details(
             &filtered_proposals,
             &repo_ref,
             event_id_or_nevent,
             json,
+            show_comments,
+            comment_count,
             &comments,
         );
     }
@@ -353,11 +373,40 @@ fn output_json(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) -> Resu
     Ok(())
 }
 
+/// Extract the parent comment ID from a NIP-22 comment event.
+/// Returns `Some(id)` when the lowercase `e` tag differs from the root `E` tag
+/// (i.e. the comment is a reply to another comment, not a top-level comment).
+fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
+    let root_id = comment.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        if s.len() >= 2 && s[0].eq("E") {
+            nostr::EventId::parse(&s[1]).ok()
+        } else {
+            None
+        }
+    })?;
+    comment.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        if s.len() >= 2 && s[0].eq("e") {
+            let parent_id = nostr::EventId::parse(&s[1]).ok()?;
+            if parent_id == root_id {
+                None
+            } else {
+                Some(parent_id)
+            }
+        } else {
+            None
+        }
+    })
+}
+
 fn show_proposal_details(
     proposals: &[(&nostr::Event, Kind)],
     _repo_ref: &RepoRef,
     event_id_or_nevent: &str,
     json: bool,
+    show_comments: bool,
+    comment_count: usize,
     comments: &[nostr::Event],
 ) -> Result<()> {
     use nostr::ToBech32;
@@ -373,26 +422,41 @@ fn show_proposal_details(
         .context("failed to extract proposal details from proposal root event")?;
 
     if json {
-        let comments_json: Vec<serde_json::Value> = comments
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "id": c.id.to_string(),
-                    "author": c.pubkey.to_bech32().unwrap_or_default(),
-                    "created_at": c.created_at.as_secs(),
-                    "body": c.content,
+        let json_output = if show_comments {
+            let comments_json: Vec<serde_json::Value> = comments
+                .iter()
+                .map(|c| {
+                    let reply_to = comment_reply_to(c).map(|id| id.to_string());
+                    serde_json::json!({
+                        "id": c.id.to_string(),
+                        "author": c.pubkey.to_bech32().unwrap_or_default(),
+                        "created_at": c.created_at.as_secs(),
+                        "reply_to": reply_to,
+                        "body": c.content,
+                    })
                 })
+                .collect();
+            serde_json::json!({
+                "id": proposal.id.to_string(),
+                "status": status_kind_to_str(*status_kind),
+                "title": cover_letter.title,
+                "author": proposal.pubkey.to_bech32().unwrap_or_default(),
+                "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                "comment_count": comment_count,
+                "comments": comments_json,
+                "description": cover_letter.description,
             })
-            .collect();
-        let json_output = serde_json::json!({
-            "id": proposal.id.to_string(),
-            "status": status_kind_to_str(*status_kind),
-            "title": cover_letter.title,
-            "author": proposal.pubkey.to_bech32().unwrap_or_default(),
-            "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-            "comments": comments_json,
-            "description": cover_letter.description,
-        });
+        } else {
+            serde_json::json!({
+                "id": proposal.id.to_string(),
+                "status": status_kind_to_str(*status_kind),
+                "title": cover_letter.title,
+                "author": proposal.pubkey.to_bech32().unwrap_or_default(),
+                "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                "comment_count": comment_count,
+                "description": cover_letter.description,
+            })
+        };
         println!("{}", serde_json::to_string_pretty(&json_output)?);
         return Ok(());
     }
@@ -416,21 +480,31 @@ fn show_proposal_details(
         }
     }
 
-    if comments.is_empty() {
-        println!("Comments: 0");
-    } else {
-        println!();
-        println!("Comments ({}):", comments.len());
-        let dim = console::Style::new().color256(247);
-        for comment in comments {
-            let author = comment.pubkey.to_bech32().unwrap_or_default();
-            let ts = chrono_timestamp(comment.created_at.as_secs());
+    if show_comments {
+        if comments.is_empty() {
+            println!("Comments: 0");
+        } else {
             println!();
-            println!("{}", dim.apply_to(format!("  {author}  {ts}")));
-            for line in comment.content.lines() {
-                println!("  {line}");
+            println!("Comments ({comment_count}):");
+            let dim = console::Style::new().color256(247);
+            for comment in comments {
+                let author = comment.pubkey.to_bech32().unwrap_or_default();
+                let ts = chrono_timestamp(comment.created_at.as_secs());
+                println!();
+                if let Some(parent_id) = comment_reply_to(comment) {
+                    println!(
+                        "{}",
+                        dim.apply_to(format!("  ↳ reply to {}", &parent_id.to_hex()[..8]))
+                    );
+                }
+                println!("{}", dim.apply_to(format!("  {author}  {ts}")));
+                for line in comment.content.lines() {
+                    println!("  {line}");
+                }
             }
         }
+    } else {
+        println!("Comments: {comment_count}  (use --comments to view)");
     }
 
     println!();
