@@ -266,6 +266,10 @@ pub enum PrCommands {
         /// Comment body
         #[arg(long)]
         body: String,
+        /// Reply to a specific comment event-id (hex) or nevent (bech32);
+        /// defaults to top-level
+        #[arg(long, value_name = "ID|nevent")]
+        reply_to: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -367,6 +371,10 @@ pub enum IssueCommands {
         /// Comment body
         #[arg(long)]
         body: String,
+        /// Reply to a specific comment event-id (hex) or nevent (bech32);
+        /// defaults to top-level
+        #[arg(long, value_name = "ID|nevent")]
+        reply_to: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

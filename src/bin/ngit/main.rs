@@ -90,8 +90,19 @@ async fn main() {
                 PrCommands::Ready { id, offline } => {
                     sub_commands::pr_status::launch_ready(id, *offline).await
                 }
-                PrCommands::Comment { id, body, offline } => {
-                    sub_commands::comment::launch_pr_comment(id, body, *offline).await
+                PrCommands::Comment {
+                    id,
+                    body,
+                    reply_to,
+                    offline,
+                } => {
+                    sub_commands::comment::launch_pr_comment(
+                        id,
+                        body,
+                        reply_to.as_deref(),
+                        *offline,
+                    )
+                    .await
                 }
                 PrCommands::Merge {
                     id,
@@ -140,8 +151,19 @@ async fn main() {
                 IssueCommands::Reopen { id, offline } => {
                     sub_commands::issue_status::launch_reopen(id, *offline).await
                 }
-                IssueCommands::Comment { id, body, offline } => {
-                    sub_commands::comment::launch_issue_comment(id, body, *offline).await
+                IssueCommands::Comment {
+                    id,
+                    body,
+                    reply_to,
+                    offline,
+                } => {
+                    sub_commands::comment::launch_issue_comment(
+                        id,
+                        body,
+                        reply_to.as_deref(),
+                        *offline,
+                    )
+                    .await
                 }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
