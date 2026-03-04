@@ -10,13 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `ngit pr` subcommand group: `list`, `view`, `checkout`, `apply`, `send`, `close`, `reopen`, `ready`, `comment`, `merge`; replaces the former top-level `ngit list`, `ngit checkout`, and `ngit apply` commands (hard-migrated); `ngit send` remains at the top level unchanged
-- `ngit pr view <id>` — view a PR with its full details and comment count
+- `ngit pr view <id>` — view a PR with its full details and all comments (author, timestamp, body) in chronological order
 - `ngit pr close <id>` / `ngit pr reopen <id>` — change PR status (author or maintainer only)
 - `ngit pr ready <id>` — mark a draft PR as ready for review (author or maintainer only)
 - `ngit pr comment <id> --body <text>` — post a NIP-22 comment on a PR
 - `ngit pr merge <id> [--squash]` — merge a PR branch and publish a `GitStatusApplied` event (maintainer only); prints a reminder to push afterwards
 - `ngit issue` subcommand group expanded: `list`, `view`, `create`, `close`, `reopen`, `comment`
-- `ngit issue view <id>` — view an issue with its full details and comment count
+- `ngit issue view <id>` — view an issue with its full details and all comments (author, timestamp, body) in chronological order
 - `ngit issue create --title <T> [--body <B>] [--label <L>...]` — publish a NIP-34 GitIssue event
 - `ngit issue close <id>` / `ngit issue reopen <id>` — change issue status (author or maintainer only)
 - `ngit issue comment <id> --body <text>` — post a NIP-22 comment on an issue

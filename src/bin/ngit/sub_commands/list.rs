@@ -201,15 +201,15 @@ pub async fn launch(status: String, json: bool, id: Option<String>, offline: boo
         .collect();
 
     if let Some(ref event_id_or_nevent) = id {
-        // Resolve the target proposal ID so we can fetch its comment count.
+        // Resolve the target proposal ID so we can fetch its comments.
         let target_id = resolve_event_id(event_id_or_nevent)?;
-        let comment_count = get_comment_count_for_proposal(git_repo_path, &target_id).await?;
+        let comments = get_comments_for_proposal(git_repo_path, &target_id).await?;
         return show_proposal_details(
             &filtered_proposals,
             &repo_ref,
             event_id_or_nevent,
             json,
-            comment_count,
+            &comments,
         );
     }
 
@@ -235,37 +235,38 @@ fn resolve_event_id(event_id_or_nevent: &str) -> Result<nostr::EventId> {
     }
 }
 
-/// Count NIP-22 kind-1111 comments whose root `#E` tag matches `proposal_id`.
-async fn get_comment_count_for_proposal(
+/// Fetch NIP-22 kind-1111 comments whose root `#E` tag matches `proposal_id`,
+/// sorted oldest-first.
+async fn get_comments_for_proposal(
     git_repo_path: &std::path::Path,
     proposal_id: &nostr::EventId,
-) -> Result<usize> {
-    let comments = get_events_from_local_cache(
+) -> Result<Vec<nostr::Event>> {
+    let mut comments = get_events_from_local_cache(
         git_repo_path,
-        vec![nostr::Filter::default()
-            .custom_tags(
-                SingleLetterTag::uppercase(Alphabet::E),
-                std::iter::once(*proposal_id),
-            )
-            .kind(KIND_COMMENT)],
+        vec![
+            nostr::Filter::default()
+                .custom_tags(
+                    SingleLetterTag::uppercase(Alphabet::E),
+                    std::iter::once(*proposal_id),
+                )
+                .kind(KIND_COMMENT),
+        ],
     )
     .await?;
-    // Only count comments whose uppercase E tag actually points to this proposal
-    // (the filter is best-effort; verify explicitly).
-    let count = comments
-        .iter()
-        .filter(|c| {
-            c.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.len() >= 2
-                    && s[0].eq("E")
-                    && nostr::EventId::parse(&s[1])
-                        .map(|id| id == *proposal_id)
-                        .unwrap_or(false)
-            })
+    // Only keep comments whose uppercase E tag actually points to this proposal.
+    comments.retain(|c| {
+        c.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2
+                && s[0].eq("E")
+                && nostr::EventId::parse(&s[1])
+                    .map(|id| id == *proposal_id)
+                    .unwrap_or(false)
         })
-        .count();
-    Ok(count)
+    });
+    // Oldest first
+    comments.sort_by_key(|e| e.created_at);
+    Ok(comments)
 }
 
 fn status_kind_to_str(kind: Kind) -> &'static str {
@@ -300,14 +301,17 @@ fn output_table(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef, status
 
     println!();
     println!("--status {status_filter}");
-    println!("{}", console::style("To view:     ngit list <id>").yellow());
     println!(
         "{}",
-        console::style("To checkout: ngit checkout <id>").yellow()
+        console::style("To view:     ngit pr view <id>").yellow()
     );
     println!(
         "{}",
-        console::style("To apply:    ngit apply <id>").yellow()
+        console::style("To checkout: ngit pr checkout <id>").yellow()
+    );
+    println!(
+        "{}",
+        console::style("To apply:    ngit pr apply <id>").yellow()
     );
 }
 
@@ -354,8 +358,10 @@ fn show_proposal_details(
     _repo_ref: &RepoRef,
     event_id_or_nevent: &str,
     json: bool,
-    comment_count: usize,
+    comments: &[nostr::Event],
 ) -> Result<()> {
+    use nostr::ToBech32;
+
     let target_id = resolve_event_id(event_id_or_nevent)?;
 
     let (proposal, status_kind) = proposals
@@ -367,13 +373,24 @@ fn show_proposal_details(
         .context("failed to extract proposal details from proposal root event")?;
 
     if json {
+        let comments_json: Vec<serde_json::Value> = comments
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.to_string(),
+                    "author": c.pubkey.to_bech32().unwrap_or_default(),
+                    "created_at": c.created_at.as_secs(),
+                    "body": c.content,
+                })
+            })
+            .collect();
         let json_output = serde_json::json!({
             "id": proposal.id.to_string(),
             "status": status_kind_to_str(*status_kind),
             "title": cover_letter.title,
             "author": proposal.pubkey.to_bech32().unwrap_or_default(),
             "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-            "comments": comment_count,
+            "comments": comments_json,
             "description": cover_letter.description,
         });
         println!("{}", serde_json::to_string_pretty(&json_output)?);
@@ -390,7 +407,6 @@ fn show_proposal_details(
         "Branch:   {}",
         cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
     );
-    println!("Comments: {comment_count}");
 
     if !cover_letter.description.is_empty() {
         println!();
@@ -400,17 +416,57 @@ fn show_proposal_details(
         }
     }
 
+    if comments.is_empty() {
+        println!("Comments: 0");
+    } else {
+        println!();
+        println!("Comments ({}):", comments.len());
+        let dim = console::Style::new().color256(247);
+        for comment in comments {
+            let author = comment.pubkey.to_bech32().unwrap_or_default();
+            let ts = chrono_timestamp(comment.created_at.as_secs());
+            println!();
+            println!("{}", dim.apply_to(format!("  {author}  {ts}")));
+            for line in comment.content.lines() {
+                println!("  {line}");
+            }
+        }
+    }
+
     println!();
     println!(
         "{}",
-        console::style(format!("To checkout: ngit checkout {}", proposal.id)).yellow()
+        console::style(format!("To checkout: ngit pr checkout {}", proposal.id)).yellow()
     );
     println!(
         "{}",
-        console::style(format!("To apply:    ngit apply {}", proposal.id)).yellow()
+        console::style(format!("To apply:    ngit pr apply {}", proposal.id)).yellow()
     );
 
     Ok(())
+}
+
+fn chrono_timestamp(unix_secs: u64) -> String {
+    // Format as YYYY-MM-DD HH:MM UTC without pulling in chrono.
+    // unix_secs → days since epoch, then decompose.
+    let secs = unix_secs % 60;
+    let mins = (unix_secs / 60) % 60;
+    let hours = (unix_secs / 3600) % 24;
+    let days_since_epoch = unix_secs / 86400;
+
+    // Gregorian calendar decomposition (Fliegel-Van Flandern algorithm)
+    let z = days_since_epoch + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let day_of_year = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let d = day_of_year - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02} {hours:02}:{mins:02}:{secs:02} UTC")
 }
 
 #[allow(clippy::too_many_lines)]
