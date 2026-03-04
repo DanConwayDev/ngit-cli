@@ -14,6 +14,7 @@ use ngit::{
     utils::get_short_git_server_name,
 };
 use nostr::{FromBech32, PublicKey, TagStandard, ToBech32, nips::nip19::Nip19Coordinate};
+use serde::Serialize;
 
 use crate::{
     cli::{Cli, RepoCommands, extract_signer_cli_arguments},
@@ -27,21 +28,53 @@ pub async fn launch(
     cli_args: &Cli,
     repo_command: Option<&RepoCommands>,
     offline: bool,
+    json: bool,
 ) -> Result<()> {
     match repo_command {
         Some(RepoCommands::Init(args) | RepoCommands::Edit(args)) => {
             init::launch(cli_args, args).await
         }
         Some(RepoCommands::Accept(args)) => accept::launch(cli_args, args).await,
-        None => show_info(cli_args, offline).await,
+        None => show_info(cli_args, offline, json).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// JSON output types
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct RepoInfoJson {
+    is_nostr_repo: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identifier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nostr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coordinate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maintainers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grasp_servers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_servers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relays: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hashtags: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
 // `ngit repo` (no subcommand) — show repository info
 // ---------------------------------------------------------------------------
 
-async fn show_info(cli_args: &Cli, offline: bool) -> Result<()> {
+async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
@@ -61,15 +94,31 @@ async fn show_info(cli_args: &Cli, offline: bool) -> Result<()> {
     .ok()
     .map(|(_, user_ref, _)| user_ref.public_key);
 
-    println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
-    println!();
-
     let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
 
     let Some(repo_coordinate) = repo_coordinate else {
-        println!("no nostr repository found");
-        println!();
-        println!("use `ngit repo init` to publish this repository to nostr");
+        if json {
+            println!("{}", serde_json::to_string_pretty(&RepoInfoJson {
+                is_nostr_repo: false,
+                name: None,
+                identifier: None,
+                description: None,
+                nostr_url: None,
+                coordinate: None,
+                web: None,
+                maintainers: None,
+                grasp_servers: None,
+                git_servers: None,
+                relays: None,
+                hashtags: None,
+            })?);
+        } else {
+            println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
+            println!();
+            println!("no nostr repository found");
+            println!();
+            println!("use `ngit repo init` to publish this repository to nostr");
+        }
         return Ok(());
     };
 
@@ -83,23 +132,149 @@ async fn show_info(cli_args: &Cli, offline: bool) -> Result<()> {
     let Some(repo_ref) =
         (get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await).ok()
     else {
-        println!(
-            "coordinate found ({}) but no announcement on relays",
-            repo_coordinate.identifier
-        );
-        println!();
-        println!("if you created this repository, run `ngit repo init` to publish an announcement");
-        println!("if you are a co-maintainer, run `ngit repo accept` to publish your announcement");
+        if json {
+            // Coordinate found but no announcement yet — still a nostr repo
+            let nostr_url = git_repo
+                .git_repo
+                .find_remote("origin")
+                .ok()
+                .and_then(|r| r.url().map(std::string::ToString::to_string))
+                .filter(|u| u.starts_with("nostr://"));
+            println!("{}", serde_json::to_string_pretty(&RepoInfoJson {
+                is_nostr_repo: true,
+                name: None,
+                identifier: Some(repo_coordinate.identifier.clone()),
+                description: None,
+                nostr_url,
+                coordinate: repo_coordinate.to_bech32().ok(),
+                web: None,
+                maintainers: None,
+                grasp_servers: None,
+                git_servers: None,
+                relays: None,
+                hashtags: None,
+            })?);
+        } else {
+            println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
+            println!();
+            println!(
+                "coordinate found ({}) but no announcement on relays",
+                repo_coordinate.identifier
+            );
+            println!();
+            println!("if you created this repository, run `ngit repo init` to publish an announcement");
+            println!("if you are a co-maintainer, run `ngit repo accept` to publish your announcement");
+        }
         return Ok(());
     };
 
-    print_repo_info(
-        &repo_ref,
-        my_pubkey.as_ref(),
-        &repo_coordinate,
-        git_repo_path,
-    )
-    .await;
+    if json {
+        print_repo_info_json(&repo_ref, &repo_coordinate, &git_repo)?;
+    } else {
+        println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
+        println!();
+        print_repo_info(
+            &repo_ref,
+            my_pubkey.as_ref(),
+            &repo_coordinate,
+            git_repo_path,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+fn print_repo_info_json(
+    repo_ref: &RepoRef,
+    coordinate: &Nip19Coordinate,
+    git_repo: &Repo,
+) -> Result<()> {
+    let nostr_url = git_repo
+        .git_repo
+        .find_remote("origin")
+        .ok()
+        .and_then(|r| r.url().map(std::string::ToString::to_string))
+        .filter(|u| u.starts_with("nostr://"));
+
+    let grasp_servers: Vec<String> = repo_ref
+        .git_server
+        .iter()
+        .filter(|s| is_grasp_server_clone_url(s))
+        .filter_map(|s| normalize_grasp_server_url(s).ok())
+        .collect();
+
+    let git_servers: Vec<String> = repo_ref
+        .git_server
+        .iter()
+        .filter(|s| !is_grasp_server_clone_url(s))
+        .cloned()
+        .collect();
+
+    let grasp_relay_urls: Vec<String> = repo_ref
+        .git_server
+        .iter()
+        .filter(|s| is_grasp_server_clone_url(s))
+        .filter_map(|s| format_grasp_server_url_as_relay_url(s).ok())
+        .collect();
+
+    let relays: Vec<String> = repo_ref
+        .relays
+        .iter()
+        .filter(|r| {
+            let r_str = r.as_str().trim_end_matches('/');
+            !grasp_relay_urls
+                .iter()
+                .any(|g| g.trim_end_matches('/') == r_str)
+        })
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let maintainers: Vec<String> = repo_ref
+        .maintainers
+        .iter()
+        .filter_map(|pk| pk.to_bech32().ok())
+        .collect();
+
+    let info = RepoInfoJson {
+        is_nostr_repo: true,
+        name: Some(repo_ref.name.clone()),
+        identifier: Some(repo_ref.identifier.clone()),
+        description: if repo_ref.description.is_empty() {
+            None
+        } else {
+            Some(repo_ref.description.clone())
+        },
+        nostr_url,
+        coordinate: coordinate.to_bech32().ok(),
+        web: if repo_ref.web.is_empty() {
+            None
+        } else {
+            Some(repo_ref.web.clone())
+        },
+        maintainers: Some(maintainers),
+        grasp_servers: if grasp_servers.is_empty() {
+            None
+        } else {
+            Some(grasp_servers)
+        },
+        git_servers: if git_servers.is_empty() {
+            None
+        } else {
+            Some(git_servers)
+        },
+        relays: if relays.is_empty() {
+            None
+        } else {
+            Some(relays)
+        },
+        hashtags: if repo_ref.hashtags.is_empty() {
+            None
+        } else {
+            Some(repo_ref.hashtags.clone())
+        },
+    };
+
+    println!("{}", serde_json::to_string_pretty(&info)?);
     Ok(())
 }
 

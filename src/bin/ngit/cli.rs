@@ -158,6 +158,9 @@ pub struct RepoSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+    /// Output repository info as JSON; is_nostr_repo is false when not in a nostr repository
+    #[arg(long)]
+    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------

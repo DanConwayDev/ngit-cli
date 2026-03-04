@@ -400,8 +400,8 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
-    #[clap(long)]
-    /// name of repository (preferred over --identifier)
+    #[clap(long, alias = "title")]
+    /// name of repository (preferred over --identifier); --title is an alias
     name: Option<String>,
     #[clap(long)]
     /// shortname with no spaces or special characters
