@@ -1,12 +1,17 @@
 pub mod apply;
 pub mod checkout;
+pub mod comment;
 pub mod create;
 pub mod export_keys;
 pub mod init;
+pub mod issue_create;
 pub mod issue_list;
+pub mod issue_status;
 pub mod list;
 pub mod login;
 pub mod logout;
+pub mod pr_merge;
+pub mod pr_status;
 pub mod repo;
 pub mod send;
 pub mod sync;

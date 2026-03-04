@@ -8,7 +8,7 @@ use crate::sub_commands;
 #[command(
     author,
     version,
-    help_template = "{name} {version}\nnostr plugin for git\n includes a remote helper so native git commands (clone, fetch, push) work with nostr:// URLs\n - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier\n - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs\n - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options\n   set title and description via push options:\n     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch\n - publish a repository to nostr with `ngit init`\n\n{usage}\n{all-args}"
+    help_template = "{name} {version}\nnostr plugin for git\n includes a remote helper so native git commands (clone, fetch, push) work with nostr:// URLs\n - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier\n - remote branches beginning with `pr/` are open PRs from contributors; `ngit pr list` can be used to view all PRs\n - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options\n   set title and description via push options:\n     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch\n - publish a repository to nostr with `ngit init`\n\n{usage}\n{all-args}"
 )]
 #[command(propagate_version = true)]
 #[allow(clippy::struct_excessive_bools)]
@@ -119,50 +119,13 @@ pub enum Commands {
         long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
     )]
     Send(sub_commands::send::SubCommandArgs),
-    /// list PRs and view details
-    List {
-        /// Filter by status (comma-separated: open,draft,closed,applied)
-        #[arg(long, default_value = "open,draft")]
-        status: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-        /// Show details for specific proposal (event-id or nevent)
-        #[arg(value_name = "ID|nevent")]
-        id: Option<String>,
-        /// Use local cache only, skip network fetch
-        #[arg(long)]
-        offline: bool,
-    },
-    /// list issues
+    /// work with pull requests
+    #[command(
+        long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`"
+    )]
+    Pr(PrSubCommandArgs),
+    /// work with issues
     Issue(IssueSubCommandArgs),
-    /// checkout a proposal branch by event-id or nevent
-    #[command(
-        long_about = "checkout a proposal branch by event-id or nevent\n\nuse `ngit list` to find proposal IDs"
-    )]
-    Checkout {
-        /// Proposal event-id (hex) or nevent (bech32)
-        #[arg(value_name = "ID|nevent")]
-        id: String,
-        /// Use local cache only, skip network fetch
-        #[arg(long)]
-        offline: bool,
-    },
-    /// apply proposal patches to current branch
-    #[command(
-        long_about = "apply proposal patches to current branch\n\nuse `ngit list` to find proposal IDs"
-    )]
-    Apply {
-        /// Proposal event-id or nevent
-        #[arg(value_name = "ID|nevent")]
-        id: String,
-        /// Output patches to stdout instead of applying
-        #[arg(long)]
-        stdout: bool,
-        /// Use local cache only, skip network fetch
-        #[arg(long)]
-        offline: bool,
-    },
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
@@ -197,6 +160,137 @@ pub struct RepoSubCommandArgs {
     pub offline: bool,
 }
 
+// ---------------------------------------------------------------------------
+// PR subcommand group
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+pub struct PrSubCommandArgs {
+    #[command(subcommand)]
+    pub pr_command: PrCommands,
+}
+
+#[derive(Subcommand)]
+pub enum PrCommands {
+    /// list PRs and view details
+    List {
+        /// Filter by status (comma-separated: open,draft,closed,applied)
+        #[arg(long, default_value = "open,draft")]
+        status: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Show details for specific proposal (event-id or nevent)
+        #[arg(value_name = "ID|nevent")]
+        id: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// view a PR and its comments
+    View {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// checkout a proposal branch by event-id or nevent
+    #[command(
+        long_about = "checkout a proposal branch by event-id or nevent\n\nuse `ngit pr list` to find proposal IDs"
+    )]
+    Checkout {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// apply proposal patches to current branch
+    #[command(
+        long_about = "apply proposal patches to current branch\n\nuse `ngit pr list` to find proposal IDs"
+    )]
+    Apply {
+        /// Proposal event-id or nevent
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Output patches to stdout instead of applying
+        #[arg(long)]
+        stdout: bool,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// submit PR with advanced options (alias for `ngit send`)
+    #[command(
+        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
+    )]
+    Send(sub_commands::send::SubCommandArgs),
+    /// close a PR (author or maintainer only)
+    Close {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// reopen a closed PR (author or maintainer only)
+    Reopen {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// mark a draft PR as ready for review (author or maintainer only)
+    Ready {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// add a comment to a PR
+    Comment {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Comment body
+        #[arg(long)]
+        body: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// merge a PR into the current branch (maintainer only)
+    #[command(
+        long_about = "merge a PR into the current branch (maintainer only)\n\nperforms a git merge of the PR branch; push afterwards to update the nostr state"
+    )]
+    Merge {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use squash merge
+        #[arg(long)]
+        squash: bool,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Issue subcommand group
+// ---------------------------------------------------------------------------
+
 #[derive(clap::Parser)]
 pub struct IssueSubCommandArgs {
     #[command(subcommand)]
@@ -219,6 +313,60 @@ pub enum IssueCommands {
         /// Show details for a specific issue (event-id or nevent)
         #[arg(value_name = "ID|nevent")]
         id: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// view an issue and its comments
+    View {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// create a new issue
+    Create {
+        /// Issue title
+        #[arg(long)]
+        title: Option<String>,
+        /// Issue body / description
+        #[arg(long)]
+        body: Option<String>,
+        /// Hashtag labels (repeatable: --label bug --label help-wanted)
+        #[arg(long = "label", value_name = "LABEL")]
+        labels: Vec<String>,
+    },
+    /// close an issue (author or maintainer only)
+    Close {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// reopen a closed issue (author or maintainer only)
+    Reopen {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// add a comment to an issue
+    Comment {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Comment body
+        #[arg(long)]
+        body: String,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

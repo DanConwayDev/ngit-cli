@@ -3,7 +3,7 @@
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use clap::Parser;
-use cli::{AccountCommands, CUSTOMISE_TEMPLATE, Cli, Commands, IssueCommands};
+use cli::{AccountCommands, CUSTOMISE_TEMPLATE, Cli, Commands, IssueCommands, PrCommands};
 
 mod cli;
 use ngit::{
@@ -16,6 +16,7 @@ use ngit::{
 mod sub_commands;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     let cli = Cli::parse();
 
@@ -52,12 +53,52 @@ async fn main() {
             Commands::Repo(args) => {
                 sub_commands::repo::launch(&cli, args.repo_command.as_ref(), args.offline).await
             }
-            Commands::List {
-                status,
-                json,
-                id,
-                offline,
-            } => sub_commands::list::launch(status.clone(), *json, id.clone(), *offline).await,
+            Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
+            Commands::Pr(args) => match &args.pr_command {
+                PrCommands::List {
+                    status,
+                    json,
+                    id,
+                    offline,
+                } => sub_commands::list::launch(status.clone(), *json, id.clone(), *offline).await,
+                PrCommands::View { id, json, offline } => {
+                    sub_commands::list::launch(
+                        "open,draft,closed,applied".to_string(),
+                        *json,
+                        Some(id.clone()),
+                        *offline,
+                    )
+                    .await
+                }
+                PrCommands::Checkout { id, offline } => {
+                    sub_commands::checkout::launch(id, *offline).await
+                }
+                PrCommands::Apply {
+                    id,
+                    stdout,
+                    offline,
+                } => sub_commands::apply::launch(id, *stdout, *offline).await,
+                PrCommands::Send(sub_args) => {
+                    sub_commands::send::launch(&cli, sub_args, false).await
+                }
+                PrCommands::Close { id, offline } => {
+                    sub_commands::pr_status::launch_close(id, *offline).await
+                }
+                PrCommands::Reopen { id, offline } => {
+                    sub_commands::pr_status::launch_reopen(id, *offline).await
+                }
+                PrCommands::Ready { id, offline } => {
+                    sub_commands::pr_status::launch_ready(id, *offline).await
+                }
+                PrCommands::Comment { id, body, offline } => {
+                    sub_commands::comment::launch_pr_comment(id, body, *offline).await
+                }
+                PrCommands::Merge {
+                    id,
+                    squash,
+                    offline,
+                } => sub_commands::pr_merge::launch(id, *squash, *offline).await,
+            },
             Commands::Issue(args) => match &args.issue_command {
                 IssueCommands::List {
                     status,
@@ -75,17 +116,35 @@ async fn main() {
                     )
                     .await
                 }
+                IssueCommands::View { id, json, offline } => {
+                    sub_commands::issue_list::launch(
+                        "open,draft,closed,applied".to_string(),
+                        None,
+                        *json,
+                        Some(id.clone()),
+                        *offline,
+                    )
+                    .await
+                }
+                IssueCommands::Create {
+                    title,
+                    body,
+                    labels,
+                } => {
+                    sub_commands::issue_create::launch(title.clone(), body.clone(), labels.clone())
+                        .await
+                }
+                IssueCommands::Close { id, offline } => {
+                    sub_commands::issue_status::launch_close(id, *offline).await
+                }
+                IssueCommands::Reopen { id, offline } => {
+                    sub_commands::issue_status::launch_reopen(id, *offline).await
+                }
+                IssueCommands::Comment { id, body, offline } => {
+                    sub_commands::comment::launch_issue_comment(id, body, *offline).await
+                }
             },
-            Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
-            Commands::Checkout { id, offline } => {
-                sub_commands::checkout::launch(id, *offline).await
-            }
-            Commands::Apply {
-                id,
-                stdout,
-                offline,
-            } => sub_commands::apply::launch(id, *stdout, *offline).await,
         }
     } else {
         // Show help when no command is provided
