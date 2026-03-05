@@ -1,7 +1,9 @@
 ---
 name: ngit
-description: Use when working with nostr:// git repositories, submitting or reviewing pull requests (PRs) or patches over Nostr, creating or viewing git Nostr issues, cloning a nostr:// URL, publishing a repo to Nostr with ngit init, or any task involving the ngit CLI or git-remote-nostr. Triggers include: "ngit", "nostr:// repo", "git nostr", "submit a PR", "submit a patch", "open an issue on nostr", "clone nostr://", "view nostr issues", "ngit init", "push pr/ branch".
+description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, submitting or reviewing pull requests (PRs) or patches over Nostr, creating or viewing Nostr git issues, cloning a nostr:// URL, publishing a repository with ngit init, or any task involving the ngit CLI or git-remote-nostr.
 license: CC-BY-SA-4.0
+metadata:
+  version: "1.0"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -23,21 +25,30 @@ This installs two binaries:
 - `ngit` — the main CLI
 - `git-remote-nostr` — a git remote helper that enables `nostr://` URLs to work transparently with git
 
+## Machine-readable output
+
+**All `ngit` commands support `--json` for structured output. Always use `--json` when scripting or parsing output** — it is far easier to process reliably than human-readable text. Standard `git` commands do not support `--json`; use them as normal.
+
 ## Detecting a Nostr Repository
 
 Before running any `ngit` commands, check whether the current directory is a nostr repository:
 
 ```bash
-ngit repo --json
+ngit repo --json --offline
 ```
 
 Always exits 0. Returns `{"is_nostr_repo": false}` when not in a nostr repo, or the full repo info when it is.
 
+To check without loading the full repo details, grep for the key field:
+
+```bash
+ngit repo --json --offline | grep -q '"is_nostr_repo":true'
+```
+
 Script usage:
 
 ```bash
-IS_NOSTR=$(ngit repo --json --offline | jq -r '.is_nostr_repo')
-if [ "$IS_NOSTR" = "true" ]; then
+if ngit repo --json --offline | grep -q '"is_nostr_repo":true'; then
   ngit pr list --json
 fi
 ```
@@ -106,28 +117,7 @@ Anyone can clone using the `nostr://` URL. The remote helper fetches the announc
 
 ### Authentication
 
-ngit uses your Nostr private key (nsec) for signing events. Credentials are stored in git config (`nostr.nsec`). Login once globally and all repos use it:
-
-```bash
-# Login interactively (stores nsec in global git config)
-ngit account login
-
-# Or create a new account
-ngit account create --name "Your Name"
-
-# Or pass key inline (for CI/scripts — no prompt)
-ngit --nsec <nsec> <command>
-```
-
-Credentials are stored as git config keys (`nostr.nsec`, `nostr.npub`, etc.) and can be set directly:
-
-```bash
-# Global (all repos)
-git config --global nostr.nsec <nsec>
-
-# Local (this repo only)
-git config nostr.nsec <nsec>
-```
+ngit uses your Nostr private key (nsec) for signing events. See [CONCEPT 5: Account Management](#concept-5-account-management) for full details.
 
 ---
 
@@ -472,7 +462,8 @@ ngit init --name "My Project" --description "A cool project" -d
 # origin is now set to nostr://... and code is pushed
 
 # Get the canonical nostr:// URL to share (npub + relay hint + identifier)
-ngit repo --json --offline | jq -r '.nostr_url'
+ngit repo --json --offline
+# Look for the "nostr_url" field in the output
 # e.g. nostr://npub1abc.../relay.ngit.dev/my-project
 ```
 
@@ -487,16 +478,18 @@ git commit -m "fix: correct typo in README"
 git push -u origin pr/fix-typo \
   -o 'title=Fix typo in README' \
   -o 'description=Corrects a spelling mistake in the introduction.\n\nSmall copy fix, no functional changes.'
+# Verify the PR was created
+ngit pr list --json --offline
 ```
 
 ### Workflow: Review and merge a PR (maintainer)
 
 ```bash
 # See what's open
-ngit pr list
+ngit pr list --json
 
 # Review the PR
-ngit pr view <ID> --comments
+ngit pr view <ID> --json --comments
 
 # Check it out and test locally
 ngit pr checkout <ID>
@@ -506,6 +499,8 @@ ngit pr checkout <ID>
 git checkout main
 git merge pr/my-feature
 git push origin main
+# Verify the PR is now closed/applied
+ngit pr view <ID> --json --offline
 ```
 
 ### Workflow: File and close an issue
@@ -515,9 +510,13 @@ git push origin main
 ngit issue create --title "Crash on startup" \
   --body "Reproducible with v2.1 on Linux.\n\nSteps: run ngit init in an empty dir." \
   --label bug
+# Verify the issue was created and note its ID
+ngit issue list --json --offline
 
 # Later, close it
 ngit issue close <ID>
+# Verify it is closed
+ngit issue view <ID> --json --offline
 ```
 
 ### Workflow: Non-interactive / CI scripting
