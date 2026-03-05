@@ -38,11 +38,11 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 ## Detecting a nostr repo
 
 ```bash
-# Check if current directory is a nostr repo (always exits 0)
-ngit repo --json --offline | grep -q '"is_nostr_repo":true'
+git remote -v | grep -q 'nostr://'   # primary check — no cache needed
+ngit repo --json --offline            # full metadata when needed
 ```
 
-Returns full repo info (including `nostr_url`, `maintainers`, `grasp_servers`) when true.
+`ngit repo` always exits 0; `is_nostr_repo: false` can be a cold-cache false negative — if remotes show `nostr://`, run `git fetch origin` then retry. Full output includes `nostr_url`, `maintainers`, `grasp_servers`.
 
 ## nostr:// URLs
 
