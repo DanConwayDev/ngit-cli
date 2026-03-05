@@ -220,6 +220,10 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
+        /// Overwrite local branch even if it has diverged from the published
+        /// proposal
+        #[arg(long)]
+        force: bool,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

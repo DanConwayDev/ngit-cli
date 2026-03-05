@@ -97,8 +97,8 @@ async fn main() {
                     )
                     .await
                 }
-                PrCommands::Checkout { id, offline } => {
-                    sub_commands::checkout::launch(id, *offline).await
+                PrCommands::Checkout { id, force, offline } => {
+                    sub_commands::checkout::launch(id, *force, *offline).await
                 }
                 PrCommands::Apply {
                     id,

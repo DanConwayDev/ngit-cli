@@ -28,7 +28,7 @@ use crate::{
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
-pub async fn launch(id: &str, offline: bool) -> Result<()> {
+pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
     let event_id = parse_event_id(id)?;
 
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -89,6 +89,7 @@ pub async fn launch(id: &str, offline: bool) -> Result<()> {
             &cover_letter,
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
             nostr_remote.as_ref().map(|(name, _)| name.as_str()),
+            force,
         )
     } else {
         checkout_patch(
@@ -96,6 +97,7 @@ pub async fn launch(id: &str, offline: bool) -> Result<()> {
             &cover_letter,
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
             nostr_remote.as_ref().map(|(name, _)| name.as_str()),
+            force,
         )
     }
 }
@@ -168,106 +170,155 @@ fn parse_event_id(id: &str) -> Result<EventId> {
     bail!("invalid event-id or nevent: {id}")
 }
 
+fn print_diverged_branch_help(branch_name: &str) {
+    eprintln!(
+        "{}",
+        console::style(format!(
+            "Branch '{branch_name}' has diverged from the published proposal."
+        ))
+        .yellow()
+    );
+    eprintln!(
+        "{}",
+        console::style(
+            "This may be because you have local amendments, or the author force-pushed a new revision."
+        )
+        .yellow()
+    );
+    eprintln!(
+        "{}",
+        console::style("To overwrite local branch with the published version:").yellow()
+    );
+    eprintln!(
+        "{}",
+        console::style("  ngit pr checkout --force <id>").yellow()
+    );
+    eprintln!(
+        "{}",
+        console::style("To publish your local amendments as a new revision:").yellow()
+    );
+    eprintln!("{}", console::style("  ngit push --force").yellow());
+}
+
 fn checkout_pr(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
     nostr_remote_name: Option<&str>,
+    force: bool,
 ) -> Result<()> {
     let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
     let proposal_tip_event = most_recent_proposal_patch_chain_or_pr_or_pr_update
         .first()
         .context("most_recent_proposal_patch_chain_or_pr_or_pr_update will always contain an event with c tag")?;
     let proposal_tip = tag_value(proposal_tip_event, "c")?;
+    let proposal_tip_sha1 = str_to_sha1(&proposal_tip)?;
 
-    if let Ok(local_branch_tip) = git_repo.get_tip_of_branch(&branch_name) {
+    // Case 1: branch doesn't exist yet — create it.
+    let Ok(local_branch_tip) = git_repo.get_tip_of_branch(&branch_name) else {
+        if let Some(remote_name) = nostr_remote_name {
+            let remote_branch = format!("{remote_name}/{branch_name}");
+            if git_repo.get_tip_of_branch(&remote_branch).is_ok() {
+                checkout_remote_branch_with_tracking(git_repo, remote_name, &branch_name)?;
+                println!(
+                    "checked out proposal branch '{branch_name}' with tracking to {remote_name}"
+                );
+                return Ok(());
+            }
+        }
+        fetch_oid_for_from_servers_for_pr(&proposal_tip, git_repo, repo_ref, proposal_tip_event)?;
+        git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
+        git_repo.checkout(&branch_name)?;
+        println!("created and checked out proposal branch '{branch_name}'");
+        return Ok(());
+    };
+
+    // Case 2: up to date.
+    if local_branch_tip.to_string() == proposal_tip {
         git_repo
             .checkout(&branch_name)
             .context("cannot checkout existing proposal branch")?;
-        if local_branch_tip.to_string() == proposal_tip {
-            println!("checked out up-to-date proposal branch '{branch_name}'");
-            return Ok(());
-        }
+        println!("checked out up-to-date proposal branch '{branch_name}'");
+        return Ok(());
+    }
 
-        let has_tracking = git_repo.get_upstream_for_branch(&branch_name)?.is_some();
-
-        if has_tracking {
-            println!(
-                "{}",
-                console::style(format!(
-                    "Local branch '{branch_name}' is behind. Run git pull to update."
-                ))
-                .yellow()
-            );
-            return Ok(());
-        }
-
-        if git_repo.does_commit_exist(&proposal_tip)? {
-            if git_repo.ancestor_of(&str_to_sha1(&proposal_tip)?, &local_branch_tip)? {
-                git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
-                git_repo.checkout(&branch_name)?;
-                println!("checked out proposal branch and updated tip '{branch_name}'");
-                return Ok(());
-            }
-            println!(
-                "{}",
-                console::style(format!(
-                    "Branch '{branch_name}' has diverged from proposal tip."
-                ))
-                .yellow()
-            );
-            println!("{}", console::style("To reset to proposal tip:").yellow());
-            println!(
-                "{}",
-                console::style(format!("  git reset --hard {proposal_tip}")).yellow()
-            );
-            println!(
-                "{}",
-                console::style("To rebase local commits onto proposal tip:").yellow()
-            );
-            println!(
-                "{}",
-                console::style(format!("  git rebase {proposal_tip}")).yellow()
-            );
-            bail!("branch diverged from proposal");
-        }
-
-        bail!(
-            "proposal tip {proposal_tip} not found locally and branch has no tracking remote. \n\
-             Try fetching from git servers first."
+    // Branch has a tracking remote — defer to git pull for updates.
+    if git_repo.get_upstream_for_branch(&branch_name)?.is_some() {
+        git_repo
+            .checkout(&branch_name)
+            .context("cannot checkout existing proposal branch")?;
+        println!(
+            "{}",
+            console::style(format!(
+                "Local branch '{branch_name}' is behind. Run git pull to update."
+            ))
+            .yellow()
         );
+        return Ok(());
     }
 
-    if let Some(remote_name) = nostr_remote_name {
-        let remote_branch = format!("{remote_name}/{branch_name}");
-        if git_repo.get_tip_of_branch(&remote_branch).is_ok() {
-            checkout_remote_branch_with_tracking(git_repo, remote_name, &branch_name)?;
-            println!("checked out proposal branch '{branch_name}' with tracking to {remote_name}");
+    if git_repo.does_commit_exist(&proposal_tip)? {
+        let local_is_ancestor_of_published =
+            git_repo.ancestor_of(&proposal_tip_sha1, &local_branch_tip)?;
+        let published_is_ancestor_of_local =
+            git_repo.ancestor_of(&local_branch_tip, &proposal_tip_sha1)?;
+
+        // Case 3: branch is behind — fast-forward.
+        if local_is_ancestor_of_published {
+            git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
+            git_repo.checkout(&branch_name)?;
+            println!("checked out proposal branch and updated tip '{branch_name}'");
+            return Ok(());
+        }
+
+        // Case 4: local commits on top — check out without touching them.
+        if published_is_ancestor_of_local {
+            git_repo
+                .checkout(&branch_name)
+                .context("cannot checkout existing proposal branch")?;
+            println!(
+                "checked out proposal branch '{branch_name}' (local branch has unpublished commits on top)"
+            );
             return Ok(());
         }
     }
 
-    fetch_oid_for_from_servers_for_pr(&proposal_tip, git_repo, repo_ref, proposal_tip_event)?;
-    git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
-    git_repo.checkout(&branch_name)?;
-    println!("created and checked out proposal branch '{branch_name}'");
-    Ok(())
+    // Case 5 (and tip-not-found): diverged — require --force.
+    if force {
+        fetch_oid_for_from_servers_for_pr(&proposal_tip, git_repo, repo_ref, proposal_tip_event)?;
+        git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
+        git_repo.checkout(&branch_name)?;
+        println!(
+            "checked out proposal branch '{branch_name}' updated to published tip (overwrote diverged local branch)"
+        );
+        return Ok(());
+    }
+
+    git_repo
+        .checkout(&branch_name)
+        .context("cannot checkout existing proposal branch")?;
+    print_diverged_branch_help(&branch_name);
+    bail!(
+        "branch '{branch_name}' has diverged from the published proposal; use --force to overwrite"
+    )
 }
 
+#[allow(clippy::too_many_lines)]
 fn checkout_patch(
     git_repo: &Repo,
     cover_letter: &crate::git_events::CoverLetter,
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
     nostr_remote_name: Option<&str>,
+    force: bool,
 ) -> Result<()> {
-    let (_, _master_tip) = git_repo.get_main_or_master_branch()?;
-
     if git_repo.has_outstanding_changes()? {
         bail!("working directory is not clean. Discard or stash (un)staged changes and try again.");
     }
 
     let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
+
+    // Case 1: branch doesn't exist yet — create and apply.
     let branch_exists = git_repo
         .get_local_branch_names()
         .context("failed to get local branch names")?
@@ -297,34 +348,115 @@ fn checkout_patch(
 
     let local_branch_tip = git_repo.get_tip_of_branch(&branch_name)?;
 
-    // If we can reliably determine the proposal tip commit, use it to skip
-    // re-applying when already up-to-date. If the commit tag is absent or
-    // unreliable, skip this check and let apply_patch_chain handle idempotency.
-    if let Ok(proposal_tip_str) = get_commit_id_from_patch(
+    // Resolve the published tip commit id. If we can't (no commit tag), fall
+    // through to apply_patch_chain which handles idempotency itself.
+    let Ok(proposal_tip_str) = get_commit_id_from_patch(
         most_recent_proposal_patch_chain_or_pr_or_pr_update
             .first()
             .context("there should be at least one patch")?,
-    ) {
-        if let Ok(proposal_tip) = str_to_sha1(&proposal_tip_str) {
-            if proposal_tip.eq(&local_branch_tip) {
-                git_repo.checkout(&branch_name)?;
-                println!("branch '{branch_name}' checked out and up-to-date");
-                return Ok(());
-            }
-        }
+    ) else {
+        git_repo.checkout(&branch_name)?;
+        let _ = git_repo
+            .apply_patch_chain(
+                &branch_name,
+                most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
+            )
+            .context("failed to apply patch chain")?;
+        println!("checked out updated proposal as '{branch_name}' branch");
+        return Ok(());
+    };
+
+    let Ok(proposal_tip) = str_to_sha1(&proposal_tip_str) else {
+        git_repo.checkout(&branch_name)?;
+        println!("checked out proposal as '{branch_name}' branch");
+        return Ok(());
+    };
+
+    // Case 2: already up to date.
+    if proposal_tip.eq(&local_branch_tip) {
+        git_repo.checkout(&branch_name)?;
+        println!("branch '{branch_name}' checked out and up-to-date");
+        return Ok(());
     }
 
-    // Branch exists but may need updating — re-apply the chain.
-    // apply_patch_chain handles already-applied commits idempotently.
+    // For cases 3-5 we need to know the ancestry relationship.
+    if git_repo.does_commit_exist(&proposal_tip_str)? {
+        let published_is_ancestor_of_local =
+            git_repo.ancestor_of(&local_branch_tip, &proposal_tip)?;
+        let local_is_ancestor_of_published =
+            git_repo.ancestor_of(&proposal_tip, &local_branch_tip)?;
+
+        // Case 3: branch is behind — local tip is an ancestor of the published
+        // tip, meaning the author appended new patches. Fast-forward.
+        if local_is_ancestor_of_published {
+            git_repo.checkout(&branch_name)?;
+            let _ = git_repo
+                .apply_patch_chain(
+                    &branch_name,
+                    most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
+                )
+                .context("failed to apply patch chain")?;
+            println!("checked out updated proposal as '{branch_name}' branch");
+            return Ok(());
+        }
+
+        // Case 4: local has commits stacked on top of the published tip —
+        // published tip is an ancestor of local tip. Check out without touching
+        // commits.
+        if published_is_ancestor_of_local {
+            git_repo.checkout(&branch_name)?;
+            println!(
+                "checked out proposal branch '{branch_name}' (local branch has unpublished commits on top)"
+            );
+            return Ok(());
+        }
+
+        // Case 5: diverged — neither is an ancestor of the other.
+        // This covers both local amendments and author force-pushes.
+        // Require --force to overwrite.
+        if force {
+            git_repo.checkout(&branch_name)?;
+            let _ = git_repo
+                .apply_patch_chain(
+                    &branch_name,
+                    most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
+                )
+                .context("failed to apply patch chain")?;
+            println!(
+                "checked out updated proposal as '{branch_name}' branch (overwrote diverged local branch)"
+            );
+            return Ok(());
+        }
+
+        git_repo.checkout(&branch_name)?;
+        print_diverged_branch_help(&branch_name);
+        bail!(
+            "branch '{branch_name}' has diverged from the published proposal; use --force to overwrite"
+        );
+    }
+
+    // Published tip not found locally and branch already exists — the author
+    // has published a new revision whose commits we don't have yet. Treat as
+    // diverged: require --force to overwrite.
+    if force {
+        git_repo.checkout(&branch_name)?;
+        let _ = git_repo
+            .apply_patch_chain(
+                &branch_name,
+                most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
+            )
+            .context("failed to apply patch chain")?;
+        println!(
+            "checked out updated proposal as '{branch_name}' branch (overwrote diverged local branch)"
+        );
+        return Ok(());
+    }
+
     git_repo.checkout(&branch_name)?;
-    let _ = git_repo
-        .apply_patch_chain(
-            &branch_name,
-            most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
-        )
-        .context("failed to apply patch chain")?;
-    println!("checked out updated proposal as '{branch_name}' branch");
-    Ok(())
+    print_diverged_branch_help(&branch_name);
+    bail!(
+        "branch '{branch_name}' has diverged from the published proposal; use --force to overwrite"
+    )
 }
 
 fn fetch_oid_for_from_servers_for_pr(

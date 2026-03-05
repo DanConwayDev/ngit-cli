@@ -1532,6 +1532,93 @@ pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
     Ok(())
 }
 
+/// Fetch proposals into the local cache and checkout the one matching
+/// `branch_name_in_event` using `ngit pr checkout <id>`.
+/// Requires relays to already be running.
+pub fn use_ngit_pr_checkout(
+    test_repo: &GitTestRepo,
+    branch_name_in_event: &str,
+) -> Result<()> {
+    // populate the local cache
+    let mut p = CliTester::new_from_dir(
+        &test_repo.dir,
+        [
+            "--nsec",
+            TEST_KEY_1_NSEC,
+            "--password",
+            TEST_PASSWORD,
+            "--disable-cli-spinners",
+            "pr",
+            "list",
+        ],
+    );
+    p.expect_end_eventually()?;
+
+    // resolve the event id offline from the now-populated cache
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("ngit"))
+        .env("NGITTEST", "TRUE")
+        .current_dir(&test_repo.dir)
+        .args([
+            "--nsec",
+            TEST_KEY_1_NSEC,
+            "--password",
+            TEST_PASSWORD,
+            "--disable-cli-spinners",
+            "pr",
+            "list",
+            "--json",
+            "--offline",
+        ])
+        .output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let proposals: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+        .map_err(|e| anyhow::anyhow!("failed to parse pr list json: {e}\nstdout: {stdout}"))?;
+    let entry = proposals
+        .iter()
+        .find(|p| {
+            p["branch"]
+                .as_str()
+                .map(|b| b.starts_with(&format!("pr/{branch_name_in_event}(")))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no proposal found for branch {branch_name_in_event} in: {stdout}"
+            )
+        })?;
+    let proposal_id = entry["id"].as_str().unwrap_or_default().to_string();
+
+    let status = std::process::Command::new(assert_cmd::cargo::cargo_bin("ngit"))
+        .env("NGITTEST", "TRUE")
+        .current_dir(&test_repo.dir)
+        .args([
+            "--nsec",
+            TEST_KEY_1_NSEC,
+            "--password",
+            TEST_PASSWORD,
+            "--disable-cli-spinners",
+            "pr",
+            "checkout",
+            "--offline",
+            &proposal_id,
+        ])
+        .status()?;
+    anyhow::ensure!(status.success(), "ngit pr checkout exited with {status}");
+    Ok(())
+}
+
+/// Returns (originating_repo, test_repo) with proposal branch checked out.
+/// Uses `ngit pr checkout` instead of the old interactive `ngit list`.
+pub fn create_proposals_and_repo_with_proposal_branch_checked_out(
+    branch_name_in_event: &str,
+) -> Result<(GitTestRepo, GitTestRepo)> {
+    let originating_repo = cli_tester_create_proposals()?;
+    let test_repo = GitTestRepo::default();
+    test_repo.populate()?;
+    use_ngit_pr_checkout(&test_repo, branch_name_in_event)?;
+    Ok((originating_repo, test_repo))
+}
+
 pub fn remove_latest_commit_so_proposal_branch_is_behind_and_checkout_main(
     test_repo: &GitTestRepo,
 ) -> Result<String> {
