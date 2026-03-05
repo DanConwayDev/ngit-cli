@@ -38,6 +38,7 @@ struct CommentArgs<'a> {
     /// When `None` the comment is top-level (parent == root).
     /// When `Some` the comment replies to that specific comment event.
     reply_to: Option<EventId>,
+    git_repo: &'a Repo,
     git_repo_path: &'a std::path::Path,
     body: &'a str,
     entity_name: &'a str,
@@ -60,6 +61,7 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
         root_pubkey,
         root_kind,
         reply_to,
+        git_repo,
         git_repo_path,
         body,
         entity_name,
@@ -92,7 +94,7 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
 
     // Login
     let (signer, user_ref, _) =
-        login::login_or_signup(&None, &None, &None, Some(&client), true).await?;
+        login::login_or_signup(&Some(git_repo), &None, &None, Some(&client), true).await?;
 
     let relay_hint = repo_ref
         .relays
@@ -203,6 +205,7 @@ pub async fn launch_pr_comment(
         root_pubkey,
         root_kind,
         reply_to: reply_to_id,
+        git_repo: &git_repo,
         git_repo_path,
         body,
         entity_name: "PR",
@@ -247,6 +250,7 @@ pub async fn launch_issue_comment(
         root_pubkey,
         root_kind: Kind::GitIssue,
         reply_to: reply_to_id,
+        git_repo: &git_repo,
         git_repo_path,
         body,
         entity_name: "issue",
