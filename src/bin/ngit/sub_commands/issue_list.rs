@@ -8,9 +8,9 @@ use ngit::{
 use nostr::{
     FromBech32, ToBech32,
     filter::{Alphabet, SingleLetterTag},
-    nips::nip19::Nip19,
+    nips::nip19::{Nip19, Nip19Event},
 };
-use nostr_sdk::Kind;
+use nostr_sdk::{Kind, RelayUrl};
 
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
@@ -247,17 +247,20 @@ pub async fn launch(
         } else {
             vec![]
         };
+        let relay_hint = repo_ref.relays.first();
         return show_issue_details(
             &filtered,
             event_id_or_nevent,
             json,
             show_comments,
             &comments,
+            relay_hint,
         );
     }
 
+    let relay_hint = repo_ref.relays.first();
     if json {
-        output_json(&filtered)?;
+        output_json(&filtered, relay_hint)?;
     } else {
         output_table(&filtered, &status, &label_filter);
     }
@@ -298,6 +301,7 @@ fn show_issue_details(
     json: bool,
     show_comments: bool,
     comments: &[nostr::Event],
+    relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
     let target_id = if event_id_or_nevent.starts_with("nevent") {
         let nip19 = Nip19::from_bech32(event_id_or_nevent).context("failed to parse nevent")?;
@@ -323,9 +327,10 @@ fn show_issue_details(
             let comments_json: Vec<serde_json::Value> = comments
                 .iter()
                 .map(|c| {
-                    let reply_to = comment_reply_to(c).map(|id| id.to_string());
+                    let reply_to =
+                        comment_reply_to(c).map(|id| event_id_to_nevent(id, relay_hint));
                     serde_json::json!({
-                        "id": c.id.to_string(),
+                        "id": event_id_to_nevent(c.id, relay_hint),
                         "author": c.pubkey.to_bech32().unwrap_or_default(),
                         "created_at": c.created_at.as_secs(),
                         "reply_to": reply_to,
@@ -334,7 +339,7 @@ fn show_issue_details(
                 })
                 .collect();
             serde_json::json!({
-                "id": issue.id.to_string(),
+                "id": event_id_to_nevent(issue.id, relay_hint),
                 "status": status,
                 "subject": title,
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),
@@ -345,7 +350,7 @@ fn show_issue_details(
             })
         } else {
             serde_json::json!({
-                "id": issue.id.to_string(),
+                "id": event_id_to_nevent(issue.id, relay_hint),
                 "status": status,
                 "subject": title,
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),
@@ -463,12 +468,26 @@ fn output_table(
     println!();
 }
 
-fn output_json(issues: &[IssueRow<'_>]) -> Result<()> {
+/// Convert an event ID to a `nevent1…` bech32 string, including a relay hint
+/// when one is available.  Falls back to the plain hex string on error.
+fn event_id_to_nevent(event_id: nostr::EventId, relay: Option<&RelayUrl>) -> String {
+    let relays = relay.map(|r| vec![r.clone()]).unwrap_or_default();
+    Nip19Event {
+        event_id,
+        relays,
+        author: None,
+        kind: None,
+    }
+    .to_bech32()
+    .unwrap_or_else(|_| event_id.to_hex())
+}
+
+fn output_json(issues: &[IssueRow<'_>], relay_hint: Option<&RelayUrl>) -> Result<()> {
     let json_output: Vec<serde_json::Value> = issues
         .iter()
         .map(|(issue, status_kind, labels, comment_count, subject_override)| {
             serde_json::json!({
-                "id": issue.id.to_string(),
+                "id": event_id_to_nevent(issue.id, relay_hint),
                 "status": status_kind_to_str(*status_kind),
                 "subject": get_issue_title(issue, subject_override.as_deref()),
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),

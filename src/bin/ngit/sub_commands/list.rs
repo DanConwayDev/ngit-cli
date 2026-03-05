@@ -24,9 +24,9 @@ use ngit::{
 use nostr::{
     FromBech32, ToBech32,
     filter::{Alphabet, SingleLetterTag},
-    nips::nip19::Nip19,
+    nips::nip19::{Nip19, Nip19Event},
 };
-use nostr_sdk::Kind;
+use nostr_sdk::{Kind, RelayUrl};
 
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
@@ -246,6 +246,7 @@ pub async fn launch(
                 .await?
                 .len()
         };
+        let relay_hint = repo_ref.relays.first();
         return show_proposal_details(
             &filtered_proposals,
             event_id_or_nevent,
@@ -253,11 +254,13 @@ pub async fn launch(
             show_comments,
             comment_count,
             &comments,
+            relay_hint,
         );
     }
 
+    let relay_hint = repo_ref.relays.first();
     if json {
-        output_json(&filtered_proposals)?;
+        output_json(&filtered_proposals, relay_hint)?;
     } else {
         output_table(&filtered_proposals, &status, &label_filter);
     }
@@ -384,11 +387,28 @@ fn output_table(
     );
 }
 
-fn output_json(proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)]) -> Result<()> {
+/// Convert an event ID to a `nevent1…` bech32 string, including a relay hint
+/// when one is available.  Falls back to the plain hex string on error.
+fn event_id_to_nevent(event_id: nostr::EventId, relay: Option<&RelayUrl>) -> String {
+    let relays = relay.map(|r| vec![r.clone()]).unwrap_or_default();
+    Nip19Event {
+        event_id,
+        relays,
+        author: None,
+        kind: None,
+    }
+    .to_bech32()
+    .unwrap_or_else(|_| event_id.to_hex())
+}
+
+fn output_json(
+    proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
+    relay_hint: Option<&RelayUrl>,
+) -> Result<()> {
     let json_output: Vec<serde_json::Value> = proposals
         .iter()
         .map(|(proposal, status_kind, proposal_labels, subject_override)| {
-            let id = proposal.id.to_string();
+            let id = event_id_to_nevent(proposal.id, relay_hint);
             let status = status_kind_to_str(*status_kind).to_string();
             let (title, author, branch) = if let Ok(cl) = event_to_cover_letter(proposal) {
                 (
@@ -460,6 +480,7 @@ fn show_proposal_details(
     show_comments: bool,
     comment_count: usize,
     comments: &[nostr::Event],
+    relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
     use nostr::ToBech32;
 
@@ -484,9 +505,10 @@ fn show_proposal_details(
             let comments_json: Vec<serde_json::Value> = comments
                 .iter()
                 .map(|c| {
-                    let reply_to = comment_reply_to(c).map(|id| id.to_string());
+                    let reply_to =
+                        comment_reply_to(c).map(|id| event_id_to_nevent(id, relay_hint));
                     serde_json::json!({
-                        "id": c.id.to_string(),
+                        "id": event_id_to_nevent(c.id, relay_hint),
                         "author": c.pubkey.to_bech32().unwrap_or_default(),
                         "created_at": c.created_at.as_secs(),
                         "reply_to": reply_to,
@@ -495,7 +517,7 @@ fn show_proposal_details(
                 })
                 .collect();
             serde_json::json!({
-                "id": proposal.id.to_string(),
+                "id": event_id_to_nevent(proposal.id, relay_hint),
                 "status": status_kind_to_str(*status_kind),
                 "subject": display_title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
@@ -507,7 +529,7 @@ fn show_proposal_details(
             })
         } else {
             serde_json::json!({
-                "id": proposal.id.to_string(),
+                "id": event_id_to_nevent(proposal.id, relay_hint),
                 "status": status_kind_to_str(*status_kind),
                 "subject": display_title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
