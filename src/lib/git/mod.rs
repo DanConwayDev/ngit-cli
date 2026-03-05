@@ -1089,6 +1089,22 @@ pub fn get_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<Optio
     }
 }
 
+/// Read a config item from the system-level git config only (e.g.
+/// /etc/gitconfig).
+pub fn get_git_config_item_system(item: &str) -> Result<Option<String>> {
+    let config = git2::Config::open_default().context("failed to open git config")?;
+    // Try system level first, then ProgramData (Windows equivalent)
+    for level in [git2::ConfigLevel::System, git2::ConfigLevel::ProgramData] {
+        if let Ok(level_config) = config.open_level(level) {
+            match level_config.get_entry(item) {
+                Ok(entry) => return Ok(entry.value().map(|v| v.to_string())),
+                Err(_) => continue,
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub fn save_git_config_item(git_repo: &Option<&Repo>, item: &str, value: &str) -> Result<()> {
     if let Some(git_repo) = git_repo {
         git_repo.save_git_config_item(item, value, false)

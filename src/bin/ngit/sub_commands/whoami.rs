@@ -41,8 +41,10 @@ struct WhoamiJson {
     local: Option<UserJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     global: Option<UserJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<UserJson>,
     /// The account that would be used for operations in the current context
-    /// (local takes priority over global).
+    /// (local > global > system, matching git's priority order).
     #[serde(skip_serializing_if = "Option::is_none")]
     active: Option<UserJson>,
 }
@@ -62,7 +64,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
 
     let signer_info = extract_signer_cli_arguments(args).unwrap_or(None);
 
-    // Try to load local login (silent, no prompts)
+    // Try to load login from each config level (silent, no prompts)
     let local = load_user_for_scope(
         git_repo.as_ref(),
         signer_info.as_ref(),
@@ -71,7 +73,6 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     )
     .await;
 
-    // Try to load global login (silent, no prompts)
     let global = load_user_for_scope(
         git_repo.as_ref(),
         signer_info.as_ref(),
@@ -80,44 +81,66 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     )
     .await;
 
+    let system = load_user_for_scope(
+        git_repo.as_ref(),
+        signer_info.as_ref(),
+        client.as_ref(),
+        SignerInfoSource::GitSystem,
+    )
+    .await;
+
     if let Some(client) = client {
         client.disconnect().await?;
     }
 
+    // Active account follows git's priority order: local > global > system
+    let active_scope = if local.is_some() {
+        Some("local")
+    } else if global.is_some() {
+        Some("global")
+    } else if system.is_some() {
+        Some("system")
+    } else {
+        None
+    };
+
     if command_args.json {
-        // active = local if present, else global
-        let active = local
-            .as_ref()
-            .map(|u| make_user_json(u, "local"))
-            .or_else(|| global.as_ref().map(|u| make_user_json(u, "global")));
+        let active = active_scope.and_then(|scope| match scope {
+            "local" => local.as_ref().map(|u| make_user_json(u, scope)),
+            "global" => global.as_ref().map(|u| make_user_json(u, scope)),
+            "system" => system.as_ref().map(|u| make_user_json(u, scope)),
+            _ => None,
+        });
 
         let output = WhoamiJson {
             local: local.as_ref().map(|u| make_user_json(u, "local")),
             global: global.as_ref().map(|u| make_user_json(u, "global")),
+            system: system.as_ref().map(|u| make_user_json(u, "system")),
             active,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if local.is_none() && global.is_none() && system.is_none() {
+        println!("not logged in");
+        println!();
+        println!("use `ngit account login` to log in");
     } else {
-        match (local.as_ref(), global.as_ref()) {
-            (None, None) => {
-                println!("not logged in");
-                println!();
-                println!("use `ngit account login` to log in");
-            }
-            (Some(u), None) => {
-                println!("logged in to local repository as:");
+        type UserEntry = Option<(String, String, Option<String>)>;
+        let entries: &[(&str, &UserEntry)] =
+            &[("local", &local), ("global", &global), ("system", &system)];
+        let mut first = true;
+        for (scope, user) in entries {
+            if let Some(u) = user {
+                if !first {
+                    println!();
+                }
+                first = false;
+                let is_active = active_scope == Some(scope);
+                if is_active {
+                    println!("{scope} (active):");
+                } else {
+                    println!("{scope}:");
+                }
                 print_user_human(u);
-            }
-            (None, Some(u)) => {
-                println!("logged in globally as:");
-                print_user_human(u);
-            }
-            (Some(local_u), Some(global_u)) => {
-                println!("local (active):");
-                print_user_human(local_u);
-                println!();
-                println!("global:");
-                print_user_human(global_u);
             }
         }
     }

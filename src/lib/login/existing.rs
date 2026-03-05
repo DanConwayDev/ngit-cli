@@ -18,7 +18,7 @@ use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptPasswordParms},
     client::fetch_public_key,
-    git::{Repo, RepoActions, get_git_config_item},
+    git::{Repo, RepoActions, get_git_config_item, get_git_config_item_system},
 };
 
 /// load signer from git config and UserProfile from cache or relays
@@ -62,7 +62,8 @@ pub async fn load_existing_login(
     Ok((signer, user_ref, source))
 }
 
-/// priority order: cli arguments, local git config, global git config
+/// priority order: cli arguments, local git config, global git config, system
+/// git config
 pub fn get_signer_info(
     git_repo: &Option<&Repo>,
     signer_info: &Option<SignerInfo>,
@@ -82,6 +83,7 @@ pub fn get_signer_info(
                     SignerInfoSource::CommandLineArguments,
                     SignerInfoSource::GitLocal,
                     SignerInfoSource::GitGlobal,
+                    SignerInfoSource::GitSystem,
                 ]
             } {
                 if let Ok(res) =
@@ -91,7 +93,7 @@ pub fn get_signer_info(
                     break;
                 }
             }
-            result.context("failed to get or find signer info in cli arguments, local git config or global git config")?
+            result.context("failed to get or find signer info in cli arguments, local git config, global git config or system git config")?
         }
         Some(SignerInfoSource::CommandLineArguments) => {
             if let Some(signer_info) = signer_info {
@@ -156,6 +158,33 @@ pub fn get_signer_info(
                 }, SignerInfoSource::GitGlobal)
             } else {
                 bail!("no signer info in global git config")
+            }
+        }
+        Some(SignerInfoSource::GitSystem) => {
+            if let Some(nsec) = get_git_config_item_system("nostr.nsec")
+                .context("failed to get system git config")?
+            {
+                (
+                    SignerInfo::Nsec {
+                        nsec: nsec.to_string(),
+                        password: password.clone(),
+                        npub: get_git_config_item_system("nostr.npub")
+                            .context("failed to get system git config")?,
+                    },
+                    SignerInfoSource::GitSystem,
+                )
+            } else if let Some(bunker_uri) = get_git_config_item_system("nostr.bunker-uri")
+                .context("failed to get system git config")?
+            {
+                (SignerInfo::Bunker {
+                    bunker_uri, bunker_app_key: get_git_config_item_system("nostr.bunker-app-key")
+                    .context("failed to get system git config")?
+                    .context("system git config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?,
+                    npub: get_git_config_item_system("nostr.npub")
+                        .context("failed to get system git config")?,
+                }, SignerInfoSource::GitSystem)
+            } else {
+                bail!("no signer info in system git config")
             }
         }
     })

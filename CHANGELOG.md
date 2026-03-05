@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ngit account whoami` now detects and displays login credentials set at the system git config level (`/etc/gitconfig`), and falls back to system config during normal operations when no local or global credentials are found
+
 ### Added
 
 - Cover notes (kind 1624, experimental): a new event kind that lets the author or a maintainer attach context or a summary to a pr/issue. designed to pinned to the top of long threads.

@@ -65,6 +65,7 @@ pub enum SignerInfo {
 pub enum SignerInfoSource {
     GitLocal,
     GitGlobal,
+    GitSystem,
     CommandLineArguments,
 }
 
@@ -91,6 +92,7 @@ fn print_logged_in_as(
             SignerInfoSource::CommandLineArguments => " via cli arguments",
             SignerInfoSource::GitLocal => " to local repository",
             SignerInfoSource::GitGlobal => "",
+            SignerInfoSource::GitSystem => " via system git config",
         }
     );
     Ok(())
