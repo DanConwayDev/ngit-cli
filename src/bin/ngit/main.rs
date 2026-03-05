@@ -102,17 +102,17 @@ async fn main() {
                 PrCommands::Send(sub_args) => {
                     sub_commands::send::launch(&cli, sub_args, false).await
                 }
-                PrCommands::Close { id, offline } => {
-                    sub_commands::pr_status::launch_close(id, *offline).await
+                PrCommands::Close { id, reason, offline } => {
+                    sub_commands::pr_status::launch_close(id, *offline, reason.as_deref()).await
                 }
-                PrCommands::Reopen { id, offline } => {
-                    sub_commands::pr_status::launch_reopen(id, *offline).await
+                PrCommands::Reopen { id, reason, offline } => {
+                    sub_commands::pr_status::launch_reopen(id, *offline, reason.as_deref()).await
                 }
-                PrCommands::Ready { id, offline } => {
-                    sub_commands::pr_status::launch_ready(id, *offline).await
+                PrCommands::Ready { id, reason, offline } => {
+                    sub_commands::pr_status::launch_ready(id, *offline, reason.as_deref()).await
                 }
-                PrCommands::Draft { id, offline } => {
-                    sub_commands::pr_status::launch_draft(id, *offline).await
+                PrCommands::Draft { id, reason, offline } => {
+                    sub_commands::pr_status::launch_draft(id, *offline, reason.as_deref()).await
                 }
                 PrCommands::Comment {
                     id,
@@ -188,8 +188,8 @@ async fn main() {
                     sub_commands::issue_status::launch_resolved(id, *offline, reason.as_deref())
                         .await
                 }
-                IssueCommands::Reopen { id, offline } => {
-                    sub_commands::issue_status::launch_reopen(id, *offline).await
+                IssueCommands::Reopen { id, reason, offline } => {
+                    sub_commands::issue_status::launch_reopen(id, *offline, reason.as_deref()).await
                 }
                 IssueCommands::Comment {
                     id,

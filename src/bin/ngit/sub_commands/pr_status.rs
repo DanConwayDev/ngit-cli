@@ -193,18 +193,18 @@ async fn launch_status(
     Ok(())
 }
 
-pub async fn launch_close(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusClosed, "closed", None).await
+pub async fn launch_close(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusClosed, "closed", reason).await
 }
 
-pub async fn launch_reopen(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "reopened", None).await
+pub async fn launch_reopen(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusOpen, "reopened", reason).await
 }
 
-pub async fn launch_ready(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "marked as ready", None).await
+pub async fn launch_ready(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusOpen, "marked as ready", reason).await
 }
 
-pub async fn launch_draft(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusDraft, "converted to draft", None).await
+pub async fn launch_draft(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusDraft, "converted to draft", reason).await
 }

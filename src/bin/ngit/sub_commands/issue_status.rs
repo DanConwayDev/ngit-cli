@@ -183,8 +183,8 @@ pub async fn launch_close(id: &str, offline: bool, reason: Option<&str>) -> Resu
     launch_status(id, offline, Kind::GitStatusClosed, "closed", reason).await
 }
 
-pub async fn launch_reopen(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "reopened", None).await
+pub async fn launch_reopen(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusOpen, "reopened", reason).await
 }
 
 pub async fn launch_resolved(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {

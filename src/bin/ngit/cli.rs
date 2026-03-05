@@ -248,6 +248,9 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
+        /// Optional reason stored in event content
+        #[arg(long)]
+        reason: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -257,6 +260,9 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
+        /// Optional reason stored in event content
+        #[arg(long)]
+        reason: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -266,6 +272,9 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
+        /// Optional reason stored in event content
+        #[arg(long)]
+        reason: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -275,6 +284,9 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
+        /// Optional reason stored in event content
+        #[arg(long)]
+        reason: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -414,6 +426,9 @@ pub enum IssueCommands {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
+        /// Optional reason stored in event content
+        #[arg(long)]
+        reason: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

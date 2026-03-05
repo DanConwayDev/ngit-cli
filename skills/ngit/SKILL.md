@@ -119,10 +119,10 @@ git push origin main      # push to nostr remote records the merge event
 ### Lifecycle
 
 ```bash
-ngit pr close <ID|nevent>
-ngit pr reopen <ID|nevent>
-ngit pr ready <ID|nevent>   # mark draft as ready for review
-ngit pr draft <ID|nevent>   # convert back to draft
+ngit pr close <ID|nevent> --reason "blocked by upstream"
+ngit pr reopen <ID|nevent> --reason "fix was incomplete"
+ngit pr ready <ID|nevent> --reason "addressed review feedback"
+ngit pr draft <ID|nevent> --reason "needs more work"
 ngit pr label <ID|nevent> --label bug --label enhancement
 ```
 
@@ -138,9 +138,9 @@ ngit issue view <ID|nevent> --json
 ngit issue view <ID|nevent> --json --comments
 ngit issue comment <ID|nevent> --body "Reproduced on v2.1"
 ngit issue comment <ID|nevent> --body "Thanks!" --reply-to <comment-ID|nevent>
-ngit issue close <ID|nevent> --reason "wontfix"        # closed without resolution
+ngit issue close <ID|nevent> --reason "wontfix"
 ngit issue resolved <ID|nevent> --reason "fixed in abc123"
-ngit issue reopen <ID|nevent>
+ngit issue reopen <ID|nevent> --reason "regression in v2.3"
 ngit issue label <ID|nevent> --label bug --label enhancement
 ```
 
