@@ -30,7 +30,13 @@ fn parse_event_id(id: &str) -> Result<EventId> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) -> Result<()> {
+async fn launch_status(
+    id: &str,
+    offline: bool,
+    new_kind: Kind,
+    action: &str,
+    reason: Option<&str>,
+) -> Result<()> {
     let event_id = parse_event_id(id)?;
 
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -64,7 +70,7 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
 
     // Only author or maintainer may change status
     if issue.pubkey != user_pubkey && !repo_ref.maintainers.contains(&user_pubkey) {
-        bail!("only the issue author or a repository maintainer can {action} an issue");
+        bail!("only the issue author or a repository maintainer can change the status of an issue");
     }
 
     // Fetch existing statuses to check current state
@@ -96,6 +102,7 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
         let status_str = match new_kind {
             Kind::GitStatusOpen => "open",
             Kind::GitStatusClosed => "closed",
+            Kind::GitStatusApplied => "resolved",
             _ => "unknown",
         };
         println!("issue is already {status_str}");
@@ -105,6 +112,7 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
     let alt_text = match new_kind {
         Kind::GitStatusOpen => "issue reopened",
         Kind::GitStatusClosed => "issue closed",
+        Kind::GitStatusApplied => "issue resolved",
         _ => "issue status updated",
     };
 
@@ -112,8 +120,10 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
         repo_ref.maintainers.iter().copied().collect();
     public_keys.insert(issue.pubkey);
 
+    let content = reason.unwrap_or("").to_string();
+
     let status_event = sign_event(
-        EventBuilder::new(new_kind, "").tags(
+        EventBuilder::new(new_kind, content).tags(
             [
                 vec![
                     Tag::custom(
@@ -147,7 +157,7 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
             .concat(),
         ),
         &signer,
-        format!("{action} issue"),
+        format!("issue {action}"),
     )
     .await?;
 
@@ -165,14 +175,18 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
     )
     .await?;
 
-    println!("issue {} {}d", &event_id.to_hex()[..8], action,);
+    println!("issue {} {action}", &event_id.to_hex()[..8]);
     Ok(())
 }
 
-pub async fn launch_close(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusClosed, "close").await
+pub async fn launch_close(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusClosed, "closed", reason).await
 }
 
 pub async fn launch_reopen(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "reopen").await
+    launch_status(id, offline, Kind::GitStatusOpen, "reopened", None).await
+}
+
+pub async fn launch_resolved(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusApplied, "resolved", reason).await
 }

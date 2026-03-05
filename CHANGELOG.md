@@ -13,18 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ngit issue label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing issue (author or maintainer only); publishes a kind-1985 event; duplicate labels already present via `t` tags or prior kind-1985 events are silently skipped; the new event is saved to the local cache before broadcasting so subsequent reads reflect the change immediately
 - `ngit pr label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing PR (author or maintainer only); publishes a kind-1985 event; duplicate labels already present via `t` tags or prior kind-1985 events are silently skipped; the new event is saved to the local cache before broadcasting so subsequent reads reflect the change immediately
 - `ngit account whoami` — show the currently logged-in account(s)
-- `ngit pr` subcommand group: `list`, `view`, `checkout`, `apply`, `send`, `close`, `reopen`, `ready`, `comment`, `merge`; replaces the former top-level `ngit list`, `ngit checkout`, and `ngit apply` commands (hard-migrated); `ngit send` remains at the top level unchanged
+- `ngit pr` subcommand group: `list`, `view`, `checkout`, `apply`, `send`, `close`, `reopen`, `ready`, `draft`, `comment`, `merge`; replaces the former top-level `ngit list`, `ngit checkout`, and `ngit apply` commands (hard-migrated); `ngit send` remains at the top level unchanged
 - `ngit pr view <id>` — view a PR with its full details and all comments (author, timestamp, body) in chronological order
 - `ngit pr close <id>` / `ngit pr reopen <id>` — change PR status (author or maintainer only)
 - `ngit pr ready <id>` — mark a draft PR as ready for review (author or maintainer only)
+- `ngit pr draft <id>` — convert a PR back to draft (author or maintainer only)
 - `ngit pr comment <id> --body <text>` — post a NIP-22 comment on a PR
 - `ngit pr merge <id> [--squash]` — merge a PR branch and publish a `GitStatusApplied` event (maintainer only); prints a reminder to push afterwards
-- `ngit issue` subcommand group expanded: `list`, `view`, `create`, `close`, `reopen`, `comment`
+- `ngit issue` subcommand group: `list`, `view`, `create`, `close`, `resolved`, `reopen`, `comment`, `label`
 - `ngit issue view <id>` — view an issue with its full details and all comments (author, timestamp, body) in chronological order
 - `ngit issue create --title <T> [--body <B>] [--label <L>...]` — publish a NIP-34 GitIssue event
-- `ngit issue close <id>` / `ngit issue reopen <id>` — change issue status (author or maintainer only)
+- `ngit issue close <id> [--reason <text>]` — close an issue without resolving it; reason is stored in the event content (author or maintainer only)
+- `ngit issue resolved <id> [--reason <text>]` — mark an issue as resolved (kind-1631 `GitStatusApplied`); distinct from close, use when the issue has been fixed; reason stored in event content (author or maintainer only)
+- `ngit issue reopen <id>` — reopen a closed or resolved issue (author or maintainer only)
 - `ngit issue comment <id> --body <text>` — post a NIP-22 comment on an issue
-- `ngit issue list` command: lists NIP-34 issues with their status; supports `--status` (comma-separated: open,draft,closed,applied; default: open), `--hashtag` (comma-separated label filter), `--json`, `--offline`, and an optional `<id>` positional argument to show full details of a specific issue; hashtags are shown at the end of each row
+- `ngit issue list` command: lists NIP-34 issues with their status; supports `--status` (comma-separated: open,draft,closed,applied; default: open), `--label` filter, `--json`, `--offline`, and an optional `<id>` positional argument to show full details of a specific issue
 - `nostr.repo-relay-only` git config key: when set to `true`, nostr events are sent only to the repository's own relays, skipping the user's personal write relays and default/blaster relays; set persistently via `git config nostr.repo-relay-only true` or in one step with `ngit init --repo-relay-only`
 
 ## [2.2.3] - 2026-02-27

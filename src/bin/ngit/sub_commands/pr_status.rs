@@ -30,7 +30,13 @@ fn parse_event_id(id: &str) -> Result<EventId> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) -> Result<()> {
+async fn launch_status(
+    id: &str,
+    offline: bool,
+    new_kind: Kind,
+    action: &str,
+    reason: Option<&str>,
+) -> Result<()> {
     let event_id = parse_event_id(id)?;
 
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -65,7 +71,7 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
 
     // Only author or maintainer may change status
     if proposal.pubkey != user_pubkey && !repo_ref.maintainers.contains(&user_pubkey) {
-        bail!("only the PR author or a repository maintainer can {action} a PR");
+        bail!("only the PR author or a repository maintainer can change the status of a PR");
     }
 
     // Fetch existing statuses to check current state
@@ -124,8 +130,10 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
         repo_ref.maintainers.iter().copied().collect();
     public_keys.insert(proposal.pubkey);
 
+    let content = reason.unwrap_or("").to_string();
+
     let status_event = sign_event(
-        EventBuilder::new(new_kind, "").tags(
+        EventBuilder::new(new_kind, content).tags(
             [
                 vec![
                     Tag::custom(
@@ -159,7 +167,7 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
             .concat(),
         ),
         &signer,
-        format!("{action} PR"),
+        format!("PR {action}"),
     )
     .await?;
 
@@ -178,22 +186,25 @@ async fn launch_status(id: &str, offline: bool, new_kind: Kind, action: &str) ->
     .await?;
 
     println!(
-        "PR {} {}d: {}",
+        "PR {} {action}: {}",
         &event_id.to_hex()[..8],
-        action,
         proposal.pubkey.to_bech32().unwrap_or_default()
     );
     Ok(())
 }
 
 pub async fn launch_close(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusClosed, "close").await
+    launch_status(id, offline, Kind::GitStatusClosed, "closed", None).await
 }
 
 pub async fn launch_reopen(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "reopen").await
+    launch_status(id, offline, Kind::GitStatusOpen, "reopened", None).await
 }
 
 pub async fn launch_ready(id: &str, offline: bool) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "mark as ready").await
+    launch_status(id, offline, Kind::GitStatusOpen, "marked as ready", None).await
+}
+
+pub async fn launch_draft(id: &str, offline: bool) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusDraft, "converted to draft", None).await
 }

@@ -111,6 +111,9 @@ async fn main() {
                 PrCommands::Ready { id, offline } => {
                     sub_commands::pr_status::launch_ready(id, *offline).await
                 }
+                PrCommands::Draft { id, offline } => {
+                    sub_commands::pr_status::launch_draft(id, *offline).await
+                }
                 PrCommands::Comment {
                     id,
                     body,
@@ -178,8 +181,12 @@ async fn main() {
                     sub_commands::issue_create::launch(title.clone(), body.clone(), labels.clone())
                         .await
                 }
-                IssueCommands::Close { id, offline } => {
-                    sub_commands::issue_status::launch_close(id, *offline).await
+                IssueCommands::Close { id, reason, offline } => {
+                    sub_commands::issue_status::launch_close(id, *offline, reason.as_deref()).await
+                }
+                IssueCommands::Resolved { id, reason, offline } => {
+                    sub_commands::issue_status::launch_resolved(id, *offline, reason.as_deref())
+                        .await
                 }
                 IssueCommands::Reopen { id, offline } => {
                     sub_commands::issue_status::launch_reopen(id, *offline).await

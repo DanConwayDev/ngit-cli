@@ -270,6 +270,15 @@ pub enum PrCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// convert a PR back to draft (author or maintainer only)
+    Draft {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
     /// add a comment to a PR
     Comment {
         /// Proposal event-id (hex) or nevent (bech32)
@@ -373,11 +382,29 @@ pub enum IssueCommands {
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
     },
-    /// close an issue (author or maintainer only)
+    /// close an issue without resolving it (author or maintainer only)
     Close {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
+        /// Optional reason (e.g. wontfix, duplicate, invalid)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// mark an issue as resolved (author or maintainer only)
+    #[command(
+        long_about = "mark an issue as resolved (author or maintainer only)\n\nuse this when the issue has been fixed or addressed, as distinct from closing without resolution"
+    )]
+    Resolved {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Optional reason or resolution summary
+        #[arg(long)]
+        reason: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
