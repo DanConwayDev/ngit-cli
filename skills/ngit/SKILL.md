@@ -54,8 +54,7 @@ Standard git commands work directly with these URLs — `git-remote-nostr` resol
 ## Publishing a repo
 
 ```bash
-ngit init                                                        # interactive
-ngit init --name "My Project" --description "What it does" -d   # non-interactive
+ngit init --name "My Project" --description "What it does" -d # uses user's preferred grasp server or falls back to defaults
 ngit repo edit --description "New description"                   # update metadata
 ngit repo --json --offline                                       # view repo info (check nostr_url field)
 ```
@@ -80,7 +79,7 @@ git push -u origin pr/my-feature \
   -o 'description=Summary.\n\nDetail here.'
 ```
 
-Push options `title=` and `description=` are required. Use `\n\n` for paragraph breaks.
+Push options `title=` and `description=` are required. Use `\n\n` for paragraph breaks. `git push` or `git push --force` can update existing prs.
 
 ### Advanced: ngit send
 
@@ -99,14 +98,13 @@ ngit pr list --json --label bug
 ngit pr view <ID|nevent> --json
 ngit pr view <ID|nevent> --json --comments
 ngit pr comment <ID|nevent> --body "Looks good"
-ngit pr comment <ID|nevent> --body "Fixed!" --reply-to <comment-ID>
+ngit pr comment <ID|nevent> --body "Fixed!" --reply-to <comment-ID|nevent>
 ```
 
 ### Checkout / apply
 
 ```bash
 ngit pr checkout <ID|nevent>
-ngit pr apply <ID|nevent>
 ```
 
 ### Merge (maintainer)
@@ -129,7 +127,7 @@ ngit pr ready <ID|nevent>   # mark draft as ready for review
 ## Issues
 
 ```bash
-ngit issue create --title "Bug title" --body "Details" --label bug
+ngit issue create --title "Bug title" --body "Details as markdown" --label bug
 ngit issue create --title "Feature" --body "..." --label enhancement --label help-wanted
 ngit issue list --json
 ngit issue list --json --status closed
@@ -137,7 +135,7 @@ ngit issue list --json --label bug
 ngit issue view <ID|nevent> --json
 ngit issue view <ID|nevent> --json --comments
 ngit issue comment <ID|nevent> --body "Reproduced on v2.1"
-ngit issue comment <ID|nevent> --body "Thanks!" --reply-to <comment-ID>
+ngit issue comment <ID|nevent> --body "Thanks!" --reply-to <comment-ID|nevent>
 ngit issue close <ID|nevent>
 ngit issue reopen <ID|nevent>
 ```
@@ -164,14 +162,14 @@ ngit sync --ref-name main        # sync specific ref
 
 ## Key flags
 
-| Flag | Description |
-| --- | --- |
-| `-d`, `--defaults` | Non-interactive; use sensible defaults |
-| `--offline` | Local cache only, skip network |
-| `--json` | Structured output (ngit commands only) |
+| Flag                  | Description                            |
+| --------------------- | -------------------------------------- |
+| `-d`, `--defaults`    | Non-interactive; use sensible defaults |
+| `--offline`           | Local cache only, skip network         |
+| `--json`              | Structured output (ngit commands only) |
 | `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
-| `-f`, `--force` | Bypass safety guards |
-| `-v`, `--verbose` | Verbose output |
+| `-f`, `--force`       | Bypass safety guards                   |
+| `-v`, `--verbose`     | Verbose output                         |
 
 ## git config
 
