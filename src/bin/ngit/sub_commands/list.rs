@@ -413,7 +413,7 @@ fn output_json(proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)])
             serde_json::json!({
                 "id": id,
                 "status": status,
-                "title": title,
+                "subject": title,
                 "author": author,
                 "branch": branch,
                 "labels": proposal_labels,
@@ -497,7 +497,7 @@ fn show_proposal_details(
             serde_json::json!({
                 "id": proposal.id.to_string(),
                 "status": status_kind_to_str(*status_kind),
-                "title": display_title,
+                "subject": display_title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
                 "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                 "labels": proposal_labels,
@@ -509,7 +509,7 @@ fn show_proposal_details(
             serde_json::json!({
                 "id": proposal.id.to_string(),
                 "status": status_kind_to_str(*status_kind),
-                "title": display_title,
+                "subject": display_title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
                 "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                 "labels": proposal_labels,
@@ -521,7 +521,7 @@ fn show_proposal_details(
         return Ok(());
     }
 
-    println!("Title:    {display_title}");
+    println!("Subject:  {display_title}");
     println!(
         "Author:   {}",
         proposal.pubkey.to_bech32().unwrap_or_default()

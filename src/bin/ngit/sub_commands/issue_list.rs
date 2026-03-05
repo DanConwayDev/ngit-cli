@@ -336,7 +336,7 @@ fn show_issue_details(
             serde_json::json!({
                 "id": issue.id.to_string(),
                 "status": status,
-                "title": title,
+                "subject": title,
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),
                 "labels": labels,
                 "comment_count": comment_count,
@@ -347,7 +347,7 @@ fn show_issue_details(
             serde_json::json!({
                 "id": issue.id.to_string(),
                 "status": status,
-                "title": title,
+                "subject": title,
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),
                 "labels": labels,
                 "comment_count": comment_count,
@@ -358,7 +358,7 @@ fn show_issue_details(
         return Ok(());
     }
 
-    println!("Title:    {title}");
+    println!("Subject:  {title}");
     println!("Author:   {}", issue.pubkey.to_bech32().unwrap_or_default());
     println!("Status:   {status}");
     if !labels.is_empty() {
@@ -470,7 +470,7 @@ fn output_json(issues: &[IssueRow<'_>]) -> Result<()> {
             serde_json::json!({
                 "id": issue.id.to_string(),
                 "status": status_kind_to_str(*status_kind),
-                "title": get_issue_title(issue, subject_override.as_deref()),
+                "subject": get_issue_title(issue, subject_override.as_deref()),
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),
                 "labels": labels,
                 "comment_count": comment_count,

@@ -397,9 +397,9 @@ pub enum IssueCommands {
     },
     /// create a new issue
     Create {
-        /// Issue title
-        #[arg(long)]
-        title: Option<String>,
+        /// Issue subject/title
+        #[arg(long, alias = "title")]
+        subject: Option<String>,
         /// Issue body / description
         #[arg(long)]
         body: Option<String>,

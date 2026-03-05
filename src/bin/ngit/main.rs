@@ -179,11 +179,11 @@ async fn main() {
                     .await
                 }
                 IssueCommands::Create {
-                    title,
+                    subject,
                     body,
                     labels,
                 } => {
-                    sub_commands::issue_create::launch(title.clone(), body.clone(), labels.clone())
+                    sub_commands::issue_create::launch(subject.clone(), body.clone(), labels.clone())
                         .await
                 }
                 IssueCommands::Close { id, reason, offline } => {

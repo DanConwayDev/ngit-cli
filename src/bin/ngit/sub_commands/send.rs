@@ -38,9 +38,9 @@ pub struct SubCommandArgs {
     /// don't prompt for a cover letter
     #[arg(long, action)]
     pub(crate) no_cover_letter: bool,
-    /// optional cover letter title
-    #[clap(long)]
-    pub(crate) title: Option<String>,
+    /// optional cover letter subject/title
+    #[clap(long, alias = "title")]
+    pub(crate) subject: Option<String>,
     #[clap(long)]
     /// optional cover letter description
     pub(crate) description: Option<String>,
@@ -73,23 +73,23 @@ fn validate_send_args(cli: &Cli, args: &SubCommandArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Description requires title
-    if args.description.is_some() && args.title.is_none() {
-        let message = "ngit send requires --title when --description is provided";
-        let details = vec![("--title <T>", "cover letter title")];
+    // Description requires subject
+    if args.description.is_some() && args.subject.is_none() {
+        let message = "ngit send requires --subject when --description is provided";
+        let details = vec![("--subject <T>", "cover letter subject")];
         let suggestions = vec![
-            "ngit send HEAD~2 --title \"My Feature\" --description \"Details\"",
+            "ngit send HEAD~2 --subject \"My Feature\" --description \"Details\"",
             "ngit send --interactive",
         ];
         return Err(cli_error(message, &details, &suggestions));
     }
 
-    // Title requires description
-    if args.title.is_some() && args.description.is_none() {
-        let message = "ngit send requires --description when --title is provided";
+    // Subject requires description
+    if args.subject.is_some() && args.description.is_none() {
+        let message = "ngit send requires --description when --subject is provided";
         let details = vec![("--description <D>", "cover letter description")];
         let suggestions = vec![
-            "ngit send HEAD~2 --title \"My Feature\" --description \"Details\"",
+            "ngit send HEAD~2 --subject \"My Feature\" --description \"Details\"",
             "ngit send --interactive",
         ];
         return Err(cli_error(message, &details, &suggestions));
@@ -105,8 +105,8 @@ fn validate_send_args(cli: &Cli, args: &SubCommandArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Both title and description provided - all good
-    if args.title.is_some() && args.description.is_some() {
+    // Both subject and description provided - all good
+    if args.subject.is_some() && args.description.is_some() {
         return Ok(());
     }
 
@@ -121,11 +121,11 @@ fn validate_send_args(cli: &Cli, args: &SubCommandArgs) -> Result<()> {
     if args.since_or_range.is_empty() {
         details.push(("<SINCE_OR_RANGE>", "commits to send (eg. HEAD~2)"));
     }
-    details.push(("--title <T> --description <D>", "cover letter details"));
+    details.push(("--subject <T> --description <D>", "cover letter details"));
     details.push(("-d, --defaults", "use sensible defaults"));
     details.push(("--interactive", "prompt for values"));
     let suggestions = vec![
-        "ngit send HEAD~2 --title \"My Feature\" --description \"Details\"",
+        "ngit send HEAD~2 --subject \"My Feature\" --description \"Details\"",
         "ngit send --defaults",
         "ngit send --interactive",
     ];
@@ -252,13 +252,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let cover_letter_title_description = if cli_args.interactive {
         // Interactive flow: prompt for cover letter confirm, title, description
         let title = if as_pr {
-            match &args.title {
+            match &args.subject {
                 Some(t) => Some(t.clone()),
                 None => {
                     if root_proposal.is_none() {
                         Some(
                             Interactor::default()
-                                .input(PromptInputParms::default().with_prompt("title"))?
+                                .input(PromptInputParms::default().with_prompt("subject"))?
                                 .clone(),
                         )
                     } else {
@@ -269,7 +269,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         } else if args.no_cover_letter {
             None
         } else {
-            match &args.title {
+            match &args.subject {
                 Some(t) => Some(t.clone()),
                 None => {
                     if Interactor::default().confirm(
@@ -279,7 +279,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                     )? {
                         Some(
                             Interactor::default()
-                                .input(PromptInputParms::default().with_prompt("title"))?
+                                .input(PromptInputParms::default().with_prompt("subject"))?
                                 .clone(),
                         )
                     } else {
@@ -305,12 +305,12 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
     } else if as_pr {
         // PR always needs cover letter
-        let title = match &args.title {
+        let title = match &args.subject {
             Some(t) => t.clone(),
             None if cli_args.defaults => {
                 git_repo.get_commit_message_summary(commits.first().context("no commits")?)?
             }
-            None => bail!("PR requires --title and --description (or use --defaults)"),
+            None => bail!("PR requires --subject and --description (or use --defaults)"),
         };
         let description = match &args.description {
             Some(d) => d.clone(),
@@ -324,15 +324,15 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                     .trim()
                     .to_string()
             }
-            None => bail!("PR requires --title and --description (or use --defaults)"),
+            None => bail!("PR requires --subject and --description (or use --defaults)"),
         };
         Some((title, description))
     } else {
         // Patch mode
-        match (&args.title, &args.description) {
+        match (&args.subject, &args.description) {
             (Some(t), Some(d)) => Some((t.clone(), d.clone())),
-            (Some(_), None) => bail!("--title requires --description"),
-            (None, Some(_)) => bail!("--description requires --title"),
+            (Some(_), None) => bail!("--subject requires --description"),
+            (None, Some(_)) => bail!("--description requires --subject"),
             (None, None) => None, // no cover letter
         }
     };

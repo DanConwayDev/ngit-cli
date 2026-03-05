@@ -84,7 +84,7 @@ Push options `title=` and `description=` are required. Use `\n\n` for paragraph 
 ### Advanced: ngit send
 
 ```bash
-ngit send HEAD~2 --title "My Feature" --description "Details"
+ngit send HEAD~2 --subject "My Feature" --description "Details"
 ngit send --defaults                                    # non-interactive
 ngit send HEAD~2 --in-reply-to <PR-event-id>           # update existing PR
 ```
@@ -130,8 +130,8 @@ ngit pr set-subject <ID|nevent> --subject "New title"
 ## Issues
 
 ```bash
-ngit issue create --title "Bug title" --body "Details as markdown" --label bug
-ngit issue create --title "Feature" --body "..." --label enhancement --label help-wanted
+ngit issue create --subject "Bug title" --body "Details as markdown" --label bug
+ngit issue create --subject "Feature" --body "..." --label enhancement --label help-wanted
 ngit issue list --json
 ngit issue list --json --status closed
 ngit issue list --json --label bug
