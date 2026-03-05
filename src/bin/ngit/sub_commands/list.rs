@@ -16,7 +16,7 @@ use ngit::{
     fetch::fetch_from_git_server,
     git_events::{
         KIND_COMMENT, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        get_commit_id_from_patch, get_labels,
+        get_commit_id_from_patch, get_labels_and_subject,
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
@@ -203,7 +203,7 @@ pub async fn launch(
     // OR filter: proposal must have at least one of the requested labels.
     let label_filter: HashSet<String> = labels.iter().map(|l| l.trim().to_lowercase()).collect();
 
-    let filtered_proposals: Vec<(&nostr::Event, Kind, Vec<String>)> = proposals
+    let filtered_proposals: Vec<(&nostr::Event, Kind, Vec<String>, Option<String>)> = proposals
         .iter()
         .filter_map(|p| {
             let status_kind = get_status(p, &repo_ref, &statuses, &proposals);
@@ -217,7 +217,8 @@ pub async fn launch(
             if !status_filter.contains(status_str) && !status_filter.contains("unknown") {
                 return None;
             }
-            let proposal_labels = get_labels(p, &repo_ref, &label_events);
+            let (proposal_labels, subject_override) =
+                get_labels_and_subject(p, &repo_ref, &label_events);
             if !label_filter.is_empty() {
                 let proposal_labels_lower: HashSet<String> =
                     proposal_labels.iter().map(|l| l.to_lowercase()).collect();
@@ -225,7 +226,7 @@ pub async fn launch(
                     return None;
                 }
             }
-            Some((p, status_kind, proposal_labels))
+            Some((p, status_kind, proposal_labels, subject_override))
         })
         .collect();
 
@@ -321,8 +322,21 @@ fn status_kind_to_str(kind: Kind) -> &'static str {
     }
 }
 
+fn proposal_title(proposal: &nostr::Event, subject_override: Option<&str>) -> String {
+    if let Some(s) = subject_override {
+        return s.to_string();
+    }
+    if let Ok(cl) = event_to_cover_letter(proposal) {
+        cl.title
+    } else if let Ok(msg) = tag_value(proposal, "description") {
+        msg.split('\n').collect::<Vec<&str>>()[0].to_string()
+    } else {
+        proposal.id.to_string()
+    }
+}
+
 fn output_table(
-    proposals: &[(&nostr::Event, Kind, Vec<String>)],
+    proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
     status_filter: &str,
     label_filter: &HashSet<String>,
 ) {
@@ -332,16 +346,10 @@ fn output_table(
     }
 
     println!("{:<66} {:<8} TITLE  LABELS", "ID", "STATUS");
-    for (proposal, status_kind, proposal_labels) in proposals {
+    for (proposal, status_kind, proposal_labels, subject_override) in proposals {
         let id = proposal.id.to_string();
         let status = status_kind_to_str(*status_kind);
-        let title = if let Ok(cl) = event_to_cover_letter(proposal) {
-            cl.title
-        } else if let Ok(msg) = tag_value(proposal, "description") {
-            msg.split('\n').collect::<Vec<&str>>()[0].to_string()
-        } else {
-            proposal.id.to_string()
-        };
+        let title = proposal_title(proposal, subject_override.as_deref());
         let labels_str: String = proposal_labels
             .iter()
             .map(|l| format!("#{l}"))
@@ -376,24 +384,26 @@ fn output_table(
     );
 }
 
-fn output_json(proposals: &[(&nostr::Event, Kind, Vec<String>)]) -> Result<()> {
+fn output_json(proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)]) -> Result<()> {
     let json_output: Vec<serde_json::Value> = proposals
         .iter()
-        .map(|(proposal, status_kind, proposal_labels)| {
+        .map(|(proposal, status_kind, proposal_labels, subject_override)| {
             let id = proposal.id.to_string();
             let status = status_kind_to_str(*status_kind).to_string();
             let (title, author, branch) = if let Ok(cl) = event_to_cover_letter(proposal) {
                 (
-                    cl.title.clone(),
+                    subject_override.clone().unwrap_or(cl.title.clone()),
                     proposal.pubkey.to_bech32().unwrap_or_default(),
                     cl.get_branch_name_with_pr_prefix_and_shorthand_id()
                         .unwrap_or_default(),
                 )
             } else {
-                let title = tag_value(proposal, "description").map_or_else(
-                    |_| proposal.id.to_string(),
-                    |d| d.split('\n').collect::<Vec<&str>>()[0].to_string(),
-                );
+                let title = subject_override.clone().unwrap_or_else(|| {
+                    tag_value(proposal, "description").map_or_else(
+                        |_| proposal.id.to_string(),
+                        |d| d.split('\n').collect::<Vec<&str>>()[0].to_string(),
+                    )
+                });
                 (
                     title,
                     proposal.pubkey.to_bech32().unwrap_or_default(),
@@ -444,7 +454,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
 
 #[allow(clippy::too_many_lines)]
 fn show_proposal_details(
-    proposals: &[(&nostr::Event, Kind, Vec<String>)],
+    proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
     event_id_or_nevent: &str,
     json: bool,
     show_comments: bool,
@@ -455,13 +465,19 @@ fn show_proposal_details(
 
     let target_id = resolve_event_id(event_id_or_nevent)?;
 
-    let (proposal, status_kind, proposal_labels) = proposals
+    let (proposal, status_kind, proposal_labels, subject_override) = proposals
         .iter()
-        .find(|(p, _, _)| p.id == target_id)
+        .find(|(p, _, _, _)| p.id == target_id)
         .context("proposal not found")?;
 
     let cover_letter = event_to_cover_letter(proposal)
         .context("failed to extract proposal details from proposal root event")?;
+
+    // Use subject override if present, otherwise fall back to the original title.
+    let display_title = subject_override
+        .as_deref()
+        .unwrap_or(&cover_letter.title)
+        .to_string();
 
     if json {
         let json_output = if show_comments {
@@ -481,7 +497,7 @@ fn show_proposal_details(
             serde_json::json!({
                 "id": proposal.id.to_string(),
                 "status": status_kind_to_str(*status_kind),
-                "title": cover_letter.title,
+                "title": display_title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
                 "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                 "labels": proposal_labels,
@@ -493,7 +509,7 @@ fn show_proposal_details(
             serde_json::json!({
                 "id": proposal.id.to_string(),
                 "status": status_kind_to_str(*status_kind),
-                "title": cover_letter.title,
+                "title": display_title,
                 "author": proposal.pubkey.to_bech32().unwrap_or_default(),
                 "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                 "labels": proposal_labels,
@@ -505,7 +521,7 @@ fn show_proposal_details(
         return Ok(());
     }
 
-    println!("Title:    {}", cover_letter.title);
+    println!("Title:    {display_title}");
     println!(
         "Author:   {}",
         proposal.pubkey.to_bech32().unwrap_or_default()

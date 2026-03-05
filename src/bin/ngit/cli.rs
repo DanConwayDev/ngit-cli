@@ -334,6 +334,19 @@ pub enum PrCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// set the subject/title of a PR (author or maintainer only)
+    #[command(name = "set-subject")]
+    SetSubject {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// New subject/title for the PR
+        #[arg(long, alias = "title")]
+        subject: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +470,19 @@ pub enum IssueCommands {
         /// Label to apply (repeatable: --label bug --label help-wanted)
         #[arg(long = "label", value_name = "LABEL", required = true)]
         labels: Vec<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// set the subject/title of an issue (author or maintainer only)
+    #[command(name = "set-subject")]
+    SetSubject {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// New subject/title for the issue
+        #[arg(long, alias = "title")]
+        subject: String,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 use ngit::{
     client::{Params, get_events_from_local_cache, get_issues_from_cache},
-    git_events::{KIND_COMMENT, KIND_LABEL, get_labels, get_status, status_kinds, tag_value},
+    git_events::{KIND_COMMENT, KIND_LABEL, get_labels_and_subject, get_status, status_kinds, tag_value},
 };
 use nostr::{
     FromBech32, ToBech32,
@@ -18,7 +18,13 @@ use crate::{
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
-fn get_issue_title(event: &nostr::Event) -> String {
+/// `(event, status_kind, labels, comment_count, subject_override)`
+type IssueRow<'a> = (&'a nostr::Event, Kind, Vec<String>, usize, Option<String>);
+
+fn get_issue_title(event: &nostr::Event, subject_override: Option<&str>) -> String {
+    if let Some(s) = subject_override {
+        return s.to_string();
+    }
     tag_value(event, "subject")
         .ok()
         .filter(|s| !s.is_empty())
@@ -196,7 +202,7 @@ pub async fn launch(
     // revisions, so we pass an empty slice.
     let empty_proposals: Vec<nostr::Event> = vec![];
 
-    let filtered: Vec<(&nostr::Event, Kind, Vec<String>, usize)> = issues
+    let filtered: Vec<IssueRow<'_>> = issues
         .iter()
         .filter_map(|issue| {
             let status_kind = get_status(issue, &repo_ref, &statuses, &empty_proposals);
@@ -204,7 +210,8 @@ pub async fn launch(
             if !status_filter.contains(status_str) && !status_filter.contains("unknown") {
                 return None;
             }
-            let issue_labels = get_labels(issue, &repo_ref, &label_events);
+            let (issue_labels, subject_override) =
+                get_labels_and_subject(issue, &repo_ref, &label_events);
             if !label_filter.is_empty() {
                 let issue_labels_lower: HashSet<String> =
                     issue_labels.iter().map(|t| t.to_lowercase()).collect();
@@ -213,7 +220,7 @@ pub async fn launch(
                 }
             }
             let comment_count = comment_counts.get(&issue.id).copied().unwrap_or(0);
-            Some((issue, status_kind, issue_labels, comment_count))
+            Some((issue, status_kind, issue_labels, comment_count, subject_override))
         })
         .collect();
 
@@ -286,7 +293,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
 }
 
 fn show_issue_details(
-    issues: &[(&nostr::Event, Kind, Vec<String>, usize)],
+    issues: &[IssueRow<'_>],
     event_id_or_nevent: &str,
     json: bool,
     show_comments: bool,
@@ -303,12 +310,12 @@ fn show_issue_details(
         nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
     };
 
-    let (issue, status_kind, labels, comment_count) = issues
+    let (issue, status_kind, labels, comment_count, subject_override) = issues
         .iter()
-        .find(|(e, _, _, _)| e.id == target_id)
+        .find(|(e, _, _, _, _)| e.id == target_id)
         .context("issue not found")?;
 
-    let title = get_issue_title(issue);
+    let title = get_issue_title(issue, subject_override.as_deref());
     let status = status_kind_to_str(*status_kind);
 
     if json {
@@ -421,15 +428,15 @@ fn chrono_timestamp(unix_secs: u64) -> String {
 }
 
 fn output_table(
-    issues: &[(&nostr::Event, Kind, Vec<String>, usize)],
+    issues: &[IssueRow<'_>],
     status_filter: &str,
     label_filter: &HashSet<String>,
 ) {
     println!("{:<66} {:<8} {:<5} TITLE  LABELS", "ID", "STATUS", "CMTS");
-    for (issue, status_kind, labels, comment_count) in issues {
+    for (issue, status_kind, labels, comment_count, subject_override) in issues {
         let id = issue.id.to_string();
         let status = status_kind_to_str(*status_kind);
-        let title = get_issue_title(issue);
+        let title = get_issue_title(issue, subject_override.as_deref());
         let labels_str = if labels.is_empty() {
             String::new()
         } else {
@@ -456,14 +463,14 @@ fn output_table(
     println!();
 }
 
-fn output_json(issues: &[(&nostr::Event, Kind, Vec<String>, usize)]) -> Result<()> {
+fn output_json(issues: &[IssueRow<'_>]) -> Result<()> {
     let json_output: Vec<serde_json::Value> = issues
         .iter()
-        .map(|(issue, status_kind, labels, comment_count)| {
+        .map(|(issue, status_kind, labels, comment_count, subject_override)| {
             serde_json::json!({
                 "id": issue.id.to_string(),
                 "status": status_kind_to_str(*status_kind),
-                "title": get_issue_title(issue),
+                "title": get_issue_title(issue, subject_override.as_deref()),
                 "author": issue.pubkey.to_bech32().unwrap_or_default(),
                 "labels": labels,
                 "comment_count": comment_count,

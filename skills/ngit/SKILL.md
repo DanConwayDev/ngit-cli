@@ -124,6 +124,7 @@ ngit pr reopen <ID|nevent> --reason "fix was incomplete"
 ngit pr ready <ID|nevent> --reason "addressed review feedback"
 ngit pr draft <ID|nevent> --reason "needs more work"
 ngit pr label <ID|nevent> --label bug --label enhancement
+ngit pr set-subject <ID|nevent> --subject "New title"
 ```
 
 ## Issues
@@ -142,6 +143,7 @@ ngit issue close <ID|nevent> --reason "wontfix"
 ngit issue resolved <ID|nevent> --reason "fixed in abc123"
 ngit issue reopen <ID|nevent> --reason "regression in v2.3"
 ngit issue label <ID|nevent> --label bug --label enhancement
+ngit issue set-subject <ID|nevent> --subject "New title"
 ```
 
 ## Account management

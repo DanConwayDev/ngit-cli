@@ -3,7 +3,7 @@
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use clap::Parser;
-use cli::{AccountCommands, CUSTOMISE_TEMPLATE, Cli, Commands, IssueCommands, PrCommands};
+use cli::{AccountCommands, Cli, Commands, IssueCommands, PrCommands, CUSTOMISE_TEMPLATE};
 
 mod cli;
 use ngit::{
@@ -138,6 +138,11 @@ async fn main() {
                     labels,
                     offline,
                 } => sub_commands::label::launch_pr_label(id, labels, *offline).await,
+                PrCommands::SetSubject {
+                    id,
+                    subject,
+                    offline,
+                } => sub_commands::set_subject::launch_pr_set_subject(id, subject, *offline).await,
             },
             Commands::Issue(args) => match &args.issue_command {
                 IssueCommands::List {
@@ -210,6 +215,13 @@ async fn main() {
                     labels,
                     offline,
                 } => sub_commands::label::launch_issue_label(id, labels, *offline).await,
+                IssueCommands::SetSubject {
+                    id,
+                    subject,
+                    offline,
+                } => {
+                    sub_commands::set_subject::launch_issue_set_subject(id, subject, *offline).await
+                }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
         }
