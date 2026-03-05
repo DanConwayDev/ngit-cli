@@ -301,6 +301,18 @@ pub enum PrCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// add one or more labels to a PR (author or maintainer only)
+    Label {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Label to apply (repeatable: --label bug --label help-wanted)
+        #[arg(long = "label", value_name = "LABEL", required = true)]
+        labels: Vec<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +403,18 @@ pub enum IssueCommands {
         /// defaults to top-level
         #[arg(long, value_name = "ID|nevent")]
         reply_to: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// add one or more labels to an issue (author or maintainer only)
+    Label {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Label to apply (repeatable: --label bug --label help-wanted)
+        #[arg(long = "label", value_name = "LABEL", required = true)]
+        labels: Vec<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

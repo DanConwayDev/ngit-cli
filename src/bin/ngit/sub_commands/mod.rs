@@ -7,6 +7,7 @@ pub mod init;
 pub mod issue_create;
 pub mod issue_list;
 pub mod issue_status;
+pub mod label;
 pub mod list;
 pub mod login;
 pub mod logout;

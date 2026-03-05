@@ -130,6 +130,11 @@ async fn main() {
                     squash,
                     offline,
                 } => sub_commands::pr_merge::launch(id, *squash, *offline).await,
+                PrCommands::Label {
+                    id,
+                    labels,
+                    offline,
+                } => sub_commands::label::launch_pr_label(id, labels, *offline).await,
             },
             Commands::Issue(args) => match &args.issue_command {
                 IssueCommands::List {
@@ -193,6 +198,11 @@ async fn main() {
                     )
                     .await
                 }
+                IssueCommands::Label {
+                    id,
+                    labels,
+                    offline,
+                } => sub_commands::label::launch_issue_label(id, labels, *offline).await,
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
         }

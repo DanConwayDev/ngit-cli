@@ -122,6 +122,7 @@ git push origin main      # push to nostr remote records the merge event
 ngit pr close <ID|nevent>
 ngit pr reopen <ID|nevent>
 ngit pr ready <ID|nevent>   # mark draft as ready for review
+ngit pr label <ID|nevent> --label bug --label enhancement
 ```
 
 ## Issues
@@ -138,6 +139,7 @@ ngit issue comment <ID|nevent> --body "Reproduced on v2.1"
 ngit issue comment <ID|nevent> --body "Thanks!" --reply-to <comment-ID|nevent>
 ngit issue close <ID|nevent>
 ngit issue reopen <ID|nevent>
+ngit issue label <ID|nevent> --label bug --label enhancement
 ```
 
 ## Account management
