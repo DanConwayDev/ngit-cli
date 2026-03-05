@@ -143,6 +143,8 @@ pub enum AccountCommands {
     ExportKeys,
     /// create a new nostr account
     Create(sub_commands::create::SubCommandArgs),
+    /// show currently logged-in account(s)
+    Whoami(sub_commands::whoami::SubCommandArgs),
 }
 
 #[derive(clap::Parser)]
@@ -158,7 +160,7 @@ pub struct RepoSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output repository info as JSON; is_nostr_repo is false when not in a nostr repository
+    /// Output repository info as JSON; `is_nostr_repo` is false when not in a nostr repository
     #[arg(long)]
     pub json: bool,
 }

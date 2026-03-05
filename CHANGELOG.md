@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit account whoami` — show the currently logged-in account(s)
 - `ngit pr` subcommand group: `list`, `view`, `checkout`, `apply`, `send`, `close`, `reopen`, `ready`, `comment`, `merge`; replaces the former top-level `ngit list`, `ngit checkout`, and `ngit apply` commands (hard-migrated); `ngit send` remains at the top level unchanged
 - `ngit pr view <id>` — view a PR with its full details and all comments (author, timestamp, body) in chronological order
 - `ngit pr close <id>` / `ngit pr reopen <id>` — change PR status (author or maintainer only)
@@ -143,7 +144,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Pull Requests Support**: Introduced complete PR functionality for large contributions that would be too big for relays as patches:
-
   - Generate PR events for oversized patches automatically
   - Support PR updates and PR as patch revision
   - List open/draft proposals on repo relays/servers as `pr/*` branches and all proposals as `refs/pr/*` and `refs/pr/pr-by-id/head`
@@ -154,12 +154,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **NIP-22 Status Events Support**: Read and process NIP-22 style status events for proposals and PRs
 
 - **ngit sync command**: New command to synchronize git servers with nostr state
-
   - Optional `--force` flag for forced synchronization eg deleting refs on non-GRASP servers
   - `--ref-name` parameter to limit sync to a single reference
 
 - **ngit init improvements** (simple model for non-grasp servers):
-
   - Use user's grasp list for defaults instead of hardcoded options
   - List and allow selection/deselection of non-grasp servers
   - Check and fetch origin refs when missing locally

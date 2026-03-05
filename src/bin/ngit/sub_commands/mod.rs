@@ -15,3 +15,4 @@ pub mod pr_status;
 pub mod repo;
 pub mod send;
 pub mod sync;
+pub mod whoami;

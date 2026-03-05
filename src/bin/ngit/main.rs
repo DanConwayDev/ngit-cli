@@ -48,6 +48,9 @@ async fn main() {
                 AccountCommands::Create(sub_args) => {
                     sub_commands::create::launch(&cli, sub_args).await
                 }
+                AccountCommands::Whoami(sub_args) => {
+                    sub_commands::whoami::launch(&cli, sub_args).await
+                }
             },
             Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
             Commands::Repo(args) => {

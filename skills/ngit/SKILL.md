@@ -143,6 +143,8 @@ ngit issue reopen <ID|nevent>
 ## Account management
 
 ```bash
+ngit account whoami --json
+ngit account whoami --json --offline          # use cache, no network
 ngit account login                            # interactive, stores nsec in global git config
 ngit account login --bunker-url bunker://...  # NIP-46 remote signer
 ngit account login --local                    # this repo only
