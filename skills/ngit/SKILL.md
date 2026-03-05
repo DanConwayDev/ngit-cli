@@ -15,6 +15,8 @@ ngit makes `clone`, `fetch`, `push` work with `nostr://` URLs and adds a CLI for
 
 ## How it works
 
+**Nostr** is a decentralised protocol where users publish signed events to relays (simple servers anyone can run). There is no central authority — identity is a keypair, and data is replicated across many relays.
+
 Git has two distinct layers that ngit separates:
 
 - **Git state (refs)** — which commit each branch/tag points to — is published as signed events on Nostr relays. This is the source of truth for the repository.
@@ -22,7 +24,7 @@ Git has two distinct layers that ngit separates:
 
 When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr relays, then fetches the corresponding objects from the git server(s) listed in the repository announcement. Because the state lives on Nostr and the data can live anywhere, git servers are interchangeable — switching providers requires no coordination with contributors.
 
-**Grasp servers** are a convenience: they combine a Nostr relay and a git server into a single hosted service (e.g. `relay.ngit.dev`), so a single URL covers both layers. You can use separate relays and git servers if you prefer.
+**Grasp servers** are a convenience: they combine a Nostr relay and a git server into a single hosted service (e.g. `relay.ngit.dev`). When `ngit init` publishes a repository announcement listing a grasp server, the grasp server automatically creates the git repository — no prior setup or account configuration required. You can use separate relays and git servers if you prefer.
 
 ## Key rules
 
