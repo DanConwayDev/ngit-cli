@@ -2038,7 +2038,7 @@ mod non_interactive_validation {
         let output = p.expect_end_eventually()?;
         assert!(output.contains("ngit send requires additional arguments"));
         assert!(output.contains("<SINCE_OR_RANGE>"));
-        assert!(output.contains("--title"));
+        assert!(output.contains("--subject"));
         assert!(output.contains("--description"));
         assert!(output.contains("--defaults"));
         assert!(output.contains("--interactive"));
@@ -2051,7 +2051,7 @@ mod non_interactive_validation {
         let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "HEAD~2"]);
         let output = p.expect_end_eventually()?;
         assert!(output.contains("ngit send requires additional arguments"));
-        assert!(output.contains("--title"));
+        assert!(output.contains("--subject"));
         assert!(output.contains("--description"));
         assert!(output.contains("--defaults"));
         Ok(())
@@ -2063,7 +2063,7 @@ mod non_interactive_validation {
         let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--force-pr", "HEAD~2"]);
         let output = p.expect_end_eventually()?;
         assert!(output.contains("ngit send requires additional arguments"));
-        assert!(output.contains("--title"));
+        assert!(output.contains("--subject"));
         assert!(output.contains("--description"));
         assert!(output.contains("--defaults"));
         Ok(())
@@ -2075,17 +2075,17 @@ mod non_interactive_validation {
         let mut p =
             CliTester::new_from_dir(&test_repo.dir, ["send", "--description", "Y", "HEAD~2"]);
         let output = p.expect_end_eventually()?;
-        assert!(output.contains("ngit send requires --title when --description is provided"));
-        assert!(output.contains("--title"));
+        assert!(output.contains("ngit send requires --subject when --description is provided"));
+        assert!(output.contains("--subject"));
         Ok(())
     }
 
     #[test]
     fn send_title_without_description_errors() -> Result<()> {
         let test_repo = prep_git_repo()?;
-        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--title", "X", "HEAD~2"]);
+        let mut p = CliTester::new_from_dir(&test_repo.dir, ["send", "--subject", "X", "HEAD~2"]);
         let output = p.expect_end_eventually()?;
-        assert!(output.contains("ngit send requires --description when --title is provided"));
+        assert!(output.contains("ngit send requires --description when --subject is provided"));
         assert!(output.contains("--description"));
         Ok(())
     }
