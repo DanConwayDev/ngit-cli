@@ -166,6 +166,7 @@ async fn main() {
                     status,
                     labels,
                     json,
+                    comments,
                     id,
                     offline,
                 } => {
@@ -173,7 +174,7 @@ async fn main() {
                         status.clone(),
                         labels.clone(),
                         *json,
-                        false,
+                        *comments,
                         id.clone(),
                         *offline,
                     )

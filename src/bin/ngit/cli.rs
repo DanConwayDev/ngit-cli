@@ -390,6 +390,10 @@ pub enum IssueCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Include full comment thread when viewing a specific issue (requires
+        /// ID)
+        #[arg(long)]
+        comments: bool,
         /// Show details for a specific issue (event-id or nevent)
         #[arg(value_name = "ID|nevent")]
         id: Option<String>,
