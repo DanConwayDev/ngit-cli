@@ -1535,10 +1535,8 @@ pub fn use_ngit_list_to_download_and_checkout_proposal_branch(
 /// Fetch proposals into the local cache and checkout the one matching
 /// `branch_name_in_event` using `ngit pr checkout <id>`.
 /// Requires relays to already be running.
-pub fn use_ngit_pr_checkout(
-    test_repo: &GitTestRepo,
-    branch_name_in_event: &str,
-) -> Result<()> {
+#[allow(deprecated)]
+pub fn use_ngit_pr_checkout(test_repo: &GitTestRepo, branch_name_in_event: &str) -> Result<()> {
     // populate the local cache
     let mut p = CliTester::new_from_dir(
         &test_repo.dir,
@@ -1582,9 +1580,7 @@ pub fn use_ngit_pr_checkout(
                 .unwrap_or(false)
         })
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no proposal found for branch {branch_name_in_event} in: {stdout}"
-            )
+            anyhow::anyhow!("no proposal found for branch {branch_name_in_event} in: {stdout}")
         })?;
     let proposal_id = entry["id"].as_str().unwrap_or_default().to_string();
 

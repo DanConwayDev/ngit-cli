@@ -5,6 +5,7 @@ use test_utils::{git::GitTestRepo, relay::Relay, *};
 
 /// Run `ngit pr list --json --offline` in `dir` and return the nevent id for
 /// the proposal whose branch-name matches `branch_name_in_event`.
+#[allow(deprecated)]
 fn get_proposal_id_for_branch(dir: &std::path::Path, branch_name_in_event: &str) -> Result<String> {
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("ngit"))
         .env("NGITTEST", "TRUE")
@@ -33,9 +34,7 @@ fn get_proposal_id_for_branch(dir: &std::path::Path, branch_name_in_event: &str)
                 .unwrap_or(false)
         })
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no proposal found for branch {branch_name_in_event} in: {stdout}"
-            )
+            anyhow::anyhow!("no proposal found for branch {branch_name_in_event} in: {stdout}")
         })?;
     Ok(entry["id"].as_str().unwrap_or_default().to_string())
 }
@@ -45,11 +44,13 @@ fn run_pr_checkout(test_repo: &GitTestRepo, branch_name_in_event: &str) -> Resul
     run_pr_checkout_with_args(test_repo, branch_name_in_event, &["--offline"])
 }
 
-/// Run `ngit pr checkout --force --offline <id>` (cache must already be populated).
+/// Run `ngit pr checkout --force --offline <id>` (cache must already be
+/// populated).
 fn run_pr_checkout_force(test_repo: &GitTestRepo, branch_name_in_event: &str) -> Result<()> {
     run_pr_checkout_with_args(test_repo, branch_name_in_event, &["--force", "--offline"])
 }
 
+#[allow(deprecated)]
 fn run_pr_checkout_with_args(
     test_repo: &GitTestRepo,
     branch_name_in_event: &str,
@@ -150,7 +151,9 @@ mod when_proposal_branch_doesnt_exist {
         let (_, test_repo) = prep_and_run().await?;
         let expected_branch = get_proposal_branch_name(&test_repo, FEATURE_BRANCH_NAME_1)?;
         assert!(
-            test_repo.get_local_branch_names()?.contains(&expected_branch),
+            test_repo
+                .get_local_branch_names()?
+                .contains(&expected_branch),
             "expected branch {expected_branch} to exist"
         );
         Ok(())
@@ -173,9 +176,10 @@ mod when_proposal_branch_doesnt_exist {
         let (originating_repo, test_repo) = prep_and_run().await?;
         assert_eq!(
             originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
-            test_repo.get_tip_of_local_branch(
-                &get_proposal_branch_name(&test_repo, FEATURE_BRANCH_NAME_1)?
-            )?,
+            test_repo.get_tip_of_local_branch(&get_proposal_branch_name(
+                &test_repo,
+                FEATURE_BRANCH_NAME_1
+            )?)?,
         );
         Ok(())
     }
@@ -232,9 +236,10 @@ mod when_proposal_branch_exists_and_is_up_to_date {
         let (originating_repo, test_repo) = prep_and_run().await?;
         assert_eq!(
             originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
-            test_repo.get_tip_of_local_branch(
-                &get_proposal_branch_name(&test_repo, FEATURE_BRANCH_NAME_1)?
-            )?,
+            test_repo.get_tip_of_local_branch(&get_proposal_branch_name(
+                &test_repo,
+                FEATURE_BRANCH_NAME_1
+            )?)?,
         );
         Ok(())
     }
@@ -292,9 +297,10 @@ mod when_proposal_branch_exists_and_is_behind {
         let (originating_repo, test_repo) = prep_and_run().await?;
         assert_eq!(
             originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
-            test_repo.get_tip_of_local_branch(
-                &get_proposal_branch_name(&test_repo, FEATURE_BRANCH_NAME_1)?
-            )?,
+            test_repo.get_tip_of_local_branch(&get_proposal_branch_name(
+                &test_repo,
+                FEATURE_BRANCH_NAME_1
+            )?)?,
         );
         Ok(())
     }
@@ -343,12 +349,14 @@ mod when_proposal_branch_has_local_amendments {
     #[serial]
     async fn local_unpublished_commits_are_not_overwritten() -> Result<()> {
         let (originating_repo, test_repo) = prep_and_run().await?;
-        // the local branch tip must differ from the published tip — local work preserved
+        // the local branch tip must differ from the published tip — local work
+        // preserved
         assert_ne!(
             originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
-            test_repo.get_tip_of_local_branch(
-                &get_proposal_branch_name(&test_repo, FEATURE_BRANCH_NAME_1)?
-            )?,
+            test_repo.get_tip_of_local_branch(&get_proposal_branch_name(
+                &test_repo,
+                FEATURE_BRANCH_NAME_1
+            )?)?,
         );
         Ok(())
     }
@@ -488,9 +496,10 @@ mod when_newer_revision_rebases_proposal {
         let (new_originating_repo, test_repo) = prep_and_run().await?;
         assert_eq!(
             new_originating_repo.get_tip_of_local_branch(FEATURE_BRANCH_NAME_1)?,
-            test_repo.get_tip_of_local_branch(
-                &get_proposal_branch_name(&test_repo, FEATURE_BRANCH_NAME_1)?
-            )?,
+            test_repo.get_tip_of_local_branch(&get_proposal_branch_name(
+                &test_repo,
+                FEATURE_BRANCH_NAME_1
+            )?)?,
         );
         Ok(())
     }
@@ -498,16 +507,15 @@ mod when_newer_revision_rebases_proposal {
 
 /// Creates 3 proposals, checks out proposal 1 in a test repo, then publishes
 /// a rebased revision of proposal 1 from a second originating repo. Returns
-/// (new_originating_repo, test_repo) with the test repo still on the old branch.
-fn create_proposals_with_rebased_first_proposal(
-) -> Result<(GitTestRepo, GitTestRepo)> {
+/// (new_originating_repo, test_repo) with the test repo still on the old
+/// branch.
+fn create_proposals_with_rebased_first_proposal() -> Result<(GitTestRepo, GitTestRepo)> {
     // create the initial 3 proposals and check out proposal 1 in a test repo
     let (_, test_repo) =
         create_proposals_and_repo_with_proposal_branch_checked_out(FEATURE_BRANCH_NAME_1)?;
 
     // get the original proposal id to use as in_reply_to for the rebased revision
-    let original_proposal_id =
-        get_proposal_id_for_branch(&test_repo.dir, FEATURE_BRANCH_NAME_1)?;
+    let original_proposal_id = get_proposal_id_for_branch(&test_repo.dir, FEATURE_BRANCH_NAME_1)?;
 
     // publish a rebased revision of proposal 1 from a second originating repo
     let second_originating_repo = GitTestRepo::default();
