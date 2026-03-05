@@ -8,581 +8,161 @@ metadata:
 
 # ngit — Nostr Plugin for Git
 
-ngit makes native git commands (`clone`, `fetch`, `push`) work with `nostr://` URLs and adds a CLI for pull requests, issues, and repository management — all over the decentralised Nostr protocol. No GitHub, no centralised forge.
+ngit makes `clone`, `fetch`, `push` work with `nostr://` URLs and adds a CLI for PRs, issues, and repo management over the decentralised Nostr protocol.
 
-- Homepage: https://ngit.dev
-- Source: `nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit`
-- Web UI for browsing repos/PRs/issues: https://gitworkshop.dev
+- Install: `curl -Ls https://ngit.dev/install.sh | bash` (installs `ngit` and `git-remote-nostr`)
+- Web UI: https://gitworkshop.dev
 
-## Installation
+## Key rules
 
-```bash
-curl -Ls https://ngit.dev/install.sh | bash
-```
+- **Always use `--json`** on `ngit` commands when reading output — far easier to parse than human-readable text. `git` commands do not support `--json`.
+- **Use `--offline`** on all but the first `ngit` command in a session — reads from local cache instantly. `git fetch origin` also refreshes the cache.
+- **Never construct NIP-05 addresses** (`user@domain`). Use the `npub1...` form unless a NIP-05 address was explicitly provided.
+- **`<ID|nevent>`** accepts a 64-char hex event ID or a `nevent1...` bech32 string. Get IDs from `ngit pr list --json` or `ngit issue list --json`.
 
-This installs two binaries:
-
-- `ngit` — the main CLI
-- `git-remote-nostr` — a git remote helper that enables `nostr://` URLs to work transparently with git
-
-## Machine-readable output
-
-**All `ngit` commands support `--json` for structured output. Always use `--json` when scripting or parsing output** — it is far easier to process reliably than human-readable text. Standard `git` commands do not support `--json`; use them as normal.
-
-## Detecting a Nostr Repository
-
-Before running any `ngit` commands, check whether the current directory is a nostr repository:
+## Detecting a nostr repo
 
 ```bash
-ngit repo --json --offline
-```
-
-Always exits 0. Returns `{"is_nostr_repo": false}` when not in a nostr repo, or the full repo info when it is.
-
-To check without loading the full repo details, grep for the key field:
-
-```bash
+# Check if current directory is a nostr repo (always exits 0)
 ngit repo --json --offline | grep -q '"is_nostr_repo":true'
 ```
 
-Script usage:
+Returns full repo info (including `nostr_url`, `maintainers`, `grasp_servers`) when true.
 
-```bash
-if ngit repo --json --offline | grep -q '"is_nostr_repo":true'; then
-  ngit pr list --json
-fi
-```
-
----
-
-## Caching and --offline
-
-Every `git fetch` and every `ngit` command that contacts relays fetches and caches the latest PRs, issues, and comments locally. This means **when running multiple ngit commands in quick succession, use `--offline`** on all but the first — it reads from the local cache and is instant.
-
-```bash
-# First command fetches from relays and populates the cache
-ngit pr list --json
-
-# Subsequent commands in the same session can skip the network
-ngit pr view <ID> --offline --comments
-ngit issue list --json --offline
-ngit repo --json --offline
-```
-
-`git fetch origin` also triggers a relay sync, so after a fetch all cached data is fresh.
-
----
-
-## Core Concepts
-
-### What is a `nostr://` URL?
-
-A `nostr://` URL identifies a repository on the Nostr network. It encodes the maintainer's public key and a short repository identifier:
+## nostr:// URLs
 
 ```
 nostr://<npub>/<identifier>
-nostr://<npub>/<relay-hint>/<identifier>
+nostr://<npub>/<relay-hint>/<identifier>   # relay-hint is bare domain, e.g. relay.ngit.dev
 ```
 
-**`<npub>` is the only reliable form to construct yourself.** It is the bech32-encoded Nostr public key, always starting with `npub1`. Get it from `ngit repo --json` (the `maintainers` field) or `ngit account export-keys`.
+Standard git commands work directly with these URLs — `git-remote-nostr` resolves them transparently.
 
-The relay hint is a bare domain (no `wss://`) and speeds up discovery — use the repo's grasp server. Get it from `ngit repo --json` (`grasp_servers[0]`).
-
-```
-nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/ngit
-```
-
-**NIP-05 addresses** (`user@domain.com`) are also valid if the user has set one up, but they require a `/.well-known/nostr.json` file deployed to that domain — do not attempt to construct or guess them. Use the npub form unless a NIP-05 address has been explicitly provided to you.
-
-These URLs work directly with git — no special commands needed:
+## Publishing a repo
 
 ```bash
-git clone nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/ngit
-git fetch origin
-git push origin main
+ngit init                                                        # interactive
+ngit init --name "My Project" --description "What it does" -d   # non-interactive
+ngit repo edit --description "New description"                   # update metadata
+ngit repo --json --offline                                       # view repo info (check nostr_url field)
 ```
 
-The `git-remote-nostr` helper resolves the URL to actual git servers behind the scenes.
-
-### How repositories work
-
-When a maintainer publishes a repo with `ngit init`, they broadcast a **repository announcement event** to Nostr relays. This event contains:
-
-- Repository name, description, and identifier
-- Git server URLs (where the actual git data lives)
-- Nostr relay URLs (where events like PRs and issues are published)
-- Maintainer public keys
-
-Anyone can clone using the `nostr://` URL. The remote helper fetches the announcement, finds the git servers, and performs the actual git operations.
-
-### Authentication
-
-ngit uses your Nostr private key (nsec) for signing events. See [CONCEPT 5: Account Management](#concept-5-account-management) for full details.
-
----
-
-## CONCEPT 1: Publishing a Repository
-
-_"Making a git repo discoverable and collaborative on Nostr"_
-
-### First-time publish (from an existing git repo)
+## Cloning
 
 ```bash
-# Interactive (recommended for humans)
-ngit init
-
-# Non-interactive / scripted — uses sensible defaults
-ngit init --name "My Project" --description "What it does" -d
-
-# With explicit grasp server (hosted git+nostr infrastructure)
-ngit init --name "My Project" --description "What it does" \
-  --grasp-server https://relay.ngit.dev -d
+git clone nostr://<npub>/<relay-hint>/<identifier>   # preferred
+git clone nostr://<npub>/<identifier>                # slower discovery, no relay hint
+git clone nostr://user@domain.com/<identifier>       # NIP-05, only if given to you
 ```
 
-After `ngit init`:
+## Pull Requests
 
-- A repository announcement is published to Nostr relays
-- The `origin` remote is updated to the `nostr://` URL
-- Your code is pushed to the configured git server(s)
-- You get a shareable URL like `https://gitworkshop.dev/npub.../myrepo`
-
-### Update repository metadata
-
-```bash
-ngit repo edit --description "Updated description"
-ngit repo edit --hashtag rust --hashtag cli
-```
-
-### View repository info
-
-```bash
-ngit repo
-```
-
----
-
-## CONCEPT 2: Cloning and Working with a Repo
-
-_"Getting and staying in sync with a nostr repository"_
-
-```bash
-# Clone using npub + relay hint + identifier (preferred — always works)
-git clone nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/ngit
-
-# Clone using npub + identifier (no relay hint — slightly slower discovery)
-git clone nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit
-
-# Clone using NIP-05 address if its already been given to you in the clone url.
-git clone nostr://dan@danconwaydev.com/ngit
-
-# Standard git operations work normally after cloning
-git fetch origin
-git pull origin main
-git push origin main
-```
-
-### Remote branches and PRs
-
-When you fetch from a nostr remote, open and draft PRs appear as remote branches with the `pr/` prefix:
-
-```bash
-git fetch origin
-git branch -r
-# origin/main
-# origin/pr/fix-login-bug       ← open PR
-# origin/pr/add-dark-mode       ← open PR
-```
-
-You can check out a PR branch directly:
-
-```bash
-git checkout pr/fix-login-bug
-# or by event ID
-ngit pr checkout <ID|nevent>
-```
-
----
-
-## CONCEPT 3: Pull Requests
-
-_"Proposing and reviewing changes"_
-
-### Opening a PR
-
-Create a branch with the `pr/` prefix and push it. Always include `-o title=` and `-o description=`:
+### Open a PR
 
 ```bash
 git checkout -b pr/my-feature
-# ... make commits ...
+# ... commits ...
 git push -u origin pr/my-feature \
-  -o 'title=Add dark mode' \
-  -o 'description=Implements a dark mode toggle in settings.\n\nAdds a toggle to the settings page and persists the preference.'
+  -o 'title=My feature title' \
+  -o 'description=Summary.\n\nDetail here.'
 ```
 
-Use `\n\n` in the description for paragraph breaks.
+Push options `title=` and `description=` are required. Use `\n\n` for paragraph breaks.
 
-### Opening a PR (advanced — `ngit send`)
+### Advanced: ngit send
 
 ```bash
-# Send commits ahead of main as a PR
-ngit send HEAD~2 --title "My Feature" --description "Details here"
-
-# Non-interactive with defaults
-ngit send --defaults
-
-# Update an existing PR (new version/revision)
-ngit send HEAD~2 --in-reply-to <PR-event-id>
+ngit send HEAD~2 --title "My Feature" --description "Details"
+ngit send --defaults                                    # non-interactive
+ngit send HEAD~2 --in-reply-to <PR-event-id>           # update existing PR
 ```
 
-### Listing PRs
+### List / view / comment
 
 ```bash
-# List open and draft PRs (default)
-ngit pr list
-
-# List all statuses
-ngit pr list --status open,draft,closed,applied
-
-# Filter by label
-ngit pr list --label bug
-
-# Output as JSON (for scripting)
 ngit pr list --json
-```
-
-### Viewing a PR
-
-```bash
-ngit pr view <ID|nevent>
-
-# Include full comment thread
-ngit pr view <ID|nevent> --comments
-
-# JSON output
+ngit pr list --json --status open,draft,closed,applied
+ngit pr list --json --label bug
 ngit pr view <ID|nevent> --json
-```
-
-### Reviewing a PR
-
-```bash
-# Checkout the PR branch locally
-ngit pr checkout <ID|nevent>
-
-# Or apply patches to current branch
-ngit pr apply <ID|nevent>
-```
-
-### Commenting on a PR
-
-```bash
-ngit pr comment <ID|nevent> --body "Looks good, just one nit..."
-
-# Reply to a specific comment
+ngit pr view <ID|nevent> --json --comments
+ngit pr comment <ID|nevent> --body "Looks good"
 ngit pr comment <ID|nevent> --body "Fixed!" --reply-to <comment-ID>
 ```
 
-### Merging a PR (maintainer only)
-
-Prefer `git merge` then push — this creates the merge commit and the push updates the Nostr state automatically:
+### Checkout / apply
 
 ```bash
-# Checkout the PR branch, test it, then merge
+ngit pr checkout <ID|nevent>
+ngit pr apply <ID|nevent>
+```
+
+### Merge (maintainer)
+
+```bash
 ngit pr checkout <ID|nevent>
 git checkout main
-git merge pr/my-feature
-git push origin main
-# pushing to the nostr remote records the merge event on Nostr
-
-# Squash merge
-git merge --squash pr/my-feature
-git commit -m "feat: add dark mode"
-git push origin main
+git merge pr/my-feature   # or: git merge --squash pr/my-feature && git commit
+git push origin main      # push to nostr remote records the merge event
 ```
 
-### PR lifecycle management
+### Lifecycle
 
 ```bash
-# Close a PR (author or maintainer)
 ngit pr close <ID|nevent>
-
-# Reopen a closed PR
 ngit pr reopen <ID|nevent>
-
-# Mark a draft PR as ready for review
-ngit pr ready <ID|nevent>
+ngit pr ready <ID|nevent>   # mark draft as ready for review
 ```
 
----
-
-## CONCEPT 4: Issues
-
-_"Tracking bugs, features, and tasks"_
-
-### Creating an issue
+## Issues
 
 ```bash
-# Interactive
-ngit issue create
-
-# Non-interactive
-ngit issue create --title "Bug: login fails on mobile" \
-  --body "Steps to reproduce: ..." \
-  --label bug
-
-# Multiple labels
-ngit issue create --title "Add dark mode" \
-  --body "Feature request" \
-  --label enhancement --label help-wanted
-```
-
-### Listing issues
-
-```bash
-# List open issues (default)
-ngit issue list
-
-# Filter by status
-ngit issue list --status open
-ngit issue list --status closed
-
-# Filter by label
-ngit issue list --label bug
-
-# JSON output
+ngit issue create --title "Bug title" --body "Details" --label bug
+ngit issue create --title "Feature" --body "..." --label enhancement --label help-wanted
 ngit issue list --json
-```
-
-### Viewing an issue
-
-```bash
-ngit issue view <ID|nevent>
-
-# Include comment thread
-ngit issue view <ID|nevent> --comments
-
-# JSON output
+ngit issue list --json --status closed
+ngit issue list --json --label bug
 ngit issue view <ID|nevent> --json
-```
-
-### Commenting on an issue
-
-```bash
-ngit issue comment <ID|nevent> --body "I can reproduce this on v1.2.3"
-
-# Reply to a specific comment
-ngit issue comment <ID|nevent> --body "Thanks for the report!" --reply-to <comment-ID>
-```
-
-### Closing and reopening issues
-
-```bash
-# Close (author or maintainer)
+ngit issue view <ID|nevent> --json --comments
+ngit issue comment <ID|nevent> --body "Reproduced on v2.1"
+ngit issue comment <ID|nevent> --body "Thanks!" --reply-to <comment-ID>
 ngit issue close <ID|nevent>
-
-# Reopen
 ngit issue reopen <ID|nevent>
 ```
 
----
-
-## CONCEPT 5: Account Management
-
-_"Managing your Nostr identity"_
-
-All credentials are stored as git config keys. You can set them directly or via `ngit account login`.
+## Account management
 
 ```bash
-# Login interactively (stores credentials in global git config)
-ngit account login
-
-# Login with a bunker:// URL (remote signer / NIP-46)
-ngit account login --bunker-url bunker://...
-
-# Login only for this repository (local git config)
-ngit account login --local
-
-# Create a new account
+ngit account login                            # interactive, stores nsec in global git config
+ngit account login --bunker-url bunker://...  # NIP-46 remote signer
+ngit account login --local                    # this repo only
 ngit account create --name "Alice"
-
-# Export keys (to use in other Nostr clients)
 ngit account export-keys
-
-# Logout (removes stored credentials from git config)
 ngit account logout
+git config --global nostr.nsec <nsec>         # set directly
+ngit --nsec <nsec> <command>                  # inline for CI, no login needed
 ```
 
-Credentials are stored as standard git config entries and can be set or inspected directly:
+## Sync
 
 ```bash
-# Set nsec globally for all repos
-git config --global nostr.nsec <nsec>
-
-# Set nsec for this repo only
-git config nostr.nsec <nsec>
-
-# View stored npub
-git config --global nostr.npub
+ngit sync                        # sync all refs from nostr state to git servers
+ngit sync --ref-name main        # sync specific ref
 ```
 
-For CI/automation, pass `--nsec` inline — no login step required:
+## Key flags
+
+| Flag | Description |
+| --- | --- |
+| `-d`, `--defaults` | Non-interactive; use sensible defaults |
+| `--offline` | Local cache only, skip network |
+| `--json` | Structured output (ngit commands only) |
+| `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
+| `-f`, `--force` | Bypass safety guards |
+| `-v`, `--verbose` | Verbose output |
+
+## git config
 
 ```bash
-ngit --nsec <nsec> issue create --title "CI report" --body "..." -d
-```
-
----
-
-## CONCEPT 6: Sync and Maintenance
-
-_"Keeping git servers in sync with Nostr state"_
-
-```bash
-# Sync all refs from nostr state to git servers
-ngit sync
-
-# Sync a specific ref
-ngit sync --ref-name main
-ngit sync --ref-name v1.5.2
-```
-
-Use `ngit sync` if git servers have fallen out of sync with the Nostr state (e.g. after relay-side changes).
-
----
-
-## Common Workflows
-
-### Workflow: Publish a new repository
-
-```bash
-cd my-project
-git init
-git add .
-git commit -m "initial commit"
-ngit init --name "My Project" --description "A cool project" -d
-# origin is now set to nostr://... and code is pushed
-
-# Get the canonical nostr:// URL to share (npub + relay hint + identifier)
-ngit repo --json --offline
-# Look for the "nostr_url" field in the output
-# e.g. nostr://npub1abc.../relay.ngit.dev/my-project
-```
-
-### Workflow: Contribute a PR to someone else's repo
-
-```bash
-git clone nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/ngit
-cd ngit
-git checkout -b pr/fix-typo
-# ... make changes ...
-git commit -m "fix: correct typo in README"
-git push -u origin pr/fix-typo \
-  -o 'title=Fix typo in README' \
-  -o 'description=Corrects a spelling mistake in the introduction.\n\nSmall copy fix, no functional changes.'
-# Verify the PR was created
-ngit pr list --json --offline
-```
-
-### Workflow: Review and merge a PR (maintainer)
-
-```bash
-# See what's open
-ngit pr list --json
-
-# Review the PR
-ngit pr view <ID> --json --comments
-
-# Check it out and test locally
-ngit pr checkout <ID>
-# ... run tests ...
-
-# Merge via git and push — push records the merge on Nostr
-git checkout main
-git merge pr/my-feature
-git push origin main
-# Verify the PR is now closed/applied
-ngit pr view <ID> --json --offline
-```
-
-### Workflow: File and close an issue
-
-```bash
-# File
-ngit issue create --title "Crash on startup" \
-  --body "Reproducible with v2.1 on Linux.\n\nSteps: run ngit init in an empty dir." \
-  --label bug
-# Verify the issue was created and note its ID
-ngit issue list --json --offline
-
-# Later, close it
-ngit issue close <ID>
-# Verify it is closed
-ngit issue view <ID> --json --offline
-```
-
-### Workflow: Non-interactive / CI scripting
-
-Use `-d` / `--defaults` to skip all prompts and `--nsec` to provide credentials:
-
-```bash
-ngit --nsec <nsec> init --name "My Repo" --description "CI-published repo" -d
-ngit --nsec <nsec> issue create --title "Automated report" --body "..." -d
-```
-
----
-
-## Reference: ID formats
-
-Many commands accept an `<ID|nevent>` argument. This can be:
-
-- A hex event ID: `a1b2c3d4...` (64 hex chars)
-- A bech32 nevent: `nevent1...`
-
-Get IDs from `ngit pr list --json` or `ngit issue list --json`.
-
----
-
-## Reference: Push options for PRs
-
-When pushing a `pr/` branch, always set title and description via `-o` push options:
-
-| Option               | Description                                     |
-| -------------------- | ----------------------------------------------- |
-| `title=<text>`       | PR title                                        |
-| `description=<text>` | PR description; use `\n\n` for paragraph breaks |
-
-```bash
-git push -u origin pr/my-branch \
-  -o 'title=My PR Title' \
-  -o 'description=Summary of changes.\n\nMore detail here.'
-```
-
----
-
-## Reference: Key flags
-
-| Flag                  | Description                                                 |
-| --------------------- | ----------------------------------------------------------- |
-| `-d`, `--defaults`    | Non-interactive mode; use sensible defaults for all prompts |
-| `-i`, `--interactive` | Force interactive prompts (default behaviour)               |
-| `-f`, `--force`       | Bypass safety guards                                        |
-| `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline                      |
-| `--offline`           | Use local cache only, skip network fetch                    |
-| `--json`              | Output as JSON (on commands that support it)                |
-| `-v`, `--verbose`     | Verbose output                                              |
-
----
-
-## Reference: git config customisation
-
-All ngit settings live in git config under the `nostr.*` namespace.
-
-```bash
-# Show all customisation options
-ngit --customize
-
-# Store credentials
-git config --global nostr.nsec <nsec>
-
-# Repo-only relay publishing (don't broadcast to personal relays)
-git config nostr.repo-relay-only true
+ngit --customize                          # show all options
+git config nostr.repo-relay-only true     # don't broadcast to personal relays
 ```
