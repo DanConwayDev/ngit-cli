@@ -56,9 +56,9 @@ use crate::{
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
-        KIND_COMMENT, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_USER_GRASP_LIST,
-        event_is_cover_letter, event_is_patch_set_root, event_is_revision_root,
-        event_is_valid_pr_or_pr_update, status_kinds,
+        KIND_COMMENT, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
+        KIND_USER_GRASP_LIST, event_is_cover_letter, event_is_patch_set_root,
+        event_is_revision_root, event_is_valid_pr_or_pr_update, status_kinds,
     },
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
     repo_ref::{RepoRef, normalize_grasp_server_url},
@@ -1998,6 +1998,8 @@ async fn process_fetched_events(
                 }
             } else if event.kind.eq(&KIND_COMMENT) {
                 report.comments.insert(event.id);
+            } else if event.kind.eq(&KIND_LABEL) {
+                report.labels.insert(event.id);
             } else if [Kind::RelayList, Kind::Metadata, KIND_USER_GRASP_LIST].contains(&event.kind)
             {
                 if request.missing_contributor_profiles.contains(&event.pubkey) {
@@ -2120,6 +2122,9 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
         }
         for c in relay_report.comments {
             report.comments.insert(c);
+        }
+        for c in relay_report.labels {
+            report.labels.insert(c);
         }
         report.deletions += relay_report.deletions;
         for c in relay_report.contributor_profiles {
@@ -2245,6 +2250,24 @@ pub fn get_fetch_filters(
                 ]
             }
         },
+        // Fetch NIP-32 kind-1985 label events for issues and proposals.
+        // Label events reference the target via a lowercase `e` tag.
+        {
+            let all_root_ids: HashSet<EventId> = issue_ids
+                .iter()
+                .chain(proposal_ids.iter())
+                .copied()
+                .collect();
+            if all_root_ids.is_empty() {
+                vec![]
+            } else {
+                vec![
+                    nostr::Filter::default()
+                        .events(all_root_ids)
+                        .kind(KIND_LABEL),
+                ]
+            }
+        },
         // Request kind-5 deletions for state events and repo announcements by
         // their event ID (#e tag), as per NIP-09. The #a-tagged filter above
         // covers addressable-event deletions; this covers the specific event IDs
@@ -2333,6 +2356,8 @@ pub struct FetchReport {
     issue_statuses: HashSet<EventId>,
     /// NIP-22 kind-1111 comments against issues, patches, and PRs.
     comments: HashSet<EventId>,
+    /// NIP-32 kind-1985 label events for issues and proposals.
+    labels: HashSet<EventId>,
     /// Count of kind-5 deletion events received (for display purposes).
     deletions: u32,
     contributor_profiles: HashSet<PublicKey>,
@@ -2419,6 +2444,13 @@ impl Display for FetchReport {
                 "{} comment{}",
                 self.comments.len(),
                 if self.comments.len() > 1 { "s" } else { "" },
+            ));
+        }
+        if !self.labels.is_empty() {
+            display_items.push(format!(
+                "{} label{}",
+                self.labels.len(),
+                if self.labels.len() > 1 { "s" } else { "" },
             ));
         }
         if self.deletions > 0 {

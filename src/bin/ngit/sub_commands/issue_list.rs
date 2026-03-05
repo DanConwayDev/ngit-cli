@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 use ngit::{
     client::{Params, get_events_from_local_cache, get_issues_from_cache},
-    git_events::{KIND_COMMENT, get_status, status_kinds, tag_value},
+    git_events::{KIND_COMMENT, KIND_LABEL, get_labels, get_status, status_kinds, tag_value},
 };
 use nostr::{
     FromBech32, ToBech32,
@@ -38,17 +38,7 @@ fn get_issue_title(event: &nostr::Event) -> String {
         })
 }
 
-fn get_issue_labels(event: &nostr::Event) -> Vec<String> {
-    event
-        .tags
-        .iter()
-        .filter(|t| {
-            let s = t.as_slice();
-            s.len() >= 2 && s[0].eq("t")
-        })
-        .map(|t| t.as_slice()[1].clone())
-        .collect()
-}
+
 
 fn status_kind_to_str(kind: Kind) -> &'static str {
     match kind {
@@ -184,6 +174,17 @@ pub async fn launch(
         statuses
     };
 
+    // Fetch NIP-32 kind-1985 label events for all issues.
+    let label_events: Vec<nostr::Event> = get_events_from_local_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .events(issues.iter().map(|e| e.id))
+                .kind(KIND_LABEL),
+        ],
+    )
+    .await?;
+
     let comment_counts = get_comment_counts(git_repo_path, &issues).await?;
 
     let status_filter: HashSet<&str> = status.split(',').map(str::trim).collect();
@@ -203,7 +204,7 @@ pub async fn launch(
             if !status_filter.contains(status_str) && !status_filter.contains("unknown") {
                 return None;
             }
-            let issue_labels = get_issue_labels(issue);
+            let issue_labels = get_labels(issue, &repo_ref, &label_events);
             if !label_filter.is_empty() {
                 let issue_labels_lower: HashSet<String> =
                     issue_labels.iter().map(|t| t.to_lowercase()).collect();

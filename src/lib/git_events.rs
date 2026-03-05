@@ -91,6 +91,9 @@ pub const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
 pub const KIND_USER_GRASP_LIST: Kind = Kind::Custom(10317);
 /// NIP-22 comment (kind 1111) — threaded comments on any event.
 pub const KIND_COMMENT: Kind = Kind::Custom(1111);
+/// NIP-32 label event (kind 1985) — applies hashtag labels to an existing
+/// event. Used to add labels to issues, patches and PRs after the fact.
+pub const KIND_LABEL: Kind = Kind::Custom(1985);
 
 pub fn event_is_patch_set_root(event: &Event) -> bool {
     event.kind.eq(&Kind::GitPatch)
@@ -973,6 +976,91 @@ pub fn is_event_proposal_root_for_branch(
         // e.kind.eq(&KIND_PULL_REQUEST) ||
         !event_is_revision_root(e)
     ))
+}
+
+/// Compute the effective set of labels for `event`.
+///
+/// Labels come from two sources, both subject to the same permission check:
+///
+/// 1. `t` tags on the event itself (self-reported by the event author).
+/// 2. NIP-32 kind-1985 label events in `all_label_events` that reference
+///    `event` via a lowercase `e` tag and carry `["L", "#t"]` +
+///    `["l", "<value>", "#t"]` tags.
+///
+/// A label is only applied when the author of the source event (the original
+/// event for inline `t` tags, or the kind-1985 event for external labels) is
+/// either the author of `event` itself or one of the repository maintainers.
+pub fn get_labels(
+    event: &Event,
+    repo_ref: &RepoRef,
+    all_label_events: &[Event],
+) -> Vec<String> {
+    let is_permitted = |pubkey: &PublicKey| -> bool {
+        pubkey.eq(&event.pubkey) || repo_ref.maintainers.contains(pubkey)
+    };
+
+    // 1. Inline `t` tags on the event itself — only if the event author is
+    //    permitted (they always are, since they authored the event, but we
+    //    keep the check symmetric with the external-label path).
+    let mut labels: Vec<String> = if is_permitted(&event.pubkey) {
+        event
+            .tags
+            .iter()
+            .filter(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0].eq("t")
+            })
+            .map(|t| t.as_slice()[1].clone())
+            .collect()
+    } else {
+        vec![]
+    };
+
+    // 2. External NIP-32 kind-1985 label events.
+    //
+    // A valid label event must:
+    //   - be kind 1985
+    //   - reference `event` via a lowercase `e` tag
+    //   - have `["L", "#t"]` (namespace declaration)
+    //   - have at least one `["l", "<value>", "#t"]` tag
+    //   - be authored by a permitted pubkey
+    let event_id_str = event.id.to_string();
+    for label_event in all_label_events {
+        if !label_event.kind.eq(&KIND_LABEL) {
+            continue;
+        }
+        if !is_permitted(&label_event.pubkey) {
+            continue;
+        }
+        // Must reference our event via a lowercase `e` tag.
+        let references_event = label_event.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0].eq("e") && s[1].eq(&event_id_str)
+        });
+        if !references_event {
+            continue;
+        }
+        // Must declare the `#t` namespace.
+        let has_namespace = label_event.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0].eq("L") && s[1].eq("#t")
+        });
+        if !has_namespace {
+            continue;
+        }
+        // Collect all `["l", "<value>", "#t"]` labels from this event.
+        for tag in label_event.tags.iter() {
+            let s = tag.as_slice();
+            if s.len() >= 3 && s[0].eq("l") && s[2].eq("#t") && !s[1].is_empty() {
+                let label = s[1].clone();
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+        }
+    }
+
+    labels
 }
 
 pub fn get_status(

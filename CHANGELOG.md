@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- NIP-32 label support: kind-1985 label events are now fetched alongside status events and merged with inline `t` tags to compute the effective label set for issues and PRs; only labels authored by the issue/PR author or a repository maintainer are applied; label counts appear in the fetch progress report
+- `ngit issue label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing issue (author or maintainer only); publishes a kind-1985 event
+- `ngit pr label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing PR (author or maintainer only); publishes a kind-1985 event
 - `ngit account whoami` — show the currently logged-in account(s)
 - `ngit pr` subcommand group: `list`, `view`, `checkout`, `apply`, `send`, `close`, `reopen`, `ready`, `comment`, `merge`; replaces the former top-level `ngit list`, `ngit checkout`, and `ngit apply` commands (hard-migrated); `ngit send` remains at the top level unchanged
 - `ngit pr view <id>` — view a PR with its full details and all comments (author, timestamp, body) in chronological order

@@ -15,7 +15,8 @@ use ngit::{
     },
     fetch::fetch_from_git_server,
     git_events::{
-        KIND_COMMENT, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
+        KIND_COMMENT, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
+        get_commit_id_from_patch, get_labels,
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
@@ -162,6 +163,17 @@ pub async fn launch(
         statuses
     };
 
+    // Fetch NIP-32 kind-1985 label events for all proposals.
+    let label_events: Vec<nostr::Event> = get_events_from_local_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .events(proposals_and_revisions.iter().map(|e| e.id))
+                .kind(KIND_LABEL),
+        ],
+    )
+    .await?;
+
     let mut open_proposals: Vec<&nostr::Event> = vec![];
     let mut draft_proposals: Vec<&nostr::Event> = vec![];
     let mut closed_proposals: Vec<&nostr::Event> = vec![];
@@ -191,7 +203,7 @@ pub async fn launch(
     // OR filter: proposal must have at least one of the requested labels.
     let label_filter: HashSet<String> = labels.iter().map(|l| l.trim().to_lowercase()).collect();
 
-    let filtered_proposals: Vec<(&nostr::Event, Kind)> = proposals
+    let filtered_proposals: Vec<(&nostr::Event, Kind, Vec<String>)> = proposals
         .iter()
         .filter_map(|p| {
             let status_kind = get_status(p, &repo_ref, &statuses, &proposals);
@@ -205,21 +217,15 @@ pub async fn launch(
             if !status_filter.contains(status_str) && !status_filter.contains("unknown") {
                 return None;
             }
+            let proposal_labels = get_labels(p, &repo_ref, &label_events);
             if !label_filter.is_empty() {
-                let proposal_labels: HashSet<String> = p
-                    .tags
-                    .iter()
-                    .filter(|t| {
-                        let s = t.as_slice();
-                        s.len() >= 2 && s[0].eq("t")
-                    })
-                    .map(|t| t.as_slice()[1].to_lowercase())
-                    .collect();
-                if !label_filter.iter().any(|l| proposal_labels.contains(l)) {
+                let proposal_labels_lower: HashSet<String> =
+                    proposal_labels.iter().map(|l| l.to_lowercase()).collect();
+                if !label_filter.iter().any(|l| proposal_labels_lower.contains(l)) {
                     return None;
                 }
             }
-            Some((p, status_kind))
+            Some((p, status_kind, proposal_labels))
         })
         .collect();
 
@@ -241,7 +247,6 @@ pub async fn launch(
         };
         return show_proposal_details(
             &filtered_proposals,
-            &repo_ref,
             event_id_or_nevent,
             json,
             show_comments,
@@ -251,9 +256,9 @@ pub async fn launch(
     }
 
     if json {
-        output_json(&filtered_proposals, &repo_ref)?;
+        output_json(&filtered_proposals)?;
     } else {
-        output_table(&filtered_proposals, &repo_ref, &status, &label_filter);
+        output_table(&filtered_proposals, &status, &label_filter);
     }
 
     Ok(())
@@ -317,8 +322,7 @@ fn status_kind_to_str(kind: Kind) -> &'static str {
 }
 
 fn output_table(
-    proposals: &[(&nostr::Event, Kind)],
-    _repo_ref: &RepoRef,
+    proposals: &[(&nostr::Event, Kind, Vec<String>)],
     status_filter: &str,
     label_filter: &HashSet<String>,
 ) {
@@ -328,7 +332,7 @@ fn output_table(
     }
 
     println!("{:<66} {:<8} TITLE  LABELS", "ID", "STATUS");
-    for (proposal, status_kind) in proposals {
+    for (proposal, status_kind, proposal_labels) in proposals {
         let id = proposal.id.to_string();
         let status = status_kind_to_str(*status_kind);
         let title = if let Ok(cl) = event_to_cover_letter(proposal) {
@@ -338,14 +342,9 @@ fn output_table(
         } else {
             proposal.id.to_string()
         };
-        let labels_str: String = proposal
-            .tags
+        let labels_str: String = proposal_labels
             .iter()
-            .filter(|t| {
-                let s = t.as_slice();
-                s.len() >= 2 && s[0].eq("t")
-            })
-            .map(|t| format!("#{}", t.as_slice()[1]))
+            .map(|l| format!("#{l}"))
             .collect::<Vec<_>>()
             .join(" ");
         if labels_str.is_empty() {
@@ -377,10 +376,10 @@ fn output_table(
     );
 }
 
-fn output_json(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) -> Result<()> {
+fn output_json(proposals: &[(&nostr::Event, Kind, Vec<String>)]) -> Result<()> {
     let json_output: Vec<serde_json::Value> = proposals
         .iter()
-        .map(|(proposal, status_kind)| {
+        .map(|(proposal, status_kind, proposal_labels)| {
             let id = proposal.id.to_string();
             let status = status_kind_to_str(*status_kind).to_string();
             let (title, author, branch) = if let Ok(cl) = event_to_cover_letter(proposal) {
@@ -401,22 +400,13 @@ fn output_json(proposals: &[(&nostr::Event, Kind)], _repo_ref: &RepoRef) -> Resu
                     String::new(),
                 )
             };
-            let labels: Vec<String> = proposal
-                .tags
-                .iter()
-                .filter(|t| {
-                    let s = t.as_slice();
-                    s.len() >= 2 && s[0].eq("t")
-                })
-                .map(|t| t.as_slice()[1].clone())
-                .collect();
             serde_json::json!({
                 "id": id,
                 "status": status,
                 "title": title,
                 "author": author,
                 "branch": branch,
-                "labels": labels,
+                "labels": proposal_labels,
             })
         })
         .collect();
@@ -454,8 +444,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
 
 #[allow(clippy::too_many_lines)]
 fn show_proposal_details(
-    proposals: &[(&nostr::Event, Kind)],
-    _repo_ref: &RepoRef,
+    proposals: &[(&nostr::Event, Kind, Vec<String>)],
     event_id_or_nevent: &str,
     json: bool,
     show_comments: bool,
@@ -466,23 +455,13 @@ fn show_proposal_details(
 
     let target_id = resolve_event_id(event_id_or_nevent)?;
 
-    let (proposal, status_kind) = proposals
+    let (proposal, status_kind, proposal_labels) = proposals
         .iter()
-        .find(|(p, _)| p.id == target_id)
+        .find(|(p, _, _)| p.id == target_id)
         .context("proposal not found")?;
 
     let cover_letter = event_to_cover_letter(proposal)
         .context("failed to extract proposal details from proposal root event")?;
-
-    let proposal_labels: Vec<String> = proposal
-        .tags
-        .iter()
-        .filter(|t| {
-            let s = t.as_slice();
-            s.len() >= 2 && s[0].eq("t")
-        })
-        .map(|t| t.as_slice()[1].clone())
-        .collect();
 
     if json {
         let json_output = if show_comments {
