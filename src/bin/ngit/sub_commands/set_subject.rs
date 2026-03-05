@@ -150,12 +150,6 @@ async fn publish_set_subject_event(
     // Notify the target event author.
     tags.push(Tag::public_key(target.pubkey));
 
-    // Human-readable alt text.
-    tags.push(Tag::custom(
-        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-        vec![format!("set {target_kind} subject to: {subject}")],
-    ));
-
     let subject_event = ngit::client::sign_event(
         EventBuilder::new(KIND_LABEL, "").tags(tags),
         &signer,
