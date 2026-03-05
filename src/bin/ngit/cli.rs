@@ -160,7 +160,8 @@ pub struct RepoSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output repository info as JSON; `is_nostr_repo` is false when not in a nostr repository
+    /// Output repository info as JSON; `is_nostr_repo` is false when not in a
+    /// nostr repository
     #[arg(long)]
     pub json: bool,
 }
@@ -347,6 +348,22 @@ pub enum PrCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// set or update the cover note for a PR (author or maintainer only)
+    ///
+    /// A cover note is a markdown body that replaces the displayed description.
+    /// nostr: mentions in --body are converted to q/p tags automatically.
+    #[command(name = "set-cover-note")]
+    SetCoverNote {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Markdown body for the cover note
+        #[arg(long)]
+        body: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +500,22 @@ pub enum IssueCommands {
         /// New subject/title for the issue
         #[arg(long, alias = "title")]
         subject: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// set or update the cover note for an issue (author or maintainer only)
+    ///
+    /// A cover note is a markdown body that replaces the displayed description.
+    /// nostr: mentions in --body are converted to q/p tags automatically.
+    #[command(name = "set-cover-note")]
+    SetCoverNote {
+        /// Issue event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Markdown body for the cover note
+        #[arg(long)]
+        body: String,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

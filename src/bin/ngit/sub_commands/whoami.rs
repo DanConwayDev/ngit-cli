@@ -154,7 +154,14 @@ async fn load_user_for_scope(
 ) -> Option<(String, String, Option<String>)> {
     // First verify signer info exists for this scope without building a full
     // signer — avoids triggering password prompts for ncryptsec.
-    if get_signer_info(&git_repo, &signer_info.cloned(), &None, &Some(source.clone())).is_err() {
+    if get_signer_info(
+        &git_repo,
+        &signer_info.cloned(),
+        &None,
+        &Some(source.clone()),
+    )
+    .is_err()
+    {
         return None;
     }
 

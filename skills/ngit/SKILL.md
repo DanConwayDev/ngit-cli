@@ -127,6 +127,7 @@ ngit pr ready <ID|nevent> --reason "addressed review feedback"
 ngit pr draft <ID|nevent> --reason "needs more work"
 ngit pr label <ID|nevent> --label bug --label enhancement
 ngit pr set-subject <ID|nevent> --subject "New title"
+ngit pr set-cover-note <ID|nevent> --body "Updated description. See nostr:nevent1abc…"
 ```
 
 ## Issues
@@ -146,6 +147,7 @@ ngit issue resolved <ID|nevent> --reason "fixed in abc123"
 ngit issue reopen <ID|nevent> --reason "regression in v2.3"
 ngit issue label <ID|nevent> --label bug --label enhancement
 ngit issue set-subject <ID|nevent> --subject "New title"
+ngit issue set-cover-note <ID|nevent> --body "Updated description. See nostr:nevent1abc…"
 ```
 
 ## Account management

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Cover notes (kind 1624, experimental): a new event kind that lets the author or a maintainer attach context or a summary to a pr/issue. designed to pinned to the top of long threads.
+- `ngit pr set-cover-note <id> --body <markdown>` — publish a cover note for a PR (author or maintainer only); `nostr:` mentions in `--body` are automatically converted to `q`/`p` tags; replaces the displayed description; original description is shown only with `--comments`
+- `ngit issue set-cover-note <id> --body <markdown>` — same for issues
+- Cover note display in `ngit pr view` / `ngit issue view`: when a cover note exists it is shown in place of the description under a "Cover Note:" header (or "Cover Note (by npub...):" when set by a maintainer); `--json` output gains a `cover_note` object with `id`, `author`, `created_at`, `body`, and optional `by_maintainer: true`
 - NIP-32 label support: kind-1985 label events are now fetched alongside status events and merged with inline `t` tags to compute the effective label set for issues and PRs; only labels authored by the issue/PR author or a repository maintainer are applied; label counts appear in the fetch progress report
 - `ngit issue label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing issue (author or maintainer only); publishes a kind-1985 event; duplicate labels already present via `t` tags or prior kind-1985 events are silently skipped; the new event is saved to the local cache before broadcasting so subsequent reads reflect the change immediately
 - `ngit pr label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing PR (author or maintainer only); publishes a kind-1985 event; duplicate labels already present via `t` tags or prior kind-1985 events are silently skipped; the new event is saved to the local cache before broadcasting so subsequent reads reflect the change immediately

@@ -94,6 +94,10 @@ pub const KIND_COMMENT: Kind = Kind::Custom(1111);
 /// NIP-32 label event (kind 1985) — applies hashtag labels to an existing
 /// event. Used to add labels to issues, patches and PRs after the fact.
 pub const KIND_LABEL: Kind = Kind::Custom(1985);
+/// Cover note event (kind 1624) — a markdown note attached to a PR, patch or
+/// issue by its author or a repository maintainer.  Only the latest authorised
+/// event is displayed (replaceable semantics with hex-id tiebreak).
+pub const KIND_COVER_NOTE: Kind = Kind::Custom(1624);
 
 pub fn event_is_patch_set_root(event: &Event) -> bool {
     event.kind.eq(&Kind::GitPatch)
@@ -985,19 +989,15 @@ pub fn is_event_proposal_root_for_branch(
 ///
 /// 1. `t` tags on the event itself (self-reported by the event author).
 /// 2. NIP-32 kind-1985 label events in `label_events` that reference `event`
-///    via a lowercase `e` tag and carry `["L", "#t"]` +
-///    `["l", "<value>", "#t"]` tags.
+///    via a lowercase `e` tag and carry `["L", "#t"]` + `["l", "<value>",
+///    "#t"]` tags.
 ///
 /// A label is only applied when the author of the source event is either the
 /// author of `event` itself or one of the repository maintainers.
 ///
 /// Labels are additive — all valid label events contribute; there is no
 /// "latest wins" replacement semantics.
-pub fn process_labels(
-    event: &Event,
-    repo_ref: &RepoRef,
-    label_events: &[Event],
-) -> Vec<String> {
+pub fn process_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> Vec<String> {
     let is_permitted = |pubkey: &PublicKey| -> bool {
         pubkey.eq(&event.pubkey) || repo_ref.maintainers.contains(pubkey)
     };
@@ -1162,12 +1162,57 @@ pub fn get_labels_and_subject(
 /// Compatibility wrapper — returns only the hashtag labels.
 ///
 /// Prefer [`get_labels_and_subject`] when the subject override is also needed.
-pub fn get_labels(
+pub fn get_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> Vec<String> {
+    process_labels(event, repo_ref, label_events)
+}
+
+/// The effective cover note for `event`, selected from a pre-fetched set of
+/// kind-1624 events.
+///
+/// A cover note is a markdown body attached to a PR, patch or issue by its
+/// author or a repository maintainer.  Only the latest authorised event wins
+/// (replaceable semantics: newest `created_at`, tiebreak by lexicographically
+/// larger event ID).  Events authored by other pubkeys are ignored.
+///
+/// Returns `None` when no valid cover note exists.
+pub fn process_cover_note(
     event: &Event,
     repo_ref: &RepoRef,
-    label_events: &[Event],
-) -> Vec<String> {
-    process_labels(event, repo_ref, label_events)
+    cover_note_events: &[Event],
+) -> Option<(Event, bool)> {
+    let is_permitted = |pubkey: &PublicKey| -> bool {
+        pubkey.eq(&event.pubkey) || repo_ref.maintainers.contains(pubkey)
+    };
+
+    let event_id_str = event.id.to_string();
+
+    // Find the winning cover note: latest created_at, tiebreak by
+    // lexicographically larger event ID (NIP-1 replaceable event semantics).
+    let winner = cover_note_events
+        .iter()
+        .filter(|cn| {
+            if !cn.kind.eq(&KIND_COVER_NOTE) {
+                return false;
+            }
+            if !is_permitted(&cn.pubkey) {
+                return false;
+            }
+            // Must reference our event via a lowercase `e` tag.
+            cn.tags.iter().any(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0].eq("e") && s[1].eq(&event_id_str)
+            })
+        })
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+        })?;
+
+    // True when the cover note author differs from the original event author
+    // (i.e. a maintainer wrote it, not the PR/issue author).
+    let by_different_author = winner.pubkey != event.pubkey;
+    Some((winner.clone(), by_different_author))
 }
 
 pub fn get_status(

@@ -15,9 +15,10 @@ use ngit::{
     },
     fetch::fetch_from_git_server,
     git_events::{
-        KIND_COMMENT, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
+        KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         get_commit_id_from_patch, get_labels_and_subject,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, process_cover_note,
+        status_kinds, tag_value,
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
 };
@@ -222,7 +223,10 @@ pub async fn launch(
             if !label_filter.is_empty() {
                 let proposal_labels_lower: HashSet<String> =
                     proposal_labels.iter().map(|l| l.to_lowercase()).collect();
-                if !label_filter.iter().any(|l| proposal_labels_lower.contains(l)) {
+                if !label_filter
+                    .iter()
+                    .any(|l| proposal_labels_lower.contains(l))
+                {
                     return None;
                 }
             }
@@ -246,6 +250,16 @@ pub async fn launch(
                 .await?
                 .len()
         };
+        // Fetch kind-1624 cover note events for this proposal.
+        let cover_note_events = get_events_from_local_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .event(target_id)
+                    .kind(KIND_COVER_NOTE),
+            ],
+        )
+        .await?;
         let relay_hint = repo_ref.relays.first();
         return show_proposal_details(
             &filtered_proposals,
@@ -254,6 +268,8 @@ pub async fn launch(
             show_comments,
             comment_count,
             &comments,
+            &cover_note_events,
+            &repo_ref,
             relay_hint,
         );
     }
@@ -407,38 +423,40 @@ fn output_json(
 ) -> Result<()> {
     let json_output: Vec<serde_json::Value> = proposals
         .iter()
-        .map(|(proposal, status_kind, proposal_labels, subject_override)| {
-            let id = event_id_to_nevent(proposal.id, relay_hint);
-            let status = status_kind_to_str(*status_kind).to_string();
-            let (title, author, branch) = if let Ok(cl) = event_to_cover_letter(proposal) {
-                (
-                    subject_override.clone().unwrap_or(cl.title.clone()),
-                    proposal.pubkey.to_bech32().unwrap_or_default(),
-                    cl.get_branch_name_with_pr_prefix_and_shorthand_id()
-                        .unwrap_or_default(),
-                )
-            } else {
-                let title = subject_override.clone().unwrap_or_else(|| {
-                    tag_value(proposal, "description").map_or_else(
-                        |_| proposal.id.to_string(),
-                        |d| d.split('\n').collect::<Vec<&str>>()[0].to_string(),
+        .map(
+            |(proposal, status_kind, proposal_labels, subject_override)| {
+                let id = event_id_to_nevent(proposal.id, relay_hint);
+                let status = status_kind_to_str(*status_kind).to_string();
+                let (title, author, branch) = if let Ok(cl) = event_to_cover_letter(proposal) {
+                    (
+                        subject_override.clone().unwrap_or(cl.title.clone()),
+                        proposal.pubkey.to_bech32().unwrap_or_default(),
+                        cl.get_branch_name_with_pr_prefix_and_shorthand_id()
+                            .unwrap_or_default(),
                     )
-                });
-                (
-                    title,
-                    proposal.pubkey.to_bech32().unwrap_or_default(),
-                    String::new(),
-                )
-            };
-            serde_json::json!({
-                "id": id,
-                "status": status,
-                "subject": title,
-                "author": author,
-                "branch": branch,
-                "labels": proposal_labels,
-            })
-        })
+                } else {
+                    let title = subject_override.clone().unwrap_or_else(|| {
+                        tag_value(proposal, "description").map_or_else(
+                            |_| proposal.id.to_string(),
+                            |d| d.split('\n').collect::<Vec<&str>>()[0].to_string(),
+                        )
+                    });
+                    (
+                        title,
+                        proposal.pubkey.to_bech32().unwrap_or_default(),
+                        String::new(),
+                    )
+                };
+                serde_json::json!({
+                    "id": id,
+                    "status": status,
+                    "subject": title,
+                    "author": author,
+                    "branch": branch,
+                    "labels": proposal_labels,
+                })
+            },
+        )
         .collect();
 
     println!("{}", serde_json::to_string_pretty(&json_output)?);
@@ -472,7 +490,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
     })
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn show_proposal_details(
     proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
     event_id_or_nevent: &str,
@@ -480,6 +498,8 @@ fn show_proposal_details(
     show_comments: bool,
     comment_count: usize,
     comments: &[nostr::Event],
+    cover_note_events: &[nostr::Event],
+    repo_ref: &RepoRef,
     relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
     use nostr::ToBech32;
@@ -500,13 +520,41 @@ fn show_proposal_details(
         .unwrap_or(&cover_letter.title)
         .to_string();
 
+    // Resolve the effective cover note (kind 1624) for this proposal.
+    let cover_note = process_cover_note(proposal, repo_ref, cover_note_events);
+
     if json {
-        let json_output = if show_comments {
+        let cover_note_json = cover_note.as_ref().map(|(cn, by_different_author)| {
+            let mut obj = serde_json::json!({
+                "id": event_id_to_nevent(cn.id, relay_hint),
+                "author": cn.pubkey.to_bech32().unwrap_or_default(),
+                "created_at": cn.created_at.as_secs(),
+                "body": cn.content,
+            });
+            if *by_different_author {
+                obj["by_maintainer"] = serde_json::Value::Bool(true);
+            }
+            obj
+        });
+
+        let mut json_obj = serde_json::json!({
+            "id": event_id_to_nevent(proposal.id, relay_hint),
+            "status": status_kind_to_str(*status_kind),
+            "subject": display_title,
+            "author": proposal.pubkey.to_bech32().unwrap_or_default(),
+            "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+            "labels": proposal_labels,
+            "comment_count": comment_count,
+            "description": cover_letter.description,
+        });
+        if let Some(cn) = cover_note_json {
+            json_obj["cover_note"] = cn;
+        }
+        if show_comments {
             let comments_json: Vec<serde_json::Value> = comments
                 .iter()
                 .map(|c| {
-                    let reply_to =
-                        comment_reply_to(c).map(|id| event_id_to_nevent(id, relay_hint));
+                    let reply_to = comment_reply_to(c).map(|id| event_id_to_nevent(id, relay_hint));
                     serde_json::json!({
                         "id": event_id_to_nevent(c.id, relay_hint),
                         "author": c.pubkey.to_bech32().unwrap_or_default(),
@@ -516,30 +564,9 @@ fn show_proposal_details(
                     })
                 })
                 .collect();
-            serde_json::json!({
-                "id": event_id_to_nevent(proposal.id, relay_hint),
-                "status": status_kind_to_str(*status_kind),
-                "subject": display_title,
-                "author": proposal.pubkey.to_bech32().unwrap_or_default(),
-                "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                "labels": proposal_labels,
-                "comment_count": comment_count,
-                "comments": comments_json,
-                "description": cover_letter.description,
-            })
-        } else {
-            serde_json::json!({
-                "id": event_id_to_nevent(proposal.id, relay_hint),
-                "status": status_kind_to_str(*status_kind),
-                "subject": display_title,
-                "author": proposal.pubkey.to_bech32().unwrap_or_default(),
-                "branch": cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
-                "labels": proposal_labels,
-                "comment_count": comment_count,
-                "description": cover_letter.description,
-            })
-        };
-        println!("{}", serde_json::to_string_pretty(&json_output)?);
+            json_obj["comments"] = serde_json::Value::Array(comments_json);
+        }
+        println!("{}", serde_json::to_string_pretty(&json_obj)?);
         return Ok(());
     }
 
@@ -562,7 +589,28 @@ fn show_proposal_details(
         println!("Labels:   {labels_str}");
     }
 
-    if !cover_letter.description.is_empty() {
+    if let Some((cn, by_different_author)) = &cover_note {
+        println!();
+        if *by_different_author {
+            println!(
+                "Cover Note (by {}):",
+                cn.pubkey.to_bech32().unwrap_or_default()
+            );
+        } else {
+            println!("Cover Note:");
+        }
+        for line in cn.content.lines() {
+            println!("  {line}");
+        }
+        // Show original description only when --comments is used.
+        if show_comments && !cover_letter.description.is_empty() {
+            println!();
+            println!("Original Description:");
+            for line in cover_letter.description.lines() {
+                println!("  {line}");
+            }
+        }
+    } else if !cover_letter.description.is_empty() {
         println!();
         println!("Description:");
         for line in cover_letter.description.lines() {

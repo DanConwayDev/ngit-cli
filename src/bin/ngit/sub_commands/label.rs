@@ -3,14 +3,13 @@ use ngit::{
     client::{Params, get_issues_from_cache, get_proposals_and_revisions_from_cache, send_events},
     git_events::{KIND_LABEL, get_labels},
 };
-use nostr::{EventBuilder, Tag, TagStandard};
+use nostr::{EventBuilder, Tag, TagStandard, nips::nip19::Nip19};
 use nostr_sdk::{EventId, FromBech32};
-use nostr::nips::nip19::Nip19;
 
 use crate::{
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
-        save_event_in_local_cache,
+        Client, Connect, fetching_with_report, get_events_from_local_cache,
+        get_repo_ref_from_cache, save_event_in_local_cache,
     },
     git::{Repo, RepoActions},
     login,
@@ -90,19 +89,13 @@ async fn publish_label_event(
 
     // Permission check: only the author or a maintainer may label.
     if target.pubkey != user_pubkey && !repo_ref.maintainers.contains(&user_pubkey) {
-        bail!(
-            "only the {target_kind} author or a repository maintainer can label a {target_kind}"
-        );
+        bail!("only the {target_kind} author or a repository maintainer can label a {target_kind}");
     }
 
     // Fetch existing label events so we can warn about duplicates.
     let existing_label_events = get_events_from_local_cache(
         git_repo_path,
-        vec![
-            nostr::Filter::default()
-                .event(event_id)
-                .kind(KIND_LABEL),
-        ],
+        vec![nostr::Filter::default().event(event_id).kind(KIND_LABEL)],
     )
     .await?;
 
@@ -117,10 +110,7 @@ async fn publish_label_event(
         .collect();
 
     if new_labels.is_empty() {
-        let already: Vec<String> = labels
-            .iter()
-            .map(|l| format!("#{}", l.trim()))
-            .collect();
+        let already: Vec<String> = labels.iter().map(|l| format!("#{}", l.trim())).collect();
         println!(
             "{target_kind} already has label{}: {}",
             if already.len() == 1 { "" } else { "s" },

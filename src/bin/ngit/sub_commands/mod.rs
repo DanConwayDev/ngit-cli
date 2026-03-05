@@ -15,6 +15,7 @@ pub mod pr_merge;
 pub mod pr_status;
 pub mod repo;
 pub mod send;
+pub mod set_cover_note;
 pub mod set_subject;
 pub mod sync;
 pub mod whoami;

@@ -206,5 +206,12 @@ pub async fn launch_ready(id: &str, offline: bool, reason: Option<&str>) -> Resu
 }
 
 pub async fn launch_draft(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusDraft, "converted to draft", reason).await
+    launch_status(
+        id,
+        offline,
+        Kind::GitStatusDraft,
+        "converted to draft",
+        reason,
+    )
+    .await
 }

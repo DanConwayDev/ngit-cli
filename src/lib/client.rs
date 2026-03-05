@@ -56,7 +56,7 @@ use crate::{
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
-        KIND_COMMENT, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
+        KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         KIND_USER_GRASP_LIST, event_is_cover_letter, event_is_patch_set_root,
         event_is_revision_root, event_is_valid_pr_or_pr_update, status_kinds,
     },
@@ -2000,6 +2000,8 @@ async fn process_fetched_events(
                 report.comments.insert(event.id);
             } else if event.kind.eq(&KIND_LABEL) {
                 report.labels.insert(event.id);
+            } else if event.kind.eq(&KIND_COVER_NOTE) {
+                report.cover_notes.insert(event.id);
             } else if [Kind::RelayList, Kind::Metadata, KIND_USER_GRASP_LIST].contains(&event.kind)
             {
                 if request.missing_contributor_profiles.contains(&event.pubkey) {
@@ -2125,6 +2127,9 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
         }
         for c in relay_report.labels {
             report.labels.insert(c);
+        }
+        for c in relay_report.cover_notes {
+            report.cover_notes.insert(c);
         }
         report.deletions += relay_report.deletions;
         for c in relay_report.contributor_profiles {
@@ -2268,6 +2273,24 @@ pub fn get_fetch_filters(
                 ]
             }
         },
+        // Fetch kind-1624 cover note events for issues and proposals.
+        // Cover notes reference the target via a lowercase `e` tag.
+        {
+            let all_root_ids: HashSet<EventId> = issue_ids
+                .iter()
+                .chain(proposal_ids.iter())
+                .copied()
+                .collect();
+            if all_root_ids.is_empty() {
+                vec![]
+            } else {
+                vec![
+                    nostr::Filter::default()
+                        .events(all_root_ids)
+                        .kind(KIND_COVER_NOTE),
+                ]
+            }
+        },
         // Request kind-5 deletions for state events and repo announcements by
         // their event ID (#e tag), as per NIP-09. The #a-tagged filter above
         // covers addressable-event deletions; this covers the specific event IDs
@@ -2358,6 +2381,8 @@ pub struct FetchReport {
     comments: HashSet<EventId>,
     /// NIP-32 kind-1985 label events for issues and proposals.
     labels: HashSet<EventId>,
+    /// Kind-1624 cover note events for issues, patches, and PRs.
+    cover_notes: HashSet<EventId>,
     /// Count of kind-5 deletion events received (for display purposes).
     deletions: u32,
     contributor_profiles: HashSet<PublicKey>,
@@ -2451,6 +2476,13 @@ impl Display for FetchReport {
                 "{} label{}",
                 self.labels.len(),
                 if self.labels.len() > 1 { "s" } else { "" },
+            ));
+        }
+        if !self.cover_notes.is_empty() {
+            display_items.push(format!(
+                "{} cover note{}",
+                self.cover_notes.len(),
+                if self.cover_notes.len() > 1 { "s" } else { "" },
             ));
         }
         if self.deletions > 0 {

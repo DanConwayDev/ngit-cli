@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 use ngit::{
     client::{Params, get_events_from_local_cache, get_issues_from_cache},
-    git_events::{KIND_COMMENT, KIND_LABEL, get_labels_and_subject, get_status, status_kinds, tag_value},
+    git_events::{
+        KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, get_labels_and_subject, get_status,
+        process_cover_note, status_kinds, tag_value,
+    },
 };
 use nostr::{
     FromBech32, ToBech32,
@@ -43,8 +46,6 @@ fn get_issue_title(event: &nostr::Event, subject_override: Option<&str>) -> Stri
             }
         })
 }
-
-
 
 fn status_kind_to_str(kind: Kind) -> &'static str {
     match kind {
@@ -220,7 +221,13 @@ pub async fn launch(
                 }
             }
             let comment_count = comment_counts.get(&issue.id).copied().unwrap_or(0);
-            Some((issue, status_kind, issue_labels, comment_count, subject_override))
+            Some((
+                issue,
+                status_kind,
+                issue_labels,
+                comment_count,
+                subject_override,
+            ))
         })
         .collect();
 
@@ -247,6 +254,16 @@ pub async fn launch(
         } else {
             vec![]
         };
+        // Fetch kind-1624 cover note events for this issue.
+        let cover_note_events = get_events_from_local_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .event(target_id)
+                    .kind(KIND_COVER_NOTE),
+            ],
+        )
+        .await?;
         let relay_hint = repo_ref.relays.first();
         return show_issue_details(
             &filtered,
@@ -254,6 +271,8 @@ pub async fn launch(
             json,
             show_comments,
             &comments,
+            &cover_note_events,
+            &repo_ref,
             relay_hint,
         );
     }
@@ -295,12 +314,15 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
     })
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn show_issue_details(
     issues: &[IssueRow<'_>],
     event_id_or_nevent: &str,
     json: bool,
     show_comments: bool,
     comments: &[nostr::Event],
+    cover_note_events: &[nostr::Event],
+    repo_ref: &ngit::repo_ref::RepoRef,
     relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
     let target_id = if event_id_or_nevent.starts_with("nevent") {
@@ -322,13 +344,40 @@ fn show_issue_details(
     let title = get_issue_title(issue, subject_override.as_deref());
     let status = status_kind_to_str(*status_kind);
 
+    // Resolve the effective cover note (kind 1624) for this issue.
+    let cover_note = process_cover_note(issue, repo_ref, cover_note_events);
+
     if json {
-        let json_output = if show_comments {
+        let cover_note_json = cover_note.as_ref().map(|(cn, by_different_author)| {
+            let mut obj = serde_json::json!({
+                "id": event_id_to_nevent(cn.id, relay_hint),
+                "author": cn.pubkey.to_bech32().unwrap_or_default(),
+                "created_at": cn.created_at.as_secs(),
+                "body": cn.content,
+            });
+            if *by_different_author {
+                obj["by_maintainer"] = serde_json::Value::Bool(true);
+            }
+            obj
+        });
+
+        let mut json_obj = serde_json::json!({
+            "id": event_id_to_nevent(issue.id, relay_hint),
+            "status": status,
+            "subject": title,
+            "author": issue.pubkey.to_bech32().unwrap_or_default(),
+            "labels": labels,
+            "comment_count": comment_count,
+            "description": issue.content,
+        });
+        if let Some(cn) = cover_note_json {
+            json_obj["cover_note"] = cn;
+        }
+        if show_comments {
             let comments_json: Vec<serde_json::Value> = comments
                 .iter()
                 .map(|c| {
-                    let reply_to =
-                        comment_reply_to(c).map(|id| event_id_to_nevent(id, relay_hint));
+                    let reply_to = comment_reply_to(c).map(|id| event_id_to_nevent(id, relay_hint));
                     serde_json::json!({
                         "id": event_id_to_nevent(c.id, relay_hint),
                         "author": c.pubkey.to_bech32().unwrap_or_default(),
@@ -338,28 +387,9 @@ fn show_issue_details(
                     })
                 })
                 .collect();
-            serde_json::json!({
-                "id": event_id_to_nevent(issue.id, relay_hint),
-                "status": status,
-                "subject": title,
-                "author": issue.pubkey.to_bech32().unwrap_or_default(),
-                "labels": labels,
-                "comment_count": comment_count,
-                "comments": comments_json,
-                "description": issue.content,
-            })
-        } else {
-            serde_json::json!({
-                "id": event_id_to_nevent(issue.id, relay_hint),
-                "status": status,
-                "subject": title,
-                "author": issue.pubkey.to_bech32().unwrap_or_default(),
-                "labels": labels,
-                "comment_count": comment_count,
-                "description": issue.content,
-            })
-        };
-        println!("{}", serde_json::to_string_pretty(&json_output)?);
+            json_obj["comments"] = serde_json::Value::Array(comments_json);
+        }
+        println!("{}", serde_json::to_string_pretty(&json_obj)?);
         return Ok(());
     }
 
@@ -375,7 +405,28 @@ fn show_issue_details(
         println!("Labels:   {labels_str}");
     }
 
-    if !issue.content.is_empty() {
+    if let Some((cn, by_different_author)) = &cover_note {
+        println!();
+        if *by_different_author {
+            println!(
+                "Cover Note (by {}):",
+                cn.pubkey.to_bech32().unwrap_or_default()
+            );
+        } else {
+            println!("Cover Note:");
+        }
+        for line in cn.content.lines() {
+            println!("  {line}");
+        }
+        // Show original description only when --comments is used.
+        if show_comments && !issue.content.is_empty() {
+            println!();
+            println!("Original Description:");
+            for line in issue.content.lines() {
+                println!("  {line}");
+            }
+        }
+    } else if !issue.content.is_empty() {
         println!();
         for line in issue.content.lines() {
             println!("  {line}");
@@ -432,11 +483,7 @@ fn chrono_timestamp(unix_secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02} {hours:02}:{mins:02}:{secs:02} UTC")
 }
 
-fn output_table(
-    issues: &[IssueRow<'_>],
-    status_filter: &str,
-    label_filter: &HashSet<String>,
-) {
+fn output_table(issues: &[IssueRow<'_>], status_filter: &str, label_filter: &HashSet<String>) {
     println!("{:<66} {:<8} {:<5} TITLE  LABELS", "ID", "STATUS", "CMTS");
     for (issue, status_kind, labels, comment_count, subject_override) in issues {
         let id = issue.id.to_string();
@@ -485,16 +532,18 @@ fn event_id_to_nevent(event_id: nostr::EventId, relay: Option<&RelayUrl>) -> Str
 fn output_json(issues: &[IssueRow<'_>], relay_hint: Option<&RelayUrl>) -> Result<()> {
     let json_output: Vec<serde_json::Value> = issues
         .iter()
-        .map(|(issue, status_kind, labels, comment_count, subject_override)| {
-            serde_json::json!({
-                "id": event_id_to_nevent(issue.id, relay_hint),
-                "status": status_kind_to_str(*status_kind),
-                "subject": get_issue_title(issue, subject_override.as_deref()),
-                "author": issue.pubkey.to_bech32().unwrap_or_default(),
-                "labels": labels,
-                "comment_count": comment_count,
-            })
-        })
+        .map(
+            |(issue, status_kind, labels, comment_count, subject_override)| {
+                serde_json::json!({
+                    "id": event_id_to_nevent(issue.id, relay_hint),
+                    "status": status_kind_to_str(*status_kind),
+                    "subject": get_issue_title(issue, subject_override.as_deref()),
+                    "author": issue.pubkey.to_bech32().unwrap_or_default(),
+                    "labels": labels,
+                    "comment_count": comment_count,
+                })
+            },
+        )
         .collect();
     println!("{}", serde_json::to_string_pretty(&json_output)?);
     Ok(())

@@ -74,6 +74,7 @@ struct RepoInfoJson {
 // `ngit repo` (no subcommand) — show repository info
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -98,20 +99,23 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
 
     let Some(repo_coordinate) = repo_coordinate else {
         if json {
-            println!("{}", serde_json::to_string_pretty(&RepoInfoJson {
-                is_nostr_repo: false,
-                name: None,
-                identifier: None,
-                description: None,
-                nostr_url: None,
-                coordinate: None,
-                web: None,
-                maintainers: None,
-                grasp_servers: None,
-                git_servers: None,
-                relays: None,
-                hashtags: None,
-            })?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&RepoInfoJson {
+                    is_nostr_repo: false,
+                    name: None,
+                    identifier: None,
+                    description: None,
+                    nostr_url: None,
+                    coordinate: None,
+                    web: None,
+                    maintainers: None,
+                    grasp_servers: None,
+                    git_servers: None,
+                    relays: None,
+                    hashtags: None,
+                })?
+            );
         } else {
             println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
             println!();
@@ -140,20 +144,23 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                 .ok()
                 .and_then(|r| r.url().map(std::string::ToString::to_string))
                 .filter(|u| u.starts_with("nostr://"));
-            println!("{}", serde_json::to_string_pretty(&RepoInfoJson {
-                is_nostr_repo: true,
-                name: None,
-                identifier: Some(repo_coordinate.identifier.clone()),
-                description: None,
-                nostr_url,
-                coordinate: repo_coordinate.to_bech32().ok(),
-                web: None,
-                maintainers: None,
-                grasp_servers: None,
-                git_servers: None,
-                relays: None,
-                hashtags: None,
-            })?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&RepoInfoJson {
+                    is_nostr_repo: true,
+                    name: None,
+                    identifier: Some(repo_coordinate.identifier.clone()),
+                    description: None,
+                    nostr_url,
+                    coordinate: repo_coordinate.to_bech32().ok(),
+                    web: None,
+                    maintainers: None,
+                    grasp_servers: None,
+                    git_servers: None,
+                    relays: None,
+                    hashtags: None,
+                })?
+            );
         } else {
             println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
             println!();
@@ -162,8 +169,12 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                 repo_coordinate.identifier
             );
             println!();
-            println!("if you created this repository, run `ngit repo init` to publish an announcement");
-            println!("if you are a co-maintainer, run `ngit repo accept` to publish your announcement");
+            println!(
+                "if you created this repository, run `ngit repo init` to publish an announcement"
+            );
+            println!(
+                "if you are a co-maintainer, run `ngit repo accept` to publish your announcement"
+            );
         }
         return Ok(());
     };

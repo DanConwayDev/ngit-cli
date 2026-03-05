@@ -3,7 +3,7 @@
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use clap::Parser;
-use cli::{AccountCommands, Cli, Commands, IssueCommands, PrCommands, CUSTOMISE_TEMPLATE};
+use cli::{AccountCommands, CUSTOMISE_TEMPLATE, Cli, Commands, IssueCommands, PrCommands};
 
 mod cli;
 use ngit::{
@@ -54,7 +54,13 @@ async fn main() {
             },
             Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
             Commands::Repo(args) => {
-                sub_commands::repo::launch(&cli, args.repo_command.as_ref(), args.offline, args.json).await
+                sub_commands::repo::launch(
+                    &cli,
+                    args.repo_command.as_ref(),
+                    args.offline,
+                    args.json,
+                )
+                .await
             }
             Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
             Commands::Pr(args) => match &args.pr_command {
@@ -102,18 +108,26 @@ async fn main() {
                 PrCommands::Send(sub_args) => {
                     sub_commands::send::launch(&cli, sub_args, false).await
                 }
-                PrCommands::Close { id, reason, offline } => {
-                    sub_commands::pr_status::launch_close(id, *offline, reason.as_deref()).await
-                }
-                PrCommands::Reopen { id, reason, offline } => {
-                    sub_commands::pr_status::launch_reopen(id, *offline, reason.as_deref()).await
-                }
-                PrCommands::Ready { id, reason, offline } => {
-                    sub_commands::pr_status::launch_ready(id, *offline, reason.as_deref()).await
-                }
-                PrCommands::Draft { id, reason, offline } => {
-                    sub_commands::pr_status::launch_draft(id, *offline, reason.as_deref()).await
-                }
+                PrCommands::Close {
+                    id,
+                    reason,
+                    offline,
+                } => sub_commands::pr_status::launch_close(id, *offline, reason.as_deref()).await,
+                PrCommands::Reopen {
+                    id,
+                    reason,
+                    offline,
+                } => sub_commands::pr_status::launch_reopen(id, *offline, reason.as_deref()).await,
+                PrCommands::Ready {
+                    id,
+                    reason,
+                    offline,
+                } => sub_commands::pr_status::launch_ready(id, *offline, reason.as_deref()).await,
+                PrCommands::Draft {
+                    id,
+                    reason,
+                    offline,
+                } => sub_commands::pr_status::launch_draft(id, *offline, reason.as_deref()).await,
                 PrCommands::Comment {
                     id,
                     body,
@@ -143,6 +157,9 @@ async fn main() {
                     subject,
                     offline,
                 } => sub_commands::set_subject::launch_pr_set_subject(id, subject, *offline).await,
+                PrCommands::SetCoverNote { id, body, offline } => {
+                    sub_commands::set_cover_note::launch_pr_set_cover_note(id, body, *offline).await
+                }
             },
             Commands::Issue(args) => match &args.issue_command {
                 IssueCommands::List {
@@ -183,17 +200,33 @@ async fn main() {
                     body,
                     labels,
                 } => {
-                    sub_commands::issue_create::launch(subject.clone(), body.clone(), labels.clone())
-                        .await
+                    sub_commands::issue_create::launch(
+                        subject.clone(),
+                        body.clone(),
+                        labels.clone(),
+                    )
+                    .await
                 }
-                IssueCommands::Close { id, reason, offline } => {
+                IssueCommands::Close {
+                    id,
+                    reason,
+                    offline,
+                } => {
                     sub_commands::issue_status::launch_close(id, *offline, reason.as_deref()).await
                 }
-                IssueCommands::Resolved { id, reason, offline } => {
+                IssueCommands::Resolved {
+                    id,
+                    reason,
+                    offline,
+                } => {
                     sub_commands::issue_status::launch_resolved(id, *offline, reason.as_deref())
                         .await
                 }
-                IssueCommands::Reopen { id, reason, offline } => {
+                IssueCommands::Reopen {
+                    id,
+                    reason,
+                    offline,
+                } => {
                     sub_commands::issue_status::launch_reopen(id, *offline, reason.as_deref()).await
                 }
                 IssueCommands::Comment {
@@ -221,6 +254,10 @@ async fn main() {
                     offline,
                 } => {
                     sub_commands::set_subject::launch_issue_set_subject(id, subject, *offline).await
+                }
+                IssueCommands::SetCoverNote { id, body, offline } => {
+                    sub_commands::set_cover_note::launch_issue_set_cover_note(id, body, *offline)
+                        .await
                 }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
