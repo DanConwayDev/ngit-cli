@@ -7,38 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `ngit account whoami` now detects and displays login credentials set at the system git config level (`/etc/gitconfig`), and falls back to system config during normal operations when no local or global credentials are found
+## [2.3.0] - 2026-03-05
 
 ### Added
 
-- Cover notes (kind 1624, experimental): a new event kind that lets the author or a maintainer attach context or a summary to a pr/issue. designed to pinned to the top of long threads.
-- `ngit pr set-cover-note <id> --body <markdown>` — publish a cover note for a PR (author or maintainer only); `nostr:` mentions in `--body` are automatically converted to `q`/`p` tags; replaces the displayed description; original description is shown only with `--comments`
-- `ngit issue set-cover-note <id> --body <markdown>` — same for issues
-- Cover note display in `ngit pr view` / `ngit issue view`: when a cover note exists it is shown in place of the description under a "Cover Note:" header (or "Cover Note (by npub...):" when set by a maintainer); `--json` output gains a `cover_note` object with `id`, `author`, `created_at`, `body`, and optional `by_maintainer: true`
-- NIP-32 label support: kind-1985 label events are now fetched alongside status events and merged with inline `t` tags to compute the effective label set for issues and PRs; only labels authored by the issue/PR author or a repository maintainer are applied; label counts appear in the fetch progress report
-- `ngit issue label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing issue (author or maintainer only); publishes a kind-1985 event; duplicate labels already present via `t` tags or prior kind-1985 events are silently skipped; the new event is saved to the local cache before broadcasting so subsequent reads reflect the change immediately
-- `ngit pr label <id> --label <L> [--label <L>...]` — apply one or more NIP-32 hashtag labels to an existing PR (author or maintainer only); publishes a kind-1985 event; duplicate labels already present via `t` tags or prior kind-1985 events are silently skipped; the new event is saved to the local cache before broadcasting so subsequent reads reflect the change immediately
-- `ngit pr set-subject <id> --subject <text>` — update the displayed title of a PR via a NIP-32 kind-1985 `#subject` label event (author or maintainer only); the latest authorised subject takes precedence with tiebreak by event ID; does not affect the underlying git commit messages or branch names
-- `ngit issue set-subject <id> --subject <text>` — update the displayed title of an issue (author or maintainer only); same semantics as PR set-subject
-- `ngit account whoami` — show the currently logged-in account(s)
-- `ngit pr` subcommand group: `list`, `view`, `checkout`, `apply`, `send`, `close`, `reopen`, `ready`, `draft`, `comment`, `merge`; replaces the former top-level `ngit list`, `ngit checkout`, and `ngit apply` commands (hard-migrated); `ngit send` remains at the top level unchanged
-- `ngit pr view <id>` — view a PR with its full details and all comments (author, timestamp, body) in chronological order
-- `ngit pr close <id>` / `ngit pr reopen <id>` — change PR status (author or maintainer only)
-- `ngit pr ready <id>` — mark a draft PR as ready for review (author or maintainer only)
-- `ngit pr draft <id>` — convert a PR back to draft (author or maintainer only)
-- `ngit pr comment <id> --body <text>` — post a NIP-22 comment on a PR
-- `ngit pr merge <id> [--squash]` — merge a PR branch and publish a `GitStatusApplied` event (maintainer only); prints a reminder to push afterwards
-- `ngit issue` subcommand group: `list`, `view`, `create`, `close`, `resolved`, `reopen`, `comment`, `label`
-- `ngit issue view <id>` — view an issue with its full details and all comments (author, timestamp, body) in chronological order
-- `ngit issue create --title <T> [--body <B>] [--label <L>...]` — publish a NIP-34 GitIssue event
-- `ngit issue close <id> [--reason <text>]` — close an issue without resolving it; reason is stored in the event content (author or maintainer only)
-- `ngit issue resolved <id> [--reason <text>]` — mark an issue as resolved (kind-1631 `GitStatusApplied`); distinct from close, use when the issue has been fixed; reason stored in event content (author or maintainer only)
-- `ngit issue reopen <id>` — reopen a closed or resolved issue (author or maintainer only)
-- `ngit issue comment <id> --body <text>` — post a NIP-22 comment on an issue
-- `ngit issue list` command: lists NIP-34 issues with their status; supports `--status` (comma-separated: open,draft,closed,applied; default: open), `--label` filter, `--json`, `--offline`, and an optional `<id>` positional argument to show full details of a specific issue
-- `nostr.repo-relay-only` git config key: when set to `true`, nostr events are sent only to the repository's own relays, skipping the user's personal write relays and default/blaster relays; set persistently via `git config nostr.repo-relay-only true` or in one step with `ngit init --repo-relay-only`
+- **Issue management**: new `ngit issue` subcommand group (`list`, `view`, `create`, `close`, `resolved`, `reopen`, `comment`, `label`) for creating and viewing NIP-34 issues and posting NIP-22 comments
+- **PR comments and viewing**: `ngit pr view` shows full PR details with all comments in chronological order; `ngit pr comment` posts a NIP-22 comment
+- **NIP-32 labels**: apply hashtag labels to issues and PRs via `ngit issue label` / `ngit pr label`; labels from kind-1985 events are merged with inline `t` tags (author and maintainer only)
+- **Set subject**: `ngit pr set-subject` / `ngit issue set-subject` — update the displayed title of a PR or issue after the fact via a NIP-32 kind-1985 `#subject` label event (author or maintainer only)
+- **Cover notes** (kind 1624, experimental): attach a summary or context note to a PR or issue via `ngit pr set-cover-note` / `ngit issue set-cover-note`; displayed in place of the description in `view` output; designed to be pinned to the top of long threads
+- **Repo-only relays**: new `nostr.repo-relay-only` git config key; when `true`, nostr events are sent only to the repository's own relays, skipping personal write and default relays; enable with `git config nostr.repo-relay-only true` or `ngit init --repo-relay-only`
+- **`ngit account whoami`**: show the currently logged-in account(s); improved detection of credentials set at the system git config level (`/etc/gitconfig`)
+- **SKILL.md**: AI agent skill file for working with ngit repositories
+
+### Fixed
+
+- `ngit pr checkout` now requires `--force` when the local branch has diverged from the proposal branch
+- `ngit issue list` missing `--comments` flag added
+- NIP-22 comment compliance fixes; `--reply-to` flag added for threaded replies on issues and PRs
+- Login local config takes precedence correctly when posting comments
 
 ## [2.2.3] - 2026-02-27
 
