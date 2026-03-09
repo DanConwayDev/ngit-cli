@@ -357,7 +357,7 @@ async fn create_and_publish_events_and_proposals(
             events.push(new_repo_state.event);
         }
 
-        for event in get_merged_status_events(
+        if let Ok(merged_status_events) = get_merged_status_events(
             term,
             &repo_ref.to_nostr_git_url(&None),
             repo_ref,
@@ -365,9 +365,11 @@ async fn create_and_publish_events_and_proposals(
             &signer,
             git_server_refspecs,
         )
-        .await?
+        .await
         {
-            events.push(event);
+            for event in merged_status_events {
+                events.push(event);
+            }
         }
 
         if let Ok(Some(repo_ref_event)) = get_maintainers_yaml_update(
@@ -1294,7 +1296,14 @@ async fn create_merge_events(
             term.write_line(
                 format!(
                     "merge commit {}: create nostr proposal status event",
-                    &merged_patches.keys().next().unwrap().to_string()[..7],
+                    merged_patches
+                        .keys()
+                        .next()
+                        .map(|h| {
+                            let s = h.to_string();
+                            s[..s.len().min(7)].to_string()
+                        })
+                        .unwrap_or_default(),
                 )
                 .as_str(),
             )?;
@@ -1527,14 +1536,19 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
                 .clone(),
         )?;
 
-        get_events_from_local_cache(
+        let cached = get_events_from_local_cache(
             git_repo.get_path()?,
             vec![nostr::Filter::default().id(proposal_or_revision_id)],
         )
-        .await?
-        .first()
-        .unwrap()
-        .clone()
+        .await?;
+        cached
+            .first()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "proposal or revision root event {proposal_or_revision_id} not found in local cache",
+                )
+            })?
+            .clone()
     };
 
     if !proposal_or_revision.kind.eq(&Kind::GitPatch) {
@@ -1551,7 +1565,12 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
                     .tags
                     .iter()
                     .find(|t| t.is_reply())
-                    .unwrap()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "revision-root patch event {} missing reply tag",
+                            proposal_or_revision.id
+                        )
+                    })?
                     .as_slice()[1],
             )?,
             Some(proposal_or_revision.id),

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- gracefully handle errors identifying potential PR merges during push
+
 ## [2.3.0] - 2026-03-05
 
 ### Added
