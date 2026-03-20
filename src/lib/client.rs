@@ -1793,7 +1793,7 @@ async fn create_relays_request(
         // When we have a repo coordinate, rely on repo relays and coordinate
         // hint relays instead of always merging in the default set.
         let mut relays = if trusted_maintainer_coordinate.is_none() {
-            fallback_relays
+            fallback_relays.clone()
         } else {
             HashSet::new()
         };
@@ -1807,8 +1807,11 @@ async fn create_relays_request(
                 relays.insert(r.clone());
             }
         }
-        // When bootstrapping with no repo context and no coordinate hints,
-        // we need at least the fallback relays to discover the user profile.
+        // Fall back to fallback relays when the coordinate had no relay hints
+        // and nothing is cached yet (e.g. fresh clone with a bare npub URL).
+        if relays.is_empty() {
+            relays = fallback_relays;
+        }
         relays
     };
 
@@ -1825,11 +1828,7 @@ async fn create_relays_request(
                 a
             }
         })
-        .unwrap()
-        .to_string()
-        .chars()
-        .count()
-        + 2;
+        .map_or(0, |r| r.to_string().chars().count() + 2);
 
     Ok(FetchRequest {
         selected_relay: None,
