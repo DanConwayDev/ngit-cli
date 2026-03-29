@@ -276,6 +276,49 @@ impl GitTestRepo {
         Ok(())
     }
 
+    /// Creates a git worktree linked to this repository.
+    /// Returns a `GitTestRepo` whose `dir` points to the worktree working
+    /// directory.
+    pub fn create_worktree(&self, branch_name: &str) -> Result<GitTestRepo> {
+        let worktree_path = self
+            .dir
+            .parent()
+            .unwrap()
+            .join(format!("tmpgit-worktree-{}", rand::random::<u64>()));
+
+        // Create the branch at the current HEAD
+        let head_commit = self.git_repo.head()?.peel_to_commit()?;
+        self.git_repo
+            .branch(branch_name, &head_commit, false)
+            .context("failed to create branch for worktree")?;
+
+        // Add worktree via git2
+        let worktree = self
+            .git_repo
+            .worktree(
+                branch_name,
+                &worktree_path,
+                Some(
+                    git2::WorktreeAddOptions::new().reference(Some(
+                        &self
+                            .git_repo
+                            .find_branch(branch_name, git2::BranchType::Local)?
+                            .into_reference(),
+                    )),
+                ),
+            )
+            .context("failed to create worktree")?;
+
+        let worktree_repo = git2::Repository::open_from_worktree(&worktree)
+            .context("failed to open repo from worktree")?;
+
+        Ok(GitTestRepo {
+            dir: worktree_path,
+            git_repo: worktree_repo,
+            delete_dir_on_drop: true,
+        })
+    }
+
     pub fn checkout_remote_branch(&self, branch_name: &str) -> Result<Oid> {
         self.checkout(&format!("remotes/origin/{branch_name}"))?;
         let mut branch = self.create_branch(branch_name)?;

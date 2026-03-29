@@ -1208,8 +1208,12 @@ where
 
 /** copied from client.rs */
 async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
-    NostrLMDB::open(git_repo_path.join(".git/nostr-cache.lmdb"))
-        .context("failed to open or create nostr cache database at .git/nostr-cache.lmdb")
+    let git_dir = git2::Repository::discover(git_repo_path)
+        .context("failed to discover git repository")?
+        .commondir()
+        .to_path_buf();
+    NostrLMDB::open(git_dir.join("nostr-cache.lmdb"))
+        .context("failed to open or create nostr cache database at <git-dir>/nostr-cache.lmdb")
 }
 
 /** copied from client.rs */

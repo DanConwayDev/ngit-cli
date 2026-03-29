@@ -105,10 +105,9 @@ pub trait RepoActions {
 
 impl RepoActions for Repo {
     fn get_path(&self) -> Result<&Path> {
-        self.git_repo
-            .path()
-            .parent()
-            .context("failed to find repositiory path as .git has  no parent")
+        self.git_repo.workdir().context(
+            "failed to find repository working directory (bare repositories are not supported)",
+        )
     }
 
     fn get_origin_url(&self) -> Result<String> {
@@ -2848,4 +2847,130 @@ index ce01362..a21e91c 100644\n\
         }
     }
 
+    mod worktree {
+        use super::*;
+
+        #[test]
+        fn get_path_returns_worktree_working_dir() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let worktree_repo = test_repo.create_worktree("wt-branch")?;
+            let git_repo = Repo::from_path(&worktree_repo.dir)?;
+
+            let path = git_repo.get_path()?;
+            // get_path() should return the worktree's working directory, not
+            // somewhere inside the main repo's .git/worktrees/
+            assert_eq!(path.canonicalize()?, worktree_repo.dir.canonicalize()?,);
+            Ok(())
+        }
+
+        #[test]
+        fn get_path_returns_normal_repo_working_dir() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            let path = git_repo.get_path()?;
+            assert_eq!(path.canonicalize()?, test_repo.dir.canonicalize()?,);
+            Ok(())
+        }
+
+        #[test]
+        fn from_path_works_with_worktree_dir() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let worktree_repo = test_repo.create_worktree("wt-open")?;
+            // Opening from the worktree's working directory should succeed
+            let git_repo = Repo::from_path(&worktree_repo.dir)?;
+            // And get_path() should return the worktree dir
+            assert_eq!(
+                git_repo.get_path()?.canonicalize()?,
+                worktree_repo.dir.canonicalize()?,
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn worktree_can_read_branches() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let worktree_repo = test_repo.create_worktree("wt-branches")?;
+            let git_repo = Repo::from_path(&worktree_repo.dir)?;
+
+            let branches = git_repo.get_local_branch_names()?;
+            assert!(branches.contains(&"main".to_string()));
+            assert!(branches.contains(&"wt-branches".to_string()));
+            Ok(())
+        }
+
+        #[test]
+        fn worktree_can_read_git_config() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let worktree_repo = test_repo.create_worktree("wt-config")?;
+            let git_repo = Repo::from_path(&worktree_repo.dir)?;
+
+            // nostr.repo is set by GitTestRepo::default() on the main repo
+            // and should be readable from the worktree since config is shared
+            let nostr_repo = git_repo.get_git_config_item("nostr.repo", None)?;
+            assert!(nostr_repo.is_some());
+            Ok(())
+        }
+
+        #[test]
+        fn worktree_get_head_commit_works() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let worktree_repo = test_repo.create_worktree("wt-head")?;
+            let git_repo = Repo::from_path(&worktree_repo.dir)?;
+
+            // Should not error - worktree has its own HEAD
+            let _head = git_repo.get_head_commit()?;
+            Ok(())
+        }
+
+        #[test]
+        fn worktree_files_accessible_from_get_path() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let worktree_repo = test_repo.create_worktree("wt-files")?;
+            let git_repo = Repo::from_path(&worktree_repo.dir)?;
+
+            // Create a file in the worktree
+            let test_file = worktree_repo.dir.join("worktree-test.txt");
+            fs::write(&test_file, "hello from worktree")?;
+
+            // get_path() should point to the worktree dir where the file lives
+            let path = git_repo.get_path()?;
+            assert!(path.join("worktree-test.txt").exists());
+            Ok(())
+        }
+
+        #[test]
+        fn worktree_opened_via_git_dir_env_works() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+
+            let worktree_repo = test_repo.create_worktree("wt-gitdir")?;
+
+            // In a worktree, GIT_DIR points to the worktree-specific git dir
+            // (e.g., .git/worktrees/<name>). Simulate what git does when
+            // calling a remote helper.
+            let git_dir = worktree_repo.git_repo.path().to_path_buf();
+            let git_repo = Repo::from_path(&git_dir)?;
+
+            // get_path() should still return the worktree working directory
+            assert_eq!(
+                git_repo.get_path()?.canonicalize()?,
+                worktree_repo.dir.canonicalize()?,
+            );
+            Ok(())
+        }
+    }
 }
