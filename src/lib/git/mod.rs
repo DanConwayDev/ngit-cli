@@ -417,6 +417,11 @@ impl RepoActions for Repo {
             ))?)
             .context(format!("failed to find commit {}", &commit))?;
         let mut options = git2::EmailCreateOptions::default();
+        // Explicitly set a/b prefixes so that the user's `diff.noprefix` git
+        // config (or any other prefix override) does not affect the generated
+        // patch. Patches must use standard a/b prefixes to be parseable by
+        // git2::Diff::from_buffer when applying them.
+        options.diff_options().old_prefix("a/").new_prefix("b/");
         if let Some((n, total)) = series_count {
             options.subject_prefix(format!("PATCH {n}/{total}"));
         }
@@ -695,9 +700,10 @@ impl RepoActions for Repo {
         // let mut apply_opts = git2::ApplyOptions::new();
         // apply_opts.check(false);
         let mut existing_index = self.git_repo.index()?;
+        let normalized_content = normalize_diff_prefix(&patch.content);
         let mut index = self.git_repo.apply_to_tree(
             &parent_tree,
-            &git2::Diff::from_buffer(patch.content.as_bytes())?,
+            &git2::Diff::from_buffer(normalized_content.as_bytes())?,
             // Some(&mut apply_opts),
             None,
         )?;
@@ -1067,6 +1073,98 @@ impl SignatureData {
     }
 }
 
+/// Normalize a patch that uses no-prefix diff format (produced by libgit2 with
+/// `--no-prefix`, e.g. `diff --git src/foo.rs src/foo.rs`) to the standard
+/// `a/`/`b/` prefix format that `git2::Diff::from_buffer` requires.
+///
+/// If the patch already uses standard prefixes this function is a no-op.
+fn normalize_diff_prefix(content: &str) -> String {
+    // Detect whether any diff header is missing the a/b prefix.
+    // A standard header looks like: diff --git a/<path> b/<path>
+    // A no-prefix header looks like: diff --git <path> <path>
+    let needs_normalization = content
+        .lines()
+        .filter(|l| l.starts_with("diff --git "))
+        .any(|l| {
+            let rest = &l["diff --git ".len()..];
+            !rest.starts_with("a/")
+        });
+
+    if !needs_normalization {
+        return content.to_string();
+    }
+
+    let mut out = String::with_capacity(content.len() + 64);
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // rest is "<old-path> <new-path>". For paths without spaces the
+            // split is unambiguous. For paths with spaces we rely on the fact
+            // that old == new for renames-in-place; we find the midpoint by
+            // trying each space as a split and checking old == new.
+            let (old, new) = split_diff_git_paths(rest);
+            out.push_str("diff --git a/");
+            out.push_str(old);
+            out.push_str(" b/");
+            out.push_str(new);
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            if rest == "/dev/null" {
+                out.push_str(line);
+            } else {
+                out.push_str("--- a/");
+                out.push_str(rest);
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            if rest == "/dev/null" {
+                out.push_str(line);
+            } else {
+                out.push_str("+++ b/");
+                out.push_str(rest);
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    // Preserve trailing newline behaviour of the original.
+    if !content.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Split the path portion of a `diff --git <old> <new>` line into (old, new).
+///
+/// For paths without spaces this is trivial. For paths with spaces we try each
+/// space as a candidate split point and return the first one where the two
+/// halves are equal (which is always the case for non-rename patches). If no
+/// equal split is found we fall back to splitting at the first space.
+fn split_diff_git_paths(rest: &str) -> (&str, &str) {
+    // Fast path: no spaces → split at the single space
+    if let Some(pos) = rest.find(' ') {
+        let (old, new_with_space) = rest.split_at(pos);
+        let new = &new_with_space[1..];
+        if !old.contains(' ') {
+            return (old, new);
+        }
+        // Paths contain spaces: try each space as a split point.
+        let bytes = rest.as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b' ' {
+                let candidate_old = &rest[..i];
+                let candidate_new = &rest[i + 1..];
+                if candidate_old == candidate_new {
+                    return (candidate_old, candidate_new);
+                }
+            }
+        }
+        // Fallback: split at first space
+        (old, new)
+    } else {
+        // No space at all — malformed, return as-is
+        (rest, rest)
+    }
+}
+
 fn extract_description_from_patch(patch: &nostr::Event) -> Result<String> {
     if let Ok(desc) = tag_value(patch, "description") {
         return Ok(desc);
@@ -1137,6 +1235,142 @@ mod tests {
     use test_utils::{generate_repo_ref_event, git::GitTestRepo};
 
     use super::*;
+
+    mod normalize_diff_prefix {
+        use super::*;
+
+        #[test]
+        fn no_op_when_already_prefixed() {
+            let patch = "\
+diff --git a/src/foo.rs b/src/foo.rs\n\
+index ce01362..a21e91c 100644\n\
+--- a/src/foo.rs\n\
++++ b/src/foo.rs\n\
+@@ -1 +1 @@\n\
+-hello\n\
++world\n";
+            assert_eq!(normalize_diff_prefix(patch), patch);
+        }
+
+        #[test]
+        fn adds_prefix_to_no_prefix_diff() {
+            let patch_no_prefix = "\
+diff --git src/foo.rs src/foo.rs\n\
+index ce01362..a21e91c 100644\n\
+--- src/foo.rs\n\
++++ src/foo.rs\n\
+@@ -1 +1 @@\n\
+-hello\n\
++world\n";
+            let expected = "\
+diff --git a/src/foo.rs b/src/foo.rs\n\
+index ce01362..a21e91c 100644\n\
+--- a/src/foo.rs\n\
++++ b/src/foo.rs\n\
+@@ -1 +1 @@\n\
+-hello\n\
++world\n";
+            assert_eq!(normalize_diff_prefix(patch_no_prefix), expected);
+        }
+
+        #[test]
+        fn preserves_dev_null_for_new_file() {
+            let patch_no_prefix = "\
+diff --git src/new.rs src/new.rs\n\
+new file mode 100644\n\
+index 0000000..a21e91c\n\
+--- /dev/null\n\
++++ src/new.rs\n\
+@@ -0,0 +1 @@\n\
++hello\n";
+            let expected = "\
+diff --git a/src/new.rs b/src/new.rs\n\
+new file mode 100644\n\
+index 0000000..a21e91c\n\
+--- /dev/null\n\
++++ b/src/new.rs\n\
+@@ -0,0 +1 @@\n\
++hello\n";
+            assert_eq!(normalize_diff_prefix(patch_no_prefix), expected);
+        }
+
+        #[test]
+        fn preserves_dev_null_for_deleted_file() {
+            let patch_no_prefix = "\
+diff --git src/old.rs src/old.rs\n\
+deleted file mode 100644\n\
+index a21e91c..0000000\n\
+--- src/old.rs\n\
++++ /dev/null\n\
+@@ -1 +0,0 @@\n\
+-hello\n";
+            let expected = "\
+diff --git a/src/old.rs b/src/old.rs\n\
+deleted file mode 100644\n\
+index a21e91c..0000000\n\
+--- a/src/old.rs\n\
++++ /dev/null\n\
+@@ -1 +0,0 @@\n\
+-hello\n";
+            assert_eq!(normalize_diff_prefix(patch_no_prefix), expected);
+        }
+
+        #[test]
+        fn handles_multiple_files() {
+            let patch_no_prefix = "\
+diff --git src/foo.rs src/foo.rs\n\
+index ce01362..a21e91c 100644\n\
+--- src/foo.rs\n\
++++ src/foo.rs\n\
+@@ -1 +1 @@\n\
+-hello\n\
++world\n\
+diff --git src/bar.rs src/bar.rs\n\
+index 1234567..abcdef0 100644\n\
+--- src/bar.rs\n\
++++ src/bar.rs\n\
+@@ -1 +1 @@\n\
+-foo\n\
++baz\n";
+            let expected = "\
+diff --git a/src/foo.rs b/src/foo.rs\n\
+index ce01362..a21e91c 100644\n\
+--- a/src/foo.rs\n\
++++ b/src/foo.rs\n\
+@@ -1 +1 @@\n\
+-hello\n\
++world\n\
+diff --git a/src/bar.rs b/src/bar.rs\n\
+index 1234567..abcdef0 100644\n\
+--- a/src/bar.rs\n\
++++ b/src/bar.rs\n\
+@@ -1 +1 @@\n\
+-foo\n\
++baz\n";
+            assert_eq!(normalize_diff_prefix(patch_no_prefix), expected);
+        }
+
+        #[test]
+        fn libgit2_can_parse_normalized_no_prefix_diff() {
+            // Verify that after normalization, git2::Diff::from_buffer succeeds
+            let patch_no_prefix = "\
+diff --git src/foo.rs src/foo.rs\n\
+index ce01362..a21e91c 100644\n\
+--- src/foo.rs\n\
++++ src/foo.rs\n\
+@@ -1 +1 @@\n\
+-hello\n\
++world\n";
+            let normalized = normalize_diff_prefix(patch_no_prefix);
+            let result = git2::Diff::from_buffer(normalized.as_bytes());
+            assert!(
+                result.is_ok(),
+                "libgit2 failed to parse normalized diff: {:?}",
+                result.err()
+            );
+            assert_eq!(result.unwrap().deltas().count(), 1);
+        }
+    }
 
     mod git_config_item_local {
         use super::*;
@@ -2609,4 +2843,5 @@ mod tests {
             Ok(())
         }
     }
+
 }
