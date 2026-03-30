@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- git worktree support (a3b0bf6) - thanks to new contributor m0wer
+
 ### Fixed
 
-- gracefully handle errors identifying potential PR merges during push
+- more robust patch parsing and gracefully handle errors (7a36aed, e1dd109, 6a2245d),
+- panic when cloning a bare `nostr://npub/identifier` URL with no relay hints (f3a6ae8)
 
 ## [2.3.0] - 2026-03-05
 
