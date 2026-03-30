@@ -740,7 +740,7 @@ impl RepoActions for Repo {
             .git_repo
             .commit_signed(
                 commit_buff.as_str().unwrap(),
-                pgp_sig.unwrap_or(String::new()).as_str(),
+                pgp_sig.as_deref().unwrap_or(""),
                 None,
             )
             .context("failed to create signed commit")?;
@@ -773,7 +773,7 @@ impl RepoActions for Repo {
                         )
                         .context("failed to amend commit to produce new oid")?;
                 }
-                if !applied_oid.to_string().eq(commit_id) {
+                if !applied_oid.to_string().eq(commit_id) && pgp_sig.is_none() {
                     bail!(
                         "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
                         applied_oid,
