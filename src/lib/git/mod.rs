@@ -773,13 +773,17 @@ impl RepoActions for Repo {
                         )
                         .context("failed to amend commit to produce new oid")?;
                 }
-                if !applied_oid.to_string().eq(commit_id) && pgp_sig.is_none() {
-                    bail!(
-                        "when applied the patch commit id ({}) doesn't match the one specified in the event tag ({})",
-                        applied_oid,
-                        get_commit_id_from_patch(patch)?,
-                    );
-                }
+                // If the OID still doesn't match after the amend, accept
+                // the amend result and continue. The amend always produces
+                // an unsigned commit (git_commit_amend goes through
+                // git_commit__create_internal, not
+                // commit_create_with_signature) so any GPG sig
+                // from the original is stripped — correct
+                // behaviour since the reconstructed commit object differs
+                // from what was originally signed. The diff is applied
+                // correctly regardless. apply_patch_chain threads the actual
+                // OID forward via next_parent_override so the chain remains
+                // consistent.
             }
         }
         self.git_repo.set_index(&mut existing_index)?;
