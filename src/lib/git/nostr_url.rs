@@ -95,7 +95,7 @@ impl fmt::Display for NostrUrlDecoded {
                 )
             )?;
         }
-        write!(f, "{}", self.coordinate.identifier)
+        write!(f, "{}", urlencoding::encode(&self.coordinate.identifier))
     }
 }
 
@@ -178,10 +178,11 @@ impl NostrUrlDecoded {
         } else {
             let npub_or_nip05 = part.to_owned();
             parts.remove(0);
-            let identifier = parts
-                .pop()
-                .context("nostr url must have an identifier eg. nostr://npub123/repo-identifier")?
-                .to_string();
+            let identifier = urlencoding::decode(parts.pop().context(
+                "nostr url must have an identifier eg. nostr://npub123/repo-identifier",
+            )?)
+            .context("could not percent-decode identifier in nostr git url")?
+            .into_owned();
             for relay in parts {
                 let mut decoded = urlencoding::decode(relay)
                     .context("could not parse relays in nostr git url")?
@@ -1058,6 +1059,31 @@ mod tests {
         }
 
         #[test]
+        fn identifier_with_spaces_is_percent_encoded() -> Result<()> {
+            assert_eq!(
+                format!("{}", NostrUrlDecoded {
+                    original_string: String::new(),
+                    coordinate: Nip19Coordinate {
+                        coordinate: Coordinate {
+                            identifier: "my repo".to_string(),
+                            public_key: PublicKey::parse(
+                                "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                            )
+                            .unwrap(),
+                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                        },
+                        relays: vec![],
+                    },
+                    protocol: None,
+                    ssh_key_file: None,
+                    nip05: None,
+                }),
+                "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my%20repo",
+            );
+            Ok(())
+        }
+
+        #[test]
         fn with_protocol() -> Result<()> {
             assert_eq!(
                 format!("{}", NostrUrlDecoded {
@@ -1349,6 +1375,32 @@ mod tests {
                         nip05: None,
                     },
                 );
+                    Ok(())
+                }
+
+                #[tokio::test]
+                async fn percent_encoded_identifier_is_decoded() -> Result<()> {
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my%20repo".to_string();
+                    let decoded = NostrUrlDecoded::parse_and_resolve(&url, &None).await?;
+                    assert_eq!(decoded.coordinate.identifier, "my repo");
+                    Ok(())
+                }
+
+                #[tokio::test]
+                async fn percent_encoded_identifier_round_trips() -> Result<()> {
+                    // parse a URL with an encoded identifier, then re-display it and get the same
+                    // URL back
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my%20repo".to_string();
+                    let decoded = NostrUrlDecoded::parse_and_resolve(&url, &None).await?;
+                    // Display re-encodes, but original_string is stored so we need a fresh struct
+                    let redisplayed = format!(
+                        "{}",
+                        NostrUrlDecoded {
+                            original_string: String::new(),
+                            ..decoded
+                        }
+                    );
+                    assert_eq!(redisplayed, url);
                     Ok(())
                 }
 

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - more robust patch parsing and gracefully handle errors (7a36aed, e1dd109, 6a2245d),
 - panic when cloning a bare `nostr://npub/identifier` URL with no relay hints (f3a6ae8)
+- repository identifiers containing reserved characters (e.g. spaces, emoji) are now percent-encoded in `nostr://` clone URLs and GRASP HTTP paths, per [NIP-34](https://github.com/nostr-protocol/nips/pull/2312)
 
 ## [2.3.0] - 2026-03-05
 

@@ -14,6 +14,7 @@ use nostr::{
 };
 use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp, Url};
 use serde::{Deserialize, Serialize};
+use urlencoding::encode as pct_encode;
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -661,7 +662,7 @@ pub fn detect_existing_grasp_servers(
         }
 
         let clone_url_is_grasp_server_format = if let Ok(npub) = extract_npub(url) {
-            url.contains(&format!("/{npub}/{identifier}.git"))
+            url.contains(&format!("/{npub}/{}.git", pct_encode(identifier)))
         } else {
             false
         };
@@ -809,8 +810,9 @@ pub fn format_grasp_server_url_as_clone_url(
         "https://"
     };
     Ok(format!(
-        "{prefix}{grasp_server_url}/{}/{identifier}.git",
-        public_key.to_bech32()?
+        "{prefix}{grasp_server_url}/{}/{}.git",
+        public_key.to_bech32()?,
+        pct_encode(identifier)
     ))
 }
 
