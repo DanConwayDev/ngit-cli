@@ -1,17 +1,11 @@
 use core::str;
-use std::{
-    collections::{HashMap, HashSet},
-    io::Stdin,
-};
+use std::{collections::HashMap, io::Stdin};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
     fetch::fetch_from_git_server,
     git::{Repo, RepoActions},
-    git_events::{
-        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        identify_clone_urls_for_oids_from_pr_pr_update_events,
-    },
+    git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE},
     login::get_curent_user,
     repo_ref::{RepoRef, is_grasp_server_in_list},
     utils::{
@@ -37,56 +31,29 @@ pub async fn run_fetch(
         .map(|(_, oid)| oid.clone())
         .collect::<Vec<String>>();
 
-    let pr_oid_clone_url_map = identify_clone_urls_for_oids_from_pr_pr_update_events(
-        fetch_batch.values().collect::<Vec<&String>>(),
-        git_repo,
-        repo_ref,
-    )
-    .await?;
-
-    let oids_to_fetch_from_git_servers = [
-        oids_from_state.clone(),
-        pr_oid_clone_url_map
-            .keys()
-            .cloned()
-            .collect::<Vec<String>>(),
-    ]
-    .concat();
-
-    let git_servers = {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<String> = vec![];
-        for server in &repo_ref.git_server {
-            if seen.insert(server.clone()) {
-                out.push(server.clone());
-            }
-        }
-        for url in pr_oid_clone_url_map.values().flatten() {
-            if seen.insert(url.clone()) {
-                out.push(url.clone());
-            }
-        }
-        out
-    };
-
     let mut errors = vec![];
     let term = console::Term::stderr();
 
-    for git_server_url in &git_servers {
-        let oids_to_fetch_from_server = oids_to_fetch_from_git_servers
-            .clone()
-            .into_iter()
+    // Only repo git servers are tried here. PR tip OIDs are guaranteed local by the
+    // list phase (see get_open_and_draft_proposals_state), so run_fetch only needs
+    // to resolve state OIDs that may have been missed by the bulk prefetch.
+    // We intentionally do not fall back to git-server URLs in PR event `clone`
+    // tags; see the note in get_open_and_draft_proposals_state for the
+    // rationale.
+    for git_server_url in &repo_ref.git_server {
+        let missing = oids_from_state
+            .iter()
             .filter(|oid| !git_repo.does_commit_exist(oid).unwrap_or(false))
+            .cloned()
             .collect::<Vec<String>>();
 
-        if oids_to_fetch_from_server.is_empty() {
-            continue;
+        if missing.is_empty() {
+            break;
         }
 
-        let term = console::Term::stderr();
         if let Err(error) = fetch_from_git_server(
             git_repo,
-            &oids_from_state,
+            &missing,
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             &term,
@@ -98,7 +65,7 @@ pub async fn run_fetch(
 
     if oids_from_state
         .iter()
-        .any(|oid| !git_repo.does_commit_exist(oid).unwrap())
+        .any(|oid| !git_repo.does_commit_exist(oid).unwrap_or(false))
         && !errors.is_empty()
     {
         bail!(

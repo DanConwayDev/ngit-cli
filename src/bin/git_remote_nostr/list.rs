@@ -32,13 +32,14 @@ pub async fn run_list(
     if is_verbose() {
         term.write_line("git servers: listing refs...")?;
     }
+    let nostr_git_url = repo_ref.to_nostr_git_url(&None);
     // nostr_state is passed to list_from_remotes only for the sync-status
     // display; the actual ref state we advertise is determined below.
     let remote_states = list_from_remotes(
         &term,
         git_repo,
         &repo_ref.git_server,
-        &repo_ref.to_nostr_git_url(&None),
+        &nostr_git_url,
         nostr_state.as_ref(),
     )
     .await;
@@ -134,6 +135,7 @@ pub async fn run_list(
 
 /// fetches branches and tags from git servers so patch parent commits can be
 /// used to build patches with correct commit ids
+#[allow(clippy::too_many_lines)]
 async fn get_open_and_draft_proposals_state(
     term: &console::Term,
     git_repo: &Repo,
@@ -156,8 +158,6 @@ async fn get_open_and_draft_proposals_state(
                 .filter(|v| !v.starts_with("ref: "))
                 .cloned()
                 .collect::<Vec<String>>(),
-            // TODO we could fetch the oids of Pull Requests and Pull Request Updates to prevent
-            // having repeat fetching during the git remote helper fetch phase
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
             term,
@@ -169,8 +169,62 @@ async fn get_open_and_draft_proposals_state(
         }
     }
 
-    let mut state = HashMap::new();
     let open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
+
+    // Collect PR/PR-update tip OIDs that are still missing after the bulk prefetch.
+    // We borrow proposals here so we can move them in the state-building loop
+    // below.
+    let mut missing_pr_oids: Vec<String> = open_and_draft_proposals
+        .values()
+        .filter_map(|(_, events)| {
+            events
+                .iter()
+                .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
+                .and_then(|e| tag_value(e, "c").ok())
+        })
+        .filter(|tip| !git_repo.does_commit_exist(tip).unwrap_or(false))
+        .collect();
+
+    // For each repo git server, batch-fetch the PR tip OIDs it carries that are
+    // still missing locally. Only OIDs the server has advertised are included in
+    // each batch (avoids all-or-nothing batch-poisoning). We mop up across servers
+    // until all missing OIDs are satisfied or all servers are exhausted.
+    //
+    // NOTE: we intentionally restrict mop-up to the repo's declared git servers
+    // (remote_states) and do NOT try the git-server URL carried in the PR event's
+    // `clone` tag. A PR submitter could include an arbitrary server URL there;
+    // fetching from it unconditionally would let a malicious or slow server
+    // delay every clone/fetch. If we later want to support PR-supplied servers,
+    // it should be opt-in (e.g. an explicit `--include-pr-servers` flag) so
+    // users consciously accept the trust/performance trade-off. PRs whose tip
+    // OID isn't carried by any repo git server will simply not be advertised as
+    // `refs/heads/pr/*` refs; they are still accessible via their patch events.
+    if !missing_pr_oids.is_empty() {
+        for (server_url, (server_state, is_grasp)) in remote_states {
+            let batch: Vec<String> = missing_pr_oids
+                .iter()
+                .filter(|oid| server_state.values().any(|v| v == *oid))
+                .cloned()
+                .collect();
+            if batch.is_empty() {
+                continue;
+            }
+            let _ = fetch_from_git_server(
+                git_repo,
+                &batch,
+                server_url,
+                &repo_ref.to_nostr_git_url(&None),
+                term,
+                *is_grasp,
+            );
+            missing_pr_oids.retain(|oid| !git_repo.does_commit_exist(oid).unwrap_or(false));
+            if missing_pr_oids.is_empty() {
+                break;
+            }
+        }
+    }
+
+    let mut state = HashMap::new();
     let current_user = get_curent_user(git_repo)?;
     for (_, (proposal, events_to_apply)) in open_and_draft_proposals {
         if let Ok(cl) = event_to_cover_letter(&proposal) {
@@ -192,17 +246,9 @@ async fn get_open_and_draft_proposals_state(
                 {
                     match tag_value(pr_or_pr_update, "c") {
                         Ok(tip) => {
-                            // only list Pull Requests as refs/heads/pr/* if data is commit is
-                            // advertised as tip of a ref on a repo git server or
-                            // available locally. Otherwise the standard cmd:
-                            // `git clone nostr://` will fail as it assumes all /refs/heads
-                            // returned by list are accessable
-                            let tip_oid_is_on_a_repo_git_server =
-                                remote_states.iter().any(|(_url, (state, _is_grasp))| {
-                                    state.iter().any(|(_, oid)| tip == *oid)
-                                }) || git_repo.does_commit_exist(&tip).is_ok_and(|r| r);
-
-                            if tip_oid_is_on_a_repo_git_server {
+                            // Only advertise once confirmed locally available — this
+                            // guarantees the subsequent fetch phase can serve the object.
+                            if git_repo.does_commit_exist(&tip).is_ok_and(|r| r) {
                                 state.insert(format!("refs/heads/{branch_name}"), tip);
                             }
                         }
@@ -254,8 +300,8 @@ async fn get_all_proposals_state(
     let mut state = HashMap::new();
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
     let current_user = get_curent_user(git_repo)?;
-    for (_, (proposal, events_to_apply)) in all_proposals {
-        if let Ok(cl) = event_to_cover_letter(&proposal) {
+    for (proposal, events_to_apply) in all_proposals.values() {
+        if let Ok(cl) = event_to_cover_letter(proposal) {
             if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
                 branch_name = if let Some(public_key) = current_user {
                     if proposal.pubkey.eq(&public_key) {
@@ -275,7 +321,7 @@ async fn get_all_proposals_state(
                         state.insert(format!("refs/pr/{}/head", proposal.id), tip);
                     }
                 } else if let Ok(tip) =
-                    make_commits_for_proposal(git_repo, repo_ref, &events_to_apply)
+                    make_commits_for_proposal(git_repo, repo_ref, events_to_apply)
                 {
                     state.insert(format!("refs/{branch_name}"), tip.clone());
                     state.insert(format!("refs/pr/{}/head", proposal.id), tip);
