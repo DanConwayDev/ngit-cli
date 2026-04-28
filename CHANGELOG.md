@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- when submitting a PR (via `--force-pr` or when the existing proposal is already a PR kind), repository GRASP servers were never tried when pushing proposal refs; a URL normalisation mismatch (`repo_grasps` holds normalised hostnames but the comparison was made against full clone URLs) meant the candidate server list was always empty, so every submission fell through to the fork-creation / personal GRASP server fallback path instead of pushing directly to the repository's own GRASP servers
+
 ## [2.4.1] - 2026-04-22
 
 ### Fixed

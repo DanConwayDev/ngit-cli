@@ -470,8 +470,10 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     }
     // also use repo grasp servers
     for url in &repo_ref.git_server {
-        if is_grasp_server_in_list(url, &repo_grasps) && !to_try.contains(url) {
-            to_try.push(url.clone());
+        if let Ok(normalized) = normalize_grasp_server_url(url) {
+            if repo_grasps.contains(&normalized) && !to_try.contains(url) {
+                to_try.push(url.clone());
+            }
         }
     }
 
