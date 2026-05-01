@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- when a repo has multiple `nostr://` remotes sharing the same identifier, relays could return state events authored by maintainers of the *other* remote; without filtering, the newest event won regardless of author, pointing refs at the wrong commits; state event candidates in `run_list` are now filtered to maintainers of the current remote's repo announcement
+
 ## [2.4.2] - 2026-04-28
 
 ### Fixed

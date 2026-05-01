@@ -58,10 +58,14 @@ pub async fn run_list(
     //   (b) already available locally.
     // This prevents advertising refs whose git objects haven't been pushed to
     // any server yet, which would cause `git clone` / `git fetch` to fail.
+    //
+    // filter by maintainers to avoid state events from other remotes with the
+    // same identifier being selected when they have a newer created_at
     let mut candidates: Vec<&nostr::Event> = fetch_report
         .state_per_relay
         .values()
         .filter_map(|maybe| maybe.as_ref())
+        .filter(|event| repo_ref.maintainers.contains(&event.pubkey))
         .collect();
     // Sort newest-first (by created_at, then by id for tie-breaking).
     candidates.sort_by(|a, b| {
