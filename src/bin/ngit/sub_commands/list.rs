@@ -1,13 +1,6 @@
-use std::{
-    collections::HashSet,
-    io::Write,
-    ops::Add,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{collections::HashSet, io::Write, ops::Add};
 
 use anyhow::{Context, Result, bail};
-use indicatif::{ProgressBar, ProgressStyle};
 use ngit::{
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
@@ -42,60 +35,6 @@ use crate::{
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
-fn run_git_fetch(remote_name: &str) -> Result<()> {
-    let verbose = ngit::client::is_verbose();
-    if verbose {
-        println!("fetching from {remote_name}...");
-    }
-
-    let spinner = if verbose {
-        None
-    } else {
-        let pb = ProgressBar::new_spinner()
-            .with_style(
-                ProgressStyle::with_template("{spinner} {msg}")
-                    .unwrap()
-                    .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
-            )
-            .with_message(format!("Fetching from {remote_name}..."));
-        pb.enable_steady_tick(Duration::from_millis(100));
-        Some(pb)
-    };
-
-    let output = Command::new("git")
-        .args(["fetch", remote_name])
-        .stdout(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .stderr(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .output()
-        .context("failed to run git fetch")?;
-
-    if let Some(spinner) = spinner {
-        spinner.finish_and_clear();
-    }
-
-    if !output.status.success() {
-        if !verbose {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                eprintln!("{stderr}");
-            }
-        }
-        bail!(
-            "git fetch {remote_name} exited with error: {}",
-            output.status
-        );
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_lines)]
 pub async fn launch(
     status: String,
@@ -116,22 +55,8 @@ pub async fn launch(
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    let nostr_remote = git_repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await
-        .ok()
-        .flatten();
-
     if !offline {
-        if let Some((remote_name, _)) = &nostr_remote {
-            if std::env::var("NGITTEST").is_ok() {
-                fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-            } else {
-                run_git_fetch(remote_name)?;
-            }
-        } else {
-            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        }
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
@@ -694,21 +619,7 @@ async fn launch_interactive() -> Result<()> {
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    let nostr_remote = git_repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await
-        .ok()
-        .flatten();
-
-    if let Some((remote_name, _)) = &nostr_remote {
-        if std::env::var("NGITTEST").is_ok() {
-            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        } else {
-            run_git_fetch(remote_name)?;
-        }
-    } else {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-    }
+    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
