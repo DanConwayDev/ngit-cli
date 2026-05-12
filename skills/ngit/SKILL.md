@@ -79,12 +79,17 @@ git clone nostr://user@domain.com/<identifier>       # NIP-05, only if given to 
 ```bash
 git checkout -b pr/my-feature          # MUST use pr/ prefix — not "my-feature", not "feature/foo"
 # ... commits ...
+
+# Single commit: omit title/description — commit subject and body are used automatically (preferred)
+git push -u origin pr/my-feature
+
+# Multiple commits: supply title and description explicitly
 git push -u origin pr/my-feature \     # MUST match the pr/ branch name exactly
   -o 'title=My feature title' \
   -o 'description=Summary.\n\nDetail here.'
 ```
 
-Push options `title=` and `description=` are required. Use `\n\n` for paragraph breaks. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
+When there is only one commit, omitting `-o title=` and `-o description=` is preferred — ngit uses the commit subject as the title and the commit body as the description. Pass `-d` (or `--defaults`) to confirm this automatically. Use `\n\n` for paragraph breaks when supplying descriptions manually. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
 
 ### Advanced: ngit send
 
