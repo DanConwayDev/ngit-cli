@@ -28,6 +28,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 
 ## Key rules
 
+- **`pr/` prefix is MANDATORY for PRs** — branch names for pull requests MUST start with `pr/` (e.g. `pr/my-feature`). A branch without this prefix is a plain git push and will never create a PR.
 - **Always use `--json`** on `ngit` commands when reading output — far easier to parse than human-readable text. `git` commands do not support `--json`.
 - **Use `--offline`** on all but the first `ngit` command in a session — reads from local cache instantly. `git fetch origin` also refreshes the cache.
 - **Never construct NIP-05 addresses** (`user@domain`). Use the `npub1...` form unless a NIP-05 address was explicitly provided.
@@ -73,15 +74,17 @@ git clone nostr://user@domain.com/<identifier>       # NIP-05, only if given to 
 
 ### Open a PR
 
+> **CRITICAL: Branch name MUST start with `pr/`** — this is what signals ngit to create a PR. A branch without the `pr/` prefix is a plain push and will NEVER create a PR, regardless of push options.
+
 ```bash
-git checkout -b pr/my-feature
+git checkout -b pr/my-feature          # MUST use pr/ prefix — not "my-feature", not "feature/foo"
 # ... commits ...
-git push -u origin pr/my-feature \
+git push -u origin pr/my-feature \     # MUST match the pr/ branch name exactly
   -o 'title=My feature title' \
   -o 'description=Summary.\n\nDetail here.'
 ```
 
-Push options `title=` and `description=` are required. Use `\n\n` for paragraph breaks. `git push` or `git push --force` can update existing prs.
+Push options `title=` and `description=` are required. Use `\n\n` for paragraph breaks. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
 
 ### Advanced: ngit send
 

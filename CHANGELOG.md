@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- strengthen `pr/` branch prefix requirement in ngit skill: add a mandatory key rule bullet and a CRITICAL callout in the PR workflow to prevent LLMs from omitting the prefix
+
 ## [2.4.3] - 2026-05-01
 
 ### Fixed
