@@ -84,17 +84,28 @@ git checkout -b pr/my-feature          # MUST use pr/ prefix — not "my-feature
 git push -u origin pr/my-feature
 
 # Multiple commits: supply title and description explicitly
-git push -u origin pr/my-feature \     # MUST match the pr/ branch name exactly
+# Use literal \n\n for paragraph breaks — ngit's push-option parser converts them to real newlines.
+# Do NOT use $'...\n\n...' ANSI-C quoting — git cannot pass real newlines through push options.
+git push -u origin pr/my-feature \
   -o 'title=My feature title' \
-  -o 'description=Summary.\n\nDetail here.'
+  -o 'description=First paragraph.\n\nSecond paragraph.'
 ```
 
-When there is only one commit, omitting `-o title=` and `-o description=` is preferred — ngit uses the commit subject as the title and the commit body as the description. Pass `-d` (or `--defaults`) to confirm this automatically. Use `\n\n` for paragraph breaks when supplying descriptions manually. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
+When there is only one commit, omitting `-o title=` and `-o description=` is preferred — ngit uses the commit subject as the title and the commit body as the description. Pass `-d` (or `--defaults`) to confirm this automatically. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
 
 ### Advanced: ngit send
 
+`ngit send` takes `--description` as a regular shell argument — the shell does **not** interpret `\n` inside double-quoted strings, so `"...\n\n..."` produces literal backslash-n in the event. Use ANSI-C quoting (`$'...'`) to embed real newlines:
+
 ```bash
-ngit send HEAD~2 --subject "My Feature" --description "Details"
+# correct — $'...' quoting gives real newlines
+ngit send HEAD~2 \
+  --subject "My Feature" \
+  --description $'First paragraph.\n\nSecond paragraph.'
+
+# WRONG — \n inside double quotes is not interpreted; event contains literal \n\n
+ngit send HEAD~2 --subject "My Feature" --description "First paragraph.\n\nSecond paragraph."
+
 ngit send --defaults                                    # non-interactive
 ngit send HEAD~2 --in-reply-to <PR-event-id>           # update existing PR
 ```

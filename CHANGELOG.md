@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - strengthen `pr/` branch prefix requirement in ngit skill: add a mandatory key rule bullet and a CRITICAL callout in the PR workflow to prevent LLMs from omitting the prefix
 - document in ngit skill that omitting `-o title=` / `-o description=` when pushing a single-commit PR is preferred — ngit uses the commit subject and body automatically
+- clarify newline handling in ngit skill: `git push -o 'description=...'` requires literal `\n\n` (ngit's push-option parser converts them); `ngit send --description` requires `$'...\n\n...'` ANSI-C quoting since the shell passes the argument verbatim and does not interpret `\n` in double-quoted strings
 
 ## [2.4.3] - 2026-05-01
 
