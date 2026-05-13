@@ -361,6 +361,15 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         ))?;
     }
 
+    // Build a set of (url, ref_name) pairs for servers that are ahead of nostr
+    // state.  These refs must not be pushed: the server already has commits
+    // that nostr state doesn't, so pushing the (older) nostr-state tracking
+    // ref would attempt a non-fast-forward downgrade and fail.
+    let ahead_ref_skip: std::collections::HashSet<(&str, &str)> = ahead_refs
+        .iter()
+        .map(|r| (r.source_url.as_str(), r.ref_name.as_str()))
+        .collect();
+
     for (url, (remote_state, is_grasp_server)) in &remote_states {
         let remote_name = get_short_git_server_name(url);
         let mut refspecs = vec![];
@@ -409,6 +418,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             }
             // skip refs missing locally
             if missing_refs.contains(nostr_ref_name) {
+                continue;
+            }
+            // skip refs where this server is ahead of nostr state — pushing
+            // the (older) tracking ref would attempt a non-fast-forward
+            // downgrade; the user must run with --trust-server first
+            if ahead_ref_skip.contains(&(url.as_str(), nostr_ref_name.as_str())) {
                 continue;
             }
             // strip refs/heads/ or refs/tags/ prefix to get the tracking ref segment
@@ -478,11 +493,14 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         }
 
         if refspecs.is_empty() {
+            let has_ahead_refs = ahead_refs.iter().any(|r| r.source_url == *url);
             if !not_updated.is_empty() || !not_deleted.is_empty() {
                 term.write_line(&format!("{remote_name} in sync excluding"))?;
-            } else {
+            } else if !has_ahead_refs {
                 term.write_line(&format!("{remote_name} already in sync"))?;
             }
+            // if the server is ahead, we already reported it above — no
+            // additional message needed here
             // report already in sync
         } else {
             match push_to_remote(
