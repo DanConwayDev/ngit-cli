@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ngit sync --trust-server` (`-t`): when a git server is fast-forward ahead of nostr state, sync reports the affected refs and requires `--trust-server` to sign and publish an updated state event reflecting the server's commits; in non-interactive mode the update is auto-accepted
+- Diverged-branch detection in `ngit sync`: branches where the git server and nostr state have each made commits the other lacks are always reported with a concrete recovery command (`git fetch <url> <branch> && git push <nostr-remote> +<branch>`) and cannot be resolved with `--trust-server`
+
 ### Documentation
 
 - strengthen `pr/` branch prefix requirement in ngit skill: add a mandatory key rule bullet and a CRITICAL callout in the PR workflow to prevent LLMs from omitting the prefix
