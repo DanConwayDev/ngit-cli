@@ -239,7 +239,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         } else {
             false
         }
-    } || git_repo.are_commits_too_big_for_patches(&commits);
+    } || git_repo.are_commits_too_big_for_patches(&commits)
+        || git_repo.do_commits_contain_submodules(&commits);
 
     let as_pr = if args.force_patch {
         false

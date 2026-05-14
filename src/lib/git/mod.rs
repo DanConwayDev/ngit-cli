@@ -78,6 +78,7 @@ pub trait RepoActions {
         series_count: &Option<(u64, u64)>,
     ) -> Result<String>;
     fn are_commits_too_big_for_patches(&self, commits: &[Sha1Hash]) -> bool;
+    fn do_commits_contain_submodules(&self, commits: &[Sha1Hash]) -> bool;
     fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String>;
     fn checkout(&self, ref_name: &str) -> Result<Sha1Hash>;
     fn create_branch_at_commit(&self, branch_name: &str, commit: &str) -> Result<()>;
@@ -442,6 +443,17 @@ impl RepoActions for Repo {
             } else {
                 true
             }
+        })
+    }
+
+    fn do_commits_contain_submodules(&self, commits: &[Sha1Hash]) -> bool {
+        // libgit2 cannot apply patches that touch submodule entries (mode 160000)
+        // — it crashes with SIGSEGV.  Force PR mode so the commits are pushed
+        // directly rather than being sent as patch events.
+        commits.iter().any(|commit| {
+            self.make_patch_from_commit(commit, &None)
+                .map(|patch| patch.contains(" 160000"))
+                .unwrap_or(false)
         })
     }
 

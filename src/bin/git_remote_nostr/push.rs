@@ -523,6 +523,7 @@ async fn process_proposal_refspecs(
                         }
                         if proposal.kind.eq(&KIND_PULL_REQUEST)
                             || git_repo.are_commits_too_big_for_patches(&ahead)
+                            || git_repo.do_commits_contain_submodules(&ahead)
                         {
                             for event in generate_patches_or_pr_event_or_pr_updates(
                                 client,
@@ -633,7 +634,9 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     git_server_push_options: &[String],
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
-    let use_pr = parent_is_pr || git_repo.are_commits_too_big_for_patches(ahead);
+    let use_pr = parent_is_pr
+        || git_repo.are_commits_too_big_for_patches(ahead)
+        || git_repo.do_commits_contain_submodules(ahead);
 
     if use_pr {
         let tip = ahead.last().context("no commits")?; // ahead is oldest first (callers reverse it)

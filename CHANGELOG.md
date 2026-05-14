@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - fast-forward push to a `pr/` branch backed by a PR event (kind 1618) or PR update event (kind 1619) failed with "event is not a patch"; these events store the tip commit in a `"c"` tag rather than a `"commit"` tag, so `get_commit_id_from_patch` now checks the `"c"` tag for PR/PR-update events before falling back to the mbox content heuristic
-- patches containing submodule entries (mode 160000) now return an error from `create_commit_from_patch` instead of crashing the `git-remote-nostr` process with signal 11 (SIGSEGV); libgit2's `apply_to_tree` dereferences a null pointer on such entries rather than reporting an error, so the submodule diff is detected before calling into libgit2 and the proposal is skipped gracefully
+- patches containing submodule entries (mode 160000) now return an error from `create_commit_from_patch` instead of crashing the `git-remote-nostr` process with signal 11 (SIGSEGV); libgit2's `apply_to_tree` dereferences a null pointer on such entries rather than reporting an error, so the submodule diff is detected before calling into libgit2 and the proposal is skipped gracefully; `ngit send` and the `pr/` branch push path in `git-remote-nostr` now also detect submodule entries up-front and automatically use PR mode so the commits are pushed directly rather than sent as patch events
 
 ### Documentation
 
