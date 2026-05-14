@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use ngit::{
     fetch::fetch_from_git_server,
     git::{Repo, RepoActions},
-    git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE},
+    git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_is_cover_letter},
     login::get_curent_user,
     repo_ref::{RepoRef, is_grasp_server_in_list},
     utils::{
@@ -92,7 +92,13 @@ pub fn make_commits_for_proposal(
     repo_ref: &RepoRef,
     patches_ancestor_last: &[Event],
 ) -> Result<String> {
-    let patches_ancestor_first: Vec<&Event> = patches_ancestor_last.iter().rev().collect();
+    // Cover letter events (patch-set root) carry metadata only — they have no
+    // diff content and must not be passed to create_commit_from_patch.
+    let patches_ancestor_first: Vec<&Event> = patches_ancestor_last
+        .iter()
+        .rev()
+        .filter(|e| !event_is_cover_letter(e))
+        .collect();
     let first_patch = patches_ancestor_first
         .first()
         .context("proposal should have at least one patch")?;
