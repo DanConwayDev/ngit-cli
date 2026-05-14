@@ -700,6 +700,17 @@ impl RepoActions for Repo {
         // apply_opts.check(false);
         let mut existing_index = self.git_repo.index()?;
         let normalized_content = normalize_diff_prefix(&patch.content);
+
+        // libgit2's apply_to_tree does not handle submodule entries (mode 160000)
+        // gracefully — it dereferences a null pointer and kills the process with
+        // signal 11 (SIGSEGV) instead of returning an error.  Detect them early
+        // and return an Err so the caller can skip this proposal cleanly.
+        if normalized_content.contains(" 160000") {
+            bail!(
+                "patch contains a submodule entry (mode 160000); libgit2 cannot apply submodule pointer changes via apply_to_tree"
+            );
+        }
+
         let mut index = self.git_repo.apply_to_tree(
             &parent_tree,
             &git2::Diff::from_buffer(normalized_content.as_bytes())?,
