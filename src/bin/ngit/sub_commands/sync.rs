@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Result, bail};
 use console::Term;
@@ -9,7 +9,10 @@ use ngit::{
         get_state_from_cache, send_events,
     },
     fetch::fetch_from_git_server,
-    git::{Repo, RepoActions, nostr_url::NostrUrlDecoded},
+    git::{
+        Repo, RepoActions, get_git_config_item,
+        nostr_url::{CloneUrl, NostrUrlDecoded},
+    },
     list::{get_ahead_behind, list_from_remotes},
     login::existing::load_existing_login,
     push::push_to_remote,
@@ -41,6 +44,25 @@ pub struct SubCommandArgs {
 pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
+
+    // Read the optional semicolon-separated list of trusted git-server domains
+    // from git config (local or global).  When a git server's hostname matches
+    // one of these entries, `ngit sync` will automatically trust it and update
+    // nostr state without requiring `--trust-server`.
+    //
+    // Example: git config --global nostr.trust-server-domains
+    // 'github.com;codeberg.org'
+    let trusted_domains: Vec<String> =
+        get_git_config_item(&Some(&git_repo), "nostr.trust-server-domains")
+            .unwrap_or(None)
+            .map(|v| {
+                v.split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_lowercase)
+                    .collect()
+            })
+            .unwrap_or_default();
 
     let full_ref_name = if let Some(ref_name) = &args.ref_name {
         if ref_name.starts_with("refs/") {
@@ -250,7 +272,20 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             ))?;
         }
 
-        if args.trust_server {
+        // Partition ahead refs into those whose server domain is in the
+        // trusted list (auto-trusted) and those that require --trust-server.
+        let (trusted_ahead, untrusted_ahead): (Vec<&AheadRef>, Vec<&AheadRef>) = ahead_refs
+            .iter()
+            .partition(|r| is_url_domain_trusted(&r.source_url, &trusted_domains));
+
+        let refs_to_trust: Vec<&AheadRef> = if args.trust_server {
+            // --trust-server covers everything
+            ahead_refs.iter().collect()
+        } else {
+            trusted_ahead
+        };
+
+        if !refs_to_trust.is_empty() {
             match load_existing_login(
                 &Some(&git_repo),
                 &None,
@@ -268,7 +303,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
                     // Build the updated state map.
                     let mut new_state_map = nostr_state.state.clone();
-                    for r in &ahead_refs {
+                    for r in &refs_to_trust {
                         new_state_map.insert(r.ref_name.clone(), r.ahead_oid.clone());
                     }
 
@@ -296,7 +331,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                             // Update the nostr-remote tracking refs so the
                             // push loop below can push the new commits to all
                             // other servers using normal fast-forward refspecs.
-                            for r in &ahead_refs {
+                            for r in &refs_to_trust {
                                 let tracking_name = r
                                     .ref_name
                                     .strip_prefix("refs/heads/")
@@ -333,14 +368,28 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 }
                 Err(_) => {
                     term.write_line(
-                        "cannot update nostr state: not logged in — run 'ngit login' first",
+                        "cannot update nostr state: not logged in — run 'ngit account login' first",
                     )?;
                 }
             }
+        }
+
+        // Report any remaining untrusted-ahead refs that were not covered by
+        // --trust-server.
+        let remaining_untrusted: Vec<&AheadRef> = if args.trust_server {
+            vec![] // --trust-server already handled everything
         } else {
+            untrusted_ahead
+        };
+        if !remaining_untrusted.is_empty() {
             term.write_line(
                 "run `ngit sync --trust-server` to update nostr state from ahead git server(s)",
             )?;
+            if trusted_domains.is_empty() {
+                term.write_line(
+                    "  tip: set `nostr.trust-server-domains` in git config to auto-trust servers by domain",
+                )?;
+            }
         }
     }
 
@@ -715,6 +764,22 @@ fn invalid_nostr_state_ref(ref_name: &str) -> bool {
     ref_name.ends_with("^{}")
         || ref_name.starts_with("refs/heads/pr/")
         || (!ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/"))
+}
+
+/// Returns `true` when the hostname of `url` matches any entry in
+/// `trusted_domains` (case-insensitive).  An empty `trusted_domains` slice
+/// always returns `false`.
+fn is_url_domain_trusted(url: &str, trusted_domains: &[String]) -> bool {
+    if trusted_domains.is_empty() {
+        return false;
+    }
+    let host = CloneUrl::from_str(url)
+        .map(|u| u.domain().to_lowercase())
+        .unwrap_or_default();
+    if host.is_empty() {
+        return false;
+    }
+    trusted_domains.iter().any(|d| d == &host)
 }
 
 fn identify_missing_refs(git_repo: &Repo, state: &HashMap<String, String>) -> Vec<String> {
@@ -1308,5 +1373,48 @@ mod tests {
             diverging[0].commits_behind, 1,
             "server is 1 behind nostr state"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_url_domain_trusted
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trusted_domain_matches_exact_hostname() {
+        let domains = vec!["github.com".to_string(), "codeberg.org".to_string()];
+        assert!(is_url_domain_trusted(
+            "https://github.com/user/repo.git",
+            &domains
+        ));
+        assert!(is_url_domain_trusted(
+            "https://codeberg.org/user/repo.git",
+            &domains
+        ));
+    }
+
+    #[test]
+    fn untrusted_domain_not_matched() {
+        let domains = vec!["github.com".to_string()];
+        assert!(!is_url_domain_trusted(
+            "https://evil.example.com/user/repo.git",
+            &domains
+        ));
+    }
+
+    #[test]
+    fn empty_trusted_domains_never_matches() {
+        assert!(!is_url_domain_trusted(
+            "https://github.com/user/repo.git",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn domain_matching_is_case_insensitive() {
+        let domains = vec!["GitHub.COM".to_lowercase()];
+        assert!(is_url_domain_trusted(
+            "https://GITHUB.COM/user/repo.git",
+            &domains
+        ));
     }
 }

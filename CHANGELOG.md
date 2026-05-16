@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `ngit sync --trust-server` (`-t`): when a git server is fast-forward ahead of nostr state, sync reports the affected refs and requires `--trust-server` to sign and publish an updated state event reflecting the server's commits; in non-interactive mode the update is auto-accepted
+- `nostr.trust-server-domains` git config setting: semicolon-separated list of git-server hostnames that `ngit sync` automatically trusts when they are fast-forward ahead of nostr state, without requiring `--trust-server`; the new commits are also pushed to any other git servers; can be set globally (`git config --global nostr.trust-server-domains 'github.com;codeberg.org'`) or per-repository
 - Diverged-branch detection in `ngit sync`: branches where the git server and nostr state have each made commits the other lacks are always reported with a concrete recovery command (`git fetch <url> <branch> && git push <nostr-remote> +<branch>`) and cannot be resolved with `--trust-server`
 
 ### Documentation
