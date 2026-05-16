@@ -70,6 +70,10 @@ Other useful settings:
  - 'nostr.repo-relay-only true' to only publish nostr events to repo relays, skipping user and
    default relays. Useful for repositories where you don't want to broadcast to your personal
    relay set. Set via `git config nostr.repo-relay-only true` or `ngit init --repo-relay-only`.
+ - 'nostr.trust-server-domains' — semicolon-separated list of git-server hostnames that `ngit sync`
+   should automatically trust when they are fast-forward ahead of nostr state, without requiring
+   the `--trust-server` flag.  Can be set globally or per-repository.
+   Example: `git config --global nostr.trust-server-domains 'github.com;codeberg.org'`
  - Login settings configured during `ngit account login`:
    - nostr.nsec - nsec or ncryptsec
    - nostr.npub - used for ncryptsec and remote signer
