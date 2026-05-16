@@ -11,9 +11,10 @@ use client::{
     sign_event,
 };
 use console::Term;
-use git::{RepoActions, sha1_to_oid};
+use git::{RepoActions, sha1_to_oid, str_to_sha1};
 use git_events::{
     generate_cover_letter_and_patch_events, generate_patch_event, get_commit_id_from_patch,
+    tag_value,
 };
 use git2::{Oid, Repository};
 use ngit::{
@@ -643,13 +644,29 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         let first_commit = ahead.first().context("no commits")?;
         let push_options_refs: Vec<&str> =
             git_server_push_options.iter().map(String::as_str).collect();
+        // For a PR update (FF push on top of an existing PR), the merge-base
+        // must be taken from the existing PR event rather than computed as the
+        // parent of the first *new* commit.  Using the parent of the first new
+        // commit would set the merge-base to the previous PR tip, which is
+        // wrong.  The original merge-base (i.e. where the branch diverged from
+        // main) is stored in the "merge-base" tag of the root PR event.
+        let pr_merge_base: Option<Sha1Hash> = root_proposal
+            .filter(|p| p.kind.eq(&KIND_PULL_REQUEST))
+            .and_then(|p| tag_value(p, "merge-base").ok())
+            .and_then(|v| str_to_sha1(&v).ok());
+        let fallback_merge_base: Option<Sha1Hash> = if pr_merge_base.is_none() {
+            git_repo.get_commit_parent(first_commit).ok()
+        } else {
+            None
+        };
+        let merge_base = pr_merge_base.as_ref().or(fallback_merge_base.as_ref());
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
             git_repo,
             repo_ref,
             tip,
             first_commit,
-            git_repo.get_commit_parent(first_commit).ok().as_ref(),
+            merge_base,
             user_ref,
             root_proposal,
             &title_description.map(|(t, d)| (t.clone(), d.clone())),
