@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-05-16
+
 ### Added
 
 - `ngit sync --trust-server` (`-t`): when a git server is fast-forward ahead of nostr state, sync reports the affected refs and requires `--trust-server` to sign and publish an updated state event reflecting the server's commits; in non-interactive mode the update is auto-accepted
