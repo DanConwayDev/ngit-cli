@@ -34,6 +34,9 @@ pub fn get_commit_id_from_patch(event: &Event) -> Result<String> {
 
     if value.is_ok() {
         value
+    } else if [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&event.kind) {
+        // PR and PR-update events store the tip commit in the "c" tag
+        tag_value(event, "c").context("PR event missing 'c' (tip commit) tag")
     } else if event.content.starts_with("From ") && event.content.len().gt(&45) {
         Ok(event.content[5..45].to_string())
     } else {
@@ -1296,6 +1299,71 @@ pub async fn identify_clone_urls_for_oids_from_pr_pr_update_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod get_commit_id_from_patch {
+        use super::*;
+
+        fn make_patch_event(commit: &str) -> Result<nostr::Event> {
+            Ok(nostr::event::EventBuilder::new(
+                nostr::event::Kind::GitPatch,
+                format!("From {commit} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 1/1] test\n\n"),
+            )
+            .tags([Tag::custom(
+                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
+                vec![commit.to_string()],
+            )])
+            .sign_with_keys(&nostr::Keys::generate())?)
+        }
+
+        fn make_pr_event(tip_commit: &str) -> Result<nostr::Event> {
+            Ok(
+                nostr::event::EventBuilder::new(KIND_PULL_REQUEST, "PR description")
+                    .tags([Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
+                        vec![tip_commit.to_string()],
+                    )])
+                    .sign_with_keys(&nostr::Keys::generate())?,
+            )
+        }
+
+        fn make_pr_update_event(tip_commit: &str) -> Result<nostr::Event> {
+            Ok(
+                nostr::event::EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
+                    .tags([Tag::custom(
+                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
+                        vec![tip_commit.to_string()],
+                    )])
+                    .sign_with_keys(&nostr::Keys::generate())?,
+            )
+        }
+
+        #[test]
+        fn returns_commit_tag_for_patch_event() -> Result<()> {
+            let commit = "a".repeat(40);
+            assert_eq!(
+                get_commit_id_from_patch(&make_patch_event(&commit)?)?,
+                commit,
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn returns_c_tag_for_pr_event() -> Result<()> {
+            let commit = "b".repeat(40);
+            assert_eq!(get_commit_id_from_patch(&make_pr_event(&commit)?)?, commit,);
+            Ok(())
+        }
+
+        #[test]
+        fn returns_c_tag_for_pr_update_event() -> Result<()> {
+            let commit = "c".repeat(40);
+            assert_eq!(
+                get_commit_id_from_patch(&make_pr_update_event(&commit)?)?,
+                commit,
+            );
+            Ok(())
+        }
+    }
 
     mod event_to_cover_letter {
         use super::*;

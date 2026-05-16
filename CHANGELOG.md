@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- fast-forward push to a `pr/` branch backed by a PR event (kind 1618) or PR update event (kind 1619) failed with "event is not a patch"; these events store the tip commit in a `"c"` tag rather than a `"commit"` tag, so `get_commit_id_from_patch` now checks the `"c"` tag for PR/PR-update events before falling back to the mbox content heuristic
+
 ### Documentation
 
 - strengthen `pr/` branch prefix requirement in ngit skill: add a mandatory key rule bullet and a CRITICAL callout in the PR workflow to prevent LLMs from omitting the prefix
