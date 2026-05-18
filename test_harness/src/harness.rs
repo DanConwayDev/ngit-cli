@@ -1,9 +1,10 @@
 //! Harness builder and top-level fixture.
 //!
-//! `Harness` owns the relay roster and the binary paths needed to spawn
-//! ngit / git commands; it hands out per-test [`Repo`] fixtures via
+//! `Harness` owns the relay + grasp roster and the binary paths needed to
+//! spawn ngit / git commands; it hands out per-test [`Repo`] fixtures via
 //! [`Harness::fresh_repo`]. Drop the `Harness` to shut everything down —
-//! relays are `Drop`-managed inside their wrappers, and `TempDir`s clean
+//! vanilla relays are `Drop`-managed inside their wrappers, grasp servers
+//! have an explicit `Drop` that kills the subprocess, and `TempDir`s clean
 //! themselves up.
 
 use std::{
@@ -13,13 +14,18 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::{port, relay::VanillaRelay, repo::Repo};
+use crate::{grasp::GraspServer, port, relay::VanillaRelay, repo::Repo};
 
-/// Per-role relay roster + injected env, ready to drive ngit subprocesses.
+/// Per-role relay + grasp roster + injected env, ready to drive ngit
+/// subprocesses.
 pub struct Harness {
-    /// Loopback relays keyed by role label. A role may carry multiple
+    /// Loopback vanilla relays keyed by role label. A role may carry multiple
     /// relays; they aggregate into a `;`-separated env-var value.
     relays: BTreeMap<String, Vec<VanillaRelay>>,
+    /// `ngit-grasp` subprocesses keyed by role label. Aggregation rules
+    /// match `relays`. Roles `"repo"` (or any unrecognised label) feed into
+    /// `NGIT_GRASP_DEFAULT_SET`.
+    grasps: BTreeMap<String, Vec<GraspServer>>,
     /// Absolute path to the `ngit` binary under test.
     ngit_bin: PathBuf,
     /// Absolute path to the `git-remote-nostr` binary under test. Stored
@@ -38,6 +44,7 @@ impl Harness {
     ) -> HarnessBuilder {
         HarnessBuilder {
             relay_roles: Vec::new(),
+            grasp_roles: Vec::new(),
             ngit_bin: ngit_bin.into(),
             git_remote_nostr_bin: git_remote_nostr_bin.into(),
         }
@@ -57,12 +64,38 @@ impl Harness {
         self.relays.get(role).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// `;`-separated URL list for the given role — the format every
+    /// Look up a grasp server by role. Panics if the role has no grasp
+    /// servers — caller bug, not a test failure mode.
+    pub fn grasp(&self, role: &str) -> &GraspServer {
+        self.grasps
+            .get(role)
+            .and_then(|v| v.first())
+            .unwrap_or_else(|| panic!("no grasp server registered under role {role:?}"))
+    }
+
+    /// All grasp servers for a role.
+    pub fn grasps(&self, role: &str) -> &[GraspServer] {
+        self.grasps.get(role).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// `;`-separated URL list for the given relay role — the format every
     /// `NGIT_RELAY_*` env var expects.
-    fn role_urls(&self, role: &str) -> String {
+    fn relay_role_urls(&self, role: &str) -> String {
         self.relays(role)
             .iter()
             .map(|r| r.url().to_string())
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// `;`-separated `http://host:port` list spanning **every** registered
+    /// grasp server, regardless of role label. `NGIT_GRASP_DEFAULT_SET` is
+    /// the only env var ngit reads for grasp fallback selection, so all
+    /// roles collapse into it.
+    fn all_grasp_urls(&self) -> String {
+        self.grasps
+            .values()
+            .flat_map(|v| v.iter().map(|g| g.url().to_string()))
             .collect::<Vec<_>>()
             .join(";")
     }
@@ -73,21 +106,22 @@ impl Harness {
     pub fn env(&self) -> Vec<(String, String)> {
         let mut env = vec![("NGITTEST".to_string(), "TRUE".to_string())];
 
-        let default_urls = self.role_urls("default");
+        let default_urls = self.relay_role_urls("default");
         if !default_urls.is_empty() {
             env.push(("NGIT_RELAY_DEFAULT_SET".to_string(), default_urls));
         }
-        let blaster_urls = self.role_urls("blaster");
+        let blaster_urls = self.relay_role_urls("blaster");
         if !blaster_urls.is_empty() {
             env.push(("NGIT_RELAY_BLASTER_SET".to_string(), blaster_urls));
         }
-        let signer_urls = self.role_urls("signer_fallback");
+        let signer_urls = self.relay_role_urls("signer_fallback");
         if !signer_urls.is_empty() {
             env.push(("NGIT_RELAY_SIGNER_FALLBACK_SET".to_string(), signer_urls));
         }
-        // grasp_default_set is intentionally empty in the relay-only PR; the
-        // env var simply stays unset and `Params::default()` falls back to
-        // the legacy empty vec.
+        let grasp_urls = self.all_grasp_urls();
+        if !grasp_urls.is_empty() {
+            env.push(("NGIT_GRASP_DEFAULT_SET".to_string(), grasp_urls));
+        }
 
         env
     }
@@ -116,6 +150,7 @@ impl Harness {
 /// Fluent builder for [`Harness`].
 pub struct HarnessBuilder {
     relay_roles: Vec<String>,
+    grasp_roles: Vec<String>,
     ngit_bin: PathBuf,
     git_remote_nostr_bin: PathBuf,
 }
@@ -132,7 +167,18 @@ impl HarnessBuilder {
         self
     }
 
-    /// Build the harness: allocate ports, start every relay, then return.
+    /// Register a real `ngit-grasp` subprocess under the given role label.
+    ///
+    /// Every registered grasp server feeds into `NGIT_GRASP_DEFAULT_SET`
+    /// regardless of role — the role label is purely for the test's own
+    /// look-ups via `Harness::grasp(role)`.
+    pub fn with_grasp_server(mut self, role: impl Into<String>) -> Self {
+        self.grasp_roles.push(role.into());
+        self
+    }
+
+    /// Build the harness: allocate ports, start every relay and grasp
+    /// subprocess, then return when all are accepting connections.
     pub async fn build(self) -> Result<Harness> {
         if !self.ngit_bin.exists() {
             return Err(anyhow!(
@@ -150,15 +196,26 @@ impl HarnessBuilder {
         let mut relays: BTreeMap<String, Vec<VanillaRelay>> = BTreeMap::new();
         for role in self.relay_roles {
             let port = port::find_free_port()
-                .with_context(|| format!("failed to allocate port for role {role:?}"))?;
+                .with_context(|| format!("failed to allocate port for relay role {role:?}"))?;
             let relay = VanillaRelay::start(role.clone(), port)
                 .await
                 .with_context(|| format!("failed to start relay for role {role:?}"))?;
             relays.entry(role).or_default().push(relay);
         }
 
+        let mut grasps: BTreeMap<String, Vec<GraspServer>> = BTreeMap::new();
+        for role in self.grasp_roles {
+            let port = port::find_free_port()
+                .with_context(|| format!("failed to allocate port for grasp role {role:?}"))?;
+            let server = GraspServer::start(role.clone(), port)
+                .await
+                .with_context(|| format!("failed to start ngit-grasp for role {role:?}"))?;
+            grasps.entry(role).or_default().push(server);
+        }
+
         Ok(Harness {
             relays,
+            grasps,
             ngit_bin: self.ngit_bin,
             git_remote_nostr_bin: self.git_remote_nostr_bin,
         })

@@ -9,14 +9,13 @@
 //! `AtomicDestructor`, so the listener thread terminates when every clone
 //! goes out of scope.
 
-use std::{
-    net::{IpAddr, Ipv4Addr},
-    time::Duration,
-};
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::{Context, Result};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 use nostr_sdk::prelude::*;
+
+use crate::query;
 
 /// A vanilla nostr relay bound to a fixed loopback port.
 ///
@@ -67,17 +66,6 @@ impl VanillaRelay {
     ///
     /// The connection is short-lived: a single REQ + EOSE + disconnect.
     pub async fn events(&self, filter: Filter) -> Result<Vec<Event>> {
-        let client = Client::default();
-        client
-            .add_relay(&self.url)
-            .await
-            .with_context(|| format!("failed to add relay {}", self.url))?;
-        client.connect().await;
-        let events = client
-            .fetch_events(filter, Duration::from_secs(5))
-            .await
-            .context("failed to fetch events from relay")?;
-        client.disconnect().await;
-        Ok(events.into_iter().collect())
+        query::fetch_events(&self.url, filter).await
     }
 }
