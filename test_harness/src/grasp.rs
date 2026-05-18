@@ -85,6 +85,11 @@ impl GraspServer {
         // synchronously inside a per-test fixture; without them the
         // background sync tasks can keep the process busy for seconds.
         let process = Command::new(&binary)
+            // ngit-grasp writes `.relay-owner.nsec` into CWD on first start
+            // if no key is supplied; point that at the tempdir so the file
+            // is cleaned up with the rest of the fixture and doesn't litter
+            // the test crate's working directory.
+            .current_dir(&git_data_path)
             .env("NGIT_BIND_ADDRESS", &bind_address)
             .env("NGIT_DOMAIN", &bind_address)
             .env("NGIT_GIT_DATA_PATH", &git_data_path)
