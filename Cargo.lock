@@ -1582,6 +1582,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serial_test",
+ "test_harness",
  "test_utils",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -1668,6 +1669,23 @@ dependencies = [
  "async-utility",
  "flume 0.11.1",
  "heed",
+ "nostr",
+ "nostr-database",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nostr-relay-builder"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51ba8e48eaadd5644e7317ca2f892b89a394a8cc57e99fea9f624dc081df1a24"
+dependencies = [
+ "async-utility",
+ "async-wsocket",
+ "atomic-destructor",
+ "hex",
+ "negentropy",
  "nostr",
  "nostr-database",
  "tokio",
@@ -2755,6 +2773,19 @@ name = "termtree"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
+
+[[package]]
+name = "test_harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "git2",
+ "nostr",
+ "nostr-relay-builder",
+ "nostr-sdk",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "test_utils"

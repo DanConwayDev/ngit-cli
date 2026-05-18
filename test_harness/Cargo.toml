@@ -1,0 +1,15 @@
+[package]
+name = "test_harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Integration test harness for ngit. Successor to test_utils."
+
+[dependencies]
+anyhow = "1.0.98"
+git2 = "0.20.4"
+nostr = "0.44.1"
+nostr-relay-builder = "0.44.0"
+nostr-sdk = "0.44.1"
+tempfile = "3.10"
+tokio = { version = "1.46.1", features = ["full"] }
