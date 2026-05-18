@@ -1,7 +1,9 @@
-//! Lighthouse test for the new test_harness.
+//! Lighthouse test: `ngit account create --relay <url>`.
 //!
-//! Drives `ngit account create --local --name "..." -d` against one
-//! vanilla nostr relay registered under role `"default"`. Asserts:
+//! Drives `ngit account create --local --name "..." --relay <url>` against one
+//! vanilla nostr relay that is *not* injected into `NGIT_RELAY_DEFAULT_SET` —
+//! the relay is only reachable because the test passes it explicitly via
+//! `--relay`. Asserts:
 //!
 //! 1. The command exits successfully.
 //! 2. The generated nsec / npub land in the repo's *local* git config —
@@ -20,21 +22,32 @@ use nostr_sdk::prelude::*;
 use test_harness::Harness;
 
 #[tokio::test]
-async fn account_create_local_publishes_metadata_and_relay_list() -> Result<()> {
+async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<()> {
+    // Register under "target" — not "default" — so NGIT_RELAY_DEFAULT_SET is
+    // unset. The relay is only reachable via the explicit --relay argument.
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
-    .with_relay("default")
+    .with_relay("target")
     .build()
     .await?;
 
     let repo = harness.fresh_repo()?;
+    let relay_url = harness.relay("target").url().to_string();
 
     let display_name = "lighthouse alice";
 
     let output = repo
-        .ngit(["account", "create", "--local", "--name", display_name, "-d"])
+        .ngit([
+            "account",
+            "create",
+            "--local",
+            "--name",
+            display_name,
+            "--relay",
+            &relay_url,
+        ])
         .output()
         .await
         .context("failed to spawn ngit account create")?;
@@ -65,11 +78,11 @@ async fn account_create_local_publishes_metadata_and_relay_list() -> Result<()> 
         "stored npub does not match nsec"
     );
 
-    // --- assertion 3: kind 0 metadata reached the default relay -----------
+    // --- assertion 3: kind 0 metadata reached the specified relay ----------
 
     let pubkey = keys.public_key();
     let metadata_events = harness
-        .relay("default")
+        .relay("target")
         .events(Filter::new().author(pubkey).kind(Kind::Metadata))
         .await?;
 
@@ -88,10 +101,10 @@ async fn account_create_local_publishes_metadata_and_relay_list() -> Result<()> 
         "metadata.name does not match --name argument",
     );
 
-    // --- assertion 4: kind 10002 relay-list reached the default relay -----
+    // --- assertion 4: kind 10002 relay-list reached the specified relay ----
 
     let relay_list_events = harness
-        .relay("default")
+        .relay("target")
         .events(Filter::new().author(pubkey).kind(Kind::RelayList))
         .await?;
 
@@ -102,7 +115,6 @@ async fn account_create_local_publishes_metadata_and_relay_list() -> Result<()> 
         relay_list_events.len(),
     );
 
-    let relay_url = harness.relay("default").url();
     let listed_relays: Vec<String> = relay_list_events[0]
         .tags
         .iter()
@@ -121,7 +133,7 @@ async fn account_create_local_publishes_metadata_and_relay_list() -> Result<()> 
     let host_port = relay_url.trim_start_matches("ws://").trim_end_matches('/');
     assert!(
         listed_relays.iter().any(|r| r.contains(host_port)),
-        "relay list does not include the harness's default relay {relay_url:?}; \
+        "relay list does not include the specified relay {relay_url:?}; \
          got entries: {listed_relays:?}",
     );
 
