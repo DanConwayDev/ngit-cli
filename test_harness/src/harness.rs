@@ -78,6 +78,24 @@ impl Harness {
         self.grasps.get(role).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Take ownership of a grasp server registered under `role`, removing
+    /// it from the harness. Dropping the returned value kills the
+    /// subprocess — useful for tests that need to simulate a downed git
+    /// server and exercise client-side fallback behaviour.
+    ///
+    /// Returns `None` when the role has no remaining grasp servers (either
+    /// it was never registered or every registered server has already been
+    /// taken).
+    ///
+    /// After the take, [`Harness::env`] no longer includes the killed
+    /// server's URL in `NGIT_GRASP_DEFAULT_SET`. `Repo` instances created
+    /// **before** the take retain the original env snapshot — that
+    /// asymmetry is intentional for failover tests that need the *client*
+    /// to still try the dead URL.
+    pub fn take_grasp(&mut self, role: &str) -> Option<GraspServer> {
+        self.grasps.get_mut(role).and_then(|v| v.pop())
+    }
+
     /// `;`-separated URL list for the given relay role — the format every
     /// `NGIT_RELAY_*` env var expects.
     fn relay_role_urls(&self, role: &str) -> String {
