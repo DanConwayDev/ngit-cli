@@ -9,6 +9,7 @@ use relay::Relay;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
 
+mod fetch;
 mod list;
 mod push;
 
@@ -73,6 +74,20 @@ fn clone_git_repo_with_nostr_url() -> Result<GitTestRepo> {
         .expect_end_eventually_and_print()?;
     let test_repo = GitTestRepo::open(&path)?;
     set_git_nostr_login_config(&test_repo)?;
+    Ok(test_repo)
+}
+
+// Retained (with #[allow(dead_code)]) only to keep the legacy tree frozen per
+// AGENTS.md "do not patch tests/legacy/". The sole caller,
+// fetch_downloads_speficied_commits_from_second_git_server, has been ported to
+// tests/fetch_failover_grasp.rs, so this helper is now unused. Delete only as
+// part of a wider legacy-file retirement, not in isolation.
+#[allow(dead_code)]
+fn prep_git_repo_minus_1_commit() -> Result<GitTestRepo> {
+    let test_repo = GitTestRepo::without_repo_in_git_config();
+    set_git_nostr_login_config(&test_repo)?;
+    test_repo.add_remote(NOSTR_REMOTE_NAME, &get_nostr_remote_url()?)?;
+    test_repo.populate_minus_1()?;
     Ok(test_repo)
 }
 
