@@ -7,6 +7,13 @@
 //! can find `git-remote-nostr` for any test that exercises `nostr://`
 //! remotes — even though the relay-only lighthouse does not need it.
 //!
+//! Spawn returns [`tokio::process::Command`] rather than
+//! [`std::process::Command`] so that awaiting `.output()` from a
+//! `#[tokio::test]` cooperatively yields to the in-process relay tasks. With
+//! the std variant the subprocess wait blocks the current-thread runtime
+//! and the relay never gets a chance to ACK the published events —
+//! symptom is a `Timeout` error inside `nostr-sdk`'s `send_event`.
+//!
 //! The repo is initialised with `main` as the default branch and a benign
 //! `user.name` / `user.email` so commits succeed without touching the
 //! caller's global git identity.
@@ -14,11 +21,12 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    process::Command,
+    process::Command as StdCommand,
 };
 
 use anyhow::{Context, Result};
 use tempfile::TempDir;
+use tokio::process::Command;
 
 use crate::{harness::Harness, snapshot::RepoSnapshot};
 
@@ -39,9 +47,14 @@ impl Repo {
         let tempdir = TempDir::new().context("failed to allocate TempDir for fresh_repo")?;
         let dir = tempdir.path().to_path_buf();
 
+        // Setup uses the synchronous std variant — these calls happen during
+        // construction (outside any await), so they can't block the relay's
+        // task runtime. Only the public `.ngit()` / `.git()` accessors hand
+        // out tokio Commands.
+
         // `git init -b main` works on git ≥ 2.28 (released 2020-07). The CI
         // baseline assumed by the project is well above this.
-        let status = Command::new("git")
+        let status = StdCommand::new("git")
             .arg("init")
             .arg("-b")
             .arg("main")
@@ -60,7 +73,7 @@ impl Repo {
             ("user.email", "ngit-test@example.invalid"),
             ("commit.gpgSign", "false"),
         ] {
-            let status = Command::new("git")
+            let status = StdCommand::new("git")
                 .current_dir(&dir)
                 .args(["config", "--local", k, v])
                 .status()
@@ -144,10 +157,11 @@ impl Repo {
     ///
     /// Returns `Ok(None)` when the key is unset, `Err` only on a hard
     /// failure (process spawn error, malformed output).
-    pub fn config(&self, key: &str) -> Result<Option<String>> {
+    pub async fn config(&self, key: &str) -> Result<Option<String>> {
         let out = self
             .git(["config", "--local", "--get", key])
             .output()
+            .await
             .with_context(|| format!("failed to spawn git config --get {key}"))?;
         if out.status.success() {
             let s = String::from_utf8(out.stdout)
