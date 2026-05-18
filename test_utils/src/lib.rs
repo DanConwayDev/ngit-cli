@@ -1,3 +1,5 @@
+#![doc = "DEPRECATED — frozen, do not modify. New tests use `test_harness`. See docs/architecture/test-harness.md."]
+
 use std::{
     collections::HashSet,
     ffi::OsStr,

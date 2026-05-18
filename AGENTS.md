@@ -224,13 +224,51 @@ Check `Cargo.toml` for feature flags and optional dependencies.
 
 - Located in `tests/` directory
 - Test full workflows (init, push, fetch, etc.)
-- Require test utilities from `test_utils/`
+- **New tests** use `test_harness/` (see
+  `docs/architecture/test-harness.md`). `test_utils/` is **frozen** —
+  see "Test harness boundary" below.
 
 ### Test Utilities
 
-- Mock relay implementation
-- Git repository setup helpers
-- Located in `test_utils/`
+- `test_harness/` — current crate. Use this for all new tests.
+- `test_utils/` — **DEPRECATED, frozen, do not modify**. Retained only
+  to keep the rstest-based files under `tests/legacy/` compiling until
+  each is migrated to `test_harness` and deleted.
+
+### Test harness boundary (mandatory rules for new tests)
+
+These rules exist because the previous harness collapsed under exactly
+these patterns. They are non-negotiable for any new test or any test
+file moved out of `tests/legacy/`:
+
+- **Do not import from `test_utils` in new code.** No `use
+  test_utils::...`, no re-exports, no "convenience" shims into
+  `test_harness`. The two crates are hermetically separated.
+- **Do not patch `tests/legacy/` or `test_utils/`.** The legacy tree is
+  frozen — fix bugs by migrating the offending test to `test_harness`
+  and deleting the old one, not by editing in place. The freeze
+  doc-marker on `test_utils/src/lib.rs` enforces this in code review.
+- **No `#[serial]` annotations.** Test isolation is provided by the
+  harness (per-test temp dirs, per-test ports, per-test env). If a
+  test needs serialisation, the harness contract is wrong; fix the
+  harness.
+- **No PTY / `rexpect` / `dialoguer` interaction.** Drive ngit through
+  flags only. Tests that require an interactive prompt are out of
+  scope for the new harness; cover the underlying logic with a unit
+  test instead.
+- **No `std::env::set_var` from a test or helper.** Spawned children
+  receive env via `Repo::ngit` / `Repo::git`, which scope vars to the
+  subprocess. Mutating the test process's env is process-global and
+  breaks parallelism.
+- **No exact-stdout assertions.** Assert on observable side-effects
+  (events on relays, refs on disk, git config keys, exit status), not
+  on the literal text ngit prints. The handful of stdout reads that
+  exist today (e.g. parsing the `clone url:` line out of `ngit init`)
+  are tolerated as a regression-catching shortcut and must use
+  case-insensitive prefix matching, never equality.
+
+These rules are reiterated in `docs/architecture/test-harness.md` and
+in the freeze doc-marker on `test_utils/src/lib.rs:1`.
 
 ## Common Pitfalls
 
