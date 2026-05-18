@@ -1187,29 +1187,6 @@ mod when_no_cover_letter_flag_set_with_range_of_head_2_sends_2_patches_without_c
 
     #[tokio::test]
     #[serial]
-    async fn no_cover_letter_event() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_proposal(false).await?;
-        for relay in [&r53, &r55, &r56] {
-            assert_eq!(
-                relay.events.iter().filter(|e| is_cover_letter(e)).count(),
-                0,
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn two_patch_events() -> Result<()> {
-        let (_, _, r53, r55, r56) = prep_run_create_proposal(false).await?;
-        for relay in [&r53, &r55, &r56] {
-            assert_eq!(relay.events.iter().filter(|e| is_patch(e)).count(), 2);
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[serial]
     // TODO check this is the ancestor
     async fn first_patch_with_root_t_tag() -> Result<()> {
         let (_, _, r53, r55, r56) = prep_run_create_proposal(false).await?;

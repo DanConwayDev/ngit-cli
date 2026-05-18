@@ -44,7 +44,7 @@ pub struct Repo {
 
 impl Repo {
     pub(crate) fn init(harness: &Harness) -> Result<Self> {
-        let tempdir = TempDir::new().context("failed to allocate TempDir for fresh_repo")?;
+        let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
         let dir = tempdir.path().to_path_buf();
 
         // Setup uses the synchronous std variant — these calls happen during
@@ -65,23 +65,71 @@ impl Repo {
             anyhow::bail!("git init exited {status}");
         }
 
-        // Benign per-repo identity so future `git commit`s don't trip the
-        // default-identity check. Using --local keeps it scoped to this
-        // tempdir — no contamination of the caller's global config.
-        for (k, v) in [
-            ("user.name", "ngit test"),
-            ("user.email", "ngit-test@example.invalid"),
-            ("commit.gpgSign", "false"),
-        ] {
-            let status = StdCommand::new("git")
-                .current_dir(&dir)
-                .args(["config", "--local", k, v])
-                .status()
-                .with_context(|| format!("failed to git config {k}"))?;
-            if !status.success() {
-                anyhow::bail!("git config {k} exited {status}");
-            }
+        Self::set_default_identity(&dir)?;
+
+        Ok(Self {
+            _tempdir: tempdir,
+            dir,
+            env: harness.env(),
+            ngit_bin: harness.ngit_bin().to_path_buf(),
+            augmented_path,
+        })
+    }
+
+    /// Build a `Repo` by `git clone`-ing `url` into a fresh tempdir.
+    ///
+    /// Unlike [`Repo::init`], no `git init` is run; the clone produces the
+    /// repository layout. Per-repo `user.name` / `user.email` are still
+    /// written after the clone so subsequent `git commit`s succeed without
+    /// touching the caller's global git identity.
+    ///
+    /// The harness env is applied to the spawned `git clone`, so the
+    /// `git-remote-nostr` helper inherits relay-URL injection and clones
+    /// over `nostr://` URLs against the harness's relays / grasp servers.
+    pub(crate) async fn clone(harness: &Harness, url: &str) -> Result<Self> {
+        let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
+        let dir = tempdir.path().to_path_buf();
+
+        // `git clone <url> .` requires the working tree to be empty.
+        // `TempDir::new` returns an empty dir, so this is safe.
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&dir);
+        for (k, v) in harness.env() {
+            cmd.env(k, v);
         }
+        cmd.env("PATH", &augmented_path);
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        cmd.args(["clone", url, "."]);
+
+        let out = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn git clone {url}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git clone {url} exited {:?}\nstdout: {}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+
+        Self::set_default_identity(&dir)?;
+
+        Ok(Self {
+            _tempdir: tempdir,
+            dir,
+            env: harness.env(),
+            ngit_bin: harness.ngit_bin().to_path_buf(),
+            augmented_path,
+        })
+    }
+
+    /// Allocate a fresh tempdir and an augmented `PATH` (with the
+    /// `git-remote-nostr` directory prepended) for either constructor.
+    fn alloc_tempdir_and_path(harness: &Harness) -> Result<(TempDir, OsString)> {
+        let tempdir = TempDir::new().context("failed to allocate TempDir for Repo")?;
 
         // Augment PATH with the dir containing git-remote-nostr, so any
         // future `git clone nostr://...` driven from this repo finds the
@@ -98,13 +146,28 @@ impl Repo {
         }
         let augmented_path = std::env::join_paths(paths).context("failed to join PATH")?;
 
-        Ok(Self {
-            _tempdir: tempdir,
-            dir,
-            env: harness.env(),
-            ngit_bin: harness.ngit_bin().to_path_buf(),
-            augmented_path,
-        })
+        Ok((tempdir, augmented_path))
+    }
+
+    /// Benign per-repo identity so future `git commit`s don't trip the
+    /// default-identity check. Using `--local` keeps it scoped to the
+    /// tempdir — no contamination of the caller's global config.
+    fn set_default_identity(dir: &Path) -> Result<()> {
+        for (k, v) in [
+            ("user.name", "ngit test"),
+            ("user.email", "ngit-test@example.invalid"),
+            ("commit.gpgSign", "false"),
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(dir)
+                .args(["config", "--local", k, v])
+                .status()
+                .with_context(|| format!("failed to git config {k}"))?;
+            if !status.success() {
+                anyhow::bail!("git config {k} exited {status}");
+            }
+        }
+        Ok(())
     }
 
     /// Working tree path.

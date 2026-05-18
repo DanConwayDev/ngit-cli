@@ -23,6 +23,10 @@
 //! - [`repo::Repo`] — `TempDir`-backed git repo, with [`Repo::ngit`] /
 //!   [`Repo::git`] returning a `Command` pre-configured with the harness's env
 //!   so children (git → git-remote-nostr) inherit it via `execve`.
+//! - [`scenarios`] — multi-step setup helpers built on the primitives above
+//!   ([`Harness::publish_repo`], [`Harness::clone_published_repo`]). Use these
+//!   when your test starts "maintainer publishes a repo; contributor clones it;
+//!   ...".
 //! - [`snapshot::RepoSnapshot`] — `HEAD` + refs only for now; grows as migrated
 //!   tests demand.
 
@@ -32,10 +36,12 @@ pub mod port;
 mod query;
 pub mod relay;
 pub mod repo;
+pub mod scenarios;
 pub mod snapshot;
 
 pub use grasp::GraspServer;
 pub use harness::{Harness, HarnessBuilder};
 pub use relay::VanillaRelay;
 pub use repo::Repo;
+pub use scenarios::{CloneLogin, PublishRepoOpts, PublishedRepo};
 pub use snapshot::RepoSnapshot;
