@@ -73,6 +73,30 @@ path = "src/bin/ngit/main.rs"
 name = "git-remote-nostr"
 path = "src/bin/git_remote_nostr/main.rs"
 
+# Legacy integration tests, relocated under tests/legacy/ as part of the
+# test-harness migration. Cargo only auto-discovers tests at the top level
+# of `tests/`, so each legacy file needs an explicit entry. As tests are
+# migrated to the new harness, delete the entry and the file together.
+[[test]]
+name = "legacy_ngit_init"
+path = "tests/legacy/ngit_init.rs"
+
+[[test]]
+name = "legacy_ngit_send"
+path = "tests/legacy/ngit_send.rs"
+
+[[test]]
+name = "legacy_ngit_login"
+path = "tests/legacy/ngit_login.rs"
+
+[[test]]
+name = "legacy_ngit_pr_checkout"
+path = "tests/legacy/ngit_pr_checkout.rs"
+
+[[test]]
+name = "legacy_git_remote_nostr"
+path = "tests/legacy/git_remote_nostr/main.rs"
+
 [profile.release]
 lto = true
 strip = "symbols"
