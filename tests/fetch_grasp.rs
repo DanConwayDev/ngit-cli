@@ -67,8 +67,8 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
         .await?
         .context("nostr.nsec missing from local git config after account create")?;
     let keys = Keys::parse(&nsec).context("nostr.nsec from local config is not a valid key")?;
-    let npub = keys
-        .public_key()
+    let pubkey = keys.public_key();
+    let npub = pubkey
         .to_bech32()
         .context("failed to bech32-encode the new account's public key")?;
 
@@ -202,6 +202,17 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
     );
 
     // --- step 6: publisher advances main with a second commit ----------------
+    //
+    // Nostr event `created_at` has 1-second resolution. Replaceable events
+    // (30000-39999) addressed by `(pubkey, kind, d-tag)` are kept by the
+    // relay only when `created_at` strictly increases; on a tie NIP-01
+    // says the lower-id event wins (`<id>` lexicographic). If push #1 and
+    // push #2 land in the same wall-clock second the kind-30618 from #1
+    // may keep the address, git-remote-nostr's `list` then advertises v1,
+    // and the cloner's `git fetch` is a no-op. Sleeping a hair over a
+    // second guarantees the new event's timestamp is strictly greater.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
     std::fs::write(publisher.dir().join("README.md"), "main v2\n")
         .context("failed to overwrite README.md for second commit")?;
     run_git_ok(&publisher, ["add", "README.md"], "git add v2").await?;
@@ -228,6 +239,13 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
         main_oid_v2, main_oid_v1,
         "second commit did not advance refs/heads/main",
     );
+
+    // Wait for the kind-30618 state event on the grasp's relay to reflect
+    // the new oid before issuing the fetch. The 1.1s sleep above makes
+    // the timestamp race essentially impossible, but the relay still has
+    // a finite publish-and-ack pipeline; polling the observable state is
+    // strictly more honest than guessing how long that takes.
+    wait_for_state_event_main(harness.grasp("repo"), pubkey, &main_oid_v2).await?;
 
     // --- step 7: cloner fetches, sees the advance ----------------------------
     //
@@ -302,6 +320,54 @@ where
         );
     }
     Ok(())
+}
+
+/// Poll the grasp's relay surface until a kind-30618 state event for
+/// `pubkey` lists `refs/heads/main` with `expected_oid`. Times out after a
+/// few seconds with a context-rich error.
+///
+/// State events are parameterised replaceable (kind 30000-39999): a relay
+/// only keeps the latest by `(pubkey, kind, d-tag)`, broken by event id on
+/// `created_at` ties. The publisher's two pushes can land in the same
+/// wall-clock second, in which case the relay may retain the old event
+/// and a naive fetch reads stale state.
+async fn wait_for_state_event_main(
+    grasp: &test_harness::GraspServer,
+    pubkey: PublicKey,
+    expected_oid: &str,
+) -> Result<()> {
+    const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + POLL_TIMEOUT;
+
+    loop {
+        let events = grasp
+            .events(Filter::new().author(pubkey).kind(Kind::Custom(30618)))
+            .await?;
+        // The relay is supposed to keep at most one replaceable event per
+        // address, but defensive: pick the highest-timestamped one.
+        let latest = events.iter().max_by_key(|e| e.created_at);
+        if let Some(event) = latest {
+            let main_oid_in_event = event.tags.iter().find_map(|t| {
+                let s = t.as_slice();
+                if s.first().map(String::as_str) == Some("refs/heads/main") {
+                    s.get(1).cloned()
+                } else {
+                    None
+                }
+            });
+            if main_oid_in_event.as_deref() == Some(expected_oid) {
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out after {POLL_TIMEOUT:?} waiting for kind-30618 state event to list \
+                 refs/heads/main {expected_oid}. latest event: {latest:?}"
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// Pull the first `nostr://...` URL printed after a `clone url:` /
