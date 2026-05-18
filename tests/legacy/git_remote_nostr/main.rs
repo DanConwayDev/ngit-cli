@@ -9,7 +9,6 @@ use relay::Relay;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
 
-mod fetch;
 mod list;
 mod push;
 
@@ -74,14 +73,6 @@ fn clone_git_repo_with_nostr_url() -> Result<GitTestRepo> {
         .expect_end_eventually_and_print()?;
     let test_repo = GitTestRepo::open(&path)?;
     set_git_nostr_login_config(&test_repo)?;
-    Ok(test_repo)
-}
-
-fn prep_git_repo_minus_1_commit() -> Result<GitTestRepo> {
-    let test_repo = GitTestRepo::without_repo_in_git_config();
-    set_git_nostr_login_config(&test_repo)?;
-    test_repo.add_remote(NOSTR_REMOTE_NAME, &get_nostr_remote_url()?)?;
-    test_repo.populate_minus_1()?;
     Ok(test_repo)
 }
 
