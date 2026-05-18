@@ -85,7 +85,7 @@ test process (tokio runtime)
  ├─── grasp subprocess B (in-memory mode, port :0 → e.g. 54322)
  │      ...
  │
- ├─── ngit subprocess (Command, env={NGIT_USER_INDEX_RELAYS=ws://127.0.0.1:54321, ...})
+ ├─── ngit subprocess (Command, env={NGIT_RELAY_DEFAULT_SET=ws://127.0.0.1:54321, ...})
  │      ↓ may spawn:
  │      └─── git subprocess (inherits env)
  │             └─── git-remote-nostr subprocess (inherits env via execve)
@@ -97,7 +97,7 @@ test process (tokio runtime)
 Three observations underpin this:
 
 1. **`std::process::Command::env()` is per-child, not process-global.**
-   Multiple tests can set different `NGIT_USER_INDEX_RELAYS` values
+   Multiple tests can set different `NGIT_RELAY_DEFAULT_SET` values
    concurrently without contamination.
 2. **POSIX `execve` propagates parent env to children.** git does not
    scrub env when spawning remote helpers. This is empirically certified
@@ -114,7 +114,7 @@ Three observations underpin this:
 | Concern | Mechanism |
 |---|---|
 | Relay/git ports | OS-assigned via `:0` bind in each grasp instance (ngit-grasp pattern); discovered after start |
-| Relay URL config | `Command::env("NGIT_USER_INDEX_RELAYS", ...)` etc. per spawn |
+| Relay URL config | `Command::env("NGIT_RELAY_DEFAULT_SET", ...)` etc. per spawn |
 | `NGITTEST` | Still set per spawn for fallback code paths; new env vars override the hardcoded localhost defaults |
 | Working tree | `tempfile::TempDir` under `std::env::temp_dir()` — not `current_dir()` |
 | `GIT_EXEC_PATH` (the dir containing `git-remote-nostr`) | Per-test tempdir; binary copied in once per test |
@@ -124,31 +124,53 @@ Nothing is process-global. Nothing requires `#[serial]`.
 
 ### Relay-injection mechanism: per-spawn env vars
 
-`d0f7f59` already added git-config support for relay configuration in
-`src/lib/client.rs::Params::new()`, but tests bypass it because of the
-`NGITTEST=true` gate. Rather than enable that path, we add an env-var
-override that lives *inside* the existing `NGITTEST` branch:
+On `main` today, `src/lib/client.rs::Params` already reads relay
+configuration from per-repo git-config keys (`nostr.relay-default-set`,
+`nostr.relay-blaster-set`, `nostr.relay-signer-fallback-set`,
+`nostr.grasp-default-set`) — but only when `NGITTEST` is unset
+(`client.rs:1131`). Under tests, those reads are skipped and the
+relay fields fall back to hardcoded localhost ports (8051-8057).
+
+There is **no env-var override path today**. We add one — inside the
+existing `NGITTEST=true` branch, so old tests are unaffected:
 
 ```rust
 // inside Params::default(), in the NGITTEST=true branch:
-user_index_relays: env_relay_list("NGIT_USER_INDEX_RELAYS")
+relay_default_set: env_relay_list("NGIT_RELAY_DEFAULT_SET")
     .unwrap_or_else(|| vec![
         "ws://localhost:8051".to_string(),
         "ws://localhost:8052".to_string(),  // legacy hardcoded fallback
     ]),
-// (similarly for git_nostr_index_relays, default_signer_relays,
-//  grasp_default_servers)
+// (similarly for blaster_relays / fallback_signer_relays /
+//  grasp_default_set, each reading its own env var)
 ```
 
-`env_relay_list` reads a `;`-separated list of URLs from the named env
-var. When unset, behaviour is unchanged from today. When set, it
-overrides. This is **purely additive** — old tests, which set
-`NGITTEST=TRUE` and no env vars, see no behavioural change.
+The four env vars (matching current `main` field shape):
+
+- `NGIT_RELAY_DEFAULT_SET`
+- `NGIT_RELAY_BLASTER_SET`
+- `NGIT_RELAY_SIGNER_FALLBACK_SET`
+- `NGIT_GRASP_DEFAULT_SET`
+
+Each is parsed as a `;`-separated list of URLs. Empty/unset → legacy
+hardcoded behaviour.
+
+This is **purely additive** — old tests, which set `NGITTEST=TRUE` and
+no env vars, see no behavioural change. New tests set
+`NGITTEST=TRUE` AND the env vars, and the env vars win.
 
 The harness sets these env vars on every `Command` it spawns. Git
-inherits them; git-remote-nostr inherits them via `execve`. The chain
-is identical to how `NGITTEST` reaches the helper today, just with more
-keys.
+inherits them; `git-remote-nostr` inherits them via `execve`. The
+chain is identical to how `NGITTEST` reaches the helper today, just
+with more keys.
+
+**Relationship to relay-set refactors.** Future renames or splits to
+the relay-set model (e.g. splitting `relay_default_set` into separate
+user/index roles) are deliberately *out of scope* for the harness
+work. The migration order is: build harness against current field
+names → migrate tests → then perform any relay-set refactors with a
+robust harness in place. Doing those refactors against the legacy
+harness has already failed once.
 
 ### Why subprocess (not library embed) for ngit-grasp
 
@@ -167,20 +189,53 @@ The user accepted per-test cost as the right trade. Library embedding
 remains on the table if measurements show subprocess startup is the
 bottleneck.
 
+### Relay roles: vanilla relays vs GRASP
+
+The harness offers two relay primitives:
+
+- **Vanilla nostr relay** (`with_relay`) — accepts arbitrary nostr
+  events. Used for user metadata (kind 0), relay lists (kind 10002),
+  signer connect events, and anything else not specific to a git
+  repository. Implementation: `nostr-relay-builder` running in-process
+  in the test runtime, bound to `127.0.0.1:0`.
+- **GRASP server** (`with_grasp_server`) — a full `ngit-grasp`
+  subprocess speaking both NIP-01 (for repo-related events only —
+  kind 30617 repo announcements, NIP-34 patches, state events, etc.)
+  and git smart-http (for the actual git data). Vanilla nostr events
+  like kind 0 or 10002 are rejected.
+
+GRASP cannot stand in for a vanilla relay. Tests that publish user
+profiles, relay lists, or NIP-46 signer events need at least one
+`with_relay()` instance.
+
+Role labels map onto the env-var schema:
+
+| Role label | Contributes to |
+|---|---|
+| `with_relay("default")` | `NGIT_RELAY_DEFAULT_SET` |
+| `with_relay("blaster")` | `NGIT_RELAY_BLASTER_SET` |
+| `with_relay("signer_fallback")` | `NGIT_RELAY_SIGNER_FALLBACK_SET` |
+| `with_grasp_server("repo")` | `NGIT_GRASP_DEFAULT_SET` + used as git-server URL in the published repo announcement |
+
+A test can register multiple instances under the same role; the env
+var becomes a `;`-separated list of URLs.
+
 ### Test API shape (sketch)
 
 ```rust
 #[tokio::test]
 async fn clone_over_grasp_succeeds() -> Result<()> {
     let harness = Harness::builder()
-        .with_grasp_server("user")        // role label, not positional
-        .with_grasp_server("repo")
+        .with_relay("default")              // vanilla nostr relay (user index events)
+        .with_grasp_server("repo")          // GRASP — git + repo-only relay
         .build().await?;
 
     let user_keys = harness.generate_user_keys();
-    let repo_id  = harness.publish_repo_announcement(&user_keys, &["repo"]).await?;
+    harness.publish_user_metadata(&user_keys).await?;            // kind 0, kind 10002 → "default" relay
+    let repo_id = harness
+        .publish_repo_announcement(&user_keys, &["repo"]).await?; // kind 30617 → "repo" grasp
 
-    let repo = harness.fresh_repo()?;     // TempDir, configured
+    let repo = harness.fresh_repo()?;       // TempDir, env-configured
     let out  = repo.git(["clone", &harness.nostr_url(repo_id), "."]).run()?;
 
     assert!(out.status.success(), "clone failed: {}", out.stderr_lossy());
@@ -193,32 +248,35 @@ async fn clone_over_grasp_succeeds() -> Result<()> {
     ).await?;
     assert_eq!(events.len(), 1);
 
-    // harness shuts down all grasp instances on drop
+    // harness shuts down all relays / grasp instances on drop
     Ok(())
 }
 ```
 
 Key shapes:
 
-- **`Harness::builder()`** — fluent builder, async. Returns when all grasp
-  instances are listening.
-- **Role labels** — strings (`"user"`, `"repo"`, `"fallback"`, ...), not
-  positional indices. Maps to env-var roles inside `client.rs`.
+- **`Harness::builder()`** — fluent builder, async. Returns when all
+  relays and grasp instances are listening.
+- **Role labels** — strings (`"default"`, `"blaster"`, `"repo"`, ...),
+  not positional indices. Maps to env-var roles inside `client.rs`.
 - **`harness.fresh_repo()`** — `TempDir`-backed `git init`d repo, with
-  git-config pre-populated to match the harness's relay roster.
+  git-config pre-populated to match the harness's relay roster, and
+  with the harness env vars baked into the `Repo` for all spawned
+  commands.
 - **`repo.git([...])`** / **`repo.ngit([...])`** — fluent `Command`
   wrappers; inherit env from the harness automatically.
 - **`run()`** returns a struct with `status`, `stdout: Vec<u8>`,
   `stderr: Vec<u8>`, plus convenience accessors. Never panics; tests
   decide what's an assertion.
-- **`repo.snapshot()`** — returns a serializable struct: refs (name → oid),
-  HEAD, config keys of interest, working tree status. Diffable across
-  before/after.
-- **`harness.grasp(role).events(filter)`** — queries the grasp instance's
+- **`repo.snapshot()`** — returns a serializable struct: refs (name →
+  oid), HEAD, config keys of interest, working tree status. Diffable
+  across before/after.
+- **`harness.relay(role).events(filter)`** /
+  **`harness.grasp(role).events(filter)`** — queries the relay's
   event store via a real nostr REQ over websocket. NIP-01 filter
   matching, no mock shortcuts.
-- **`Drop`** — shuts down all grasp subprocesses. No `shutdown()` closure
-  to remember.
+- **`Drop`** — shuts down all subprocesses and relay tasks. No
+  `shutdown()` closure to remember.
 
 The API is small on purpose. Scenario builders (e.g. publishing a
 proposal, populating a remote repo with commits) accrue as migration
@@ -277,22 +335,24 @@ case the subprocess exit barrier is sufficient.
 
 ## Required `src/` changes
 
-### PR 1: additive env-var override in `client.rs`
+### PR 1: env-var reads inside the existing `NGITTEST=true` branch
 
-Inside `Params::default()`, in the existing `NGITTEST=true` branch,
-read four env vars before falling back to the hardcoded localhost
-defaults:
+In `src/lib/client.rs::Params::default()`, the `NGITTEST=true` branch
+currently returns a hardcoded `vec!["ws://localhost:8051", ...]` for
+each relay field. Wrap each of those with a read of the corresponding
+env var, falling back to the hardcoded vec when unset:
 
-- `NGIT_USER_INDEX_RELAYS`
-- `NGIT_GIT_NOSTR_INDEX_RELAYS`
-- `NGIT_DEFAULT_SIGNER_RELAYS`
-- `NGIT_GRASP_DEFAULT_SERVERS`
+- `NGIT_RELAY_DEFAULT_SET` → overrides `relay_default_set`
+- `NGIT_RELAY_BLASTER_SET` → overrides `blaster_relays`
+- `NGIT_RELAY_SIGNER_FALLBACK_SET` → overrides `fallback_signer_relays`
+- `NGIT_GRASP_DEFAULT_SET` → overrides `grasp_default_set`
 
 Each is parsed as a `;`-separated list of URLs. Empty/unset → legacy
-behaviour.
+hardcoded behaviour preserved.
 
 ~30 lines, no API change, no breaking change to old tests. The
-mechanism reuses the chain already certified by `NGITTEST` itself.
+mechanism reuses the env-propagation chain already certified by
+`NGITTEST` itself.
 
 ### Future (not blocking)
 
@@ -302,6 +362,9 @@ mechanism reuses the chain already certified by `NGITTEST` itself.
 - Replace remaining `NGITTEST` branches in `src/` (spinners, cache
   path, fallbacks for other settings) with proper config injection.
   Larger refactor; tracked separately.
+- Relay-set model refactors (renames, splits — e.g. the unmerged
+  `pr/rename-split-relay-sets` work). Deferred until after migration
+  so the new harness can absorb the refactor cleanly.
 - Embed ngit-grasp as a library. Requires upstream additions:
   `embed::start()`, `bind :0` native, shutdown signal, embedded
   `Config` builder. Triggered if subprocess cost becomes the
@@ -309,18 +372,51 @@ mechanism reuses the chain already certified by `NGITTEST` itself.
 
 ## ngit-grasp dependency
 
-- **No upstream changes required for v1.** Subprocess pattern matches
-  ngit-grasp's existing test approach.
-- **Imported as a git dependency** (not on crates.io). Pinned to a
-  specific rev; both projects on `nostr-sdk` 0.44.1.
-- **License compatible** (both MIT).
-- The `ngit-grasp` binary must be built before tests run. The harness's
-  `Harness::builder()` resolves the binary path via a build-script or
-  config (TBD during PR 1). Two viable approaches:
-  - Build ngit-grasp as a workspace member of a "test fixtures"
-    workspace and reference its `cargo_bin` output
-  - Require an env var (e.g. `NGIT_GRASP_BIN`) pointing to a
-    pre-built binary, with a build script as a convenience
+We need the `ngit-grasp` **binary**, not its library. The test
+harness spawns it as a subprocess; nothing links against
+`ngit_grasp` as a crate. This deliberately keeps
+`test_harness`'s cargo dependency tree small (ngit-grasp's library
+unconditionally pulls in `clap`, `dotenvy`, `tracing-subscriber`,
+etc. — undesirable in a test crate).
+
+**Binary discovery:** `Harness::builder()` resolves the path in this
+order:
+
+1. `$NGIT_GRASP_BIN` env var, if set.
+2. A conventional sibling-clone path (`../ngit-grasp/target/release/ngit-grasp`)
+   — convenient for the local dev pattern of having both repos
+   checked out side by side.
+3. Fail with a clear error pointing at the setup docs.
+
+**Local dev:** `cargo build --release` in `../ngit-grasp` once;
+fallback (2) picks it up. Or set `NGIT_GRASP_BIN` in a `.envrc` /
+shell config.
+
+**CI:** add a step before `cargo test` that builds or fetches
+`ngit-grasp` and sets `NGIT_GRASP_BIN`. Two viable approaches,
+deferred to PR 1:
+
+- `cargo install --git <ngit-grasp-url> --rev <pinned-rev> --root <cache-dir>`
+  in a GitHub Actions step, with cache. Keeps CI purely cargo-based.
+- A nix step (`nix build .#ngit-grasp` from a pinned flake) for the
+  ngit-grasp binary specifically. Smaller change than full cargo→nix
+  CI migration.
+
+**Standalone vanilla relay (`with_relay`):** uses `nostr-relay-builder`
+in-process. Crates.io 0.44.x is sufficient for v1 (accept-all-events
+behaviour). If newer relay-builder features are needed, revisit —
+options include git-pinning to match the rev ngit-grasp uses, or
+spawning a second `ngit-grasp` if it grows a vanilla-relay mode.
+
+**Version alignment:** ngit-grasp's pinned `nostr-sdk` rev should be
+compatible with ngit's `nostr-sdk = 0.44.1` (crates.io). Both
+projects are MIT-licensed.
+
+**Long-term (deferred):** if subprocess startup becomes the
+test-suite bottleneck, library embedding becomes worth the four small
+upstream changes identified in earlier audits (`embed::start()`,
+`bind :0` native, shutdown signal, embedded `Config` builder). Until
+then, subprocess is simpler and identical to production deployment.
 
 ## Migration plan
 
@@ -343,16 +439,44 @@ mechanism reuses the chain already certified by `NGITTEST` itself.
 5. **No `#[serial]` in new tests.** Ever.
 6. **No PTY/rexpect/dialoguer assertions in new tests.** Ever.
 
+### Test directory layout
+
+Cargo doesn't auto-discover nested integration tests (`tests/foo/*.rs`
+aren't picked up by default). To get a clean `tests/legacy/` boundary
+we use explicit `[[test]]` entries in `Cargo.toml`:
+
+```toml
+[[test]]
+name = "legacy_ngit_init"
+path = "tests/legacy/ngit_init.rs"
+
+[[test]]
+name = "legacy_ngit_send"
+path = "tests/legacy/ngit_send.rs"
+# ...one entry per old test file
+```
+
+PR 1 moves every existing `tests/*.rs` file into `tests/legacy/`
+(with `[[test]]` entries added), so the boundary is visible from
+day one. New tests live at `tests/*.rs` directly.
+
+As tests are migrated, the corresponding `[[test]]` entry is deleted
+from `Cargo.toml` and the file deleted from `tests/legacy/`. When the
+last entry is gone, the directory disappears with it.
+
 ### PR sequence
 
 **PR 1 — Foundation:**
 - New `test_harness` crate skeleton (port allocator, grasp instance
-  manager, `Harness` builder, `Repo` fixture, snapshot helper)
-- Additive env-var override in `src/lib/client.rs::Params::default()`
-- One lighthouse test: clone-over-grasp, in `tests/v2/clone.rs` (or
-  similar — exact path TBD during PR 1)
-- Old harness/tests UNTOUCHED
-- CI runs both
+  manager, vanilla-relay manager, `Harness` builder, `Repo` fixture,
+  snapshot helper)
+- Env-var reads inside the `NGITTEST=true` branch in
+  `src/lib/client.rs::Params::default()` (~30 LoC, additive)
+- Move existing `tests/*.rs` → `tests/legacy/*.rs`; add `[[test]]`
+  entries to `Cargo.toml`
+- One lighthouse test: clone-over-grasp at `tests/clone.rs`
+- Old tests UNTOUCHED in content (just relocated)
+- CI runs both legacy and new
 - Mergeable in isolation, small, additive, low risk
 
 **PR 2 — Freeze declaration:**
@@ -364,23 +488,24 @@ mechanism reuses the chain already certified by `NGITTEST` itself.
 **PR 3-N — Rolling migration:**
 - Each PR migrates one logical area (init, push, send, pr_checkout,
   fetch). Rough ordering:
-  1. `tests/git_remote_nostr/main.rs` — clone flow
-  2. `tests/ngit_init.rs` — init + grasp announcement
-  3. `tests/git_remote_nostr/push.rs` — push rstest groups
-  4. `tests/ngit_send.rs` — PR send flow
-  5. `tests/ngit_pr_checkout.rs` — already non-PTY, retarget setup
-     onto scenario builders
-  6. `tests/git_remote_nostr/fetch.rs`
-  7. `tests/ngit_login.rs` — interactive parts dropped, non-interactive
-     paths covered
-  8. `tests/git_remote_nostr/list.rs`
+  1. `tests/legacy/git_remote_nostr/main.rs` — clone flow
+  2. `tests/legacy/ngit_init.rs` — init + grasp announcement
+  3. `tests/legacy/git_remote_nostr/push.rs` — push rstest groups
+  4. `tests/legacy/ngit_send.rs` — PR send flow
+  5. `tests/legacy/ngit_pr_checkout.rs` — already non-PTY, retarget
+     setup onto scenario builders
+  6. `tests/legacy/git_remote_nostr/fetch.rs`
+  7. `tests/legacy/ngit_login.rs` — interactive parts dropped,
+     non-interactive paths covered
+  8. `tests/legacy/git_remote_nostr/list.rs`
 - Each PR adds scenario builders to `test_harness` as that area
   demands them.
-- Each PR deletes the migrated old file in the same commit.
+- Each PR deletes the migrated old file and its `[[test]]` entry in
+  the same commit.
 
 **PR Final — Bury the body:**
 - Delete `test_utils` crate
-- Delete `tests/v2/` prefix if used (rename to `tests/`)
+- Remove `tests/legacy/` directory
 - Optionally remove the additive env-var branch (or keep — harmless)
 
 ### Scope of v1's "complete" state
@@ -410,19 +535,34 @@ scenarios). With focused work, weeks not months.
 
 ## Open questions (resolved during PR 1)
 
-- Exact location of new tests: `tests/v2/` prefix, sibling
-  `tests-v2/` crate, or in-place rename of `tests/` files? Resolved
-  by file naming once PR 1 lands.
-- How `test_harness` resolves the `ngit-grasp` binary path
-  (build-script vs env var vs workspace member).
-- Whether the env-var schema uses one var per role
-  (`NGIT_USER_INDEX_RELAYS=...`) or one structured var
-  (`NGIT_TEST_RELAYS=user:...,repo:...`). Per-role is simpler;
-  keeping it unless a reason emerges to merge.
+- How `test_harness` resolves the `ngit-grasp` binary path on CI.
+  Local dev uses the sibling-clone fallback; CI either does a cached
+  `cargo install --git` or a nix step. Decision deferred to PR 1
+  scoping.
+- Which `nostr-relay-builder` source to use for the vanilla relay
+  (`with_relay`). Crates.io 0.44.x is the default for v1; revisit if
+  the API gap matters.
 - Whether scenario builders return a typed `Proposal` /
   `Repository` / etc. or just side-effect on the harness. Likely
   typed for ergonomics, but emerges from the first few migration
   PRs.
+- Where to handle test-mode behaviour beyond relay configuration —
+  spinner suppression, cache path overrides, etc. — that today rides
+  on `NGITTEST`. Out of scope for v1; tracked separately.
+
+### Resolved during design
+
+- **Env-var schema**: one env var per role (`NGIT_RELAY_DEFAULT_SET`,
+  `NGIT_RELAY_BLASTER_SET`, `NGIT_RELAY_SIGNER_FALLBACK_SET`,
+  `NGIT_GRASP_DEFAULT_SET`). Simple, mirrors the existing field
+  structure, no parser needed beyond `;`-split.
+- **Test directory layout**: `tests/legacy/` for old (with explicit
+  `[[test]]` entries in `Cargo.toml`), `tests/` for new.
+- **ngit-grasp coupling**: binary only, no library import. Discovered
+  via `$NGIT_GRASP_BIN` with sibling-clone fallback.
+- **Relay model**: vanilla relays (`with_relay`) for non-repo events
+  via `nostr-relay-builder`; GRASP (`with_grasp_server`) for repo
+  events and git data, as subprocess.
 
 ## References
 
@@ -430,10 +570,12 @@ scenarios). With focused work, weeks not months.
   not committed): legacy harness audit, `new-test-harness` branch
   review, ngit-grasp embeddability audit, main harness audit, env-var
   propagation verification.
-- Commit `d0f7f596` — relay-set rename and split; added git-config
-  reading for relay configuration.
+- `pr/rename-split-relay-sets` (commit `d0f7f596`) — unmerged
+  relay-set rename/split. Deliberately not a prerequisite for this
+  harness; instead, this harness is a prerequisite for cleanly
+  landing that kind of refactor in future.
 - Commit `83b08861` — "replace broken ngit_list tests with
-  ngit_pr_checkout"; established the non-PTY `std::process::Command` +
-  `--json` pattern that this harness generalises.
+  ngit_pr_checkout"; established the non-PTY `std::process::Command`
+  + `--json` pattern that this harness generalises.
 - ngit-grasp's `tests/common/relay.rs` — port allocation and
   subprocess management pattern adopted here.
