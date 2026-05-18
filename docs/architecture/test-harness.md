@@ -392,15 +392,28 @@ order:
 fallback (2) picks it up. Or set `NGIT_GRASP_BIN` in a `.envrc` /
 shell config.
 
-**CI:** add a step before `cargo test` that builds or fetches
-`ngit-grasp` and sets `NGIT_GRASP_BIN`. Two viable approaches,
-deferred to PR 1:
+**CI:** `ngit-grasp` is wired in via a pinned flake input on the root
+`flake.nix`. The dev shell builds it (with `doCheck = false` to skip
+ngit-grasp's own unit tests, which expect git in PATH and don't run in
+the Nix build sandbox), exposes the binary on `buildInputs`, and
+exports `NGIT_GRASP_BIN` from `shellHook`. CI already runs everything
+through `nix develop --command cargo test`, so the test harness
+automatically picks up the pinned binary with no extra workflow steps.
+Bumping ngit-grasp is a one-line `nix flake update ngit-grasp` plus
+the resulting `flake.lock` change.
 
-- `cargo install --git <ngit-grasp-url> --rev <pinned-rev> --root <cache-dir>`
-  in a GitHub Actions step, with cache. Keeps CI purely cargo-based.
-- A nix step (`nix build .#ngit-grasp` from a pinned flake) for the
-  ngit-grasp binary specifically. Smaller change than full cargo→nix
-  CI migration.
+Why a flake input rather than `cargo install --git` in the GitHub
+workflow:
+
+- The project's CI is already nix-based; a flake input is cheaper
+  than introducing a parallel cargo-cache code path.
+- A locked flake rev gives bit-for-bit reproducible builds without
+  hand-rolled cache-invalidation keys.
+- Local dev and CI use the *same* mechanism — no drift between the
+  two binary paths.
+
+The sibling-clone fallback in `test_harness/src/grasp.rs` stays for
+local-dev convenience when working without the nix shell.
 
 **Standalone vanilla relay (`with_relay`):** uses `nostr-relay-builder`
 in-process. Crates.io 0.44.x is sufficient for v1 (accept-all-events
@@ -535,10 +548,6 @@ scenarios). With focused work, weeks not months.
 
 ## Open questions (resolved during PR 1)
 
-- How `test_harness` resolves the `ngit-grasp` binary path on CI.
-  Local dev uses the sibling-clone fallback; CI either does a cached
-  `cargo install --git` or a nix step. Decision deferred to PR 1
-  scoping.
 - Which `nostr-relay-builder` source to use for the vanilla relay
   (`with_relay`). Crates.io 0.44.x is the default for v1; revisit if
   the API gap matters.
@@ -559,7 +568,9 @@ scenarios). With focused work, weeks not months.
 - **Test directory layout**: `tests/legacy/` for old (with explicit
   `[[test]]` entries in `Cargo.toml`), `tests/` for new.
 - **ngit-grasp coupling**: binary only, no library import. Discovered
-  via `$NGIT_GRASP_BIN` with sibling-clone fallback.
+  via `$NGIT_GRASP_BIN` with sibling-clone fallback. CI gets the
+  binary via a pinned `ngit-grasp` flake input on `flake.nix`; the
+  dev shell exports `NGIT_GRASP_BIN` automatically.
 - **Relay model**: vanilla relays (`with_relay`) for non-repo events
   via `nostr-relay-builder`; GRASP (`with_grasp_server`) for repo
   events and git data, as subprocess.
