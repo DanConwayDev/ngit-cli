@@ -266,6 +266,15 @@ file moved out of `tests/legacy/`:
   exist today (e.g. parsing the `clone url:` line out of `ngit init`)
   are tolerated as a regression-catching shortcut and must use
   case-insensitive prefix matching, never equality.
+- **Push to a nostr remote via `Repo::nostr_push`, never
+  `repo.git(["push", ...])`.** `nostr_push` runs the push and then
+  ticks one whole unix second so the next event-publishing operation
+  lands in a strictly later `created_at` second than the
+  auto-generated kind-30618 state event the push just emitted. Bypassing
+  it produces a roughly 30% flake rate where the next publish hits the
+  relay's "this event is deleted" check_id path on a same-second event-id
+  collision. See `docs/architecture/test-harness.md` § "Timing rule"
+  for the chain; `test_harness/src/clock.rs` for the writeup.
 
 These rules are reiterated in `docs/architecture/test-harness.md` and
 in the freeze doc-marker on `test_utils/src/lib.rs:1`.

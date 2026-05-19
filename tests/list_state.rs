@@ -100,15 +100,21 @@ async fn commit_on_branch(repo: &Repo, branch: &str, file: &str, content: &str) 
     rev_parse(repo, "HEAD").await
 }
 
-/// `git push -u origin <branch>`. Pulled out of every test because the
-/// "push the branch we just committed" line was getting noisy.
+/// `git push -u origin <branch>` via [`Repo::nostr_push`]. Pulled out of
+/// every test because the "push the branch we just committed" line was
+/// getting noisy.
+///
+/// `Repo::nostr_push` (not a raw `git push`) is mandatory here because the
+/// push goes through `git-remote-nostr`, which publishes an
+/// auto-generated kind-30618 state event. See `test_harness::clock` for the
+/// timing rule that helper enforces, and the previously-flaky
+/// `state_event_takes_precedence_over_advanced_git_server_state` regression
+/// for why it matters.
 async fn push_branch(repo: &Repo, branch: &str) -> Result<()> {
-    git_ok(
-        repo,
-        ["push", "-u", "origin", branch],
-        &format!("git push origin {branch}"),
-    )
-    .await
+    repo.nostr_push(["-u", "origin", branch])
+        .await
+        .with_context(|| format!("git push origin {branch}"))?;
+    Ok(())
 }
 
 /// `git rev-parse <rev>` → oid hex.
@@ -300,17 +306,6 @@ async fn wait_for_state_event_covering(
 /// the state event that `publish_repo` + the post-`git push vnext` cycle
 /// produced.
 #[tokio::test]
-#[ignore = "FIXME(harness-migration): flaky under parallel test load — the \
-            second `git push -u origin vnext` via git-remote-nostr exits \
-            zero but the auto-generated kind-30618 covering both `main` \
-            and `vnext` never lands on the grasp's relay surface. \
-            wait_for_state_event_covering observes only the initial state \
-            event (`last seen 1 events`) after 10s. Passes in isolation, \
-            and the same multi-push pattern works fine via the explicit \
-            publish_state_event path used by the sibling tests in this \
-            file. Suspect a `git push`-via-remote-helper exit barrier vs \
-            nostr-sdk publish-ACK race; tracked for the GRASP-side \
-            investigation needed by PR 5 (push-flow migration)."]
 async fn lists_head_and_branches_from_git_server_when_state_event_matches() -> Result<()> {
     let (harness, publisher, published) = setup().await?;
 

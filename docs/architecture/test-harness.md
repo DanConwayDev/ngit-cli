@@ -333,6 +333,50 @@ Tests that await asynchronous secondary effects can use a thin
 `harness.wait_for_event(filter, timeout)` helper, but for the common
 case the subprocess exit barrier is sufficient.
 
+### Timing rule: pushes and explicit publishes tick one second
+
+Nostr `created_at` is unix-seconds (NIP-01) — second resolution. Two
+events signed by the same key with identical `(kind, tags, content)`
+in the same wall-clock second hash to the same event id. For
+replaceable / addressable events (kinds 10000–19999 and 30000–39999)
+that's nominally fine; in practice `nostr-relay-builder`'s
+`MemoryDatabase` adds **superseded** replaceable-event ids to its
+internal `deleted_ids` set (see
+`nostr-database/src/helper.rs::discard_events`), and rejects any later
+publish whose id collides with one of those superseded ids with the
+wire message `"blocked: this event is deleted"` — even though no
+NIP-09 deletion ever happened. Combined with second-resolution
+timestamps, fast back-to-back publishes on the same coordinate flake
+at roughly 30% on commodity hardware.
+
+The harness sidesteps this by making every operation that publishes a
+nostr event end with a one-second sleep, so the next caller's
+`Timestamp::now()` lands in a strictly later second and id collisions
+are impossible by construction. The rule has two prongs you'll touch
+when writing or migrating a test:
+
+1. **Always push to a nostr remote via `Repo::nostr_push`**, never
+   `repo.git(["push", ...])`. A push handled by `git-remote-nostr`
+   emits an auto-generated kind-30618 state event covering the
+   pushed ref(s); `nostr_push` is the variant that ticks afterwards.
+   Tests that bypass it will pass in isolation and flake under
+   parallel load.
+
+2. **`Harness::publish_state_event` and `Harness::publish_repo` tick
+   automatically.** No additional sleep needed at the call site.
+
+If you find yourself reaching for `tokio::time::sleep` or a custom
+`tick_to_next_second()` call in a test, prefer the wrapper that owns
+the publish — the rule belongs in the harness, not at the call site.
+The bare [`test_harness::tick_to_next_second`] helper is exported
+public for the rare case where a test publishes a custom-built event
+directly via `nostr-sdk` (which it shouldn't, but the escape hatch
+exists).
+
+The flake this fixes is documented in
+`tests/list_state.rs::state_event_takes_precedence_over_advanced_git_server_state`
+— preserved as the regression-witness for the rule.
+
 ## Required `src/` changes
 
 ### PR 1: env-var reads inside the existing `NGITTEST=true` branch
@@ -545,6 +589,7 @@ scenarios). With focused work, weeks not months.
 | Set `std::env::set_var` from a test or helper | Process-global state; breaks parallelism |
 | Spawn the ngit binary via `assert_cmd::Command` without setting the harness env | Misses relay-URL injection; test runs against hardcoded defaults |
 | Add a "convenience" re-export of `test_utils` types into `test_harness` | Bridges defeat the boundary |
+| `repo.git(["push", ...])` to a nostr remote | Misses the post-push 1s tick; flakes under parallel load. Use `Repo::nostr_push` instead. See "Timing rule" above. |
 
 ## Open questions (resolved during PR 1)
 

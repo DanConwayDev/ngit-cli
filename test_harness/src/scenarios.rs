@@ -47,7 +47,7 @@ use std::sync::{
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 
-use crate::{harness::Harness, repo::Repo};
+use crate::{clock, harness::Harness, repo::Repo};
 
 /// `KIND_PULL_REQUEST` from `src/lib/git_events.rs`. Mirrored locally so the
 /// harness doesn't pull in the ngit lib crate just for one number. Kept in
@@ -314,14 +314,15 @@ impl Harness {
         // streams pack data over smart-http and publishes the state event,
         // both of which graduate the announcement into the relay DB. After
         // this point a fresh `git clone` of the nostr:// URL works.
-        check_ok(
-            "git push",
-            publisher
-                .git(["push", "-u", "origin", "main"])
-                .output()
-                .await
-                .context("failed to spawn git push")?,
-        )?;
+        //
+        // `Repo::nostr_push` (rather than a raw `git push`) is mandatory
+        // here because the push emits a kind-30618 state event — see its
+        // doc-comment for the timing rule, and `crate::clock` for the
+        // root-cause writeup.
+        publisher
+            .nostr_push(["-u", "origin", "main"])
+            .await
+            .context("git push -u origin main (publish_repo graduation)")?;
 
         Ok((
             publisher,
@@ -725,6 +726,11 @@ impl Harness {
                 output.failed,
             );
         }
+
+        // Guarantee the next event published from this harness lands in a
+        // strictly later unix second. See `crate::clock::tick_to_next_second`
+        // for the relay-builder quirk that makes this necessary.
+        clock::tick_to_next_second().await;
 
         Ok(event)
     }

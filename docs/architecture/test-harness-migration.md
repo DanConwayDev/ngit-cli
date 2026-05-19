@@ -235,6 +235,22 @@ deliberately split heavy files so no single agent session exceeds a
 reasonable context budget. PR 7 is last because its drop ratio is
 highest and its replacement tests are smallest.
 
+### Note for the `5*` PRs (push migrations)
+
+Every push to a nostr remote in a migrated test **must** go through
+[`Repo::nostr_push`](../../test_harness/src/repo.rs), not
+`repo.git(["push", ...])`. The `nostr_push` wrapper runs the push and
+then sleeps one whole unix second so the next event-publishing
+operation in the test lands in a strictly later `created_at` second
+than the auto-generated kind-30618 state event the push just emitted.
+Skipping it produces a roughly 30% flake rate where the next publish
+hits the relay's "this event is deleted" check_id path on a same-
+second collision — see `docs/architecture/test-harness.md` §
+"Timing rule" for the full chain. The previously-flaky
+`tests/list_state.rs::state_event_takes_precedence_over_advanced_git_server_state`
+is preserved as the witness; if it starts failing again the rule has
+been violated somewhere.
+
 ## Keep / drop summary
 
 The detailed per-file matrix lives in the migration PRs themselves. The

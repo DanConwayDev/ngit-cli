@@ -33,6 +33,7 @@
 //! - [`snapshot::RepoSnapshot`] — `HEAD` + refs only for now; grows as migrated
 //!   tests demand.
 
+pub mod clock;
 pub mod grasp;
 pub mod harness;
 pub mod port;
@@ -42,6 +43,7 @@ pub mod repo;
 pub mod scenarios;
 pub mod snapshot;
 
+pub use clock::tick_to_next_second;
 pub use grasp::GraspServer;
 pub use harness::{Harness, HarnessBuilder};
 pub use relay::VanillaRelay;

@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use tempfile::TempDir;
 use tokio::process::Command;
 
-use crate::{harness::Harness, snapshot::RepoSnapshot};
+use crate::{clock, harness::Harness, snapshot::RepoSnapshot};
 
 /// One repo, owned for the lifetime of a test.
 pub struct Repo {
@@ -248,4 +248,63 @@ impl Repo {
     pub fn snapshot(&self) -> Result<RepoSnapshot> {
         RepoSnapshot::capture(&self.dir)
     }
+
+    /// `git push <args...>`, then wait one whole unix second.
+    ///
+    /// **Use this for every push to a nostr remote.** A push handled by
+    /// `git-remote-nostr` emits an auto-generated kind-30618 state event
+    /// covering the just-pushed ref(s); see `src/bin/git_remote_nostr/push.rs`.
+    /// That state event's `created_at` has unix-second resolution, and the
+    /// `nostr-relay-builder` `MemoryDatabase` tracks superseded
+    /// replaceable-event ids as deleted (it adds them to its `deleted_ids`
+    /// set when discarding during replacement). Two events in the same second
+    /// with the same `(pubkey, kind, tags, content)` hash to the same id —
+    /// so any follow-up publish that lands in the same wall-clock second can
+    /// be rejected by the relay with `"blocked: this event is deleted"` even
+    /// though no NIP-09 deletion ever happened.
+    ///
+    /// Calling this helper instead of `repo.git(["push", ...])` guarantees
+    /// that the next event published from anywhere in the test (another
+    /// push, another [`Harness::publish_state_event`], an explicit
+    /// `ngit send`) lands in a strictly later unix second, so id collisions
+    /// are impossible by construction. See [`crate::clock`] for the full
+    /// rationale.
+    ///
+    /// On `git push` failure the helper bails before sleeping — there's no
+    /// new event to space out from.
+    pub async fn nostr_push<I, S>(&self, args: I) -> Result<std::process::Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut argv: Vec<std::ffi::OsString> = vec!["push".into()];
+        for a in args {
+            argv.push(a.as_ref().to_owned());
+        }
+        let label = format!("git {}", display_argv(&argv));
+        let out = self
+            .git(&argv)
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn {label}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "{label} exited {:?}\nstdout: {}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        clock::tick_to_next_second().await;
+        Ok(out)
+    }
+}
+
+/// Best-effort `OsStr` join for the error-message label of `nostr_push`. Lossy
+/// on non-UTF-8 argv (which we don't generate in this codebase).
+fn display_argv(argv: &[std::ffi::OsString]) -> String {
+    argv.iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
