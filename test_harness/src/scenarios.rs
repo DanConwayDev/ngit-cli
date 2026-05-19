@@ -89,6 +89,26 @@ pub struct PublishRepoOpts {
     /// `maintainers` tag is enough to make ngit treat that pubkey as a
     /// maintainer for tag-generation purposes.
     pub additional_maintainer_count: usize,
+    /// Extra `--relay <url>` arguments to pass to `ngit init`, on top of
+    /// the grasp's relay URL that `apply_grasp_infrastructure`
+    /// (`src/lib/repo_ref.rs:836`) prepends automatically.
+    ///
+    /// Each URL ends up as a relay tag on the kind-30617 announcement, so
+    /// `git-remote-nostr list` (and every other ngit subcommand that
+    /// resolves repo relays from the announcement) will query it for
+    /// state events alongside the grasp.
+    ///
+    /// The intended consumer is regression tests that need a state event
+    /// published to a relay the grasp does **not** gate — for example
+    /// `tests/list_state.rs::uses_older_resolvable_state_event`, which
+    /// publishes an unresolvable state event to a vanilla relay so it can
+    /// observe `list.rs:79-90` falling back to an older-but-resolvable
+    /// candidate on a different relay. Production setups also commonly
+    /// list non-grasp relays in their announcements, so exercising this
+    /// path is realistic.
+    ///
+    /// Defaults to empty: announcement carries only the grasp's relay.
+    pub extra_repo_relays: Vec<String>,
 }
 
 /// Metadata about a repository that has been published to the grasp via
@@ -284,6 +304,16 @@ impl Harness {
             for npub in &additional_maintainer_npubs {
                 init_args.push(npub.clone());
             }
+        }
+        // Extra repo relays are appended *after* the grasp server is
+        // already in `init_args`. `init.rs:758-770` treats `--relay` as
+        // the entire announcement relay set when present, then
+        // `apply_grasp_infrastructure` prepends the grasp's relay URL
+        // back in — so the final announcement carries
+        // `[grasp_relay, ...extras]` regardless of CLI arg order.
+        for relay_url in &opts.extra_repo_relays {
+            init_args.push("--relay".into());
+            init_args.push(relay_url.clone());
         }
         let init = publisher
             .ngit(init_args)
@@ -639,10 +669,12 @@ impl Harness {
     ///    `when_state_event_references_oids_not_on_git_server`).
     /// 3. Force an older `created_at` so two competing state events on
     ///    different relays can be compared (legacy
-    ///    `when_newer_relay_state_has_missing_oid_but_older_relay_state_is_resolvable`
-    ///    — deferred to PR 5a along with the multi-grasp helper, but the
-    ///    `created_at_offset_secs` knob is built in now so the implementation
-    ///    doesn't have to change shape later).
+    ///    `when_newer_relay_state_has_missing_oid_but_older_relay_state_is_resolvable`,
+    ///    migrated as `tests/list_state.rs::uses_older_resolvable_state_event`
+    ///    — publishes a newer-unresolvable event to a vanilla relay via
+    ///    [`PublishStateEventTarget::RelayUrl`] while the grasp's
+    ///    auto-generated kind-30618 from `publish_repo` plays the role of the
+    ///    older-resolvable candidate).
     ///
     /// **Identifier discipline.** ngit's `RepoState::build` uses
     /// `repo_ref.identifier.clone()` as the `d` tag value — the bare
@@ -659,13 +691,16 @@ impl Harness {
     /// that specifically want a non-maintainer event present (so they can
     /// assert it's discarded).
     ///
-    /// **Target.** Currently always publishes to a [`GraspServer`]'s relay
-    /// surface. The harness's vanilla relays could be added as targets
-    /// later, but every list-test the migration plan calls out wants the
-    /// event on a grasp because that's where the kind-30617 announcement
-    /// already lives (and `list.rs` reads state events from the relays
-    /// listed in the announcement). A `PublishStateEventTarget::Relay(...)`
-    /// variant can be added when the first consumer materialises.
+    /// **Target.** Defaults to the grasp registered under role `"repo"`
+    /// (i.e. the announcement's git server). Override via
+    /// [`PublishStateEventOpts::target`] to publish to a different grasp
+    /// or to a vanilla relay listed on the announcement via
+    /// [`PublishRepoOpts::extra_repo_relays`]. Vanilla targets are the
+    /// only way to land a state event whose `ref→oid` map disagrees with
+    /// the bare repo, since GRASP gates kind-30618 publishes against its
+    /// own git data — see the legacy
+    /// `uses_older_resolvable_state_event` regression for the canonical
+    /// use-case.
     pub async fn publish_state_event(
         &self,
         repo: &PublishedRepo,
@@ -702,13 +737,17 @@ impl Harness {
             .sign_with_keys(&keys)
             .context("failed to sign fabricated state event")?;
 
-        let grasp_role = opts.grasp_role.as_deref().unwrap_or("repo");
-        let relay_url = self.grasp(grasp_role).relay_url();
+        let relay_url = match opts.target {
+            PublishStateEventTarget::DefaultGrasp => self.grasp("repo").relay_url(),
+            PublishStateEventTarget::GraspRole(role) => self.grasp(&role).relay_url(),
+            PublishStateEventTarget::RelayUrl(url) => url,
+        };
 
         let client = Client::default();
-        client.add_relay(&relay_url).await.with_context(|| {
-            format!("failed to add grasp relay {relay_url} for state-event publish")
-        })?;
+        client
+            .add_relay(&relay_url)
+            .await
+            .with_context(|| format!("failed to add relay {relay_url} for state-event publish"))?;
         client.connect().await;
         // `send_event_to` returns an `Output` describing which relays
         // ACKed; we only added one relay so any failure on that one means
@@ -721,7 +760,7 @@ impl Harness {
         client.disconnect().await;
         if !output.failed.is_empty() {
             bail!(
-                "grasp at {relay_url} rejected state event id={}: {:?}",
+                "relay at {relay_url} rejected state event id={}: {:?}",
                 event.id,
                 output.failed,
             );
@@ -1146,11 +1185,42 @@ pub struct PublishStateEventOpts {
     /// events published back-to-back when one needs to be the "older"
     /// candidate. Defaults to `None` (= now).
     pub created_at_offset_secs: Option<u64>,
-    /// Role label of the [`GraspServer`] to publish to. Defaults to
-    /// `"repo"` — the role label `publish_repo` uses for the
-    /// announcement's git server. Override only when the test registers
-    /// multiple grasp servers under distinct labels.
-    pub grasp_role: Option<String>,
+    /// Where to publish the fabricated event. Defaults to the grasp
+    /// registered under role `"repo"` — the role label `publish_repo`
+    /// uses for the announcement's git server. See
+    /// [`PublishStateEventTarget`] for the alternatives.
+    pub target: PublishStateEventTarget,
+}
+
+/// Where [`Harness::publish_state_event`] should send the fabricated
+/// kind-30618.
+///
+/// `list.rs:64-69` collects state-event candidates from every relay
+/// listed in the kind-30617 announcement, so the target only matters
+/// inasmuch as it must be a relay the announcement actually carries. In
+/// practice that means either:
+///
+/// - a [`GraspServer`] registered on the harness — its relay URL is added to
+///   the announcement automatically by [`Harness::publish_repo`] via
+///   `apply_grasp_infrastructure` (`src/lib/repo_ref.rs:836`);
+/// - a [`VanillaRelay`] whose URL was passed through
+///   [`PublishRepoOpts::extra_repo_relays`] — the only way to land an event on
+///   a relay the grasp won't gate, useful for the "newer-unresolvable vs
+///   older-resolvable" topology.
+#[derive(Clone, Debug, Default)]
+pub enum PublishStateEventTarget {
+    /// Publish to the grasp registered under role `"repo"` — the role
+    /// label [`Harness::publish_repo`] uses by default.
+    #[default]
+    DefaultGrasp,
+    /// Publish to the grasp registered under the given role label. Only
+    /// useful when the test registers multiple grasp servers.
+    GraspRole(String),
+    /// Publish to an arbitrary relay URL — typically a
+    /// [`VanillaRelay`]'s `url()`. The URL must already be in the
+    /// announcement's relay list (otherwise `list.rs` will not query it
+    /// and the published event is invisible to the code under test).
+    RelayUrl(String),
 }
 
 /// `git checkout -b <branch>` from `main`, write each `(filename, content)`,

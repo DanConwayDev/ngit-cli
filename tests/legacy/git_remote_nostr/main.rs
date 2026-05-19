@@ -9,7 +9,6 @@ use relay::Relay;
 use serial_test::serial;
 use test_utils::{git::GitTestRepo, *};
 
-mod list;
 mod push;
 
 // Scenario result structs - hold immutable state from expensive setup

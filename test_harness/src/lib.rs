@@ -50,6 +50,6 @@ pub use relay::VanillaRelay;
 pub use repo::Repo;
 pub use scenarios::{
     CloneLogin, PublishPatchSeriesOpts, PublishPrOpts, PublishRepoOpts, PublishStateEventOpts,
-    PublishedPatchSeries, PublishedPr, PublishedRepo,
+    PublishStateEventTarget, PublishedPatchSeries, PublishedPr, PublishedRepo,
 };
 pub use snapshot::RepoSnapshot;

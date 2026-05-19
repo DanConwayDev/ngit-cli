@@ -10,10 +10,16 @@
 //! 2. `with_state_announcement::when_announcement_matches_git_server::...`
 //! 3. `with_state_announcement::when_state_event_references_oids_not_on_git_server::falls_back_to_git_server_state`
 //! 4. `...::when_newer_relay_state_has_missing_oid_but_older_relay_state_is_resolvable::uses_older_resolvable_state_event`
-//!    — **deferred to PR 5a** alongside the `publish_repo_with_two_grasp_servers`
-//!    helper, because it needs two grasps with divergent git data on `main`
-//!    plus two competing state events. Kept in `tests/legacy/git_remote_nostr/list.rs`
-//!    for now.
+//!    — exercises the cross-relay candidate ordering: when the newest
+//!    candidate is unresolvable but an older candidate on a different
+//!    relay can resolve every OID, `list.rs:79-90` should fall back to
+//!    the older one rather than degrading to the bare-repo state. The
+//!    legacy test built this with two grasps + two divergent git
+//!    servers; this migration uses one grasp plus a vanilla repo relay
+//!    (via [`PublishRepoOpts::extra_repo_relays`]) — the vanilla relay
+//!    is the only practical way to land an unresolvable state event
+//!    because GRASP gates kind-30618 publishes against its own git
+//!    data.
 //! 5. `with_state_announcement::when_announcement_doesnt_match_git_server::anouncement_state_is_used`
 //!
 //! Open-proposal listing (legacy case 6,
@@ -42,16 +48,19 @@
 //!   `main` push. That handles the "ws://grasp/serves kind-30617 + kind-30618 +
 //!   bare repo with main pointing somewhere" precondition every legacy test
 //!   depended on.
-//! - [`Harness::publish_state_event`] (new in this PR) fabricates and publishes
-//!   a *replacement* kind-30618 directly to the grasp's relay surface. Tests 3
-//!   and 5 below use it to overwrite the state event that the initial push
-//!   produced.
+//! - [`Harness::publish_state_event`] fabricates and publishes a *replacement*
+//!   kind-30618 directly to either the grasp's relay surface or, via
+//!   [`PublishStateEventTarget::RelayUrl`], to a vanilla relay listed in the
+//!   announcement. Tests 3 and 5 use the grasp target; test 4
+//!   (`uses_older_resolvable_state_event`) uses the vanilla target so the
+//!   published event isn't gated against the grasp's bare-repo contents.
 
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 use test_harness::{
-    CloneLogin, Harness, PublishRepoOpts, PublishStateEventOpts, PublishedRepo, Repo,
+    CloneLogin, Harness, PublishRepoOpts, PublishStateEventOpts, PublishStateEventTarget,
+    PublishedRepo, Repo,
 };
 
 // ---------------------------------------------------------------------------
@@ -549,6 +558,119 @@ async fn state_event_takes_precedence_over_advanced_git_server_state() -> Result
     assert_eq!(
         heads.get("example-branch").copied(),
         Some(example_oid.as_str()),
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Legacy case 4: newer relay's state event is unresolvable; fall back to
+//   older relay's resolvable state event.
+// ---------------------------------------------------------------------------
+
+/// Folds legacy
+/// `when_newer_relay_state_has_missing_oid_but_older_relay_state_is_resolvable::uses_older_resolvable_state_event`.
+///
+/// Two repo relays are listed on the kind-30617 announcement: the
+/// grasp's own relay surface (which carries the auto-generated
+/// kind-30618 from `publish_repo`'s `git push`, pointing at the real
+/// `main` tip) and a separate vanilla relay registered under role
+/// `"repo-extra"` (which receives a *newer* fabricated state event
+/// pointing at an OID that doesn't exist on the bare repo).
+///
+/// Why a vanilla relay rather than two grasps? GRASP gates kind-30618
+/// publishes against its own git data — there's no way to land an
+/// intentionally-unresolvable state event on a grasp without first
+/// pushing the matching git objects, which defeats the precondition
+/// the test exists to exercise. A vanilla relay accepts the fabricated
+/// event as-is. `list.rs:64-69` doesn't care which kind of relay a
+/// candidate came from, only that the event's pubkey is in the
+/// announcement's maintainers list.
+///
+/// `list.rs:79-90` should then walk newest-first, find the vanilla's
+/// fabricated event unresolvable (its `refs/heads/main` OID is not on
+/// any git server and not in the local repo), and fall back to the
+/// older auto event on the grasp (whose `refs/heads/main` OID is the
+/// bare repo's actual tip).
+///
+/// Asserts:
+/// - The fake OID from the newer-but-unresolvable event must NOT be advertised
+///   for any ref.
+/// - `refs/heads/main` resolves to the publisher's real `main` tip (the
+///   older-but-resolvable event's view).
+#[tokio::test]
+async fn uses_older_resolvable_state_event_from_different_relay() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .with_relay("repo-extra")
+    .build()
+    .await?;
+
+    let extra_relay_url = harness.relay("repo-extra").url().to_string();
+
+    let (_publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("list-state maintainer".into()),
+            identifier: Some("list-state-fallback-repo".into()),
+            extra_repo_relays: vec![extra_relay_url.clone()],
+            ..Default::default()
+        })
+        .await?;
+
+    let real_main_oid = published.initial_oid.clone();
+    // Plausible-looking but synthetic OID — not the seed commit, not
+    // any tag, not anything libgit2 would have on disk. The check at
+    // `list.rs:81-85` walks `git_server_oids` (built from the per-git-
+    // server `list_from_remotes` output) and the local repo, so this
+    // value is unresolvable by construction.
+    let fake_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+    assert_ne!(fake_oid, real_main_oid);
+
+    // Newer fabricated state event → vanilla repo relay only. The
+    // grasp keeps the auto-generated state event (with the real OID)
+    // that `publish_repo`'s `git push` produced.
+    //
+    // Note: the auto event is also pushed to the vanilla relay during
+    // the same push (the announcement already lists vanilla as a repo
+    // relay by then). That doesn't matter for the test contract —
+    // `client.rs:859-873` keeps only the newest state event per relay,
+    // and the fabricated event below has a strictly later
+    // `created_at` than the auto event because `Repo::nostr_push`
+    // inside `publish_repo` ticks one whole unix second after the
+    // push completes.
+    let mut state = HashMap::new();
+    state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
+    state.insert("refs/heads/main".to_string(), fake_oid.clone());
+    harness
+        .publish_state_event(
+            &published,
+            PublishStateEventOpts {
+                state,
+                target: PublishStateEventTarget::RelayUrl(extra_relay_url.clone()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let ls = ls_remote_via_clone(&harness, &published).await?;
+    let heads = ls.heads();
+
+    assert!(
+        !ls.refs.values().any(|v| *v == fake_oid),
+        "fake OID from the newer-unresolvable state event on {extra_relay_url} \
+         must NOT be advertised for any ref; got {refs:?}",
+        refs = ls.refs,
+    );
+    assert_eq!(
+        heads.get("main").copied(),
+        Some(real_main_oid.as_str()),
+        "main should fall back to the older-but-resolvable state event on \
+         the grasp (real OID), not the newer-unresolvable one on the vanilla \
+         relay (fake OID); got {heads:?}",
     );
 
     Ok(())
