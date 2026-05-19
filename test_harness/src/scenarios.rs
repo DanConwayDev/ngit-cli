@@ -29,10 +29,10 @@
 //!   contributor clone of a [`PublishedRepo`], commit some files on a branch,
 //!   and run `ngit send` with **explicit `--force-pr` / `--force-patch`** to
 //!   pin the produced event kind. The forced kind is the entire point: every
-//!   test consuming "an open proposal" as a precondition must remain green
-//!   when the default-kind heuristic in
-//!   `src/bin/ngit/sub_commands/send.rs:236-243` evolves underneath it (see
-//!   `docs/architecture/test-harness-migration.md` § "Scenario builders").
+//!   test consuming "an open proposal" as a precondition must remain green when
+//!   the default-kind heuristic in `src/bin/ngit/sub_commands/send.rs:236-243`
+//!   evolves underneath it (see `docs/architecture/test-harness-migration.md` §
+//!   "Scenario builders").
 //! - [`Harness::publish_three_open_proposals`] — `cli_tester_create_proposals`
 //!   replacement. Mints one contributor identity and publishes three PRs from
 //!   it on `feature-1`/`feature-2`/`feature-3`, with the same `{prefix}3.md` /
@@ -332,14 +332,14 @@ impl Harness {
     /// Drives:
     ///
     /// 1. `clone_published_repo` with `CloneLogin::AsContributor` so the
-    ///    proposal is signed by a brand-new account — the canonical
-    ///    "someone other than the maintainer submits a proposal" shape.
+    ///    proposal is signed by a brand-new account — the canonical "someone
+    ///    other than the maintainer submits a proposal" shape.
     /// 2. `git checkout -b <branch>` from `main`.
     /// 3. One commit per `(filename, content)` in `opts.commits`. Default is
     ///    two commits adding `t3.md` and `t4.md`, matching the legacy
     ///    `cli_tester_create_proposals` shape (with the `a`/`b`/`c` prefix
-    ///    substituted by `t`) so anyone diffing legacy vs new can pair
-    ///    commits one-to-one.
+    ///    substituted by `t`) so anyone diffing legacy vs new can pair commits
+    ///    one-to-one.
     /// 4. `ngit send HEAD~N --force-pr --title <t> --description <d>
     ///    [--in-reply-to ...]`.
     /// 5. Re-query the grasp's repo-relay surface to confirm the
@@ -476,6 +476,86 @@ impl Harness {
         })
     }
 
+    /// Patch-kind sibling of [`Harness::publish_three_open_proposals`].
+    /// Publishes three **patch-series** proposals (with cover letters)
+    /// against `repo`, all authored by the same fresh contributor
+    /// identity.
+    ///
+    /// Exists for tests that specifically pin patch-kind behaviour —
+    /// chiefly the regression coverage in `tests/pr_checkout_patch.rs`
+    /// where the legacy `ngit_pr_checkout.rs` assertions depend on
+    /// `checkout_patch`'s case-3/4/5 semantics (fast-forward / diverged
+    /// bails / force-overwrites). The PR-kind equivalent
+    /// (`checkout_pr`) takes an upstream-deferral path at
+    /// `checkout.rs:247` once an upstream is set on the local branch,
+    /// which a real cloned test_repo always has after the first
+    /// checkout. See `tests/pr_checkout.rs`'s module-level doc-comment
+    /// for the full divergence write-up.
+    ///
+    /// Inherits the [`Harness::publish_patch_series`] `--force-patch`
+    /// discipline: each proposal is locked to `Kind::GitPatch` with a
+    /// `cover-letter` patch sibling, regardless of how the default-kind
+    /// heuristic in `src/bin/ngit/sub_commands/send.rs:236-243`
+    /// evolves. Cover letters are included by default because the
+    /// legacy `cli_tester_create_proposals` produced cover-lettered
+    /// patch series.
+    ///
+    /// Branch names are `feature-1` / `feature-2` / `feature-3`, and
+    /// each proposal has two commits named `{prefix}3.md` /
+    /// `{prefix}4.md` for `prefix` in `"a"` / `"b"` / `"c"` — the same
+    /// shape as the PR-kind variant so diffing the two suites is
+    /// trivial.
+    pub async fn publish_three_open_patch_proposals(
+        &self,
+        repo: &PublishedRepo,
+    ) -> Result<[PublishedPatchSeries; 3]> {
+        // One shared contributor across all three proposals, same as
+        // the PR-kind sibling — preserves the single-author shape that
+        // legacy list / filter / merge tests assumed.
+        let clone = self
+            .clone_published_repo(
+                repo,
+                CloneLogin::AsContributor {
+                    display_name: "ngit test contributor".to_string(),
+                },
+            )
+            .await?;
+
+        let mut series: Vec<PublishedPatchSeries> = Vec::with_capacity(3);
+        for (idx, prefix) in ["a", "b", "c"].iter().enumerate() {
+            let n = idx + 1;
+            let s = self
+                .publish_patch_series_in_clone(
+                    &clone,
+                    repo,
+                    PublishPatchSeriesOpts {
+                        branch: Some(format!("feature-{n}")),
+                        commits: vec![
+                            (format!("{prefix}3.md"), "some content\n".to_string()),
+                            (format!("{prefix}4.md"), "some content\n".to_string()),
+                        ],
+                        cover_letter: Some((
+                            format!("proposal {prefix}"),
+                            format!("proposal {prefix} description"),
+                        )),
+                        in_reply_to: None,
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!("publishing patch-series proposal #{n} (prefix {prefix:?})")
+                })?;
+            series.push(s);
+        }
+
+        series.try_into().map_err(|v: Vec<PublishedPatchSeries>| {
+            anyhow::anyhow!(
+                "expected exactly 3 published patch series; got {} — programmer error",
+                v.len()
+            )
+        })
+    }
+
     /// Internal shared driver for [`Harness::publish_pr`] and
     /// [`Harness::publish_three_open_proposals`]. `clone` is assumed to be
     /// a `clone_published_repo(_, AsContributor { .. })` result — i.e. a
@@ -551,11 +631,7 @@ impl Harness {
         let author_pubkey = read_clone_pubkey(clone).await?;
         let events = self
             .grasp("repo")
-            .events(
-                Filter::new()
-                    .author(author_pubkey)
-                    .kind(KIND_PULL_REQUEST),
-            )
+            .events(Filter::new().author(author_pubkey).kind(KIND_PULL_REQUEST))
             .await?;
         let root_event = events
             .into_iter()
@@ -611,11 +687,8 @@ impl Harness {
         // `do_commits_contain_submodules` / the heuristic in
         // `src/bin/ngit/sub_commands/send.rs:236-243`.
         let n = commits.len();
-        let mut send_args: Vec<String> = vec![
-            "send".into(),
-            format!("HEAD~{n}"),
-            "--force-patch".into(),
-        ];
+        let mut send_args: Vec<String> =
+            vec!["send".into(), format!("HEAD~{n}"), "--force-patch".into()];
         match &opts.cover_letter {
             Some((title, description)) => {
                 send_args.push("--title".into());
@@ -651,45 +724,89 @@ impl Harness {
         // cover-letter patch carrying the `["t", "cover-letter"]` tag.
         // Querying the grasp post-send catches "we changed --force-patch
         // to do nothing" at scenario-construction time.
+        //
+        // `branch-name` tag discipline (per `src/lib/git_events.rs:260-271`):
+        // it's only emitted on the **root** of the series — the cover
+        // letter when one is requested, otherwise the first patch
+        // (`thread_event_id.is_none()` branch). Per-commit patches in a
+        // cover-lettered series have no `branch-name` tag; they're tied
+        // to the cover letter via an `e` tag carrying the `Reply`
+        // marker. Filtering by branch-name tag alone therefore picks up
+        // the cover letter only and zero descendants, which is exactly
+        // the bug the previous version of this verification fell into.
+        // We walk the chain via the root's id instead.
         let author_pubkey = read_clone_pubkey(clone).await?;
         let all_patches: Vec<Event> = self
             .grasp("repo")
             .events(Filter::new().author(author_pubkey).kind(Kind::GitPatch))
             .await?;
 
-        // Reduce to the events tied to *this* branch, not any prior
-        // proposal published from the same clone.
-        let our_patches: Vec<Event> = all_patches
-            .into_iter()
-            .filter(|e| event_branch_name_tag(e).as_deref() == Some(branch.as_str()))
-            .collect();
+        let cover_letter_event = if opts.cover_letter.is_some() {
+            let cl = all_patches
+                .iter()
+                .find(|e| {
+                    is_cover_letter(e)
+                        && event_branch_name_tag(e).as_deref() == Some(branch.as_str())
+                })
+                .cloned();
+            if cl.is_none() {
+                bail!(
+                    "publish_patch_series called with cover_letter=Some(...) but no \
+                     `t cover-letter` patch event landed on grasp for branch-name={branch:?}"
+                );
+            }
+            cl
+        } else {
+            if let Some(stray) = all_patches.iter().find(|e| {
+                is_cover_letter(e) && event_branch_name_tag(e).as_deref() == Some(branch.as_str())
+            }) {
+                bail!(
+                    "publish_patch_series called with cover_letter=None (and --no-cover-letter \
+                     passed) yet a `t cover-letter` patch event arrived for \
+                     branch-name={branch:?} (id={}) — did --no-cover-letter stop suppressing it?",
+                    stray.id,
+                );
+            }
+            None
+        };
 
-        let cover_letter_event = our_patches.iter().find(|e| is_cover_letter(e)).cloned();
-        let patch_events: Vec<Event> = our_patches
+        // Root of the series for this branch: cover letter when there
+        // is one, else the lone non-cover-letter patch that carries
+        // the `branch-name` tag (the first commit in the series).
+        let root_event = match &cover_letter_event {
+            Some(cl) => Some(cl.clone()),
+            None => all_patches
+                .iter()
+                .find(|e| {
+                    !is_cover_letter(e)
+                        && event_branch_name_tag(e).as_deref() == Some(branch.as_str())
+                })
+                .cloned(),
+        };
+        let root_id = root_event.as_ref().map(|e| e.id).with_context(|| {
+            format!(
+                "no root patch event for branch-name={branch:?} authored by \
+                     {author_pubkey} found on grasp `repo` after `ngit send --force-patch` — \
+                     did --force-patch stop forcing?"
+            )
+        })?;
+
+        // Per-commit patches: every non-cover-letter GitPatch that
+        // either *is* the root (no-cover-letter mode — the root is the
+        // first commit) or references the root via an `e` tag.
+        let patch_events: Vec<Event> = all_patches
             .iter()
             .filter(|e| !is_cover_letter(e))
+            .filter(|e| e.id == root_id || event_references_via_e_tag(e, root_id))
             .cloned()
             .collect();
 
         if patch_events.len() != commit_oids.len() {
             bail!(
                 "expected {} patch event(s) for branch-name={branch:?} after \
-                 `ngit send --force-patch`; got {}",
+                 `ngit send --force-patch`; got {} (root_id={root_id})",
                 commit_oids.len(),
                 patch_events.len(),
-            );
-        }
-        if opts.cover_letter.is_some() && cover_letter_event.is_none() {
-            bail!(
-                "publish_patch_series called with cover_letter=Some(...) but no \
-                 `t cover-letter` patch event landed on grasp for branch-name={branch:?}"
-            );
-        }
-        if opts.cover_letter.is_none() && cover_letter_event.is_some() {
-            bail!(
-                "publish_patch_series called with cover_letter=None (and --no-cover-letter passed) \
-                 yet a `t cover-letter` patch event arrived for branch-name={branch:?} — \
-                 did --no-cover-letter stop suppressing it?"
             );
         }
 
@@ -727,7 +844,8 @@ pub struct PublishPrOpts {
     /// mode unless `--defaults` is set, and we don't want the default to
     /// leak into scenarios.
     pub title: String,
-    /// `--description`. Mandatory for the same reason as [`PublishPrOpts::title`].
+    /// `--description`. Mandatory for the same reason as
+    /// [`PublishPrOpts::title`].
     pub description: String,
     /// Optional `--in-reply-to` reference (event id / nevent / npub /
     /// nprofile). Used by tests that exercise proposal-revision and
@@ -842,12 +960,7 @@ async fn create_branch_and_commit(
         check_ok(
             "git commit",
             clone
-                .git([
-                    "commit",
-                    "-m",
-                    &format!("add {file_name}"),
-                    "--no-gpg-sign",
-                ])
+                .git(["commit", "-m", &format!("add {file_name}"), "--no-gpg-sign"])
                 .output()
                 .await
                 .context("failed to spawn git commit")?,
@@ -918,6 +1031,21 @@ fn is_cover_letter(event: &Event) -> bool {
         let s = t.as_slice();
         s.first().map(String::as_str) == Some("t")
             && s.get(1).map(String::as_str) == Some("cover-letter")
+    })
+}
+
+/// `true` when `event` has an `e` tag whose value is the hex of `target`.
+///
+/// Patch-series descendants reference their root (cover letter, or the
+/// first patch in a no-cover-letter series) via such an `e` tag carrying
+/// a `Reply` marker — see `src/lib/git_events.rs:248-258`. We only
+/// inspect the value; the marker is downstream's concern.
+fn event_references_via_e_tag(event: &Event, target: EventId) -> bool {
+    let target_hex = target.to_hex();
+    event.tags.iter().any(|t| {
+        let s = t.as_slice();
+        s.first().map(String::as_str) == Some("e")
+            && s.get(1).map(String::as_str) == Some(target_hex.as_str())
     })
 }
 

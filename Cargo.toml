@@ -92,10 +92,6 @@ name = "legacy_ngit_login"
 path = "tests/legacy/ngit_login.rs"
 
 [[test]]
-name = "legacy_ngit_pr_checkout"
-path = "tests/legacy/ngit_pr_checkout.rs"
-
-[[test]]
 name = "legacy_git_remote_nostr"
 path = "tests/legacy/git_remote_nostr/main.rs"
 
