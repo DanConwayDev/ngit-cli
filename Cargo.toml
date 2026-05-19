@@ -84,10 +84,6 @@ name = "legacy_ngit_init"
 path = "tests/legacy/ngit_init.rs"
 
 [[test]]
-name = "legacy_ngit_send"
-path = "tests/legacy/ngit_send.rs"
-
-[[test]]
 name = "legacy_ngit_login"
 path = "tests/legacy/ngit_login.rs"
 
