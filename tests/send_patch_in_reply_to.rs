@@ -90,20 +90,17 @@ async fn capture_issue_snapshot() -> Result<IssueSnapshot> {
 
     // --- contributor publishes a patch series referencing the issue ------
     //
-    // First (and only) `--in-reply-to` value is the issue id in
-    // **bech32** (`note1...`) form. The hex form would be parsed via
-    // `git_events.rs:422` as a bare `TagStandard::Event { marker: None,
-    // ... }`, which serialises as `["e", <id>]` — *not* the `["q",
-    // <id>]` shape the cover-letter mention contract requires. The
-    // bech32 path goes through `Nip19::EventId` → `TagStandard::Quote`
-    // (`git_events.rs:386-393`) and lands as the expected `q` tag. The
-    // legacy test took the bech32 path for the same reason. (The hex
-    // path's slightly weird discrepancy is preserved here as an
-    // observation; if it ever gets fixed in `src/`, the test will start
-    // working with hex too.)
-    let issue_bech32 = issue_event_id
-        .to_bech32()
-        .context("encoding issue event id as note1...")?;
+    // The `--in-reply-to` value is the issue id in raw **hex** form. Both
+    // hex and bech32 (`note1...`) routes through
+    // `git_events.rs::event_tag_from_nip19_or_hex` now honour
+    // `EventRefType::Quote` and emit the expected `["q", <id>]` tag on
+    // the cover letter — see the unit tests
+    // `event_tag_from_nip19_or_hex::quote_ref_type_emits_q_tag_for_*`
+    // for the corresponding lower-level coverage. (Historically the
+    // hex branch unconditionally produced `["e", <id>]` regardless of
+    // ref_type; this scenario doubles as the integration-level
+    // regression guard for that fix.)
+    let issue_id_hex = issue_event_id.to_hex();
     let series = harness
         .publish_patch_series(
             &published,
@@ -113,7 +110,7 @@ async fn capture_issue_snapshot() -> Result<IssueSnapshot> {
                     ("t4.md".into(), "some content\n".into()),
                 ],
                 cover_letter: Some((COVER_LETTER_TITLE.into(), COVER_LETTER_DESCRIPTION.into())),
-                in_reply_to: vec![issue_bech32],
+                in_reply_to: vec![issue_id_hex],
                 ..Default::default()
             },
         )
