@@ -252,53 +252,12 @@ async fn prep_source_repo_and_events_including_proposals()
 }
 
 mod initially_runs_fetch {
-
-    use super::*;
-
-    #[tokio::test]
-    #[serial]
-    async fn runs_fetch_and_reports() -> Result<()> {
-        let source_git_repo = prep_git_repo()?;
-        let git_repo = prep_git_repo()?;
-        let events = vec![
-            generate_test_key_1_metadata_event("fred"),
-            generate_test_key_1_relay_list_event(),
-            generate_repo_ref_event_with_git_server(vec![
-                source_git_repo.dir.to_str().unwrap().to_string(),
-            ]),
-        ];
-        // fallback (51,52) user write (53, 55) repo (55, 56) blaster (57)
-        let (mut r51, mut r52, mut r53, mut r55, mut r56, mut r57) = (
-            Relay::new(8051, None, None),
-            Relay::new(8052, None, None),
-            Relay::new(8053, None, None),
-            Relay::new(8055, None, None),
-            Relay::new(8056, None, None),
-            Relay::new(8057, None, None),
-        );
-        r51.events = events.clone();
-        r55.events = events;
-
-        // // check relay had the right number of events
-        let cli_tester_handle = std::thread::spawn(move || -> Result<()> {
-            let mut p = cli_tester_after_fetch(&git_repo)?;
-            p.exit()?;
-            for p in [51, 52, 53, 55, 56, 57] {
-                relay::shutdown_relay(8000 + p)?;
-            }
-            Ok(())
-        });
-
-        // launch relays
-        let _ = join!(
-            r51.listen_until_close(),
-            r52.listen_until_close(),
-            r53.listen_until_close(),
-            r55.listen_until_close(),
-            r56.listen_until_close(),
-            r57.listen_until_close(),
-        );
-        cli_tester_handle.join().unwrap()?;
-        Ok(())
-    }
+    // The legacy `runs_fetch_and_reports` test was dropped during the PR 3
+    // list-migration. Its assertion (that `git-remote-nostr` runs an
+    // initial nostr fetch and prints "fetching... updates") was a pure
+    // exact-stdout check, banned by the harness rules; the underlying
+    // behaviour is exercised end-to-end by every other test in this file
+    // (each one drives the helper through its initial-fetch path before
+    // doing anything else) and by `tests/clone_grasp.rs` /
+    // `tests/fetch_grasp.rs` in the new harness.
 }

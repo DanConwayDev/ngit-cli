@@ -1,5 +1,6 @@
 //! Migrated port of legacy
-//! `tests/legacy/git_remote_nostr/fetch.rs::creates_commits_from_open_proposal_with_no_warnings_printed`.
+//! `tests/legacy/git_remote_nostr/fetch.
+//! rs::creates_commits_from_open_proposal_with_no_warnings_printed`.
 //!
 //! The legacy test drove `git-remote-nostr` directly through a PTY with a
 //! hand-typed `fetch <oid> refs/heads/<branch>` line, then asserted on the
@@ -94,10 +95,8 @@ async fn fetched_proposal_tip_lands_in_pr_remote_tracking_ref() -> Result<()> {
     let mut matches: Vec<(String, String)> = Vec::new();
     for pr in &prs {
         if let Some(ref_name) = remote_refs.iter().find_map(|(name, oid)| {
-            (oid == &pr.tip
-                && name.starts_with("refs/remotes/origin/")
-                && name.contains("/pr/"))
-            .then(|| name.clone())
+            (oid == &pr.tip && name.starts_with("refs/remotes/origin/") && name.contains("/pr/"))
+                .then(|| name.clone())
         }) {
             matches.push((ref_name, pr.tip.clone()));
         }
