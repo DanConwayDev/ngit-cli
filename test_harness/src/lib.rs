@@ -43,5 +43,8 @@ pub use grasp::GraspServer;
 pub use harness::{Harness, HarnessBuilder};
 pub use relay::VanillaRelay;
 pub use repo::Repo;
-pub use scenarios::{CloneLogin, PublishRepoOpts, PublishedRepo};
+pub use scenarios::{
+    CloneLogin, PublishPatchSeriesOpts, PublishPrOpts, PublishRepoOpts, PublishedPatchSeries,
+    PublishedPr, PublishedRepo,
+};
 pub use snapshot::RepoSnapshot;

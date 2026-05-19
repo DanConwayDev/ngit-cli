@@ -22,11 +22,37 @@
 //! shape that most send / pr / fetch tests want. Helpers that need
 //! something more bespoke can compose the lower-level [`Repo`] /
 //! [`Harness`] primitives directly.
+//!
+//! Layered on top:
+//!
+//! - [`Harness::publish_pr`] / [`Harness::publish_patch_series`] — mint a fresh
+//!   contributor clone of a [`PublishedRepo`], commit some files on a branch,
+//!   and run `ngit send` with **explicit `--force-pr` / `--force-patch`** to
+//!   pin the produced event kind. The forced kind is the entire point: every
+//!   test consuming "an open proposal" as a precondition must remain green
+//!   when the default-kind heuristic in
+//!   `src/bin/ngit/sub_commands/send.rs:236-243` evolves underneath it (see
+//!   `docs/architecture/test-harness-migration.md` § "Scenario builders").
+//! - [`Harness::publish_three_open_proposals`] — `cli_tester_create_proposals`
+//!   replacement. Mints one contributor identity and publishes three PRs from
+//!   it on `feature-1`/`feature-2`/`feature-3`, with the same `{prefix}3.md` /
+//!   `{prefix}4.md` commit shape as legacy so anyone diffing legacy-vs-new can
+//!   match commits one-to-one.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 
 use crate::{harness::Harness, repo::Repo};
+
+/// `KIND_PULL_REQUEST` from `src/lib/git_events.rs`. Mirrored locally so the
+/// harness doesn't pull in the ngit lib crate just for one number. Kept in
+/// sync by hand — if `src/` ever renumbers PR events both sides must move.
+const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
 
 /// Knobs for [`Harness::publish_repo`]. All fields are optional and
 /// defaults match what unit-style tests usually want.
@@ -68,6 +94,12 @@ pub struct PublishedRepo {
     /// Commit oid of `refs/heads/main` after the initial seed commit.
     /// Use to assert that a later clone resolves to the same tree.
     pub initial_oid: String,
+    /// Monotonic source for default `feature-{n}` branch names handed out by
+    /// [`Harness::publish_pr`] and [`Harness::publish_patch_series`]. Shared
+    /// across [`Clone`]s so two helpers operating on copies of the same
+    /// `PublishedRepo` still hand out distinct branch names. Private — tests
+    /// pass `branch: Some(...)` explicitly when they care about the name.
+    pub(crate) feature_counter: Arc<AtomicU32>,
 }
 
 /// What [`Harness::clone_published_repo`] should do *after* the clone
@@ -240,6 +272,7 @@ impl Harness {
                 display_name,
                 clone_url,
                 initial_oid,
+                feature_counter: Arc::new(AtomicU32::new(1)),
             },
         ))
     }
@@ -292,6 +325,600 @@ impl Harness {
 
         Ok(clone)
     }
+
+    /// Publish a single **PR-kind** proposal against `repo` from a fresh
+    /// contributor identity.
+    ///
+    /// Drives:
+    ///
+    /// 1. `clone_published_repo` with `CloneLogin::AsContributor` so the
+    ///    proposal is signed by a brand-new account — the canonical
+    ///    "someone other than the maintainer submits a proposal" shape.
+    /// 2. `git checkout -b <branch>` from `main`.
+    /// 3. One commit per `(filename, content)` in `opts.commits`. Default is
+    ///    two commits adding `t3.md` and `t4.md`, matching the legacy
+    ///    `cli_tester_create_proposals` shape (with the `a`/`b`/`c` prefix
+    ///    substituted by `t`) so anyone diffing legacy vs new can pair
+    ///    commits one-to-one.
+    /// 4. `ngit send HEAD~N --force-pr --title <t> --description <d>
+    ///    [--in-reply-to ...]`.
+    /// 5. Re-query the grasp's repo-relay surface to confirm the
+    ///    `KIND_PULL_REQUEST` event for the new branch actually landed —
+    ///    catches "we changed `--force-pr` to do nothing" at
+    ///    scenario-construction time rather than at first test assertion.
+    ///
+    /// **`--force-pr` is mandatory and load-bearing.** Without it ngit's
+    /// commit-size heuristic in `src/bin/ngit/sub_commands/send.rs:236-243`
+    /// decides the kind from the patch payload size and submodule
+    /// presence; a future refactor of that heuristic would silently re-kind
+    /// every test consuming "an open proposal" as a precondition. Forcing
+    /// the kind here is precisely the coupling the migration is meant to
+    /// break — see `docs/architecture/test-harness-migration.md` §
+    /// "Force-flag discipline". The corresponding `git push -u
+    /// pr/<branch>` PR-creation path lives in a tiny named group of
+    /// hand-rolled push tests; it is never reached through this builder.
+    ///
+    /// The contributor identity is fresh per call; tests that need a
+    /// shared author across multiple proposals should reach for
+    /// [`Harness::publish_three_open_proposals`] (or its patch sibling) or
+    /// compose the lower-level [`Harness::clone_published_repo`] +
+    /// `ngit send` themselves.
+    pub async fn publish_pr(
+        &self,
+        repo: &PublishedRepo,
+        opts: PublishPrOpts,
+    ) -> Result<PublishedPr> {
+        let clone = self
+            .clone_published_repo(
+                repo,
+                CloneLogin::AsContributor {
+                    display_name: "ngit test contributor".to_string(),
+                },
+            )
+            .await?;
+        self.publish_pr_in_clone(&clone, repo, opts).await
+    }
+
+    /// Publish a single **patch-series** proposal against `repo` from a
+    /// fresh contributor identity.
+    ///
+    /// Same flow as [`Harness::publish_pr`] except step 4 runs
+    /// `ngit send HEAD~N --force-patch ...` (with `--no-cover-letter` when
+    /// `opts.cover_letter` is `None`).
+    ///
+    /// **`--force-patch` is mandatory and load-bearing** for the same
+    /// reason `--force-pr` is mandatory in
+    /// [`Harness::publish_pr`]: pinning the kind here decouples every
+    /// test asserting on patch behaviour from the default-kind heuristic.
+    /// See `docs/architecture/test-harness-migration.md` § "Force-flag
+    /// discipline".
+    pub async fn publish_patch_series(
+        &self,
+        repo: &PublishedRepo,
+        opts: PublishPatchSeriesOpts,
+    ) -> Result<PublishedPatchSeries> {
+        let clone = self
+            .clone_published_repo(
+                repo,
+                CloneLogin::AsContributor {
+                    display_name: "ngit test contributor".to_string(),
+                },
+            )
+            .await?;
+        self.publish_patch_series_in_clone(&clone, repo, opts).await
+    }
+
+    /// `cli_tester_create_proposals` replacement: publish three PR-kind
+    /// proposals on top of `repo`, all authored by the **same** fresh
+    /// contributor identity.
+    ///
+    /// Three PRs because the legacy fetch / list / pr_checkout tests
+    /// assumed a non-trivial open-proposal set (to exercise filtering,
+    /// ordering, ref-naming) without caring which kind each is. Each PR
+    /// has two commits matching the legacy shape: file names are
+    /// `{prefix}3.md` / `{prefix}4.md` where `prefix` is `"a"`, `"b"`,
+    /// `"c"` for the first, second, third proposal respectively. Branches
+    /// are `feature-1`, `feature-2`, `feature-3` (no `pr/` prefix — we
+    /// drive `ngit send`, not `git push pr/<branch>`).
+    ///
+    /// Inherits the [`Harness::publish_pr`] `--force-pr` discipline: each
+    /// proposal is locked to `KIND_PULL_REQUEST` regardless of how the
+    /// default-kind heuristic evolves. A patch-kind sibling
+    /// (`publish_three_open_patch_proposals`) will exist for the narrow
+    /// case where tests pin patch behaviour — it lands in the migration PR
+    /// that first needs it.
+    pub async fn publish_three_open_proposals(
+        &self,
+        repo: &PublishedRepo,
+    ) -> Result<[PublishedPr; 3]> {
+        // One shared contributor across all three proposals — the legacy
+        // helper minted one repo and submitted from it, and downstream
+        // tests assume a single author for filter / list / merge flows.
+        let clone = self
+            .clone_published_repo(
+                repo,
+                CloneLogin::AsContributor {
+                    display_name: "ngit test contributor".to_string(),
+                },
+            )
+            .await?;
+
+        let mut prs: Vec<PublishedPr> = Vec::with_capacity(3);
+        for (idx, prefix) in ["a", "b", "c"].iter().enumerate() {
+            let n = idx + 1;
+            let pr = self
+                .publish_pr_in_clone(
+                    &clone,
+                    repo,
+                    PublishPrOpts {
+                        branch: Some(format!("feature-{n}")),
+                        commits: vec![
+                            (format!("{prefix}3.md"), "some content\n".to_string()),
+                            (format!("{prefix}4.md"), "some content\n".to_string()),
+                        ],
+                        title: format!("proposal {prefix}"),
+                        description: format!("proposal {prefix} description"),
+                        in_reply_to: None,
+                    },
+                )
+                .await
+                .with_context(|| format!("publishing proposal #{n} (prefix {prefix:?})"))?;
+            prs.push(pr);
+        }
+
+        // `[T; 3]::try_from(Vec<T>)` consumes the vec, fails only on
+        // length mismatch — we just pushed three so it's infallible.
+        prs.try_into().map_err(|v: Vec<PublishedPr>| {
+            anyhow::anyhow!(
+                "expected exactly 3 published PRs; got {} — programmer error",
+                v.len()
+            )
+        })
+    }
+
+    /// Internal shared driver for [`Harness::publish_pr`] and
+    /// [`Harness::publish_three_open_proposals`]. `clone` is assumed to be
+    /// a `clone_published_repo(_, AsContributor { .. })` result — i.e. a
+    /// fresh clone with `nostr.nsec` already populated for the publishing
+    /// identity.
+    async fn publish_pr_in_clone(
+        &self,
+        clone: &Repo,
+        repo: &PublishedRepo,
+        opts: PublishPrOpts,
+    ) -> Result<PublishedPr> {
+        let branch = opts.branch.unwrap_or_else(|| {
+            // Monotonic across the lifetime of a `PublishedRepo` so two
+            // back-to-back `publish_pr` calls with default branch don't
+            // collide. Tests that care about the exact name pass
+            // `Some(...)` explicitly.
+            let n = repo.feature_counter.fetch_add(1, Ordering::SeqCst);
+            format!("feature-{n}")
+        });
+        let commits = if opts.commits.is_empty() {
+            vec![
+                ("t3.md".to_string(), "some content\n".to_string()),
+                ("t4.md".to_string(), "some content\n".to_string()),
+            ]
+        } else {
+            opts.commits
+        };
+        let commit_oids = create_branch_and_commit(clone, &branch, &commits).await?;
+        let tip = commit_oids
+            .last()
+            .cloned()
+            .context("commits vec was empty after defaulting — should be unreachable")?;
+
+        // --- ngit send --force-pr ------------------------------------------
+        //
+        // `--force-pr` is mandatory: see the doc-comment on `publish_pr`.
+        let n = commits.len();
+        let mut send_args: Vec<String> = vec![
+            "send".into(),
+            format!("HEAD~{n}"),
+            "--force-pr".into(),
+            "--title".into(),
+            opts.title.clone(),
+            "--description".into(),
+            opts.description.clone(),
+        ];
+        if let Some(in_reply_to) = &opts.in_reply_to {
+            send_args.push("--in-reply-to".into());
+            send_args.push(in_reply_to.clone());
+        }
+        let send_out = clone
+            .ngit(send_args)
+            .output()
+            .await
+            .context("failed to spawn ngit send --force-pr")?;
+        check_ok("ngit send --force-pr", send_out)?;
+
+        // --- restore main so subsequent calls branch from a clean state ----
+        check_ok(
+            "git checkout main (after publish_pr)",
+            clone
+                .git(["checkout", "main"])
+                .output()
+                .await
+                .context("failed to spawn git checkout main")?,
+        )?;
+
+        // --- verify the produced event has the expected kind ---------------
+        //
+        // Re-query the grasp's repo-relay over a real REQ. This is what
+        // catches "we changed `--force-pr` to do nothing" at
+        // scenario-construction time rather than at first test assertion.
+        let author_pubkey = read_clone_pubkey(clone).await?;
+        let events = self
+            .grasp("repo")
+            .events(
+                Filter::new()
+                    .author(author_pubkey)
+                    .kind(KIND_PULL_REQUEST),
+            )
+            .await?;
+        let root_event = events
+            .into_iter()
+            .find(|e| event_branch_name_tag(e).as_deref() == Some(branch.as_str()))
+            .with_context(|| {
+                format!(
+                    "no KIND_PULL_REQUEST event with branch-name={branch:?} authored by {author_pubkey} found \
+                     on grasp `repo` after `ngit send --force-pr` — did --force-pr stop forcing?"
+                )
+            })?;
+
+        Ok(PublishedPr {
+            event_id: root_event.id,
+            author_pubkey,
+            branch_name: branch,
+            commits: commit_oids,
+            tip,
+            root_event,
+        })
+    }
+
+    /// Internal shared driver for [`Harness::publish_patch_series`].
+    /// `clone` must be an `AsContributor`-logged-in clone (same precondition
+    /// as [`Harness::publish_pr_in_clone`]).
+    async fn publish_patch_series_in_clone(
+        &self,
+        clone: &Repo,
+        repo: &PublishedRepo,
+        opts: PublishPatchSeriesOpts,
+    ) -> Result<PublishedPatchSeries> {
+        let branch = opts.branch.unwrap_or_else(|| {
+            let n = repo.feature_counter.fetch_add(1, Ordering::SeqCst);
+            format!("feature-{n}")
+        });
+        let commits = if opts.commits.is_empty() {
+            vec![
+                ("t3.md".to_string(), "some content\n".to_string()),
+                ("t4.md".to_string(), "some content\n".to_string()),
+            ]
+        } else {
+            opts.commits
+        };
+        let commit_oids = create_branch_and_commit(clone, &branch, &commits).await?;
+        let tip = commit_oids
+            .last()
+            .cloned()
+            .context("commits vec was empty after defaulting — should be unreachable")?;
+
+        // --- ngit send --force-patch ---------------------------------------
+        //
+        // `--force-patch` is mandatory: without it the kind ngit picks is
+        // determined by `are_commits_too_big_for_patches` /
+        // `do_commits_contain_submodules` / the heuristic in
+        // `src/bin/ngit/sub_commands/send.rs:236-243`.
+        let n = commits.len();
+        let mut send_args: Vec<String> = vec![
+            "send".into(),
+            format!("HEAD~{n}"),
+            "--force-patch".into(),
+        ];
+        match &opts.cover_letter {
+            Some((title, description)) => {
+                send_args.push("--title".into());
+                send_args.push(title.clone());
+                send_args.push("--description".into());
+                send_args.push(description.clone());
+            }
+            None => send_args.push("--no-cover-letter".into()),
+        }
+        if let Some(in_reply_to) = &opts.in_reply_to {
+            send_args.push("--in-reply-to".into());
+            send_args.push(in_reply_to.clone());
+        }
+        let send_out = clone
+            .ngit(send_args)
+            .output()
+            .await
+            .context("failed to spawn ngit send --force-patch")?;
+        check_ok("ngit send --force-patch", send_out)?;
+
+        check_ok(
+            "git checkout main (after publish_patch_series)",
+            clone
+                .git(["checkout", "main"])
+                .output()
+                .await
+                .context("failed to spawn git checkout main")?,
+        )?;
+
+        // --- verify the produced events have the expected kind -------------
+        //
+        // Patch events fan out one-per-commit, optionally preceded by a
+        // cover-letter patch carrying the `["t", "cover-letter"]` tag.
+        // Querying the grasp post-send catches "we changed --force-patch
+        // to do nothing" at scenario-construction time.
+        let author_pubkey = read_clone_pubkey(clone).await?;
+        let all_patches: Vec<Event> = self
+            .grasp("repo")
+            .events(Filter::new().author(author_pubkey).kind(Kind::GitPatch))
+            .await?;
+
+        // Reduce to the events tied to *this* branch, not any prior
+        // proposal published from the same clone.
+        let our_patches: Vec<Event> = all_patches
+            .into_iter()
+            .filter(|e| event_branch_name_tag(e).as_deref() == Some(branch.as_str()))
+            .collect();
+
+        let cover_letter_event = our_patches.iter().find(|e| is_cover_letter(e)).cloned();
+        let patch_events: Vec<Event> = our_patches
+            .iter()
+            .filter(|e| !is_cover_letter(e))
+            .cloned()
+            .collect();
+
+        if patch_events.len() != commit_oids.len() {
+            bail!(
+                "expected {} patch event(s) for branch-name={branch:?} after \
+                 `ngit send --force-patch`; got {}",
+                commit_oids.len(),
+                patch_events.len(),
+            );
+        }
+        if opts.cover_letter.is_some() && cover_letter_event.is_none() {
+            bail!(
+                "publish_patch_series called with cover_letter=Some(...) but no \
+                 `t cover-letter` patch event landed on grasp for branch-name={branch:?}"
+            );
+        }
+        if opts.cover_letter.is_none() && cover_letter_event.is_some() {
+            bail!(
+                "publish_patch_series called with cover_letter=None (and --no-cover-letter passed) \
+                 yet a `t cover-letter` patch event arrived for branch-name={branch:?} — \
+                 did --no-cover-letter stop suppressing it?"
+            );
+        }
+
+        Ok(PublishedPatchSeries {
+            author_pubkey,
+            branch_name: branch,
+            commits: commit_oids,
+            tip,
+            cover_letter_event,
+            patch_events,
+        })
+    }
+}
+
+/// Knobs for [`Harness::publish_pr`]. `title` / `description` are mandatory
+/// (no `Default` impl) — `ngit send --force-pr` will not synthesise either
+/// without `--defaults`, and we deliberately don't leak the `--defaults`
+/// behaviour into scenarios.
+#[derive(Clone, Debug)]
+pub struct PublishPrOpts {
+    /// Branch name to create from `main`. Defaults to `"feature-{n}"`
+    /// where `n` is monotonic per-[`PublishedRepo`]. No `pr/` prefix — the
+    /// builder uses `ngit send`, not `git push pr/<branch>`, and we want
+    /// the branch name to be observable in events independently of any
+    /// `pr/` convention the remote helper may apply.
+    pub branch: Option<String>,
+    /// `(filename, content)` pairs committed one-per-commit on top of the
+    /// new branch. Defaults to two commits adding `t3.md` then `t4.md`,
+    /// matching the legacy `cli_tester_create_proposals` shape. Files are
+    /// written to disk before `git add` so the commits' trees reflect the
+    /// content.
+    pub commits: Vec<(String, String)>,
+    /// `--title` (clap alias for `--subject`). Mandatory: `ngit send
+    /// --force-pr` requires both title and description in non-interactive
+    /// mode unless `--defaults` is set, and we don't want the default to
+    /// leak into scenarios.
+    pub title: String,
+    /// `--description`. Mandatory for the same reason as [`PublishPrOpts::title`].
+    pub description: String,
+    /// Optional `--in-reply-to` reference (event id / nevent / npub /
+    /// nprofile). Used by tests that exercise proposal-revision and
+    /// mention-extraction flows.
+    pub in_reply_to: Option<String>,
+}
+
+/// Outcome of [`Harness::publish_pr`].
+#[derive(Clone, Debug)]
+pub struct PublishedPr {
+    /// Event id of the `KIND_PULL_REQUEST` root event captured back from
+    /// the grasp's repo-relay.
+    pub event_id: EventId,
+    /// Pubkey of the contributor identity that signed the PR. Read from
+    /// the cloned repo's local `nostr.nsec` after `account create`.
+    pub author_pubkey: PublicKey,
+    /// e.g. `"feature-1"`. Matches the `branch-name` tag on
+    /// [`root_event`](PublishedPr::root_event).
+    pub branch_name: String,
+    /// Commit OIDs in chronological order — one entry per element of
+    /// [`PublishPrOpts::commits`].
+    pub commits: Vec<String>,
+    /// Last commit OID; equal to `commits.last().unwrap()` but exposed
+    /// directly because most assertions compare against the tip.
+    pub tip: String,
+    /// The `KIND_PULL_REQUEST` event itself, re-fetched from the grasp.
+    /// Useful for tests that want to assert on tag shape, content body,
+    /// or `created_at`.
+    pub root_event: Event,
+}
+
+/// Knobs for [`Harness::publish_patch_series`]. Unlike
+/// [`PublishPrOpts`], all fields are optional — `ngit send --force-patch
+/// --no-cover-letter` is a valid non-interactive invocation, so the
+/// scenario can default to "no cover letter, two commits, fresh branch
+/// name".
+#[derive(Clone, Debug, Default)]
+pub struct PublishPatchSeriesOpts {
+    /// See [`PublishPrOpts::branch`]. Same monotonic default.
+    pub branch: Option<String>,
+    /// See [`PublishPrOpts::commits`]. Same default.
+    pub commits: Vec<(String, String)>,
+    /// When `Some((title, description))`, the builder passes
+    /// `--title <title> --description <description>` and a `t cover-letter`
+    /// patch is published in addition to the per-commit patches. When
+    /// `None`, the builder passes `--no-cover-letter`. The scenario asserts
+    /// the chosen branch on the grasp post-send, so a regression in either
+    /// direction is caught here rather than in downstream tests.
+    pub cover_letter: Option<(String, String)>,
+    /// Optional `--in-reply-to` reference; same shape as
+    /// [`PublishPrOpts::in_reply_to`].
+    pub in_reply_to: Option<String>,
+}
+
+/// Outcome of [`Harness::publish_patch_series`].
+///
+/// No top-level `event_id` field because a patch series has a vec of
+/// `Kind::GitPatch` events plus an optional cover-letter patch — tests
+/// pick whichever they want to assert on.
+#[derive(Clone, Debug)]
+pub struct PublishedPatchSeries {
+    /// Pubkey of the signing contributor identity. Read from the cloned
+    /// repo's local `nostr.nsec` after `account create`.
+    pub author_pubkey: PublicKey,
+    /// e.g. `"feature-1"`.
+    pub branch_name: String,
+    /// Commit OIDs in chronological order — one entry per
+    /// `Kind::GitPatch` non-cover-letter event in
+    /// [`PublishedPatchSeries::patch_events`].
+    pub commits: Vec<String>,
+    /// Last commit OID; equal to `commits.last().unwrap()`.
+    pub tip: String,
+    /// `Kind::GitPatch` event carrying the `["t", "cover-letter"]` tag, if
+    /// one was requested. `None` when [`PublishPatchSeriesOpts::cover_letter`]
+    /// was `None`.
+    pub cover_letter_event: Option<Event>,
+    /// Per-commit `Kind::GitPatch` events; ordering is whatever the grasp
+    /// returns over its REQ surface (typically newest-first) and tests
+    /// should not depend on a specific order.
+    pub patch_events: Vec<Event>,
+}
+
+/// `git checkout -b <branch>` from `main`, write each `(filename, content)`,
+/// `git add` + `git commit -m "add <filename>" --no-gpg-sign` per pair, then
+/// return the resulting chronological list of commit OIDs.
+async fn create_branch_and_commit(
+    clone: &Repo,
+    branch: &str,
+    commits: &[(String, String)],
+) -> Result<Vec<String>> {
+    check_ok(
+        "git checkout -b <branch>",
+        clone
+            .git(["checkout", "-b", branch])
+            .output()
+            .await
+            .context("failed to spawn git checkout -b")?,
+    )?;
+
+    let mut oids: Vec<String> = Vec::with_capacity(commits.len());
+    for (file_name, content) in commits {
+        std::fs::write(clone.dir().join(file_name), content)
+            .with_context(|| format!("failed to write {file_name} in contributor clone"))?;
+        check_ok(
+            "git add",
+            clone
+                .git(["add", file_name.as_str()])
+                .output()
+                .await
+                .context("failed to spawn git add")?,
+        )?;
+        check_ok(
+            "git commit",
+            clone
+                .git([
+                    "commit",
+                    "-m",
+                    &format!("add {file_name}"),
+                    "--no-gpg-sign",
+                ])
+                .output()
+                .await
+                .context("failed to spawn git commit")?,
+        )?;
+
+        let oid = head_oid(clone)
+            .await
+            .with_context(|| format!("failed to read HEAD oid after committing {file_name}"))?;
+        oids.push(oid);
+    }
+    Ok(oids)
+}
+
+/// Resolve `HEAD` to a commit oid via `git rev-parse`. Cheaper than
+/// `Repo::snapshot()` when we only care about one ref.
+async fn head_oid(clone: &Repo) -> Result<String> {
+    let out = clone
+        .git(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .context("failed to spawn git rev-parse HEAD")?;
+    if !out.status.success() {
+        bail!(
+            "git rev-parse HEAD exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    Ok(String::from_utf8(out.stdout)
+        .context("git rev-parse HEAD returned non-utf8")?
+        .trim()
+        .to_string())
+}
+
+/// Pubkey of the identity logged in to `clone` — i.e. the value
+/// `clone_published_repo(_, AsContributor { .. })` wrote to local
+/// `nostr.nsec`.
+async fn read_clone_pubkey(clone: &Repo) -> Result<PublicKey> {
+    let nsec = clone
+        .config("nostr.nsec")
+        .await?
+        .context("nostr.nsec missing from clone — was clone_published_repo called with a login?")?;
+    let keys = Keys::parse(&nsec)
+        .context("nostr.nsec in clone's local config is not a valid bech32 nsec")?;
+    Ok(keys.public_key())
+}
+
+/// First value of the `["branch-name", <name>]` tag on a nostr event, if
+/// present. PR and patch events both carry this; we use it to disambiguate
+/// the event for one proposal from any others published in the same test.
+fn event_branch_name_tag(event: &Event) -> Option<String> {
+    event.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        if s.first().map(String::as_str) == Some("branch-name") {
+            s.get(1).cloned()
+        } else {
+            None
+        }
+    })
+}
+
+/// `true` when `event` carries `["t", "cover-letter"]` — the marker that
+/// distinguishes a cover-letter patch from a regular per-commit patch in a
+/// series.
+fn is_cover_letter(event: &Event) -> bool {
+    event.tags.iter().any(|t| {
+        let s = t.as_slice();
+        s.first().map(String::as_str) == Some("t")
+            && s.get(1).map(String::as_str) == Some("cover-letter")
+    })
 }
 
 /// Bail with a captured-output error message when a child process exits
