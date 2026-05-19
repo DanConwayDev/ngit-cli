@@ -37,7 +37,10 @@ use nostr_sdk::prelude::*;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
-use crate::query;
+use crate::{
+    port::{self, PortReservation},
+    query,
+};
 
 /// How long to wait for ngit-grasp to accept TCP connections before giving up.
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -47,6 +50,18 @@ const READY_POLL: Duration = Duration::from_millis(100);
 /// upstream pattern. The relay listener accepts before the websocket handler
 /// is fully wired; without this the first REQ can race the binding.
 const READY_GRACE: Duration = Duration::from_millis(100);
+/// How many fresh port reservations to attempt before giving up. The
+/// subprocess binds itself from `NGIT_BIND_ADDRESS`, so there is a
+/// microsecond-scale TOCTOU window between [`PortReservation::release`]
+/// and the subprocess's own `bind`. If that window loses the race the
+/// subprocess exits before its TCP listener accepts, and our readiness
+/// check picks that up via `try_wait` so we can retry on a fresh port
+/// instead of hanging for the full 15s readiness timeout.
+///
+/// In practice this loop has never been observed to fire in local
+/// stress testing — kept as defense-in-depth for CI / loaded hardware.
+/// Matches the cap in `relay.rs`.
+const MAX_BIND_ATTEMPTS: usize = 5;
 
 /// A spawned `ngit-grasp` subprocess plus the tempdir holding its git data.
 ///
@@ -67,24 +82,87 @@ pub struct GraspServer {
 }
 
 impl GraspServer {
-    /// Spawn ngit-grasp bound to the given loopback port, wait for it to be
-    /// ready, then return.
-    pub(crate) async fn start(role: impl Into<String>, port: u16) -> Result<Self> {
+    /// Spawn ngit-grasp on the port held by `reservation`, wait for it to
+    /// be ready, then return.
+    ///
+    /// The reservation is released (its `TcpListener` dropped) immediately
+    /// before `Command::spawn()`, so no other `reserve_port` call in this
+    /// process can be handed the same port while ngit-grasp is starting
+    /// up. There is a small TOCTOU window between release and the
+    /// subprocess's own `bind` — passing a pre-bound fd into a subprocess
+    /// would close it entirely, but isn't worth the Unix-specific
+    /// `pre_exec` plumbing for a residual race that hasn't been observed
+    /// in local stress testing.
+    ///
+    /// If the subprocess exits before becoming ready (the signature of
+    /// having lost the bind race), we retry with a fresh reservation up
+    /// to [`MAX_BIND_ATTEMPTS`] times. Defense-in-depth — never observed
+    /// to fire locally; kept for CI / loaded hardware.
+    pub(crate) async fn start(
+        role: impl Into<String>,
+        reservation: PortReservation,
+    ) -> Result<Self> {
         let role = role.into();
         let binary = locate_binary()?;
 
+        let mut reservation = Some(reservation);
+        for attempt in 1..=MAX_BIND_ATTEMPTS {
+            // Each attempt consumes the current reservation. On retry we
+            // re-acquire from the kernel — which is guaranteed to give us
+            // a port number different from any reservation currently held
+            // elsewhere in this process.
+            let r = reservation
+                .take()
+                .expect("reservation always present on attempt entry");
+            match Self::try_start_once(role.clone(), &binary, r).await {
+                Ok(server) => return Ok(server),
+                Err(StartFailure::EarlyExit { status }) if attempt < MAX_BIND_ATTEMPTS => {
+                    eprintln!(
+                        "[test_harness] ngit-grasp exited early on attempt \
+                         {attempt}/{MAX_BIND_ATTEMPTS} (status: {status:?}); \
+                         likely a port-bind race — retrying with a fresh port",
+                    );
+                    reservation = Some(port::reserve_port().context(
+                        "failed to reserve replacement port after ngit-grasp early exit",
+                    )?);
+                    continue;
+                }
+                Err(StartFailure::EarlyExit { status }) => {
+                    bail!(
+                        "ngit-grasp subprocess exited early after {MAX_BIND_ATTEMPTS} attempts \
+                         (last exit status: {status:?}). If this is not a port-bind race, \
+                         check ngit-grasp logs by temporarily enabling stderr in grasp.rs."
+                    );
+                }
+                Err(StartFailure::Other(e)) => return Err(e),
+            }
+        }
+        unreachable!("MAX_BIND_ATTEMPTS loop terminated without returning")
+    }
+
+    /// One attempt at spawning and waiting for ngit-grasp on the given
+    /// reservation. Returns `Err(StartFailure::EarlyExit)` specifically
+    /// when the subprocess died before becoming ready — the caller may
+    /// retry in that case.
+    async fn try_start_once(
+        role: String,
+        binary: &Path,
+        reservation: PortReservation,
+    ) -> std::result::Result<Self, StartFailure> {
+        let port = reservation.port();
         let bind_address = format!("127.0.0.1:{port}");
         let url = format!("http://127.0.0.1:{port}");
 
-        let git_data_dir =
-            TempDir::new().context("failed to allocate tempdir for ngit-grasp git data")?;
+        let git_data_dir = TempDir::new()
+            .context("failed to allocate tempdir for ngit-grasp git data")
+            .map_err(StartFailure::Other)?;
         let git_data_path = git_data_dir.path().to_path_buf();
 
-        // Match the upstream tests/common/relay.rs env set. The "_TEST" /
-        // jitter / startup-delay knobs are what make ngit-grasp usable
-        // synchronously inside a per-test fixture; without them the
-        // background sync tasks can keep the process busy for seconds.
-        let process = Command::new(&binary)
+        // Build the Command *before* releasing the reservation so that
+        // none of the env-setting allocations happen while the listener
+        // is held. We then release immediately before `spawn`.
+        let mut cmd = Command::new(binary);
+        cmd
             // ngit-grasp writes `.relay-owner.nsec` into CWD on first start
             // if no key is supplied; point that at the tempdir so the file
             // is cleaned up with the rest of the fixture and doesn't litter
@@ -102,13 +180,20 @@ impl GraspServer {
             // event store / git state, not on ngit-grasp logs — and noisy
             // INFO output makes `cargo test --nocapture` unreadable.
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| {
-                format!("failed to spawn ngit-grasp binary at {}", binary.display())
-            })?;
+            .stderr(Stdio::null());
 
-        let server = Self {
+        // Release the port reservation immediately before spawning the
+        // subprocess that will bind it. Holding the reservation through
+        // env-var setup above is what keeps any concurrent
+        // `reserve_port()` calls from picking this same number.
+        let _ = reservation.release();
+
+        let process = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn ngit-grasp binary at {}", binary.display()))
+            .map_err(StartFailure::Other)?;
+
+        let mut server = Self {
             role,
             url,
             port,
@@ -116,15 +201,31 @@ impl GraspServer {
             _git_data_dir: git_data_dir,
             git_data_path,
         };
-        server.wait_for_ready().await?;
+        server.wait_for_ready_or_early_exit().await?;
         Ok(server)
     }
 
-    /// Probe the listener with async TCP connects until it accepts. Mirrors
-    /// the pattern in ngit-grasp's own test harness.
-    async fn wait_for_ready(&self) -> Result<()> {
+    /// Probe the listener with async TCP connects until it accepts, while
+    /// concurrently watching for the subprocess to exit early (the
+    /// signature of a bind-collision). Mirrors the pattern in ngit-grasp's
+    /// own test harness, plus the early-exit detection that lets us retry
+    /// instead of waiting the full 15s for a doomed process.
+    async fn wait_for_ready_or_early_exit(&mut self) -> std::result::Result<(), StartFailure> {
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
+            // Check whether the subprocess has already exited. If so the
+            // TCP probe will never succeed — bail immediately so the
+            // caller can retry with a fresh port.
+            match self.process.try_wait() {
+                Ok(Some(status)) => return Err(StartFailure::EarlyExit { status }),
+                Ok(None) => { /* still running */ }
+                Err(e) => {
+                    return Err(StartFailure::Other(anyhow::Error::from(e).context(
+                        "failed to poll ngit-grasp subprocess status during readiness check",
+                    )));
+                }
+            }
+
             match tokio::net::TcpStream::connect(("127.0.0.1", self.port)).await {
                 Ok(_) => {
                     sleep(READY_GRACE).await;
@@ -134,11 +235,11 @@ impl GraspServer {
                     sleep(READY_POLL).await;
                 }
                 Err(e) => {
-                    bail!(
+                    return Err(StartFailure::Other(anyhow::anyhow!(
                         "ngit-grasp at 127.0.0.1:{} did not become ready within {:?}: {e}",
                         self.port,
                         READY_TIMEOUT,
-                    );
+                    )));
                 }
             }
         }
@@ -185,6 +286,30 @@ impl Drop for GraspServer {
         // ngit-grasp entries.
         let _ = self.process.kill();
         let _ = self.process.wait();
+    }
+}
+
+/// Internal failure mode for a single [`GraspServer::try_start_once`] attempt.
+///
+/// `EarlyExit` is the retry-eligible case (subprocess died before
+/// becoming ready — almost always a lost bind race); `Other` is anything
+/// else and is propagated unchanged.
+enum StartFailure {
+    /// The subprocess exited before passing the readiness check.
+    EarlyExit { status: std::process::ExitStatus },
+    /// Any other error (tempdir, spawn, IO during probe, etc.). Propagated
+    /// to the caller without retry.
+    Other(anyhow::Error),
+}
+
+impl From<StartFailure> for anyhow::Error {
+    fn from(value: StartFailure) -> Self {
+        match value {
+            StartFailure::EarlyExit { status } => anyhow::anyhow!(
+                "ngit-grasp subprocess exited before becoming ready (status: {status:?})"
+            ),
+            StartFailure::Other(e) => e,
+        }
     }
 }
 

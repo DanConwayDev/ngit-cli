@@ -9,7 +9,10 @@
 //! Building blocks for driving ngit subcommands against either a vanilla
 //! nostr relay or a real `ngit-grasp` subprocess (or both):
 //!
-//! - [`port::find_free_port`] — OS-assigned `127.0.0.1:0` bind, then drop.
+//! - [`port::reserve_port`] — OS-assigned `127.0.0.1:0` bind, held open in a
+//!   [`port::PortReservation`] until the consuming fixture is about to start
+//!   its real service. Eliminates same-process port races between parallel
+//!   `#[tokio::test]`s.
 //! - [`relay::VanillaRelay`] — `nostr-relay-builder` `LocalRelay` wrapped to
 //!   own its port and offer a `events(filter)` query helper. Used for user
 //!   metadata (kind 0), relay lists (kind 10002), signer-connect events —

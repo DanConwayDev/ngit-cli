@@ -213,9 +213,9 @@ impl HarnessBuilder {
 
         let mut relays: BTreeMap<String, Vec<VanillaRelay>> = BTreeMap::new();
         for role in self.relay_roles {
-            let port = port::find_free_port()
-                .with_context(|| format!("failed to allocate port for relay role {role:?}"))?;
-            let relay = VanillaRelay::start(role.clone(), port)
+            let reservation = port::reserve_port()
+                .with_context(|| format!("failed to reserve port for relay role {role:?}"))?;
+            let relay = VanillaRelay::start(role.clone(), reservation)
                 .await
                 .with_context(|| format!("failed to start relay for role {role:?}"))?;
             relays.entry(role).or_default().push(relay);
@@ -223,9 +223,9 @@ impl HarnessBuilder {
 
         let mut grasps: BTreeMap<String, Vec<GraspServer>> = BTreeMap::new();
         for role in self.grasp_roles {
-            let port = port::find_free_port()
-                .with_context(|| format!("failed to allocate port for grasp role {role:?}"))?;
-            let server = GraspServer::start(role.clone(), port)
+            let reservation = port::reserve_port()
+                .with_context(|| format!("failed to reserve port for grasp role {role:?}"))?;
+            let server = GraspServer::start(role.clone(), reservation)
                 .await
                 .with_context(|| format!("failed to start ngit-grasp for role {role:?}"))?;
             grasps.entry(role).or_default().push(server);

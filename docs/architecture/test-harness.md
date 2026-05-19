@@ -113,7 +113,7 @@ Three observations underpin this:
 
 | Concern | Mechanism |
 |---|---|
-| Relay/git ports | OS-assigned via `:0` bind in each grasp instance (ngit-grasp pattern); discovered after start |
+| Relay/git ports | OS-assigned via `:0` bind, held in a `PortReservation` until just before the fixture's real bind. Prevents same-process collisions between parallel `#[tokio::test]`s (the kernel won't reissue a port that's currently bound). A retry-on-`AddrInUse` loop sits behind this as defense-in-depth for the residual microsecond TOCTOU window — never observed to fire locally, kept for CI / loaded hardware. See `test_harness/src/port.rs`. |
 | Relay URL config | `Command::env("NGIT_RELAY_DEFAULT_SET", ...)` etc. per spawn |
 | `NGITTEST` | Still set per spawn for fallback code paths; new env vars override the hardcoded localhost defaults |
 | Working tree | `tempfile::TempDir` under `std::env::temp_dir()` — not `current_dir()` |
