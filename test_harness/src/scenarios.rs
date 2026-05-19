@@ -73,6 +73,22 @@ pub struct PublishRepoOpts {
     /// `README.md` with the body `"hello, ngit!\n"`. The file is created
     /// before `ngit init` so HEAD has an oid for libgit2 to read.
     pub initial_file: Option<(String, String)>,
+    /// Number of *additional* co-maintainers (beyond the publisher) to
+    /// list in the kind-30617 announcement. The harness mints that many
+    /// fresh [`Keys`] and passes their npubs to `ngit init` via
+    /// `--other-maintainers`. The resulting maintainer list on the
+    /// announcement is `[publisher, extra-1, extra-2, ...]`, matching
+    /// the order `init.rs` assembles it (see
+    /// `src/bin/ngit/sub_commands/init.rs:880-892`).
+    ///
+    /// Defaults to `0` (single-maintainer announcement — the publisher).
+    /// The minted keys are surfaced on
+    /// [`PublishedRepo::additional_maintainer_keys`] so tests can assert
+    /// on per-co-maintainer `p` / `a` tags downstream. The co-maintainers
+    /// themselves do **not** need to sign anything: an npub in the
+    /// `maintainers` tag is enough to make ngit treat that pubkey as a
+    /// maintainer for tag-generation purposes.
+    pub additional_maintainer_count: usize,
 }
 
 /// Metadata about a repository that has been published to the grasp via
@@ -99,6 +115,17 @@ pub struct PublishedRepo {
     /// Commit oid of `refs/heads/main` after the initial seed commit.
     /// Use to assert that a later clone resolves to the same tree.
     pub initial_oid: String,
+    /// Keypairs for the *additional* co-maintainers minted by
+    /// [`PublishRepoOpts::additional_maintainer_count`], in the order they
+    /// were minted — same order they appear on the announcement's
+    /// `maintainers` tag after the publisher. Empty when
+    /// `additional_maintainer_count == 0`.
+    ///
+    /// Surfaces full [`Keys`] (not just pubkeys) so tests that want to
+    /// sign events *as* a co-maintainer (e.g. status-event regressions,
+    /// permission tests) can do so without re-deriving. The simpler
+    /// `pubkey` accessor is `keys.public_key()`.
+    pub additional_maintainer_keys: Vec<Keys>,
     /// Monotonic source for default `feature-{n}` branch names handed out by
     /// [`Harness::publish_pr`] and [`Harness::publish_patch_series`]. Shared
     /// across [`Clone`]s so two helpers operating on copies of the same
@@ -219,18 +246,47 @@ impl Harness {
         // repo-relay tag inside the kind 30617 announcement. `-d` opts the
         // form into defaults — there are no interactive prompts to drive
         // in the new harness.
+        //
+        // `--other-maintainers <npub>...` injects the freshly-minted
+        // co-maintainer pubkeys into the announcement's `maintainers` tag.
+        // The init code path that consumes this lives at
+        // `src/bin/ngit/sub_commands/init.rs:880-892` — when the flag is
+        // present (or running non-interactively, as here), `base_maintainers`
+        // is taken straight from it without any prompt. The co-maintainer
+        // keypairs need not sign anything; an npub in the maintainers tag
+        // is enough for ngit to emit per-maintainer `p` / `a` tags on
+        // subsequent patches.
+        let additional_maintainer_keys: Vec<Keys> = (0..opts.additional_maintainer_count)
+            .map(|_| Keys::generate())
+            .collect();
+        let additional_maintainer_npubs: Vec<String> = additional_maintainer_keys
+            .iter()
+            .map(|k| {
+                k.public_key()
+                    .to_bech32()
+                    .expect("nostr pubkeys always bech32-encode")
+            })
+            .collect();
+
         let grasp_url = self.grasp("repo").url().to_string();
+        let mut init_args: Vec<String> = vec![
+            "init".into(),
+            "--name".into(),
+            display_name.clone(),
+            "--identifier".into(),
+            identifier.clone(),
+            "--grasp-server".into(),
+            grasp_url,
+            "-d".into(),
+        ];
+        if !additional_maintainer_npubs.is_empty() {
+            init_args.push("--other-maintainers".into());
+            for npub in &additional_maintainer_npubs {
+                init_args.push(npub.clone());
+            }
+        }
         let init = publisher
-            .ngit([
-                "init",
-                "--name",
-                &display_name,
-                "--identifier",
-                &identifier,
-                "--grasp-server",
-                &grasp_url,
-                "-d",
-            ])
+            .ngit(init_args)
             .output()
             .await
             .context("failed to spawn ngit init")?;
@@ -277,6 +333,7 @@ impl Harness {
                 display_name,
                 clone_url,
                 initial_oid,
+                additional_maintainer_keys,
                 feature_counter: Arc::new(AtomicU32::new(1)),
             },
         ))
