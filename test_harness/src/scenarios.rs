@@ -520,7 +520,7 @@ impl Harness {
                         ],
                         title: format!("proposal {prefix}"),
                         description: format!("proposal {prefix} description"),
-                        in_reply_to: None,
+                        in_reply_to: vec![],
                     },
                 )
                 .await
@@ -600,7 +600,7 @@ impl Harness {
                             format!("proposal {prefix}"),
                             format!("proposal {prefix} description"),
                         )),
-                        in_reply_to: None,
+                        in_reply_to: vec![],
                     },
                 )
                 .await
@@ -775,9 +775,11 @@ impl Harness {
             "--description".into(),
             opts.description.clone(),
         ];
-        if let Some(in_reply_to) = &opts.in_reply_to {
+        if !opts.in_reply_to.is_empty() {
             send_args.push("--in-reply-to".into());
-            send_args.push(in_reply_to.clone());
+            for r in &opts.in_reply_to {
+                send_args.push(r.clone());
+            }
         }
         let send_out = clone
             .ngit(send_args)
@@ -871,9 +873,11 @@ impl Harness {
             }
             None => send_args.push("--no-cover-letter".into()),
         }
-        if let Some(in_reply_to) = &opts.in_reply_to {
+        if !opts.in_reply_to.is_empty() {
             send_args.push("--in-reply-to".into());
-            send_args.push(in_reply_to.clone());
+            for r in &opts.in_reply_to {
+                send_args.push(r.clone());
+            }
         }
         let send_out = clone
             .ngit(send_args)
@@ -1020,10 +1024,13 @@ pub struct PublishPrOpts {
     /// `--description`. Mandatory for the same reason as
     /// [`PublishPrOpts::title`].
     pub description: String,
-    /// Optional `--in-reply-to` reference (event id / nevent / npub /
-    /// nprofile). Used by tests that exercise proposal-revision and
-    /// mention-extraction flows.
-    pub in_reply_to: Option<String>,
+    /// Optional `--in-reply-to` references (event ids / nevents / npubs /
+    /// nprofiles). When non-empty, passed as
+    /// `--in-reply-to <ref1> <ref2> ...` to `ngit send`. The first
+    /// reference is interpreted by `ngit send` as the proposal root for
+    /// revisions; subsequent references are mentions. An empty vec means
+    /// no `--in-reply-to` flag is appended. Defaults to empty.
+    pub in_reply_to: Vec<String>,
 }
 
 /// Outcome of [`Harness::publish_pr`].
@@ -1068,9 +1075,10 @@ pub struct PublishPatchSeriesOpts {
     /// the chosen branch on the grasp post-send, so a regression in either
     /// direction is caught here rather than in downstream tests.
     pub cover_letter: Option<(String, String)>,
-    /// Optional `--in-reply-to` reference; same shape as
-    /// [`PublishPrOpts::in_reply_to`].
-    pub in_reply_to: Option<String>,
+    /// Optional `--in-reply-to` references; same shape as
+    /// [`PublishPrOpts::in_reply_to`]. Defaults to empty (no `--in-reply-to`
+    /// flag passed).
+    pub in_reply_to: Vec<String>,
 }
 
 /// Outcome of [`Harness::publish_patch_series`].
