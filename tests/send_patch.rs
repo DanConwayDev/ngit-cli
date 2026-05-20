@@ -32,18 +32,28 @@
 //!
 //! ## rstest discipline
 //!
-//! Each `#[case]` is a read-only assertion on the captured `Snapshot` —
+//! Each case is a read-only assertion on a captured [`Snapshot`] —
 //! exactly the shape `docs/architecture/test-harness-migration.md`
-//! sanctions for rstest. The fixture rebuilds the entire harness per
-//! case (no `#[once]`); cases never run additional ngit/git commands.
-//! Per-rstest-case isolation is delegated to `tokio::test` + a fresh
-//! `Harness::build()` per fixture invocation, matching the legacy
-//! `TwoBranchesScenario` shape in `tests/legacy/git_remote_nostr/push.rs`.
+//! sanctions for rstest. The fixture is shared across cases via a
+//! [`tokio::sync::OnceCell`] because setup is expensive (one grasp,
+//! one contributor clone, a patch-series publish + REQ) and every
+//! case asserts on the same captured data — no case writes anything
+//! back. Setup still runs lazily on first case access, so
+//! `cargo test --test send_patch -- some_case` still exercises the
+//! full setup path.
+//!
+//! Each assertion lives in its own `#[rstest] #[tokio::test]` function
+//! (the two enum-driven dispatches — `cover_letter_tags` and
+//! `patch_tags` — predate this discipline and are retained as-is) so
+//! failures surface with the pinpoint name of the property that broke.
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use nostr_sdk::prelude::*;
 use rstest::*;
 use test_harness::{Harness, PublishPatchSeriesOpts, PublishRepoOpts};
+use tokio::sync::OnceCell;
 
 const COVER_LETTER_TITLE: &str = "exampletitle";
 const COVER_LETTER_DESCRIPTION: &str = "exampledescription";
@@ -51,8 +61,9 @@ const FIRST_COMMIT_FILE: &str = "t3.md";
 const SECOND_COMMIT_FILE: &str = "t4.md";
 
 /// Captured side-effects of one `ngit send --force-patch --title ...
-/// --description ...` invocation against a multi-maintainer repo. Populated
-/// once per fixture call; rstest cases read fields and never mutate.
+/// --description ...` invocation against a multi-maintainer repo.
+/// Populated once for the whole test binary via [`SNAPSHOT`]; rstest
+/// cases read fields through an `Arc` and never mutate.
 struct Snapshot {
     /// The cover-letter event (the `Kind::GitPatch` carrying
     /// `["t", "cover-letter"]`).
@@ -88,11 +99,24 @@ struct Snapshot {
 }
 
 #[fixture]
-async fn snapshot() -> Snapshot {
-    capture_snapshot()
+async fn snapshot() -> Arc<Snapshot> {
+    SNAPSHOT
+        .get_or_init(|| async {
+            Arc::new(
+                capture_snapshot()
+                    .await
+                    .expect("send_patch fixture: capture_snapshot failed"),
+            )
+        })
         .await
-        .expect("send_patch fixture: capture_snapshot failed")
+        .clone()
 }
+
+/// Global, lazily-initialised snapshot. The first case to await
+/// `snapshot()` runs the full fixture; subsequent cases see the same
+/// `Arc`. `OnceCell::get_or_init` serialises the initializer so two
+/// cases hitting it concurrently can't double-run setup.
+static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
 
 async fn capture_snapshot() -> Result<Snapshot> {
     let harness = Harness::builder(
@@ -278,7 +302,7 @@ enum CoverLetterCase {
 #[case::alt(CoverLetterCase::Alt)]
 #[tokio::test]
 async fn cover_letter_tags(
-    #[future] snapshot: Snapshot,
+    #[future] snapshot: Arc<Snapshot>,
     #[case] case: CoverLetterCase,
 ) -> Result<()> {
     let s = snapshot.await;
@@ -324,7 +348,7 @@ async fn cover_letter_tags(
 
 #[rstest]
 #[tokio::test]
-async fn cover_letter_a_tag_for_each_maintainer(#[future] snapshot: Snapshot) -> Result<()> {
+async fn cover_letter_a_tag_for_each_maintainer(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let coords = tag_values(&s.cover_letter, "a");
     for m in &s.maintainer_pubkeys {
@@ -340,7 +364,7 @@ async fn cover_letter_a_tag_for_each_maintainer(#[future] snapshot: Snapshot) ->
 
 #[rstest]
 #[tokio::test]
-async fn cover_letter_p_tag_for_each_maintainer(#[future] snapshot: Snapshot) -> Result<()> {
+async fn cover_letter_p_tag_for_each_maintainer(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let p_tags = tag_values(&s.cover_letter, "p");
     for m in &s.maintainer_pubkeys {
@@ -401,7 +425,7 @@ enum PatchCase {
 #[case::second_patch_tags_first_with_reply(PatchCase::SecondTagsFirstWithReply)]
 #[case::no_t_root_tag(PatchCase::NoTRootTag)]
 #[tokio::test]
-async fn patch_tags(#[future] snapshot: Snapshot, #[case] case: PatchCase) -> Result<()> {
+async fn patch_tags(#[future] snapshot: Arc<Snapshot>, #[case] case: PatchCase) -> Result<()> {
     let s = snapshot.await;
     match case {
         PatchCase::CommitAndCommitR => {
@@ -509,7 +533,7 @@ async fn patch_tags(#[future] snapshot: Snapshot, #[case] case: PatchCase) -> Re
 
 #[rstest]
 #[tokio::test]
-async fn patch_a_tag_for_each_maintainer(#[future] snapshot: Snapshot) -> Result<()> {
+async fn patch_a_tag_for_each_maintainer(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let coords = tag_values(&s.first_patch, "a");
     for m in &s.maintainer_pubkeys {
@@ -524,7 +548,7 @@ async fn patch_a_tag_for_each_maintainer(#[future] snapshot: Snapshot) -> Result
 
 #[rstest]
 #[tokio::test]
-async fn patch_p_tag_for_each_maintainer(#[future] snapshot: Snapshot) -> Result<()> {
+async fn patch_p_tag_for_each_maintainer(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let p_tags = tag_values(&s.first_patch, "p");
     for m in &s.maintainer_pubkeys {
@@ -539,7 +563,7 @@ async fn patch_p_tag_for_each_maintainer(#[future] snapshot: Snapshot) -> Result
 
 #[rstest]
 #[tokio::test]
-async fn patch_commit_author(#[future] snapshot: Snapshot) -> Result<()> {
+async fn patch_commit_author(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let author = full_tag(&s.first_patch, "author")?;
     // Legacy asserted the full 5-slot shape including epoch zeros for
@@ -563,7 +587,7 @@ async fn patch_commit_author(#[future] snapshot: Snapshot) -> Result<()> {
 
 #[rstest]
 #[tokio::test]
-async fn patch_commit_committer(#[future] snapshot: Snapshot) -> Result<()> {
+async fn patch_commit_committer(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let committer = full_tag(&s.first_patch, "committer")?;
     assert_eq!(

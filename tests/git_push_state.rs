@@ -24,13 +24,13 @@
 //! ## rstest discipline
 //!
 //! Modelled on `tests/send_patch.rs` — every case is a read-only
-//! assertion on a captured [`Snapshot`]. **Unlike** `send_patch.rs` the
-//! fixture is shared across cases via a [`tokio::sync::OnceCell`]
-//! because this test's setup is expensive (two grasps, two clones,
-//! three relay REQs) and every case asserts on the same captured
-//! data — no case writes anything back. Setup still runs lazily on
-//! first case access, so `cargo test --test git_push_state -- some_case`
-//! still exercises the full setup path.
+//! assertion on a captured [`Snapshot`]. The fixture is shared across
+//! cases via a [`tokio::sync::OnceCell`] because this test's setup is
+//! expensive (two grasps, two clones, three relay REQs) and every
+//! case asserts on the same captured data — no case writes anything
+//! back. Setup still runs lazily on first case access, so
+//! `cargo test --test git_push_state -- some_case` still exercises
+//! the full setup path.
 //!
 //! Each assertion lives in its own `#[rstest] #[tokio::test]` function
 //! — no enum-driven dispatch — so failures surface with the
