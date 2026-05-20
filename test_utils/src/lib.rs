@@ -1,4 +1,7 @@
-#![doc = "DEPRECATED — frozen, do not modify. New tests use `test_harness`. See docs/architecture/test-harness.md."]
+#![doc = "FROZEN — do not modify. Retained only as a `[dev-dependencies]` \
+helper for `#[cfg(test)] mod tests` unit tests under `src/` that still \
+reference it. Do not import from this crate in `tests/` or in \
+`test_harness/`. See AGENTS.md § \"Test harness boundary\"."]
 
 use std::{
     collections::HashSet,

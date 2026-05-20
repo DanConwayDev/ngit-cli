@@ -75,13 +75,6 @@ path = "src/bin/ngit/main.rs"
 name = "git-remote-nostr"
 path = "src/bin/git_remote_nostr/main.rs"
 
-# Legacy integration tests live under tests/legacy/. They are intentionally
-# NOT registered as `[[test]]` targets so `cargo test` skips them entirely
-# while the migration to test_harness is in progress. Cargo only
-# auto-discovers tests at the top level of `tests/`, so leaving the files
-# in tests/legacy/ without entries here is enough to disable them.
-# To run a legacy file ad-hoc, add a temporary [[test]] entry pointing at it.
-
 # `git push` against a nostr:// remote — one submodule per scenario under
 # `tests/git_push_state/`. The directory layout means Cargo doesn't
 # auto-discover this test, so it needs an explicit entry.
