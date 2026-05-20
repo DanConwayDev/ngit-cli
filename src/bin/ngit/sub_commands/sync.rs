@@ -887,9 +887,9 @@ mod tests {
         Kind,
         nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     };
+    use test_helpers::GitTestRepo;
 
     use super::*;
-    use test_helpers::GitTestRepo;
 
     /// Minimal in-process git repository fixture for these unit tests
     /// (previously imported from the `test_utils` crate). The binary crate

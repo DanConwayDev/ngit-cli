@@ -42,8 +42,7 @@ fn unique_suffix() -> String {
 
 /// nsec used to sign the canned repo announcement event. The corresponding
 /// pubkey is what `RepoRef::try_from` will see as the maintainer / author.
-static TEST_KEY_1_NSEC: &str =
-    "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
+static TEST_KEY_1_NSEC: &str = "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
 
 static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
