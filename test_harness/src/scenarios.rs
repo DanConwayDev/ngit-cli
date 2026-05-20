@@ -1256,8 +1256,8 @@ pub enum PublishStateEventTarget {
 // inside `publish_repo` would erase the per-state intent at the call
 // site.
 //
-// State A and State B land here in PR 6a; State C lands in 6b; D + E
-// land in 6c (see `docs/architecture/test-harness-migration.md`).
+// State A and State B landed in PR 6a; State C lands here in 6b;
+// D + E land in 6c (see `docs/architecture/test-harness-migration.md`).
 // ---------------------------------------------------------------------------
 
 /// Default seed-commit fan-out used by every `ngit init` arrange helper.
@@ -1404,6 +1404,74 @@ pub struct ArrangedInitStateB {
     pub coordinate_bech32: String,
 }
 
+/// Captured side-state for a State C "MyAnnouncement" arrange.
+///
+/// `ngit init` running against this repo finds an existing kind-30617
+/// signed by the publisher (`coordinate.pubkey == user.pubkey`) and
+/// trips the `MyAnnouncement` arm in `validate_post_fetch`
+/// (init.rs:531-549) — bare `ngit init` is rejected with
+/// "no arguments specified" unless `--force` (or a substantive flag
+/// such as `--name`) is set, and `--identifier <new>` is rejected with
+/// "changing identifier creates a new repository" unless `--force` is
+/// also passed.
+///
+/// The arrange publishes the existing announcement to the harness's
+/// `"default"` relay — the same relay [`ArrangedInitStateB`] lists in
+/// `nostr.repo`'s coordinate — so ngit's lookup finds it.
+#[derive(Clone, Debug)]
+pub struct ArrangedInitStateC {
+    /// Publisher's keypair. Same shape as [`ArrangedInitStateA::keys`].
+    pub keys: Keys,
+    /// Bech32 nsec.
+    pub nsec: String,
+    /// Bech32 npub.
+    pub npub: String,
+    /// Root commit oid (empty initial). Same shape as
+    /// [`ArrangedInitStateA::root_oid`].
+    pub root_oid: String,
+    /// HEAD oid after seed commits.
+    pub head_oid: String,
+    /// `d` tag on the existing announcement — also the identifier in
+    /// the `nostr.repo` coordinate. The re-published announcement
+    /// keeps this value unless `--identifier <new> --force` is passed
+    /// (legacy `identifier_unchanged`).
+    pub coordinate_identifier: String,
+    /// Bech32 form of the `nostr.repo` coordinate ngit reads on the
+    /// next subcommand.
+    pub coordinate_bech32: String,
+    /// The kind-30617 event the arrange published before `ngit init`
+    /// runs. Tests can inspect tags on this directly without re-querying
+    /// the relay.
+    pub existing_announcement: Event,
+    /// `name` tag value carried by [`existing_announcement`]. The
+    /// re-published announcement should preserve this on `--force`
+    /// (legacy `name_preserved`) or replace it when `--name <new>` is
+    /// passed (legacy `name_overridden`).
+    pub existing_name: String,
+    /// `description` tag value carried by [`existing_announcement`].
+    /// Preserved on `--force` (legacy `description_preserved`).
+    pub existing_description: String,
+    /// URLs in [`existing_announcement`]'s `relays` tag. Includes the
+    /// harness `"default"` relay (so ngit's lookup finds the event)
+    /// plus a distinctive marker URL so the
+    /// `relays-survive-into-re-publish` assertion is not tautological
+    /// against ngit's own default relay-set.
+    pub existing_relays: Vec<String>,
+    /// Marker URL distinguishable from the harness's own default relay
+    /// — its presence in the re-published announcement's `relays` tag
+    /// proves ngit took the relay list from the existing announcement
+    /// rather than from elsewhere (legacy `relays_from_my_event`).
+    pub marker_relay_url: String,
+    /// Co-maintainers minted by the arrange and listed alongside the
+    /// publisher in [`existing_announcement`]'s `maintainers` tag.
+    /// Tests assert these pubkeys survive into the re-published
+    /// announcement (legacy `maintainers_preserved`). The keypairs
+    /// themselves need not sign anything — an npub in the
+    /// `maintainers` tag is enough for ngit to treat the pubkey as a
+    /// maintainer on republish.
+    pub additional_maintainer_keys: Vec<Keys>,
+}
+
 impl Harness {
     /// State A "Fresh" arrange: a fresh repo with a logged-in publisher
     /// account and three seed commits, but **no** `nostr.repo` git
@@ -1507,6 +1575,167 @@ impl Harness {
                 head_oid: state_a.head_oid,
                 coordinate_identifier,
                 coordinate_bech32,
+            },
+        ))
+    }
+
+    /// State C "MyAnnouncement" arrange: a State B repo plus an
+    /// **already-published** kind-30617 signed by the publisher that
+    /// matches `nostr.repo`'s coordinate.
+    ///
+    /// Running `ngit init` against the returned [`Repo`] hits the
+    /// `MyAnnouncement` arm of `validate_pre_fetch` / `validate_post_fetch`
+    /// (init.rs:478-499, 531-549) because `coord.coordinate.public_key ==
+    /// my_pubkey`:
+    ///
+    /// - Bare `ngit init` errors with `"no arguments specified, use --force to
+    ///   publish with new timestamp"` (legacy
+    ///   `state_c_my_announcement::errors::bare_no_flags_requires_force`).
+    /// - `ngit init --identifier <new>` (without `--force`) errors with
+    ///   `"changing identifier creates a new repository"` (legacy
+    ///   `state_c_my_announcement::errors::identifier_change_requires_force`).
+    /// - `ngit init --force` republishes, preserving the existing
+    ///   announcement's `name` / `description` / `relays` / `maintainers`
+    ///   (legacy `state_c_my_announcement::success::force_refresh::*`).
+    /// - `ngit init --name <new>` overrides the name but leaves the identifier
+    ///   (legacy `state_c_my_announcement::success::name_override::*`).
+    ///
+    /// **Discovery.** The existing announcement is published to the
+    /// harness's `"default"` relay — the same relay
+    /// [`Self::arrange_init_state_b_coordinate_only`] writes into
+    /// `nostr.repo`'s coordinate — so `fetching_with_report` finds it on
+    /// the first round-trip. No grasp servers are required (the existing
+    /// announcement's `clone` tag carries a deliberately unreachable URL;
+    /// under `NGITTEST=TRUE`, init.rs:1195 short- circuits the post-init
+    /// `git push` so the unreachability is invisible).
+    ///
+    /// **Marker relay.** `relays` on the existing announcement is
+    /// `[default_relay_url, marker_relay_url]`. The marker is a
+    /// non-routable `ws://ngit-test-marker.invalid:65535` — ngit's
+    /// publish to it will fail silently (one-of-many relays), but the
+    /// URL string survives into the re-published announcement's `relays`
+    /// tag via init.rs:739-746. Asserting on the marker (rather than
+    /// `default_relay_url`, which ngit might add for unrelated reasons)
+    /// keeps the `relays_from_my_event` regression non-tautological.
+    ///
+    /// **Timestamp.** The fabricated announcement is back-dated 30s so
+    /// ngit's re-publish carries a strictly greater `created_at` and
+    /// the relay's replaceable-event semantics keep the newer copy.
+    /// Without this the two events can collide in the same unix second
+    /// — see `crate::clock` for the writeup, same root cause as the
+    /// `nostr_push` timing rule.
+    ///
+    /// **Co-maintainer.** A single fresh [`Keys`] is minted and listed
+    /// after the publisher in `maintainers`. The keypair need not
+    /// sign anything; an npub in the tag is enough for ngit to keep
+    /// it on republish. The full [`Keys`] is surfaced (not just the
+    /// pubkey) so tests that want to drive ngit *as* the co-maintainer
+    /// in a follow-up can do so without re-deriving.
+    pub async fn arrange_init_state_c_my_announcement(&self) -> Result<(Repo, ArrangedInitStateC)> {
+        let (repo, state_b) = self.arrange_init_state_b_coordinate_only().await?;
+
+        let additional_maintainer_keys: Vec<Keys> = vec![Keys::generate()];
+
+        let default_relay_url = self.relay("default").url().to_string();
+        // RFC-2606 `.invalid` TLD so this never resolves, no matter what
+        // happens to the test host's DNS — ngit's publish to it fails at
+        // the connect stage and the test path doesn't depend on any
+        // particular failure mode beyond "this URL is not the default
+        // relay". Port 65535 is a no-such-service placeholder; the URL
+        // is opaque to ngit's republish logic, which only round-trips
+        // the string through the `relays` tag.
+        let marker_relay_url = "ws://ngit-test-marker.invalid:65535".to_string();
+        let existing_name = "example name".to_string();
+        let existing_description = "example description".to_string();
+        let existing_relays = vec![default_relay_url.clone(), marker_relay_url.clone()];
+
+        let mut maintainers: Vec<String> = vec![state_b.keys.public_key().to_string()];
+        for k in &additional_maintainer_keys {
+            maintainers.push(k.public_key().to_string());
+        }
+
+        let tags: Vec<Tag> = vec![
+            Tag::identifier(state_b.coordinate_identifier.clone()),
+            // `["r", "<oid>", "euc"]` — the earliest-unique-commit
+            // marker, 3-element so we can't use TagStandard::Reference
+            // (which only allows one value).
+            Tag::custom(
+                TagKind::Custom("r".into()),
+                vec![state_b.root_oid.clone(), "euc".to_string()],
+            ),
+            Tag::from_standardized(TagStandard::Name(existing_name.clone())),
+            Tag::from_standardized(TagStandard::Description(existing_description.clone())),
+            // `clone` carries a deliberately unreachable URL — same
+            // shape as the legacy fixture's `git:://123.gitexample.com/test`
+            // — because the State C arrange doesn't drive any git
+            // operation, and the `NGITTEST=TRUE` short-circuit in
+            // init.rs:1195 suppresses the post-republish push that
+            // would have hit it.
+            Tag::custom(
+                TagKind::Custom("clone".into()),
+                vec!["https://ngit-test-clone.invalid/repo.git".to_string()],
+            ),
+            Tag::custom(TagKind::Custom("relays".into()), existing_relays.clone()),
+            Tag::custom(TagKind::Custom("maintainers".into()), maintainers),
+        ];
+
+        // Back-date by 30s. Two events with `(pubkey, kind, d)`
+        // matching are replaceable: the relay keeps whichever has the
+        // greater `created_at`. We want the *new* announcement
+        // produced by `ngit init --force` to win, so the fabricated
+        // existing event needs an older timestamp. 30s is generous
+        // enough that even a slow CI box's clock-skew can't flip the
+        // order; the consuming tests don't care about the exact
+        // delta, only that "existing predates republish".
+        let created_at = Timestamp::now() - 30u64;
+        let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags(tags)
+            .custom_created_at(created_at)
+            .sign_with_keys(&state_b.keys)
+            .context("failed to sign fabricated state-C announcement")?;
+
+        let client = Client::default();
+        client
+            .add_relay(&default_relay_url)
+            .await
+            .with_context(|| {
+                format!("failed to add default relay {default_relay_url} for state-C publish")
+            })?;
+        client.connect().await;
+        let output = client
+            .send_event_to([default_relay_url.as_str()], &event)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to publish state-C announcement to default relay {default_relay_url}"
+                )
+            })?;
+        client.disconnect().await;
+        if !output.failed.is_empty() {
+            bail!(
+                "default relay at {default_relay_url} rejected fabricated state-C \
+                 announcement (id={}): {:?}",
+                event.id,
+                output.failed,
+            );
+        }
+
+        Ok((
+            repo,
+            ArrangedInitStateC {
+                keys: state_b.keys,
+                nsec: state_b.nsec,
+                npub: state_b.npub,
+                root_oid: state_b.root_oid,
+                head_oid: state_b.head_oid,
+                coordinate_identifier: state_b.coordinate_identifier,
+                coordinate_bech32: state_b.coordinate_bech32,
+                existing_announcement: event,
+                existing_name,
+                existing_description,
+                existing_relays,
+                marker_relay_url,
+                additional_maintainer_keys,
             },
         ))
     }
