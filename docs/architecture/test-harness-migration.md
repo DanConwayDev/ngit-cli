@@ -225,15 +225,50 @@ in place with its remaining tests, and only disappears (along with its
 | 6a | `arrange_init_state_a_fresh`, `arrange_init_state_b_coordinate_only` | `ngit_init.rs` — state-a + state-b groups (~9 tests) | Delete migrated tests |
 | 6b | `arrange_init_state_c_my_announcement` | `ngit_init.rs` — state-c group (~9 tests) | Delete migrated tests |
 | 6c | `arrange_init_state_d_co_maintainer`, `arrange_init_state_e_not_listed` | `ngit_init.rs` — state-d + state-e groups (~12 tests) | File emptied → delete + `[[test]]` entry |
-| 7 | (none new — login flows minimised) | `ngit_login.rs` (~10 kept of 26; rest are pure dialoguer) | File emptied → delete + `[[test]]` entry |
+| 7 | (none new) | `ngit_login.rs` — file deleted in full, not migrated (see "ngit_login dropped wholesale" below) | File deleted; no `[[test]]` entry existed |
 | Final | — | — | Delete `test_utils/` crate, `tests/legacy/` directory, remaining `[[test]]` block in `Cargo.toml` |
 
 Order rationale: PR 1 is the smallest end-to-end proof; PR 2 is the
 biggest gain-per-LoC (already non-PTY); PR 3 unlocks state-event
 manipulation primitives that 4 reuses; the `4*`, `5*`, `6*` groups
 deliberately split heavy files so no single agent session exceeds a
-reasonable context budget. PR 7 is last because its drop ratio is
-highest and its replacement tests are smallest.
+reasonable context budget. PR 7 deletes the login file wholesale — see
+"ngit_login dropped wholesale" below.
+
+### ngit_login dropped wholesale
+
+The 26 tests in `tests/legacy/ngit_login.rs` are deleted in full rather
+than migrated. Rationale:
+
+1. **The file was already dead.** No `[[test]]` entry in `Cargo.toml`
+   (see lines 78–83 there) — `cargo test` has not been running it since
+   the legacy freeze. Deleting it removes zero coverage from the
+   currently-running suite.
+2. **~21 of 26 are pure PTY/dialoguer interaction.** `CliTester`,
+   `expect_choice`, `expect_input`, `-i` flag — explicitly banned by the
+   harness rules. These would be dropped under any migration plan.
+3. **The remaining ~5 non-interactive tests are already covered.**
+   `test_harness/src/scenarios.rs` runs
+   `ngit account login --local --nsec ...` in every `PublishedRepo`
+   flow (see `scenarios.rs:393, 399` and dozens of sites). Every PR,
+   send, fetch, push, and clone test in `tests/` depends on a successful
+   login; if `--nsec` login broke, the entire suite would break before
+   `ngit_login.rs`'s replacement ever ran.
+4. **The one genuine gap is `--password` / ncryptsec.** No coverage
+   exists in `tests/` or `test_harness/` for the password-encrypted-key
+   storage path. This is left as a deliberate follow-up: if/when
+   ncryptsec storage breaks, write a focused lighthouse test against
+   the *then-current* contract (e.g. `tests/account_login_password.rs`),
+   not a migration of a frozen PTY-heavy test that asserts on the old
+   dialoguer prompt shape.
+5. **`invalid_nsec_param_fails_without_prompts` asserts on an exact
+   error string** (`"Error: invalid nsec parameter\r\n\r\nCaused
+   by:\r\n    Invalid secret key\r\n"`) — banned by the no-exact-stdout
+   rule. Cannot be migrated as written; the underlying "non-zero exit
+   on invalid nsec" contract is trivially recoverable in a future
+   lighthouse if needed.
+
+PR 7 is therefore a pure deletion with no replacement tests added.
 
 ### Note for the `5*` PRs (push migrations)
 
@@ -261,12 +296,12 @@ headline totals (after rstest-aware reclassification):
 | `ngit_send.rs` | 39 | ~35 | 4 (3× exact-stdout `check_cli_output`, 1× pure dialoguer confirm-rendering) |
 | `git_remote_nostr/push.rs` | 28 | ~24 | 4 (exact-stdout `prints_git_helper_ok_respose`, redundant proposal-merge variants) |
 | `ngit_init.rs` | 35 | ~30 | ~5 (pure dialoguer error rendering with no flag bypass) |
-| `ngit_login.rs` | 26 | ~10 | ~16 (interactive nsec entry, retry loops, dialoguer choice rendering) |
+| `ngit_login.rs` | 26 | 0 | 26 (entire file dropped — see "ngit_login dropped wholesale") |
 | `ngit_pr_checkout.rs` | 15 | 15 | 0 |
 | `git_remote_nostr/list.rs` | 5 | 5 | 0 |
 | `git_remote_nostr/fetch.rs` | 1 | 1 | 0 |
 | `git_remote_nostr/main.rs` | 1 | 0 | 1 (clone-runs-fetch, already covered by `clone_grasp.rs`) |
-| **Total** | **150** | **~120** | **~30** |
+| **Total** | **150** | **~110** | **~40** |
 
 Categories of drop, exhaustively:
 
