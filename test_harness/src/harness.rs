@@ -1,10 +1,11 @@
 //! Harness builder and top-level fixture.
 //!
-//! `Harness` owns the relay + grasp roster and the binary paths needed to
-//! spawn ngit / git commands; it hands out per-test [`Repo`] fixtures via
-//! [`Harness::fresh_repo`]. Drop the `Harness` to shut everything down —
-//! vanilla relays are `Drop`-managed inside their wrappers, grasp servers
-//! have an explicit `Drop` that kills the subprocess, and `TempDir`s clean
+//! `Harness` owns the relay + grasp + vanilla-git-server roster and the
+//! binary paths needed to spawn ngit / git commands; it hands out
+//! per-test [`Repo`] fixtures via [`Harness::fresh_repo`]. Drop the
+//! `Harness` to shut everything down — vanilla relays and vanilla git
+//! servers are `Drop`-managed inside their wrappers, grasp servers have
+//! an explicit `Drop` that kills the subprocess, and `TempDir`s clean
 //! themselves up.
 
 use std::{
@@ -14,7 +15,9 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::{grasp::GraspServer, port, relay::VanillaRelay, repo::Repo};
+use crate::{
+    grasp::GraspServer, port, relay::VanillaRelay, repo::Repo, vanilla_git_server::VanillaGitServer,
+};
 
 /// Per-role relay + grasp roster + injected env, ready to drive ngit
 /// subprocesses.
@@ -26,6 +29,14 @@ pub struct Harness {
     /// match `relays`. Roles `"repo"` (or any unrecognised label) feed into
     /// `NGIT_GRASP_DEFAULT_SET`.
     grasps: BTreeMap<String, Vec<GraspServer>>,
+    /// In-process vanilla git servers keyed by role label, each fronting
+    /// a harness-owned **empty** bare repo (via
+    /// [`VanillaGitServer::start_empty`]). Unlike relays/grasps these do
+    /// **not** inject into any `NGIT_*_SET` env var — ngit has no
+    /// process-level discovery mechanism for git servers; clone URLs
+    /// flow through the kind-30617 announcement event per-repo. Role is
+    /// a pure lookup key here, with no aggregation semantics.
+    vanilla_git_servers: BTreeMap<String, Vec<VanillaGitServer>>,
     /// Absolute path to the `ngit` binary under test.
     ngit_bin: PathBuf,
     /// Absolute path to the `git-remote-nostr` binary under test. Stored
@@ -45,6 +56,7 @@ impl Harness {
         HarnessBuilder {
             relay_roles: Vec::new(),
             grasp_roles: Vec::new(),
+            vanilla_git_server_roles: Vec::new(),
             ngit_bin: ngit_bin.into(),
             git_remote_nostr_bin: git_remote_nostr_bin.into(),
         }
@@ -76,6 +88,26 @@ impl Harness {
     /// All grasp servers for a role.
     pub fn grasps(&self, role: &str) -> &[GraspServer] {
         self.grasps.get(role).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Look up a vanilla git server by role. Panics if the role has no
+    /// servers — caller bug, not a test failure mode. Servers registered
+    /// via [`HarnessBuilder::with_vanilla_git_server`] start as **empty
+    /// bare repos**; tests that need pre-populated content push to the
+    /// server's [`VanillaGitServer::url`] from a side working tree.
+    pub fn vanilla_git_server(&self, role: &str) -> &VanillaGitServer {
+        self.vanilla_git_servers
+            .get(role)
+            .and_then(|v| v.first())
+            .unwrap_or_else(|| panic!("no vanilla git server registered under role {role:?}"))
+    }
+
+    /// All vanilla git servers for a role.
+    pub fn vanilla_git_servers(&self, role: &str) -> &[VanillaGitServer] {
+        self.vanilla_git_servers
+            .get(role)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Take ownership of a grasp server registered under `role`, removing
@@ -169,6 +201,7 @@ impl Harness {
 pub struct HarnessBuilder {
     relay_roles: Vec<String>,
     grasp_roles: Vec<String>,
+    vanilla_git_server_roles: Vec<String>,
     ngit_bin: PathBuf,
     git_remote_nostr_bin: PathBuf,
 }
@@ -192,6 +225,27 @@ impl HarnessBuilder {
     /// look-ups via `Harness::grasp(role)`.
     pub fn with_grasp_server(mut self, role: impl Into<String>) -> Self {
         self.grasp_roles.push(role.into());
+        self
+    }
+
+    /// Register an in-process vanilla (non-grasp) git server under the
+    /// given role label. The server is started against a freshly
+    /// initialised empty bare repo
+    /// (via [`VanillaGitServer::start_empty`]), so `git ls-remote`
+    /// against its URL returns zero refs until a test pushes content
+    /// into it.
+    ///
+    /// **No env-var injection.** Unlike [`Self::with_relay`] /
+    /// [`Self::with_grasp_server`], vanilla git servers are not
+    /// advertised through any `NGIT_*_SET` — ngit does not discover git
+    /// servers from process env; clone URLs flow through the kind-30617
+    /// announcement event per-repo. The role label here is a pure lookup
+    /// key for `Harness::vanilla_git_server(role)`.
+    ///
+    /// Used to cover the `is_grasp_server_clone_url == false` branches
+    /// throughout the codebase that [`GraspServer`] cannot exercise.
+    pub fn with_vanilla_git_server(mut self, role: impl Into<String>) -> Self {
+        self.vanilla_git_server_roles.push(role.into());
         self
     }
 
@@ -231,9 +285,21 @@ impl HarnessBuilder {
             grasps.entry(role).or_default().push(server);
         }
 
+        let mut vanilla_git_servers: BTreeMap<String, Vec<VanillaGitServer>> = BTreeMap::new();
+        for role in self.vanilla_git_server_roles {
+            let reservation = port::reserve_port().with_context(|| {
+                format!("failed to reserve port for vanilla git server role {role:?}")
+            })?;
+            let server = VanillaGitServer::start_empty(role.clone(), reservation)
+                .await
+                .with_context(|| format!("failed to start vanilla git server for role {role:?}"))?;
+            vanilla_git_servers.entry(role).or_default().push(server);
+        }
+
         Ok(Harness {
             relays,
             grasps,
+            vanilla_git_servers,
             ngit_bin: self.ngit_bin,
             git_remote_nostr_bin: self.git_remote_nostr_bin,
         })

@@ -14,6 +14,15 @@
 //! covers the non-grasp branch with the cheapest possible "just a git
 //! server" implementation.
 //!
+//! ## Two entry points
+//!
+//! - [`VanillaGitServer::start`] — front a bare clone of an existing
+//!   `source_repo`. Used when a test wants pre-populated content on the server.
+//! - [`VanillaGitServer::start_empty`] — front a freshly initialised empty bare
+//!   repo (`git init --bare -b main`). Used by the [`crate::Harness`]
+//!   integration where the server is registered at builder time, before any
+//!   test repo exists. Tests that need content push it explicitly.
+//!
 //! ## Why not link the upstream version
 //!
 //! ngit-grasp has a near-identical `SimpleGitServer` / `SmartGitServer`
@@ -21,20 +30,18 @@
 //! own tests and not exposed as a library, so we vendor the smart-HTTP
 //! variant here with three differences worth noting up front:
 //!
-//! 1. **Push works.** The upstream version returns 403 for
-//!    `git-receive-pack`; we implement the symmetric handler and accept
-//!    pushes by default. Configured to allow deletes and non-fast-forwards
-//!    so force-push and delete-branch tests behave as the test author
-//!    expects.
-//! 2. **Hooks are stripped after clone.** `git clone --bare` copies the
-//!    source repo's `hooks/` directory; an over-zealous `pre-receive`
-//!    would reject every push. We wipe `hooks/` after the clone — tests
-//!    can install their own hook content into [`Self::repo_path`] if
-//!    they need one.
+//! 1. **Push works.** The upstream version returns 403 for `git-receive-pack`;
+//!    we implement the symmetric handler and accept pushes by default.
+//!    Configured to allow deletes and non-fast-forwards so force-push and
+//!    delete-branch tests behave as the test author expects.
+//! 2. **Hooks are stripped after clone.** `git clone --bare` copies the source
+//!    repo's `hooks/` directory; an over-zealous `pre-receive` would reject
+//!    every push. We wipe `hooks/` after the clone — tests can install their
+//!    own hook content into [`Self::repo_path`] if they need one.
 //! 3. **Drop joins the accept task.** Best-effort blocking shutdown via
 //!    `tokio::task::block_in_place` + `Handle::block_on`, matching the
-//!    `GraspServer` reaping pattern. Avoids zombie listener tasks
-//!    accumulating across a large parallel test run.
+//!    `GraspServer` reaping pattern. Avoids zombie listener tasks accumulating
+//!    across a large parallel test run.
 //!
 //! ## Port management
 //!
@@ -124,13 +131,11 @@ impl VanillaGitServer {
         reservation: PortReservation,
         source_repo: &Path,
     ) -> Result<Self> {
-        let role = role.into();
-        let port = reservation.port();
-
-        // Prepare the bare clone before releasing the reservation. This
-        // keeps the port held while we do the slowest part of startup,
-        // which means concurrent `reserve_port` calls still can't be
-        // handed this number.
+        // Prepare the bare clone *before* releasing the reservation by
+        // way of `into_std_listener` (which happens inside `bootstrap`).
+        // This keeps the port held while we do the slowest part of
+        // startup, which means concurrent `reserve_port` calls still
+        // can't be handed this number.
         let temp_dir =
             TempDir::new().context("failed to allocate tempdir for VanillaGitServer bare repo")?;
         let repo_path = temp_dir.path().join("repo.git");
@@ -148,12 +153,78 @@ impl VanillaGitServer {
             );
         }
 
-        // Strip any hooks the source repo carried. Tests that need a hook
-        // installed do so explicitly via `Self::repo_path()`.
+        Self::bootstrap(role, reservation, temp_dir, repo_path).await
+    }
+
+    /// Start a vanilla git server fronting a freshly initialised, empty
+    /// bare repository — `git init --bare -b main` inside a harness-owned
+    /// tempdir. The repo has zero refs at startup, so `git ls-remote`
+    /// against the returned URL succeeds with empty output (a clean
+    /// liveness check that doesn't smuggle ref names into a test's
+    /// assumptions).
+    ///
+    /// Intended for the [`crate::Harness`] integration where the server
+    /// is registered at builder time, before any test repo exists. Tests
+    /// that need pre-populated content either:
+    ///
+    /// - push their own commits to the server with `git push <Self::url()>
+    ///   <branch>` from a test-authored working tree, then continue, or
+    /// - construct a sourced server explicitly via [`Self::start`].
+    ///
+    /// Same port-reservation, hook-stripping, and runtime requirements
+    /// as [`Self::start`] — see the module-level docs.
+    pub async fn start_empty(
+        role: impl Into<String>,
+        reservation: PortReservation,
+    ) -> Result<Self> {
+        let temp_dir = TempDir::new()
+            .context("failed to allocate tempdir for empty VanillaGitServer bare repo")?;
+        let repo_path = temp_dir.path().join("repo.git");
+
+        // `-b main` (initial-branch) sets HEAD to `ref: refs/heads/main`
+        // even though that ref doesn't exist yet, matching what a
+        // freshly init'd source repo would look like. Tests that push to
+        // the server with `main:main` therefore end up with the same
+        // ref layout they'd get against any real-world git host.
+        let output = Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&repo_path)
+            .output()
+            .context("failed to invoke git init --bare")?;
+        if !output.status.success() {
+            bail!(
+                "git init --bare failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        Self::bootstrap(role, reservation, temp_dir, repo_path).await
+    }
+
+    /// Shared tail of [`Self::start`] / [`Self::start_empty`]: strip the
+    /// hooks dir, run `update-server-info`, promote the reservation's
+    /// listener into a tokio accept loop, and probe for readiness.
+    ///
+    /// `repo_path` must already exist and be a valid bare repo (whatever
+    /// produced it — `clone --bare` or `init --bare`).
+    async fn bootstrap(
+        role: impl Into<String>,
+        reservation: PortReservation,
+        temp_dir: TempDir,
+        repo_path: PathBuf,
+    ) -> Result<Self> {
+        let role = role.into();
+        let port = reservation.port();
+
+        // Strip any hooks the bare repo carries. `clone --bare` copies
+        // the source repo's hooks (an over-zealous `pre-receive` would
+        // reject every push); `init --bare` only ships disabled
+        // `.sample` files which are harmless but pointless. Either way,
+        // tests that need a hook installed do so explicitly via
+        // `Self::repo_path()`.
         let hooks_dir = repo_path.join("hooks");
         if hooks_dir.exists() {
-            std::fs::remove_dir_all(&hooks_dir)
-                .context("failed to strip hooks/ from bare clone")?;
+            std::fs::remove_dir_all(&hooks_dir).context("failed to strip hooks/ from bare repo")?;
             // git complains on some platforms if hooks/ is missing entirely;
             // recreate it empty so the dir is present but no hooks are installed.
             std::fs::create_dir(&hooks_dir).context("failed to recreate empty hooks/ dir")?;
@@ -245,7 +316,10 @@ impl VanillaGitServer {
         // in the module-level docs for why blocking sync git calls from
         // the test thread still need a worker thread to be available.
         for _ in 0..50 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -262,9 +336,9 @@ impl VanillaGitServer {
         })
     }
 
-    /// Role label this server was registered under. Free-form — `VanillaGitServer`
-    /// instances are not (currently) aggregated by role inside the harness,
-    /// unlike `VanillaRelay` / `GraspServer`.
+    /// Role label this server was registered under. Free-form —
+    /// `VanillaGitServer` instances are not (currently) aggregated by role
+    /// inside the harness, unlike `VanillaRelay` / `GraspServer`.
     pub fn role(&self) -> &str {
         &self.role
     }
@@ -346,7 +420,10 @@ async fn handle_request(
                 Ok(handle_info_refs(repo_path, Service::UploadPack, git_protocol.as_deref()).await)
             }
             Some("git-receive-pack") => {
-                Ok(handle_info_refs(repo_path, Service::ReceivePack, git_protocol.as_deref()).await)
+                Ok(
+                    handle_info_refs(repo_path, Service::ReceivePack, git_protocol.as_deref())
+                        .await,
+                )
             }
             _ => Ok(plain_response(
                 StatusCode::BAD_REQUEST,
@@ -358,12 +435,18 @@ async fn handle_request(
     // POST /git-upload-pack | /git-receive-pack
     if method == Method::POST {
         if path.ends_with("/git-upload-pack") {
-            return Ok(handle_rpc(req, repo_path, Service::UploadPack, git_protocol.as_deref())
-                .await);
+            return Ok(
+                handle_rpc(req, repo_path, Service::UploadPack, git_protocol.as_deref()).await,
+            );
         }
         if path.ends_with("/git-receive-pack") {
-            return Ok(handle_rpc(req, repo_path, Service::ReceivePack, git_protocol.as_deref())
-                .await);
+            return Ok(handle_rpc(
+                req,
+                repo_path,
+                Service::ReceivePack,
+                git_protocol.as_deref(),
+            )
+            .await);
         }
     }
 
@@ -457,7 +540,10 @@ async fn handle_info_refs(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[VanillaGitServer] spawn {} failed: {e}", service.git_subcommand());
+            eprintln!(
+                "[VanillaGitServer] spawn {} failed: {e}",
+                service.git_subcommand()
+            );
             return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "spawn failed");
         }
     };
@@ -528,7 +614,10 @@ async fn handle_rpc(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[VanillaGitServer] spawn {} failed: {e}", service.git_subcommand());
+            eprintln!(
+                "[VanillaGitServer] spawn {} failed: {e}",
+                service.git_subcommand()
+            );
             return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "spawn failed");
         }
     };
@@ -637,7 +726,10 @@ mod tests {
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains(&head), "ls-remote missing head: {stdout}");
-        assert!(stdout.contains("refs/heads/main"), "ls-remote missing main: {stdout}");
+        assert!(
+            stdout.contains("refs/heads/main"),
+            "ls-remote missing main: {stdout}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -661,13 +753,19 @@ mod tests {
         );
 
         // 2. commit on a new branch and push it
-        run_git_in(work.path(), &["config", "user.email", "harness@example.com"]);
+        run_git_in(
+            work.path(),
+            &["config", "user.email", "harness@example.com"],
+        );
         run_git_in(work.path(), &["config", "user.name", "Harness"]);
         run_git_in(work.path(), &["config", "commit.gpgSign", "false"]);
         run_git_in(work.path(), &["checkout", "-b", "feature"]);
         std::fs::write(work.path().join("new.txt"), "added\n").unwrap();
         run_git_in(work.path(), &["add", "new.txt"]);
-        run_git_in(work.path(), &["commit", "-m", "add new.txt", "--no-gpg-sign"]);
+        run_git_in(
+            work.path(),
+            &["commit", "-m", "add new.txt", "--no-gpg-sign"],
+        );
         let push_out = std::process::Command::new("git")
             .args(["push", "origin", "feature"])
             .current_dir(work.path())
@@ -714,7 +812,10 @@ mod tests {
             String::from_utf8_lossy(&ls.stderr)
         );
         let pushed_tip = String::from_utf8(ls.stdout).unwrap().trim().to_string();
-        assert_eq!(pushed_tip, work_tip, "pushed tip should be visible on reclone");
+        assert_eq!(
+            pushed_tip, work_tip,
+            "pushed tip should be visible on reclone"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -778,15 +879,101 @@ mod tests {
             .unwrap();
         assert!(ls.status.success());
         let stdout = String::from_utf8_lossy(&ls.stdout);
-        assert!(stdout.trim().is_empty(), "divergent should be gone: {stdout}");
+        assert!(
+            stdout.trim().is_empty(),
+            "divergent should be gone: {stdout}"
+        );
     }
 
     fn run_git_in(dir: &Path, args: &[&str]) {
-        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `start_empty` produces a server whose backing repo has zero refs
+    /// — `ls-remote` succeeds with empty stdout. Liveness probe shape
+    /// for the [`crate::Harness`] integration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_empty_ls_remote_returns_zero_refs() {
+        let server = VanillaGitServer::start_empty("empty-test", reserve_port().unwrap())
+            .await
+            .unwrap();
+        let out = tokio::process::Command::new("git")
+            .args(["ls-remote", server.url()])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "ls-remote on empty server failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.trim().is_empty(),
+            "empty server should advertise zero refs; got: {stdout:?}"
+        );
+    }
+
+    /// `start_empty` produces a writeable server — a test can push a
+    /// branch into it from a side working tree, and the pushed tip is
+    /// then visible via `ls-remote`. This is the canonical
+    /// "harness-managed bare server, test seeds content on demand"
+    /// pattern.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_empty_accepts_initial_push() {
+        let server = VanillaGitServer::start_empty("empty-push", reserve_port().unwrap())
+            .await
+            .unwrap();
+
+        let work = TempDir::new().unwrap();
+        run_git(&work, &["init", "-b", "main"]);
+        run_git(&work, &["config", "user.email", "h@e.com"]);
+        run_git(&work, &["config", "user.name", "h"]);
+        run_git(&work, &["config", "commit.gpgSign", "false"]);
+        std::fs::write(work.path().join("seed.md"), "seed\n").unwrap();
+        run_git(&work, &["add", "seed.md"]);
+        run_git(&work, &["commit", "-m", "seed", "--no-gpg-sign"]);
+        let head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(work.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let push_out = std::process::Command::new("git")
+            .args(["push", server.url(), "main:main"])
+            .current_dir(work.path())
+            .output()
+            .unwrap();
+        assert!(
+            push_out.status.success(),
+            "initial push to empty server failed: {}",
+            String::from_utf8_lossy(&push_out.stderr)
+        );
+
+        let ls = std::process::Command::new("git")
+            .args(["ls-remote", "--heads", server.url(), "main"])
+            .output()
+            .unwrap();
+        assert!(ls.status.success());
+        let stdout = String::from_utf8_lossy(&ls.stdout);
+        assert!(
+            stdout.contains(&head),
+            "ls-remote missing pushed tip {head}; got: {stdout}"
         );
     }
 }

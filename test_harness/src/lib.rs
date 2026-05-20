@@ -23,11 +23,17 @@
 //! - [`vanilla_git_server::VanillaGitServer`] — in-process smart-HTTP git
 //!   server with **full push and fetch support**, for tests that need a
 //!   non-grasp clone URL on a repo announcement. Covers the
-//!   `is_grasp_server_clone_url == false` branches throughout the codebase
-//!   that `GraspServer` cannot exercise.
-//! - [`Harness`] / [`HarnessBuilder`] — fluent role-keyed roster of relays plus
-//!   grasp servers; emits the `NGITTEST=TRUE` + four `NGIT_*_SET` env vars
-//!   consumed by `Params::default()` in `src/lib/client.rs`.
+//!   `is_grasp_server_clone_url == false` branches throughout the codebase that
+//!   `GraspServer` cannot exercise. Register via
+//!   [`HarnessBuilder::with_vanilla_git_server`] (empty bare repo, harness-
+//!   owned lifetime) and look up with [`Harness::vanilla_git_server`]; or
+//!   construct directly via [`VanillaGitServer::start`] when the test needs a
+//!   pre-populated source repo.
+//! - [`Harness`] / [`HarnessBuilder`] — fluent role-keyed roster of relays,
+//!   grasp servers, and vanilla git servers; emits the `NGITTEST=TRUE` + four
+//!   `NGIT_*_SET` env vars consumed by `Params::default()` in
+//!   `src/lib/client.rs` (vanilla git servers are role-keyed lookups only — no
+//!   env injection, since ngit has no process-level git-server discovery).
 //! - [`repo::Repo`] — `TempDir`-backed git repo, with [`Repo::ngit`] /
 //!   [`Repo::git`] returning a `Command` pre-configured with the harness's env
 //!   so children (git → git-remote-nostr) inherit it via `execve`.

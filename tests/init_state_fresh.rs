@@ -17,12 +17,20 @@
 //!   - `name_only_missing_server_infra` → "missing --grasp-server"
 //!   - `relays_only_missing_name_and_servers` → "missing required fields" (the
 //!     "two missing" branch)
-//! - **Success** (1 captured snapshot, 7 rstest cases asserting on different
-//!   tags of the produced kind-30617). Setup runs once per test binary via
-//!   [`tokio::sync::OnceCell`]; every case is a read-only assertion on the
-//!   captured `Snapshot`. Same discipline as `tests/send_patch.rs` and
+//! - **Success — grasp path** (1 captured snapshot, 7 rstest cases asserting on
+//!   different tags of the produced kind-30617). Setup runs once per test
+//!   binary via [`tokio::sync::OnceCell`]; every case is a read-only assertion
+//!   on the captured `Snapshot`. Same discipline as `tests/send_patch.rs` and
 //!   `tests/git_push_state/fresh_repo.rs` — see those files' module-level docs
 //!   for the rationale.
+//! - **Success — non-grasp clone path** (1 standalone test —
+//!   `vanilla_clone_url_passes_through_to_announcement`): drives `ngit init
+//!   --name --clone <vanilla_url> --relay <ws>` against a harness-managed
+//!   [`VanillaGitServer`](test_harness::VanillaGitServer), exercising the
+//!   `is_grasp_server_clone_url == false` arm of init.rs + repo_ref.rs. Single
+//!   test rather than an OnceCell snapshot because the non-grasp shape has only
+//!   one tag assertion worth pinning here (the verbatim clone-URL pass-through)
+//!   plus a server-liveness probe — sharing buys nothing.
 //!
 //! ## Error-message brittleness
 //!
@@ -443,6 +451,130 @@ async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Re
         })
         .context("announcement missing the `r <oid> euc` tag")?;
     assert_eq!(euc, s.root_oid);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Success — `--clone <vanilla_url> --relay <ws_url>` (non-grasp clone path)
+// ---------------------------------------------------------------------------
+
+/// `--name X --clone <vanilla> --relay <ws>` exercises the non-grasp
+/// clone-URL arm — the `is_grasp_server_clone_url == false` branches
+/// throughout `init.rs` (e.g. line 274) and `repo_ref.rs`. The
+/// harness-managed [`VanillaGitServer`](test_harness::VanillaGitServer)
+/// stands in for "any plain git host"; under `NGITTEST=TRUE` the
+/// post-init `git push` (init.rs:1195) is suppressed, so the server's
+/// wire path is exercised only by the test's own liveness probe — but
+/// the URL still has to round-trip through ngit's clone-URL handling
+/// without being rewritten or rejected.
+///
+/// Three things this pins:
+///
+/// 1. Harness integration: `with_vanilla_git_server("origin")` starts an empty
+///    bare server reachable at `Harness::vanilla_git_server("origin").url()`.
+/// 2. `git ls-remote <vanilla_url>` returns exit 0 with empty output — proves
+///    the in-process Smart-HTTP server is actually serving requests during the
+///    test, not just that `VanillaGitServer::start_empty` produced a URL
+///    string.
+/// 3. ngit takes `--clone + --relay` together as satisfying `validate_fresh`'s
+///    server-infra requirement (no `--grasp-server` needed; init.rs:362-370),
+///    accepts the vanilla URL, and emits it **verbatim** in the announcement's
+///    `clone` tag — without the `<npub>/<identifier>.git` suffix synthesis that
+///    the grasp path applies (cf. `clone_url_derived_from_grasp_server` above).
+///
+/// Uses a fresh `#[tokio::test(flavor = "multi_thread")]` rather than
+/// joining the shared snapshot above because the snapshot is keyed on
+/// `--grasp-server` and merging both shapes into one `ngit init` call
+/// would mask which arm produced which tag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_vanilla_git_server("origin")
+    .build()
+    .await?;
+
+    let (repo, state) = harness.arrange_init_state_a_fresh().await?;
+
+    let vanilla_url = harness.vanilla_git_server("origin").url().to_string();
+    let default_relay_url = harness.relay("default").url().to_string();
+
+    // Belt-and-braces liveness probe: ls-remote the empty bare repo
+    // *before* driving ngit. Catches a regression in the harness
+    // integration ("with_vanilla_git_server registered but never bound
+    // to a listener") at a clearly-attributable spot, separate from any
+    // ngit-side failure mode.
+    let ls = tokio::process::Command::new("git")
+        .args(["ls-remote", &vanilla_url])
+        .output()
+        .await
+        .context("failed to spawn git ls-remote against vanilla server")?;
+    assert!(
+        ls.status.success(),
+        "ls-remote against harness-managed vanilla git server failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&ls.stdout),
+        String::from_utf8_lossy(&ls.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&ls.stdout).trim().is_empty(),
+        "empty bare repo should advertise zero refs; got: {}",
+        String::from_utf8_lossy(&ls.stdout),
+    );
+
+    // `--clone + --relay` together satisfy validate_fresh's server-infra
+    // requirement (init.rs:362-370 `has_both_relays_and_clone_url`).
+    // No `--grasp-server`, so this exercises the non-grasp clone-URL
+    // arm exclusively.
+    let init_out = repo
+        .ngit([
+            "init",
+            "--name",
+            DISPLAY_NAME,
+            "--clone",
+            &vanilla_url,
+            "--relay",
+            &default_relay_url,
+        ])
+        .output()
+        .await
+        .context("failed to spawn ngit init --name --clone --relay")?;
+    if !init_out.status.success() {
+        bail!(
+            "ngit init exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            init_out.status,
+            String::from_utf8_lossy(&init_out.stdout),
+            String::from_utf8_lossy(&init_out.stderr),
+        );
+    }
+
+    let announcements = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(state.keys.public_key())
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    let announcement = announcements
+        .into_iter()
+        .find(|e| tag_value(e, "d").as_deref() == Some(EXPECTED_IDENTIFIER))
+        .with_context(|| {
+            format!(
+                "no kind-30617 with `d` = {EXPECTED_IDENTIFIER:?} on the default \
+                 relay after `ngit init --name --clone --relay`"
+            )
+        })?;
+
+    let clone_urls = tag_values(&announcement, "clone");
+    assert!(
+        clone_urls.iter().any(|u| u == &vanilla_url),
+        "expected vanilla URL {vanilla_url:?} verbatim in announcement's \
+         clone tag (no <npub>/<id>.git synthesis on the non-grasp path); \
+         got {clone_urls:?}",
+    );
     Ok(())
 }
 
