@@ -91,6 +91,13 @@ path = "tests/legacy/ngit_login.rs"
 name = "legacy_git_remote_nostr"
 path = "tests/legacy/git_remote_nostr/main.rs"
 
+# `git push` against a nostr:// remote — one submodule per scenario under
+# `tests/git_push_state/`. The directory layout means Cargo doesn't
+# auto-discover this test, so it needs an explicit entry.
+[[test]]
+name = "git_push_state"
+path = "tests/git_push_state/main.rs"
+
 [profile.release]
 lto = true
 strip = "symbols"
