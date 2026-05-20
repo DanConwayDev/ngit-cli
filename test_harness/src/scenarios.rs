@@ -45,6 +45,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, bail};
+use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
 use nostr_sdk::prelude::*;
 
 use crate::{clock, harness::Harness, repo::Repo};
@@ -1232,6 +1233,283 @@ pub enum PublishStateEventTarget {
     /// announcement's relay list (otherwise `list.rs` will not query it
     /// and the published event is invisible to the code under test).
     RelayUrl(String),
+}
+
+// ---------------------------------------------------------------------------
+// `ngit init` state-matrix arrange helpers
+//
+// `ngit init`'s validate_pre_fetch / validate_post_fetch chain in
+// `src/bin/ngit/sub_commands/init.rs:459-585` switches on five
+// distinguishable repo states (legacy ngit_init.rs::state_{a..e}):
+//
+// - State A "Fresh"          — no `nostr.repo` git config, no announcement
+// - State B "CoordinateOnly" — `nostr.repo` set, no announcement found
+// - State C "MyAnnouncement" — announcement on relays, signed by me
+// - State D "co-maintainer"  — announcement signed by someone else, lists me
+// - State E "not-listed"     — announcement signed by someone else, ignores me
+//
+// Each state has its own arrange helper rather than a single generic
+// builder because the shape of "what was already there before ngit init
+// runs" diverges meaningfully between them — co-maintainer and
+// not-listed publish different announcements, my-announcement requires
+// a maintainer-signed event on the right relays, etc. Burying that
+// inside `publish_repo` would erase the per-state intent at the call
+// site.
+//
+// State A and State B land here in PR 6a; State C lands in 6b; D + E
+// land in 6c (see `docs/architecture/test-harness-migration.md`).
+// ---------------------------------------------------------------------------
+
+/// Default seed-commit fan-out used by every `ngit init` arrange helper.
+///
+/// Three commits — one empty root + two file commits — so:
+///
+/// - The root commit (empty tree, no parents) is **distinct** from `HEAD`,
+///   which makes the `r euc` tag assertion non-degenerate (legacy
+///   `state_a_fresh::earliest_unique_commit_is_root` would pass even with a
+///   single-commit repo, but only because EUC == HEAD; capturing the root oid
+///   separately catches a regression where ngit emits HEAD's oid as the EUC).
+/// - The shape mirrors legacy `GitTestRepo::populate` (initial empty commit +
+///   `t1.md` + `t2.md`), so the migrated tests assert the *same* semantic
+///   property the legacy tests did, only against dynamically-captured oids
+///   instead of the hardcoded `9ee507fc...` baked into
+///   `test_utils::generate_repo_ref_event`.
+async fn populate_init_seed_commits(repo: &Repo) -> Result<(String, String)> {
+    // Initial empty commit — `--allow-empty` because no files have been
+    // staged yet. Mirrors legacy `initial_commit()`.
+    check_ok(
+        "git commit --allow-empty (initial)",
+        repo.git([
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initial commit",
+            "--no-gpg-sign",
+        ])
+        .output()
+        .await
+        .context("failed to spawn git commit --allow-empty")?,
+    )?;
+    let root_oid = head_oid(repo)
+        .await
+        .context("failed to read root oid after initial commit")?;
+
+    for (file_name, content) in [("t1.md", "some content"), ("t2.md", "some content1")] {
+        std::fs::write(repo.dir().join(file_name), content)
+            .with_context(|| format!("failed to write {file_name} in init-arrange repo"))?;
+        check_ok(
+            "git add",
+            repo.git(["add", file_name])
+                .output()
+                .await
+                .context("failed to spawn git add")?,
+        )?;
+        check_ok(
+            "git commit",
+            repo.git(["commit", "-m", &format!("add {file_name}"), "--no-gpg-sign"])
+                .output()
+                .await
+                .context("failed to spawn git commit")?,
+        )?;
+    }
+    let head_oid_str = head_oid(repo)
+        .await
+        .context("failed to read HEAD oid after seed commits")?;
+    Ok((root_oid, head_oid_str))
+}
+
+/// Run `ngit account create --local --name <display>` and return the
+/// resulting `(keys, nsec, npub)` triple. Shared between the State A and
+/// State B arrange helpers; both want a logged-in publisher identity
+/// before any state-specific setup.
+async fn create_publisher_account(
+    repo: &Repo,
+    display_name: &str,
+) -> Result<(Keys, String, String)> {
+    check_ok(
+        "ngit account create",
+        repo.ngit(["account", "create", "--local", "--name", display_name])
+            .output()
+            .await
+            .context("failed to spawn ngit account create")?,
+    )?;
+    let nsec = repo
+        .config("nostr.nsec")
+        .await?
+        .context("nostr.nsec missing from local git config after `ngit account create`")?;
+    let keys = Keys::parse(&nsec).context("nostr.nsec from local config is not a valid key")?;
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .context("failed to bech32-encode publisher pubkey")?;
+    Ok((keys, nsec, npub))
+}
+
+/// Captured side-state for a State A "Fresh" arrange.
+///
+/// `ngit init` running against this repo with no flags hits
+/// `validate_fresh` (init.rs:342); with `--name` + `--grasp-server` it
+/// publishes a fresh announcement.
+#[derive(Clone, Debug)]
+pub struct ArrangedInitStateA {
+    /// Publisher's keypair — useful for tests that filter the produced
+    /// announcement by pubkey.
+    pub keys: Keys,
+    /// Bech32 nsec, exactly what `nostr.nsec` in the repo's local
+    /// git-config holds. Surfaced so a test can drive `ngit` through a
+    /// second clone signed by the same identity if it wants to.
+    pub nsec: String,
+    /// Bech32 npub.
+    pub npub: String,
+    /// Oid of the **root commit** (the empty initial commit) — what
+    /// `r euc` should resolve to on a freshly-emitted kind-30617.
+    pub root_oid: String,
+    /// Oid of `HEAD` after the seed commits — distinct from `root_oid`
+    /// so EUC-vs-HEAD regressions are detectable.
+    pub head_oid: String,
+}
+
+/// Captured side-state for a State B "CoordinateOnly" arrange.
+///
+/// `ngit init` running against this repo with no flags hits the
+/// CoordinateOnly branch in `validate_post_fetch` (init.rs:515-530)
+/// because `nostr.repo` resolves to a coordinate but no announcement
+/// exists on the relays the coordinate names. With `--force` + a grasp
+/// server, ngit emits a fresh announcement whose `d` tag inherits the
+/// coordinate's identifier (legacy
+/// `state_b_coordinate_only::success::identifier_from_coordinate`).
+#[derive(Clone, Debug)]
+pub struct ArrangedInitStateB {
+    /// Publisher's keypair — same shape as
+    /// [`ArrangedInitStateA::keys`].
+    pub keys: Keys,
+    /// Bech32 nsec.
+    pub nsec: String,
+    /// Bech32 npub.
+    pub npub: String,
+    /// Root commit oid (empty initial). Same shape as
+    /// [`ArrangedInitStateA::root_oid`].
+    pub root_oid: String,
+    /// HEAD oid after seed commits.
+    pub head_oid: String,
+    /// `identifier` value that the State B arrange wrote into
+    /// `nostr.repo`'s coordinate. The post-init kind-30617 announcement
+    /// must carry this same value as its `d` tag — the State B
+    /// "inherits identifier from coordinate" contract.
+    pub coordinate_identifier: String,
+    /// Bech32 form of the `nostr.repo` coordinate ngit will read on
+    /// the next subcommand. Captured so tests that want to assert the
+    /// coordinate is *unchanged* by validate_post_fetch can do so
+    /// without re-deriving the bech32.
+    pub coordinate_bech32: String,
+}
+
+impl Harness {
+    /// State A "Fresh" arrange: a fresh repo with a logged-in publisher
+    /// account and three seed commits, but **no** `nostr.repo` git
+    /// config. Running `ngit init` against the returned [`Repo`]
+    /// without flags reproduces legacy
+    /// `state_a_fresh::errors::bare_no_flags`'s "missing required
+    /// fields" error; with `--name` + `--grasp-server` it reproduces
+    /// legacy `state_a_fresh::success`'s announcement publish.
+    ///
+    /// Requires `with_relay("default")` so `ngit account create` can
+    /// publish kind 0 / 10002 to the user's default-set; no grasp is
+    /// required here (the caller passes `--grasp-server` to the init
+    /// invocation it drives).
+    pub async fn arrange_init_state_a_fresh(&self) -> Result<(Repo, ArrangedInitStateA)> {
+        let repo = self.fresh_repo()?;
+        // Display name is fixed (rather than knob'd) because no migrated
+        // assertion in PR 6a inspects the publisher's display-name —
+        // they all assert on tags of the *announcement* event, which is
+        // the next subcommand's output, not this account's metadata.
+        let (keys, nsec, npub) = create_publisher_account(&repo, "ngit test maintainer").await?;
+        let (root_oid, head_oid) = populate_init_seed_commits(&repo).await?;
+
+        Ok((
+            repo,
+            ArrangedInitStateA {
+                keys,
+                nsec,
+                npub,
+                root_oid,
+                head_oid,
+            },
+        ))
+    }
+
+    /// State B "CoordinateOnly" arrange: same shape as
+    /// [`Harness::arrange_init_state_a_fresh`] but with `nostr.repo`
+    /// pre-populated with a Nip19Coordinate that **no relay carries an
+    /// announcement for**. The coordinate's pubkey is the publisher's
+    /// own (so the would-be announcement is not someone else's repo —
+    /// State C/D/E discriminator), and its identifier is unique enough
+    /// that no fan-out from a parallel test can plausibly land an event
+    /// matching it (the `root_oid` hex prefix is deterministic per-test
+    /// because each harness mints fresh keys + seed commits).
+    ///
+    /// Running `ngit init` against the returned [`Repo`] with no flags
+    /// reproduces legacy
+    /// `state_b_coordinate_only::errors::bare_no_flags`'s "no
+    /// announcement found for coordinate" error; with
+    /// `--force --grasp-server <url>` it publishes a new announcement
+    /// whose `d` tag inherits [`ArrangedInitStateB::coordinate_identifier`].
+    ///
+    /// The coordinate's `relays` list is set to the harness's `default`
+    /// vanilla relay URL — reachable so the lookup actually completes
+    /// (rather than timing out, which would mask the CoordinateOnly
+    /// path), but devoid of the kind-30617 the lookup is searching for.
+    pub async fn arrange_init_state_b_coordinate_only(&self) -> Result<(Repo, ArrangedInitStateB)> {
+        let (repo, state_a) = self.arrange_init_state_a_fresh().await?;
+
+        // Identifier baked from the root oid so a parallel test running
+        // an arrange against the *same* default relay can't accidentally
+        // collide on `(pubkey, kind, d-tag)` and surface as a stray
+        // announcement. The "-coord-only" suffix mirrors legacy's
+        // `-consider-it-random` shape so anyone reading the d tag in a
+        // test failure immediately sees this came from a State B fixture.
+        let coordinate_identifier = format!("{}-coord-only", &state_a.root_oid);
+
+        // Default relay is reachable (so ngit's lookup actually
+        // completes its REQ rather than hanging on a dead connection)
+        // but won't carry a matching kind-30617 — the State B
+        // discriminator. We deliberately don't list the grasp's relay
+        // here: a grasp queried for the coordinate's namespace would
+        // also return nothing (no announcement was published to it
+        // either), but listing only the vanilla relay keeps the
+        // arrange's intent unambiguous — "look here, find nothing".
+        let relay_url = RelayUrl::parse(self.relay("default").url())
+            .context("default relay's url is not a valid RelayUrl")?;
+        let coordinate = Nip19Coordinate {
+            coordinate: Coordinate::new(Kind::GitRepoAnnouncement, state_a.keys.public_key())
+                .identifier(coordinate_identifier.clone()),
+            relays: vec![relay_url],
+        };
+        let coordinate_bech32 = coordinate
+            .to_bech32()
+            .context("failed to bech32-encode fabricated state-B coordinate")?;
+
+        check_ok(
+            "git config --local nostr.repo (state-B coordinate)",
+            repo.git(["config", "--local", "nostr.repo", &coordinate_bech32])
+                .output()
+                .await
+                .context("failed to spawn git config --local nostr.repo")?,
+        )?;
+
+        Ok((
+            repo,
+            ArrangedInitStateB {
+                keys: state_a.keys,
+                nsec: state_a.nsec,
+                npub: state_a.npub,
+                root_oid: state_a.root_oid,
+                head_oid: state_a.head_oid,
+                coordinate_identifier,
+                coordinate_bech32,
+            },
+        ))
+    }
 }
 
 /// `git checkout -b <branch>` from `main`, write each `(filename, content)`,

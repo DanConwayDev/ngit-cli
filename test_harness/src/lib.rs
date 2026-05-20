@@ -49,7 +49,8 @@ pub use harness::{Harness, HarnessBuilder};
 pub use relay::VanillaRelay;
 pub use repo::Repo;
 pub use scenarios::{
-    CloneLogin, PublishPatchSeriesOpts, PublishPrOpts, PublishRepoOpts, PublishStateEventOpts,
-    PublishStateEventTarget, PublishedPatchSeries, PublishedPr, PublishedRepo,
+    ArrangedInitStateA, ArrangedInitStateB, CloneLogin, PublishPatchSeriesOpts, PublishPrOpts,
+    PublishRepoOpts, PublishStateEventOpts, PublishStateEventTarget, PublishedPatchSeries,
+    PublishedPr, PublishedRepo,
 };
 pub use snapshot::RepoSnapshot;
