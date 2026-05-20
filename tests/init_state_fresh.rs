@@ -31,6 +31,17 @@
 //!   test rather than an OnceCell snapshot because the non-grasp shape has only
 //!   one tag assertion worth pinning here (the verbatim clone-URL pass-through)
 //!   plus a server-liveness probe — sharing buys nothing.
+//! - **Success — pre-existing `origin` on a reachable vanilla git server** (1
+//!   standalone test —
+//!   `pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_tag`):
+//!   sets up an `origin` remote pointing at a harness-managed
+//!   [`VanillaGitServer`](test_harness::VanillaGitServer), pushes `main` plus
+//!   an annotated tag to it, then runs `ngit init` and checks (a) the `origin`
+//!   URL is rewritten to `nostr://`, (b) the first kind-30618 state event
+//!   covers the pre-existing tag without the user passing it on the CLI. Plugs
+//!   the gap left by legacy `state_d_*` tests, which only used an *unreachable*
+//!   origin and never exercised the origin-state-extraction branch in
+//!   init.rs:1213-1257.
 //!
 //! ## Error-message brittleness
 //!
@@ -577,6 +588,246 @@ async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
         "expected vanilla URL {vanilla_url:?} verbatim in announcement's \
          clone tag (no <npub>/<id>.git synthesis on the non-grasp path); \
          got {clone_urls:?}",
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Success — pre-existing `origin` remote on a vanilla git server, with
+// a branch and tag pushed *before* `ngit init` runs
+// ---------------------------------------------------------------------------
+
+/// Pre-populate a vanilla git server with `main` *and* an annotated tag,
+/// wire it up as the repo's `origin` remote, then run `ngit init`. Two
+/// behaviours pinned in one test because they're produced by the same
+/// `ngit init` invocation and pre-creating refs on a server is the
+/// expensive part of the arrange:
+///
+/// 1. **`origin` URL is rewritten to `nostr://`** — `ngit init` Step 7
+///    (init.rs:1310-1317) does `remote_set_url("origin", &nostr_url)`
+///    when an origin already exists, so the post-init `remote.origin.url`
+///    config key starts with `nostr://`. Legacy tests in `state_d_*`
+///    used an unreachable `https://localhost:1000` origin and never
+///    exercised the *reachable*-origin variant; this test plugs that gap.
+///
+/// 2. **The first kind-30618 state event covers the pre-existing tag** even
+///    though the tag was never passed on the CLI. `ngit init`'s origin-state
+///    branch (init.rs:1213-1257) runs `list_from_remote` against the existing
+///    `origin`, filters to `refs/heads/*` + `refs/tags/*` + `HEAD`, and bakes
+///    those into the `RepoState::build` event added to the publish batch. The
+///    tag being present in the state event without ever appearing on the `ngit
+///    init` command line is the property the user asked for: "the first state
+///    event pushed should take the existing state of an existing git server".
+///
+/// The arrange uses [`Repo::git`] (sync git operations against the
+/// vanilla server's plain HTTP URL) rather than the harness's
+/// [`Repo::nostr_push`] timing wrapper, because nothing in this arrange
+/// emits a kind-30618 — those pushes don't go through
+/// `git-remote-nostr`, so there's no same-second event-id collision
+/// risk to dodge.
+///
+/// Multi-thread runtime: the vanilla server's accept loop runs as a
+/// tokio task, and the test thread spawns blocking `git push`
+/// subprocesses against it; on a single-worker `current_thread`
+/// executor the test thread blocks the runtime before the accept loop
+/// gets to poll, which deadlocks. Two workers is the minimum that
+/// makes the wire path live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_tag() -> Result<()> {
+    /// Tag pushed to the vanilla server before `ngit init` runs. Annotated
+    /// rather than lightweight so the produced kind-30618 has to carry the
+    /// `<tag-object-oid>` (not the commit's oid) under the
+    /// `refs/tags/<TAG_NAME>` slot — `list_from_remote` reports whatever
+    /// the server advertises for the ref, and `git push origin tag <name>`
+    /// of an annotated tag advertises the tag-object oid. Catches a
+    /// regression where init.rs starts unwrapping annotated tags to their
+    /// commit before baking into the state event.
+    const TAG_NAME: &str = "v0.1.0";
+
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_vanilla_git_server("host")
+    .build()
+    .await?;
+
+    let (repo, state) = harness.arrange_init_state_a_fresh().await?;
+    let vanilla_url = harness.vanilla_git_server("host").url().to_string();
+    let default_relay_url = harness.relay("default").url().to_string();
+
+    // Step 1: wire vanilla server up as `origin` and push the existing
+    // history to it. This is the "pre-existing remote with content"
+    // shape the test name describes.
+    let out = repo
+        .git(["remote", "add", "origin", &vanilla_url])
+        .output()
+        .await
+        .context("failed to spawn git remote add origin")?;
+    if !out.status.success() {
+        bail!(
+            "git remote add origin exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    let out = repo
+        .git(["push", "origin", "main"])
+        .output()
+        .await
+        .context("failed to spawn git push origin main")?;
+    if !out.status.success() {
+        bail!(
+            "git push origin main exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    // Annotated tag so the server advertises the tag-object oid, not
+    // the commit oid. `-m` makes it annotated rather than lightweight;
+    // see TAG_NAME's doc for why this matters.
+    let out = repo
+        .git(["tag", "-a", TAG_NAME, "-m", "release v0.1.0"])
+        .output()
+        .await
+        .context("failed to spawn git tag -a")?;
+    if !out.status.success() {
+        bail!(
+            "git tag -a exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    let out = repo
+        .git(["push", "origin", "tag", TAG_NAME])
+        .output()
+        .await
+        .context("failed to spawn git push origin tag")?;
+    if !out.status.success() {
+        bail!(
+            "git push origin tag {TAG_NAME} exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    // Liveness/pre-condition probe: the tag is on the server *before*
+    // ngit init runs. Failing this proves the test's setup is wrong
+    // rather than ngit's read of the server.
+    let ls = tokio::process::Command::new("git")
+        .args(["ls-remote", "--tags", &vanilla_url])
+        .output()
+        .await
+        .context("failed to spawn git ls-remote --tags against vanilla server")?;
+    assert!(
+        ls.status.success(),
+        "ls-remote against vanilla server failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&ls.stdout),
+        String::from_utf8_lossy(&ls.stderr),
+    );
+    let tag_listing = String::from_utf8_lossy(&ls.stdout);
+    assert!(
+        tag_listing.contains(&format!("refs/tags/{TAG_NAME}")),
+        "expected refs/tags/{TAG_NAME} on vanilla server before ngit init; \
+         ls-remote --tags reported: {tag_listing}",
+    );
+
+    // Step 2: run `ngit init`. `--clone` + `--relay` together satisfy
+    // `validate_fresh`'s server-infra requirement (init.rs:362-370); the
+    // origin remote is already pointing at this URL so the origin-state
+    // branch (init.rs:1213-1257) is the one we want to fire.
+    let init_out = repo
+        .ngit([
+            "init",
+            "--name",
+            DISPLAY_NAME,
+            "--clone",
+            &vanilla_url,
+            "--relay",
+            &default_relay_url,
+        ])
+        .output()
+        .await
+        .context("failed to spawn ngit init")?;
+    if !init_out.status.success() {
+        bail!(
+            "ngit init exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            init_out.status,
+            String::from_utf8_lossy(&init_out.stdout),
+            String::from_utf8_lossy(&init_out.stderr),
+        );
+    }
+
+    // Assertion 1: origin remote URL rewritten to nostr://. This Step
+    // runs unconditionally (init.rs:1310-1317) regardless of NGITTEST,
+    // so it's the cheap half of the test to verify.
+    let origin_url = repo
+        .config("remote.origin.url")
+        .await
+        .context("failed to read remote.origin.url after ngit init")?
+        .context("remote.origin.url was unset after ngit init")?;
+    assert!(
+        origin_url.starts_with("nostr://"),
+        "expected `remote.origin.url` rewritten from {vanilla_url:?} to a \
+         nostr:// URL after ngit init Step 7; got {origin_url:?}",
+    );
+
+    // Assertion 2: a kind-30618 state event was published, and it
+    // covers the tag we pushed to the vanilla server pre-init. The
+    // event lives on the default relay because `send_events` fans out
+    // to the user's relay-list.
+    let state_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(state.keys.public_key())
+                .kind(Kind::Custom(30618)),
+        )
+        .await?;
+    let state_event = state_events
+        .into_iter()
+        .find(|e| tag_value(e, "d").as_deref() == Some(EXPECTED_IDENTIFIER))
+        .with_context(|| {
+            format!(
+                "no kind-30618 state event with `d` = {EXPECTED_IDENTIFIER:?} on \
+                 the default relay after `ngit init` against a repo with a \
+                 pre-existing reachable `origin` remote — the origin-state \
+                 branch in init.rs:1213-1257 should have fired"
+            )
+        })?;
+
+    // The state event encodes each ref as a tag whose name slot is the
+    // full ref-path (e.g. `refs/tags/v0.1.0`) and whose value slot is
+    // the oid the server advertised. We only need to check the tag is
+    // there — the exact oid is whatever git assigned, which is opaque
+    // to this assertion.
+    let ref_tag_names: Vec<String> = state_event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            s.first().and_then(|name| {
+                if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    assert!(
+        ref_tag_names
+            .iter()
+            .any(|n| n == &format!("refs/tags/{TAG_NAME}")),
+        "expected first kind-30618 to cover refs/tags/{TAG_NAME} taken from \
+         the existing origin's state (the user never passed the tag on the \
+         `ngit init` command line); got ref-name tags: {ref_tag_names:?}",
     );
     Ok(())
 }

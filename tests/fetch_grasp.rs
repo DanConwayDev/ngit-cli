@@ -154,12 +154,28 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
     // A single `git push origin main vnext` updates both refs over the
     // same wire session, matching how a real first-push from a working
     // repo behaves once `ngit init` has rewritten origin to nostr://.
-    run_git_ok(
-        &publisher,
-        ["push", "-u", "origin", "main", "vnext"],
-        "git push main+vnext",
-    )
-    .await?;
+    //
+    // `nostr_push` rather than raw `git push` because origin is now a
+    // `nostr://` URL — `git-remote-nostr` emits a kind-30618 per push,
+    // and `ngit init` has just emitted its own kind-30618 by way of its
+    // post-init `push_main_or_master_branch` step. Without the
+    // `clock::tick_to_next_second` that `nostr_push` runs first, those
+    // two kind-30618s land in the same wall-clock second and the
+    // relay's replaceable-event-id collision check rejects the second
+    // one — causing the test to time out waiting for an updated state
+    // event further down. See AGENTS.md "Push to a nostr remote via
+    // `Repo::nostr_push`" and `test_harness/src/clock.rs` for the chain.
+    let push_out = publisher
+        .nostr_push(["-u", "origin", "main", "vnext"])
+        .await
+        .context("nostr_push main+vnext failed")?;
+    assert!(
+        push_out.status.success(),
+        "nostr_push main+vnext exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        push_out.status,
+        String::from_utf8_lossy(&push_out.stdout),
+        String::from_utf8_lossy(&push_out.stderr),
+    );
 
     // --- step 5: cloner clones, verifies both branches arrived ---------------
     let cloner = harness.fresh_repo()?;
@@ -203,15 +219,14 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
 
     // --- step 6: publisher advances main with a second commit ----------------
     //
-    // Nostr event `created_at` has 1-second resolution. Replaceable events
-    // (30000-39999) addressed by `(pubkey, kind, d-tag)` are kept by the
-    // relay only when `created_at` strictly increases; on a tie NIP-01
-    // says the lower-id event wins (`<id>` lexicographic). If push #1 and
-    // push #2 land in the same wall-clock second the kind-30618 from #1
-    // may keep the address, git-remote-nostr's `list` then advertises v1,
-    // and the cloner's `git fetch` is a no-op. Sleeping a hair over a
-    // second guarantees the new event's timestamp is strictly greater.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // `nostr_push` rather than raw `git push` for the same reason as
+    // step 4 — origin is `nostr://`, this push emits a kind-30618, and
+    // it must land in a strictly later wall-clock second than the
+    // previous push's kind-30618 to avoid the relay's replaceable-
+    // event-id collision check. The `tick_to_next_second` baked into
+    // `nostr_push` makes that property local to the publish that's
+    // about to happen, so we don't have to reason about prior pushes'
+    // timing.
 
     std::fs::write(publisher.dir().join("README.md"), "main v2\n")
         .context("failed to overwrite README.md for second commit")?;
@@ -222,12 +237,17 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
         "git commit second main",
     )
     .await?;
-    run_git_ok(
-        &publisher,
-        ["push", "origin", "main"],
-        "git push second main",
-    )
-    .await?;
+    let push_out = publisher
+        .nostr_push(["origin", "main"])
+        .await
+        .context("nostr_push second main failed")?;
+    assert!(
+        push_out.status.success(),
+        "nostr_push second main exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        push_out.status,
+        String::from_utf8_lossy(&push_out.stdout),
+        String::from_utf8_lossy(&push_out.stderr),
+    );
 
     let main_oid_v2 = publisher
         .snapshot()?
