@@ -373,7 +373,7 @@ async fn falls_back_to_git_server_when_state_event_references_missing_oids() -> 
     let fake_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
     let real_main_oid = published.initial_oid.clone();
 
-    let mut state = HashMap::new();
+    let mut state = BTreeMap::new();
     state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
     state.insert("refs/heads/main".to_string(), fake_oid.clone());
 
@@ -431,7 +431,7 @@ async fn lists_branches_from_state_event_when_matches_git_server() -> Result<()>
     // whose ref→oid map exactly matches what the bare repo has. `list.rs`
     // should walk newest-first, find this candidate resolvable, and use
     // it (rather than falling back).
-    let mut state = HashMap::new();
+    let mut state = BTreeMap::new();
     state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
     state.insert("refs/heads/main".to_string(), main_oid.clone());
     state.insert("refs/heads/example-branch".to_string(), vnext_oid.clone());
@@ -493,7 +493,7 @@ async fn state_event_takes_precedence_over_advanced_git_server_state() -> Result
     // OIDs are all real, so resolvability is satisfied either way — but
     // this matches the legacy test's choreography (publish state first,
     // then `git push` further commits).
-    let mut state = HashMap::new();
+    let mut state = BTreeMap::new();
     state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
     state.insert("refs/heads/main".to_string(), original_main_oid.clone());
     state.insert("refs/heads/example-branch".to_string(), example_oid.clone());
@@ -533,7 +533,7 @@ async fn state_event_takes_precedence_over_advanced_git_server_state() -> Result
     // the `git push` would be newest and the test would degenerate into
     // "newest state event wins" — already covered by case 2.
     push_branch(&publisher, "main").await?;
-    let mut state = HashMap::new();
+    let mut state = BTreeMap::new();
     state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
     state.insert("refs/heads/main".to_string(), original_main_oid.clone());
     state.insert("refs/heads/example-branch".to_string(), example_oid.clone());
@@ -642,7 +642,7 @@ async fn uses_older_resolvable_state_event_from_different_relay() -> Result<()> 
     // `created_at` than the auto event because `Repo::nostr_push`
     // inside `publish_repo` ticks one whole unix second after the
     // push completes.
-    let mut state = HashMap::new();
+    let mut state = BTreeMap::new();
     state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
     state.insert("refs/heads/main".to_string(), fake_oid.clone());
     harness

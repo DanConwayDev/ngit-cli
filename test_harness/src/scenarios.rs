@@ -1179,7 +1179,13 @@ pub struct PublishStateEventOpts {
     /// Mandatory: an empty state is not a meaningful regression target,
     /// and `list.rs:79-90` would treat it as "no refs advertised", which
     /// is more easily expressed by skipping the helper entirely.
-    pub state: std::collections::HashMap<String, String>,
+    ///
+    /// `BTreeMap` rather than `HashMap`: tag iteration order ends up on
+    /// the signed event, so determinism matters. Tests that assert on
+    /// event tag positions (or compare events by id across runs) would
+    /// otherwise flake when `HashMap`'s randomised iteration changed
+    /// the tag ordering between two same-coordinate publishes.
+    pub state: std::collections::BTreeMap<String, String>,
     /// `d` tag value. Defaults to [`PublishedRepo::identifier`] — the
     /// identifier carried by the kind-30617 announcement, which is what
     /// `list.rs:48-53` matches state events against. Override only for

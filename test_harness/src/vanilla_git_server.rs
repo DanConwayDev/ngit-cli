@@ -213,6 +213,22 @@ impl VanillaGitServer {
         temp_dir: TempDir,
         repo_path: PathBuf,
     ) -> Result<Self> {
+        // Fail loudly on a current_thread runtime rather than deadlocking
+        // when a test issues a blocking `git push` against this server. See
+        // the "Runtime requirement: multi_thread tokio" section of the
+        // module-level docs for the full reasoning. The default
+        // `#[tokio::test]` flavor *is* current_thread, so this is the
+        // failure mode most test authors will hit if they forget the
+        // `flavor = "multi_thread"` attribute.
+        let flavor = tokio::runtime::Handle::current().runtime_flavor();
+        if matches!(flavor, tokio::runtime::RuntimeFlavor::CurrentThread) {
+            bail!(
+                "VanillaGitServer requires a multi-thread tokio runtime; \
+                 annotate the test with #[tokio::test(flavor = \"multi_thread\")]. \
+                 See test_harness/src/vanilla_git_server.rs § \"Runtime requirement\"."
+            );
+        }
+
         let role = role.into();
         let port = reservation.port();
 
