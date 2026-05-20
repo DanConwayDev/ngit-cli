@@ -249,7 +249,7 @@ impl Repo {
         RepoSnapshot::capture(&self.dir)
     }
 
-    /// `git push <args...>`, then wait one whole unix second.
+    /// Wait one whole unix second, then `git push <args...>`.
     ///
     /// **Use this for every push to a nostr remote.** A push handled by
     /// `git-remote-nostr` emits an auto-generated kind-30618 state event
@@ -257,21 +257,23 @@ impl Repo {
     /// That state event's `created_at` has unix-second resolution, and the
     /// `nostr-relay-builder` `MemoryDatabase` tracks superseded
     /// replaceable-event ids as deleted (it adds them to its `deleted_ids`
-    /// set when discarding during replacement). Two events in the same second
-    /// with the same `(pubkey, kind, tags, content)` hash to the same id —
-    /// so any follow-up publish that lands in the same wall-clock second can
-    /// be rejected by the relay with `"blocked: this event is deleted"` even
-    /// though no NIP-09 deletion ever happened.
+    /// set when discarding during replacement). Two same-coordinate
+    /// replaceable events with identical `(pubkey, kind, tags, content)`
+    /// signed in the same wall-clock second hash to the same id — so an
+    /// about-to-be-published kind-30618 whose id collides with a
+    /// previously-superseded one at the same `(pubkey, kind, d-tag)`
+    /// coordinate is rejected by the relay with
+    /// `"blocked: this event is deleted"` even though no NIP-09 deletion
+    /// ever happened.
     ///
-    /// Calling this helper instead of `repo.git(["push", ...])` guarantees
-    /// that the next event published from anywhere in the test (another
-    /// push, another [`Harness::publish_state_event`], an explicit
-    /// `ngit send`) lands in a strictly later unix second, so id collisions
-    /// are impossible by construction. See [`crate::clock`] for the full
-    /// rationale.
-    ///
-    /// On `git push` failure the helper bails before sleeping — there's no
-    /// new event to space out from.
+    /// The fix belongs *before* the push, not after: the safety property
+    /// is "*this* publish's `created_at` is strictly later than any prior
+    /// same-coordinate publish", which is local to the publish that's
+    /// about to happen. So this helper ticks first, then runs `git push`,
+    /// then returns — and does not rely on whoever ran before it having
+    /// cleaned up. See [`crate::clock`] for the full rationale, and
+    /// [`Harness::publish_state_event`] for the explicit-publish sibling
+    /// that follows the same discipline.
     pub async fn nostr_push<I, S>(&self, args: I) -> Result<std::process::Output>
     where
         I: IntoIterator<Item = S>,
@@ -282,6 +284,9 @@ impl Repo {
             argv.push(a.as_ref().to_owned());
         }
         let label = format!("git {}", display_argv(&argv));
+        // Tick before publishing: the sleep is part of preparing to
+        // publish, not cleaning up. See the doc-comment above.
+        clock::tick_to_next_second().await;
         let out = self
             .git(&argv)
             .output()
@@ -295,7 +300,6 @@ impl Repo {
                 String::from_utf8_lossy(&out.stderr),
             );
         }
-        clock::tick_to_next_second().await;
         Ok(out)
     }
 }

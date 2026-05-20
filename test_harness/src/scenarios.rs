@@ -723,6 +723,22 @@ impl Harness {
             ));
         }
 
+        // Tick *before* building the event so this kind-30618's
+        // `created_at` (taken from `Timestamp::now()` at sign-time) lands
+        // in a strictly later unix second than any prior same-coordinate
+        // replaceable event. The collision being avoided is two
+        // same-coordinate replaceable events with identical
+        // `(pubkey, kind, tags, content)` sharing a `created_at` second
+        // — see `crate::clock` for the writeup. The tick is skipped when
+        // the caller explicitly asks for a back-dated `created_at` via
+        // `created_at_offset_secs`: the whole point of that knob is to
+        // produce an event with a deterministically older timestamp, and
+        // sleeping first would just make the test slower without
+        // changing anything.
+        if opts.created_at_offset_secs.is_none() {
+            clock::tick_to_next_second().await;
+        }
+
         // `created_at` defaults to "now"; `created_at_offset_secs` makes
         // the event look older by the given number of seconds, so a test
         // can publish "older resolvable" + "newer unresolvable" events
@@ -765,11 +781,6 @@ impl Harness {
                 output.failed,
             );
         }
-
-        // Guarantee the next event published from this harness lands in a
-        // strictly later unix second. See `crate::clock::tick_to_next_second`
-        // for the relay-builder quirk that makes this necessary.
-        clock::tick_to_next_second().await;
 
         Ok(event)
     }

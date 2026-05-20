@@ -37,7 +37,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use rstest::*;
-use test_harness::{Harness, RepoSnapshot, clock};
+use test_harness::{Harness, RepoSnapshot};
 use tokio::sync::OnceCell;
 
 /// `STATE_KIND` (`Kind::Custom(30618)`) mirrored locally to keep the test
@@ -250,10 +250,6 @@ async fn capture_snapshot() -> Result<Snapshot> {
         ],
     )
     .await?;
-    // Tick after a manual publish so the next event (the auto state
-    // event emitted by the first push below) lands in a strictly later
-    // unix second. See `test_harness::clock` for the writeup.
-    clock::tick_to_next_second().await;
 
     // ---------- wait for the grasps to materialise the bare repos -------
     let bare1 = grasp1
