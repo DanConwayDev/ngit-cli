@@ -883,9 +883,25 @@ pub fn apply_grasp_infrastructure(
 
 #[cfg(test)]
 mod tests {
-    use test_utils::*;
+    use once_cell::sync::Lazy;
 
     use super::*;
+
+    // Locally-defined fixtures (previously imported from the `test_utils`
+    // crate). Two stable nsec values are used so the public-key-ordered
+    // `maintainers` tag is deterministic.
+    static TEST_KEY_1_NSEC: &str =
+        "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
+    static TEST_KEY_2_NSEC: &str =
+        "nsec1ypglg6nj6ep0g2qmyfqcv2al502gje3jvpwye6mthmkvj93tqkesknv6qm";
+
+    static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
+        Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
+    static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
+        Lazy::new(|| nostr::Keys::from_str(TEST_KEY_2_NSEC).unwrap());
+
+    static TEST_KEY_1_SIGNER: Lazy<Arc<dyn NostrSigner>> =
+        Lazy::new(|| Arc::new(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap()));
 
     async fn create() -> nostr::Event {
         RepoRef {

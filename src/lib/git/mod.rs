@@ -17,6 +17,9 @@ pub mod identify_ahead_behind;
 pub mod nostr_url;
 pub mod utils;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 pub struct Repo {
     pub git_repo: git2::Repository,
 }
@@ -1258,9 +1261,8 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
 mod tests {
     use std::fs;
 
-    use test_utils::{generate_repo_ref_event, git::GitTestRepo};
-
     use super::*;
+    use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event};
 
     mod normalize_diff_prefix {
         use super::*;
@@ -2184,10 +2186,11 @@ index ce01362..a21e91c 100644\n\
 
     mod create_commit_from_patch {
 
-        use test_utils::TEST_KEY_1_SIGNER;
-
         use super::*;
-        use crate::{git_events::generate_patch_event, repo_ref::RepoRef};
+        use crate::{
+            git::test_helpers::TEST_KEY_1_SIGNER, git_events::generate_patch_event,
+            repo_ref::RepoRef,
+        };
 
         async fn generate_patch_from_head_commit(test_repo: &GitTestRepo) -> Result<nostr::Event> {
             let original_oid = test_repo.git_repo.head()?.peel_to_commit()?.id();
@@ -2220,9 +2223,8 @@ index ce01362..a21e91c 100644\n\
         }
 
         mod patch_created_as_commit_with_matching_id {
-            use test_utils::git::joe_signature;
-
             use super::*;
+            use crate::git::test_helpers::joe_signature;
 
             #[tokio::test]
             async fn simple_signature_author_committer_same_as_git_user_0_unixtime_no_pgp_signature()
@@ -2330,10 +2332,11 @@ index ce01362..a21e91c 100644\n\
     }
 
     mod apply_patch_chain {
-        use test_utils::TEST_KEY_1_SIGNER;
-
         use super::*;
-        use crate::{git_events::generate_cover_letter_and_patch_events, repo_ref::RepoRef};
+        use crate::{
+            git::test_helpers::TEST_KEY_1_SIGNER,
+            git_events::generate_cover_letter_and_patch_events, repo_ref::RepoRef,
+        };
 
         static BRANCH_NAME: &str = "add-example-feature";
         // returns original_repo, cover_letter_event, patch_events

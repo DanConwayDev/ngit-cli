@@ -887,9 +887,135 @@ mod tests {
         Kind,
         nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     };
-    use test_utils::git::GitTestRepo;
 
     use super::*;
+    use test_helpers::GitTestRepo;
+
+    /// Minimal in-process git repository fixture for these unit tests
+    /// (previously imported from the `test_utils` crate). The binary crate
+    /// can't see the lib's `#[cfg(test)]` helpers, so we keep a tiny copy
+    /// here. Only the surface area exercised by these tests is implemented.
+    mod test_helpers {
+        use std::{
+            env::current_dir,
+            fs,
+            path::PathBuf,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+
+        use anyhow::{Context, Result};
+        use git2::{Branch, Oid, RepositoryInitOptions, Signature, Time};
+        use once_cell::sync::Lazy;
+
+        fn joe_signature() -> Signature<'static> {
+            Signature::new("Joe Bloggs", "joe.bloggs@pm.me", &Time::new(0, 0)).unwrap()
+        }
+
+        fn unique_suffix() -> String {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            static SEED: Lazy<u64> = Lazy::new(|| {
+                let b = Box::new(0u8);
+                let addr = (&*b as *const u8) as u64;
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                addr ^ nanos ^ (std::process::id() as u64)
+            });
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("{:016x}{:08x}", *SEED, n)
+        }
+
+        pub struct GitTestRepo {
+            pub dir: PathBuf,
+            pub git_repo: git2::Repository,
+        }
+
+        impl Default for GitTestRepo {
+            fn default() -> Self {
+                // sync.rs tests don't care about nostr.repo config, so a plain
+                // git repo on `main` is sufficient.
+                Self::new("main").unwrap()
+            }
+        }
+
+        impl GitTestRepo {
+            pub fn new(main_branch_name: &str) -> Result<Self> {
+                let path = current_dir()?.join(format!("tmpgit-{}", unique_suffix()));
+                let git_repo = git2::Repository::init_opts(
+                    &path,
+                    RepositoryInitOptions::new()
+                        .initial_head(main_branch_name)
+                        .mkpath(true),
+                )?;
+                git_repo.config()?.set_bool("diff.mnemonicPrefix", false)?;
+                Ok(Self {
+                    dir: path,
+                    git_repo,
+                })
+            }
+
+            fn initial_commit(&self) -> Result<Oid> {
+                let oid = self.git_repo.index()?.write_tree()?;
+                let tree = self.git_repo.find_tree(oid)?;
+                let commit_oid = self.git_repo.commit(
+                    Some("HEAD"),
+                    &joe_signature(),
+                    &joe_signature(),
+                    "Initial commit",
+                    &tree,
+                    &[],
+                )?;
+                Ok(commit_oid)
+            }
+
+            pub fn populate(&self) -> Result<Oid> {
+                self.initial_commit()?;
+                fs::write(self.dir.join("t1.md"), "some content")?;
+                self.stage_and_commit("add t1.md")?;
+                fs::write(self.dir.join("t2.md"), "some content1")?;
+                self.stage_and_commit("add t2.md")
+            }
+
+            pub fn stage_and_commit(&self, message: &str) -> Result<Oid> {
+                let prev_oid = self.git_repo.head().unwrap().peel_to_commit()?;
+                let mut index = self.git_repo.index()?;
+                index.add_all(["."], git2::IndexAddOption::DEFAULT, None)?;
+                index.write()?;
+                let oid = self.git_repo.commit(
+                    Some("HEAD"),
+                    &joe_signature(),
+                    &joe_signature(),
+                    message,
+                    &self.git_repo.find_tree(index.write_tree()?)?,
+                    &[&prev_oid],
+                )?;
+                Ok(oid)
+            }
+
+            pub fn create_branch(&'_ self, branch_name: &str) -> Result<Branch<'_>> {
+                self.git_repo
+                    .branch(branch_name, &self.git_repo.head()?.peel_to_commit()?, false)
+                    .context("could not create branch")
+            }
+
+            pub fn checkout(&self, ref_name: &str) -> Result<Oid> {
+                let (object, reference) = self.git_repo.revparse_ext(ref_name)?;
+                self.git_repo.checkout_tree(&object, None)?;
+                match reference {
+                    Some(gref) => self.git_repo.set_head(gref.name().unwrap()),
+                    None => self.git_repo.set_head_detached(object.id()),
+                }?;
+                Ok(self.git_repo.head()?.peel_to_commit()?.id())
+            }
+        }
+
+        impl Drop for GitTestRepo {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Helpers
