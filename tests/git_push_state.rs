@@ -23,21 +23,25 @@
 //!
 //! ## rstest discipline
 //!
-//! Modelled on `tests/send_patch.rs` — every `#[case]` is a read-only
-//! assertion on a captured `Snapshot`. **Unlike** `send_patch.rs` the
-//! fixture is shared across cases via a `tokio::sync::OnceCell` because
-//! this test's setup is expensive (two grasps, two clones, three relay
-//! REQs) and every case asserts on the same captured event data — no
-//! case writes anything back. Setup still runs lazily on first case
-//! access, so `cargo test --test git_push_state -- some_case` still
-//! exercises the full setup path.
+//! Modelled on `tests/send_patch.rs` — every case is a read-only
+//! assertion on a captured [`Snapshot`]. **Unlike** `send_patch.rs` the
+//! fixture is shared across cases via a [`tokio::sync::OnceCell`]
+//! because this test's setup is expensive (two grasps, two clones,
+//! three relay REQs) and every case asserts on the same captured
+//! data — no case writes anything back. Setup still runs lazily on
+//! first case access, so `cargo test --test git_push_state -- some_case`
+//! still exercises the full setup path.
+//!
+//! Each assertion lives in its own `#[rstest] #[tokio::test]` function
+//! — no enum-driven dispatch — so failures surface with the
+//! pinpoint name of the property that broke.
 
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use rstest::*;
-use test_harness::{Harness, clock};
+use test_harness::{Harness, RepoSnapshot, clock};
 use tokio::sync::OnceCell;
 
 /// `STATE_KIND` (`Kind::Custom(30618)`) mirrored locally to keep the test
@@ -50,46 +54,47 @@ const STATE_KIND: u16 = 30618;
 const DEFAULT_BRANCH: &str = "main";
 
 /// Captured side-effects of the manual-announcement / `git push` flow.
-/// All assertion cases read fields off this struct; no case writes
-/// anything back. Owned `String`s / `Event`s / `PathBuf`s so the
-/// `Harness` and its tempdirs can drop after the fixture returns
+///
+/// Holds one [`RepoSnapshot`] per git-repo source (publisher + each
+/// clone) rather than pre-extracted per-ref OIDs, so future cases can
+/// look up additional refs (tags, topic branches, negative assertions
+/// on stray refs) without growing the struct. All fields are owned, so
+/// the harness and its tempdirs can drop after the fixture returns
 /// without invalidating anything we'll later assert on.
 struct Snapshot {
-    /// Hex oid of `refs/heads/main` on the publisher after the seed
-    /// commit and before the push. Every other oid in the snapshot
-    /// should equal this.
-    local_oid: String,
-    /// `refs/remotes/origin/main` on the publisher *after*
-    /// `git push -u origin main`.
-    local_remote_tracking_oid: String,
-    /// Value of `branch.main.merge` in the publisher's local git
-    /// config after `git push -u`.
+    /// Publisher's repo state captured **after** `git push -u origin main`.
+    /// Contains `refs/heads/main` (the pushed branch — push doesn't
+    /// move it) and `refs/remotes/origin/main` (the remote-tracking ref
+    /// `-u` advances). `head` is the publisher's `HEAD` symref target.
+    publisher: RepoSnapshot,
+    /// `branch.main.merge` from publisher's local git config after
+    /// `git push -u`. Lives in config not refs so it's captured
+    /// separately from [`Self::publisher`].
     upstream_merge_cfg: String,
-    /// `refs/heads/main` in a fresh `git clone <nostr-url>` working tree.
-    cloned_via_nostr_oid: String,
-    /// `refs/heads/main` in a fresh `git clone http://grasp1/.../...git`
-    /// working tree.
-    cloned_via_grasp1_oid: String,
-    /// `refs/heads/main` in a fresh `git clone http://grasp2/.../...git`
-    /// working tree.
-    cloned_via_grasp2_oid: String,
-    /// The kind-30618 state event as the *first grasp* sees it (used as
-    /// the canonical version for tag-content assertions; grasp2 and the
-    /// vanilla relay must report the same event id).
+    /// Working tree of `git clone <nostr-url>` — refs as the cloner
+    /// sees them after the remote helper completes.
+    nostr_clone: RepoSnapshot,
+    /// Working tree of direct `git clone http://grasp1/.../...git` —
+    /// plain smart-http, no remote helper involved.
+    grasp1_clone: RepoSnapshot,
+    /// Working tree of direct `git clone http://grasp2/.../...git`.
+    grasp2_clone: RepoSnapshot,
+    /// The kind-30618 state event as the *first grasp* sees it. Used
+    /// as the canonical version for tag-content assertions; grasp2 and
+    /// the vanilla relay must report the same event id.
     state_event_grasp1: Event,
-    /// `state_event_grasp1`'s twin on the second grasp. Asserted equal
-    /// by id to `state_event_grasp1`.
+    /// `state_event_grasp1`'s twin on the second grasp.
     state_event_grasp2: Event,
-    /// `state_event_grasp1`'s twin on the vanilla standard relay listed
-    /// in the announcement. Asserted equal by id to
-    /// `state_event_grasp1`.
+    /// `state_event_grasp1`'s twin on the vanilla standard relay
+    /// listed in the announcement.
     state_event_vanilla: Event,
-    /// `refs/heads/<DEFAULT_BRANCH>` — convenience constant the cases
-    /// would otherwise have to rebuild.
+    /// `refs/heads/<DEFAULT_BRANCH>` — used by enough cases that
+    /// rebuilding the format string everywhere clutters the
+    /// assertions. Convenience only.
     branch_ref: String,
 }
 
-/// Global, lazily-initialised snapshot. The first `#[case]` to await
+/// Global, lazily-initialised snapshot. The first case to await
 /// `snapshot()` runs the full fixture; subsequent cases see the same
 /// `Arc`. `OnceCell::get_or_init` serialises the initializer so two
 /// cases hitting it concurrently can't double-run setup.
@@ -169,7 +174,8 @@ async fn capture_snapshot() -> Result<Snapshot> {
     )?;
 
     let branch_ref = format!("refs/heads/{DEFAULT_BRANCH}");
-    let local_oid = publisher
+    // Seed-commit oid — needed up-front for the `r euc` announcement tag.
+    let seed_oid = publisher
         .snapshot()?
         .refs
         .get(&branch_ref)
@@ -200,7 +206,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         Tag::identifier(identifier.to_string()),
         Tag::custom(
             TagKind::Custom("r".into()),
-            vec![local_oid.clone(), "euc".to_string()],
+            vec![seed_oid.clone(), "euc".to_string()],
         ),
         Tag::custom(
             TagKind::Custom("name".into()),
@@ -304,18 +310,13 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await
         .context("git push -u origin main")?;
 
-    // Capture local post-push state.
-    let after_push = publisher.snapshot()?;
-    let local_remote_tracking_oid = after_push
-        .refs
-        .get(&format!("refs/remotes/origin/{DEFAULT_BRANCH}"))
-        .with_context(|| {
-            format!(
-                "refs/remotes/origin/{DEFAULT_BRANCH} missing after git push -u — \
-                 push went through but git did not update the remote-tracking ref"
-            )
-        })?
-        .clone();
+    // Capture publisher state once `git push -u` returns. The snapshot
+    // includes both `refs/heads/main` and `refs/remotes/origin/main`
+    // (along with `HEAD`'s symref target), so individual cases can
+    // index whichever ref they need.
+    let publisher_snap = publisher
+        .snapshot()
+        .context("capturing publisher snapshot after push")?;
     let upstream_merge_cfg = publisher
         .config(&format!("branch.{DEFAULT_BRANCH}.merge"))
         .await?
@@ -335,33 +336,30 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await
         .context("failed to spawn git clone <nostr-url>")?;
     require_success("git clone <nostr-url>", &nostr_clone_out)?;
-    let cloned_via_nostr_oid =
-        read_local_ref_oid(&cloner.dir().join(nostr_clone_subdir), &branch_ref)
-            .with_context(|| format!("reading {branch_ref} from nostr clone"))?;
+    let nostr_clone = RepoSnapshot::capture(&cloner.dir().join(nostr_clone_subdir))
+        .context("capturing nostr clone snapshot")?;
 
     // ---------- direct grasp clones (plain smart-http, no helper) -------
     //
     // Reusing `harness.fresh_repo()` because (a) it gives a tempdir
     // with a benign git identity already configured and (b) the test
     // crate doesn't depend on `tempfile` directly. We keep the `Repo`s
-    // alive until the clones (and the ref reads) complete — dropping a
-    // `Repo` deletes its tempdir, so binding to `_` or letting it fall
-    // out of a closure would yank the host directory out from under
-    // the in-flight `git clone`.
+    // alive until the clones (and the snapshot reads) complete —
+    // dropping a `Repo` deletes its tempdir, so binding to `_` or
+    // letting it fall out of a closure would yank the host directory
+    // out from under the in-flight `git clone`.
     let host1 = harness
         .fresh_repo()
         .context("fresh_repo for direct grasp1 clone")?;
     let host2 = harness
         .fresh_repo()
         .context("fresh_repo for direct grasp2 clone")?;
-    let cloned_via_grasp1_oid =
-        clone_via_http_and_read_ref(host1.dir(), &grasp1_clone_url, &branch_ref)
-            .await
-            .context("direct grasp1 clone")?;
-    let cloned_via_grasp2_oid =
-        clone_via_http_and_read_ref(host2.dir(), &grasp2_clone_url, &branch_ref)
-            .await
-            .context("direct grasp2 clone")?;
+    let grasp1_clone = clone_via_http_and_snapshot(host1.dir(), &grasp1_clone_url)
+        .await
+        .context("direct grasp1 clone")?;
+    let grasp2_clone = clone_via_http_and_snapshot(host2.dir(), &grasp2_clone_url)
+        .await
+        .context("direct grasp2 clone")?;
 
     // ---------- state-event queries ------------------------------------
     let filter = || Filter::new().author(pubkey).kind(Kind::Custom(STATE_KIND));
@@ -379,12 +377,11 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .clone();
 
     Ok(Snapshot {
-        local_oid,
-        local_remote_tracking_oid,
+        publisher: publisher_snap,
         upstream_merge_cfg,
-        cloned_via_nostr_oid,
-        cloned_via_grasp1_oid,
-        cloned_via_grasp2_oid,
+        nostr_clone,
+        grasp1_clone,
+        grasp2_clone,
         state_event_grasp1,
         state_event_grasp2,
         state_event_vanilla,
@@ -392,203 +389,194 @@ async fn capture_snapshot() -> Result<Snapshot> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// case 1 — local refs/remotes/origin/<branch> matches local oid
-// ---------------------------------------------------------------------------
+// ---------- cases -----------------------------------------------------------
+//
+// One `#[rstest] #[tokio::test]` function per asserted property.
+// rstest's `#[future]` fixture argument lets every case share the
+// `OnceCell`-backed snapshot without enum-driven dispatch. Failures
+// name the property that broke directly in cargo test output.
 
-#[derive(Debug, Clone, Copy)]
-enum LocalRefsCase {
-    /// `refs/remotes/origin/main` advanced to the local commit oid.
-    RemoteTrackingMatchesLocal,
-    /// `branch.main.merge` was set by `-u` to `refs/heads/main`.
-    UpstreamTrackingConfigSet,
-}
-
+/// `refs/remotes/origin/main` advanced to the locally-committed oid
+/// after `git push -u`.
 #[rstest]
-#[case::remote_tracking_matches_local(LocalRefsCase::RemoteTrackingMatchesLocal)]
-#[case::upstream_tracking_config_set(LocalRefsCase::UpstreamTrackingConfigSet)]
 #[tokio::test]
-async fn publisher_local_refs(
+async fn publisher_remote_tracking_matches_local_head(
     #[future] snapshot: Arc<Snapshot>,
-    #[case] case: LocalRefsCase,
 ) -> Result<()> {
     let s = snapshot.await;
-    match case {
-        LocalRefsCase::RemoteTrackingMatchesLocal => {
-            assert_eq!(
-                s.local_remote_tracking_oid, s.local_oid,
-                "publisher's refs/remotes/origin/{DEFAULT_BRANCH} ({}) does \
-                 not match local {} ({})",
-                s.local_remote_tracking_oid, s.branch_ref, s.local_oid,
-            );
-        }
-        LocalRefsCase::UpstreamTrackingConfigSet => {
-            assert_eq!(
-                s.upstream_merge_cfg, s.branch_ref,
-                "branch.{DEFAULT_BRANCH}.merge = {:?}, expected {:?}",
-                s.upstream_merge_cfg, s.branch_ref,
-            );
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// case 2 — nostr:// clone reproduces the same ref
-// ---------------------------------------------------------------------------
-
-#[rstest]
-#[tokio::test]
-async fn nostr_clone_reproduces_local_ref(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
-    let s = snapshot.await;
+    let local = oid_at(&s.publisher, &s.branch_ref, "publisher local")?;
+    let remote_tracking_ref = format!("refs/remotes/origin/{DEFAULT_BRANCH}");
+    let remote_tracking = oid_at(
+        &s.publisher,
+        &remote_tracking_ref,
+        "publisher remote-tracking",
+    )?;
     assert_eq!(
-        s.cloned_via_nostr_oid, s.local_oid,
-        "nostr clone's {} ({}) does not match publisher's local ({})",
-        s.branch_ref, s.cloned_via_nostr_oid, s.local_oid,
+        remote_tracking, local,
+        "publisher's {remote_tracking_ref} ({remote_tracking}) does not match \
+         local {} ({local})",
+        s.branch_ref,
     );
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// case 3 — direct http clone of each grasp reproduces the same ref
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum DirectCloneCase {
-    Grasp1,
-    Grasp2,
-}
-
+/// `git push -u` wrote `branch.main.merge = refs/heads/main` into the
+/// publisher's local config. Catches a regression where the helper
+/// accepts the push but `-u`'s config write is somehow skipped.
 #[rstest]
-#[case::grasp1(DirectCloneCase::Grasp1)]
-#[case::grasp2(DirectCloneCase::Grasp2)]
 #[tokio::test]
-async fn direct_grasp_clone_reproduces_local_ref(
-    #[future] snapshot: Arc<Snapshot>,
-    #[case] case: DirectCloneCase,
-) -> Result<()> {
+async fn publisher_upstream_tracking_config_set(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
-    let (label, oid) = match case {
-        DirectCloneCase::Grasp1 => ("grasp1", &s.cloned_via_grasp1_oid),
-        DirectCloneCase::Grasp2 => ("grasp2", &s.cloned_via_grasp2_oid),
-    };
     assert_eq!(
-        oid, &s.local_oid,
-        "direct {label} clone's {} ({oid}) does not match publisher's local ({})",
-        s.branch_ref, s.local_oid,
+        s.upstream_merge_cfg, s.branch_ref,
+        "branch.{DEFAULT_BRANCH}.merge = {:?}, expected {:?}",
+        s.upstream_merge_cfg, s.branch_ref,
     );
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// case 4 — state event landed on all three relay surfaces with one id
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum StatePropagationCase {
-    /// The grasp1 and grasp2 state-event ids agree — push converged
-    /// across both grasps' relay surfaces.
-    GraspsAgreeOnId,
-    /// The grasp1 and vanilla-relay state-event ids agree — the push
-    /// also published the state event to the non-grasp relay in the
-    /// announcement.
-    GraspAndVanillaAgreeOnId,
-}
-
+/// `git clone <nostr-url>` reproduces `refs/heads/main` at the publisher's
+/// oid — the end-to-end happy path through the remote helper.
 #[rstest]
-#[case::grasps_agree_on_id(StatePropagationCase::GraspsAgreeOnId)]
-#[case::grasp_and_vanilla_agree_on_id(StatePropagationCase::GraspAndVanillaAgreeOnId)]
 #[tokio::test]
-async fn state_event_propagates_to_all_announced_relays(
-    #[future] snapshot: Arc<Snapshot>,
-    #[case] case: StatePropagationCase,
-) -> Result<()> {
+async fn nostr_clone_reproduces_local_main(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
-    match case {
-        StatePropagationCase::GraspsAgreeOnId => {
-            assert_eq!(
-                s.state_event_grasp1.id, s.state_event_grasp2.id,
-                "state events on grasp1 ({}) and grasp2 ({}) differ — \
-                 push did not converge across grasps",
-                s.state_event_grasp1.id, s.state_event_grasp2.id,
-            );
-        }
-        StatePropagationCase::GraspAndVanillaAgreeOnId => {
-            assert_eq!(
-                s.state_event_grasp1.id, s.state_event_vanilla.id,
-                "state events on grasp1 ({}) and the vanilla relay ({}) \
-                 differ — push did not publish to the non-grasp repo relay",
-                s.state_event_grasp1.id, s.state_event_vanilla.id,
-            );
-        }
-    }
+    let local = oid_at(&s.publisher, &s.branch_ref, "publisher local")?;
+    let cloned = oid_at(&s.nostr_clone, &s.branch_ref, "nostr clone")?;
+    assert_eq!(
+        cloned, local,
+        "nostr clone's {} ({cloned}) does not match publisher's local ({local})",
+        s.branch_ref,
+    );
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// case 5 — state event tags carry HEAD + the default branch correctly
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum StateTagCase {
-    /// `HEAD` tag value is `"ref: refs/heads/main"` — see
-    /// `src/lib/repo_state.rs::add_head`.
-    HeadPointsAtDefaultBranch,
-    /// `refs/heads/main` tag value matches the local oid.
-    DefaultBranchRefMatchesLocalOid,
-}
-
+/// Direct `git clone http://grasp1/...git` reproduces `refs/heads/main` —
+/// confirms the bare repo on grasp1's git server actually received the
+/// push, independent of the nostr remote-helper code path.
 #[rstest]
-#[case::head_points_at_default_branch(StateTagCase::HeadPointsAtDefaultBranch)]
-#[case::default_branch_ref_matches_local_oid(StateTagCase::DefaultBranchRefMatchesLocalOid)]
 #[tokio::test]
-async fn state_event_tags(
+async fn grasp1_direct_clone_reproduces_local_main(
     #[future] snapshot: Arc<Snapshot>,
-    #[case] case: StateTagCase,
 ) -> Result<()> {
     let s = snapshot.await;
-    match case {
-        StateTagCase::HeadPointsAtDefaultBranch => {
-            let head_value = tag_value(&s.state_event_grasp1, "HEAD")
-                .context("state event missing a HEAD tag — required by add_head()")?;
-            assert_eq!(
-                head_value,
-                format!("ref: {}", s.branch_ref),
-                "state event HEAD tag {head_value:?} does not point at {}",
-                s.branch_ref,
-            );
-        }
-        StateTagCase::DefaultBranchRefMatchesLocalOid => {
-            let branch_value =
-                tag_value(&s.state_event_grasp1, &s.branch_ref).with_context(|| {
-                    format!(
-                        "state event missing a {} tag — the pushed ref",
-                        s.branch_ref
-                    )
-                })?;
-            assert_eq!(
-                branch_value, s.local_oid,
-                "state event {} tag {branch_value} does not match local oid {}",
-                s.branch_ref, s.local_oid,
-            );
-        }
-    }
+    let local = oid_at(&s.publisher, &s.branch_ref, "publisher local")?;
+    let cloned = oid_at(&s.grasp1_clone, &s.branch_ref, "grasp1 direct clone")?;
+    assert_eq!(
+        cloned, local,
+        "direct grasp1 clone's {} ({cloned}) does not match publisher's local ({local})",
+        s.branch_ref,
+    );
+    Ok(())
+}
+
+/// As [`grasp1_direct_clone_reproduces_local_main`], but for grasp2 —
+/// the second grasp must have received the push too, not just grasp1.
+#[rstest]
+#[tokio::test]
+async fn grasp2_direct_clone_reproduces_local_main(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let local = oid_at(&s.publisher, &s.branch_ref, "publisher local")?;
+    let cloned = oid_at(&s.grasp2_clone, &s.branch_ref, "grasp2 direct clone")?;
+    assert_eq!(
+        cloned, local,
+        "direct grasp2 clone's {} ({cloned}) does not match publisher's local ({local})",
+        s.branch_ref,
+    );
+    Ok(())
+}
+
+/// The state event's id is identical across both grasps — push
+/// converged across both relay surfaces. The state event is
+/// replaceable, so divergent ids would mean one grasp saw a different
+/// kind-30618 than the other.
+#[rstest]
+#[tokio::test]
+async fn grasps_state_events_agree_on_id(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        s.state_event_grasp1.id, s.state_event_grasp2.id,
+        "state events on grasp1 ({}) and grasp2 ({}) differ — push did \
+         not converge across grasps",
+        s.state_event_grasp1.id, s.state_event_grasp2.id,
+    );
+    Ok(())
+}
+
+/// The state event also landed on the vanilla (non-grasp) relay listed
+/// in the announcement, with the same id as the grasps' copy. Catches
+/// a regression where the helper only publishes to grasp relays.
+#[rstest]
+#[tokio::test]
+async fn grasp_and_vanilla_state_events_agree_on_id(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        s.state_event_grasp1.id, s.state_event_vanilla.id,
+        "state events on grasp1 ({}) and the vanilla relay ({}) differ — \
+         push did not publish to the non-grasp repo relay",
+        s.state_event_grasp1.id, s.state_event_vanilla.id,
+    );
+    Ok(())
+}
+
+/// State event's `HEAD` tag is `"ref: refs/heads/main"` — see
+/// `src/lib/repo_state.rs::add_head`. The remote helper must populate
+/// this from the publisher's `HEAD` so cloners can resolve the default
+/// branch.
+#[rstest]
+#[tokio::test]
+async fn state_event_head_points_at_default_branch(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let head_value = tag_value(&s.state_event_grasp1, "HEAD")
+        .context("state event missing a HEAD tag — required by add_head()")?;
+    assert_eq!(
+        head_value,
+        format!("ref: {}", s.branch_ref),
+        "state event HEAD tag {head_value:?} does not point at {}",
+        s.branch_ref,
+    );
+    Ok(())
+}
+
+/// State event's `refs/heads/main` tag matches the publisher's local
+/// oid — the ref-level claim in the state event corresponds to what
+/// actually got pushed.
+#[rstest]
+#[tokio::test]
+async fn state_event_default_branch_ref_matches_local_oid(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let local = oid_at(&s.publisher, &s.branch_ref, "publisher local")?;
+    let branch_value = tag_value(&s.state_event_grasp1, &s.branch_ref).with_context(|| {
+        format!(
+            "state event missing a {} tag — the pushed ref",
+            s.branch_ref
+        )
+    })?;
+    assert_eq!(
+        branch_value, *local,
+        "state event {} tag {branch_value} does not match local oid {local}",
+        s.branch_ref,
+    );
     Ok(())
 }
 
 // ---------- helpers ---------------------------------------------------------
 
-/// `git rev-parse <ref>` against a working tree on disk via `git2`.
-fn read_local_ref_oid(working_path: &Path, refname: &str) -> Result<String> {
-    let repo = git2::Repository::open(working_path)
-        .with_context(|| format!("open {}", working_path.display()))?;
-    let reference = repo
-        .find_reference(refname)
-        .with_context(|| format!("find_reference {refname}"))?;
-    let oid = reference
-        .target()
-        .with_context(|| format!("reference {refname} has no direct target"))?;
-    Ok(oid.to_string())
+/// Look up an OID in a captured [`RepoSnapshot`] with a labelled error
+/// when the ref is missing — turns a `None` from the map into a
+/// pinpoint message naming both the source repo and the refname.
+fn oid_at<'a>(snap: &'a RepoSnapshot, refname: &str, label: &str) -> Result<&'a String> {
+    snap.refs
+        .get(refname)
+        .with_context(|| format!("{label} snapshot has no {refname}"))
 }
 
 /// Poll for `path` to exist, with a short ceiling — the grasp's
@@ -638,16 +626,13 @@ async fn publish_event_to_all(event: &Event, urls: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// `git clone http_url cloned-via-http` inside `host_dir`, then read the
-/// requested ref out of the resulting working tree. Wraps the per-grasp
-/// direct-clone boilerplate the fixture would otherwise repeat twice.
-async fn clone_via_http_and_read_ref(
-    host_dir: &Path,
-    http_url: &str,
-    refname: &str,
-) -> Result<String> {
+/// `git clone http_url cloned-via-http` inside `host_dir`, then capture
+/// the resulting working tree as a [`RepoSnapshot`]. Wraps the
+/// per-grasp direct-clone boilerplate the fixture would otherwise
+/// repeat twice.
+async fn clone_via_http_and_snapshot(host_dir: &Path, http_url: &str) -> Result<RepoSnapshot> {
     // Plain smart-http clone — no nostr remote helper involved, so we
-    // don't need the harness env. Pin GIT_CONFIG_* to `/dev/null` so a
+    // don't need the harness env. Pin `GIT_CONFIG_*` to `/dev/null` so a
     // developer's global git config can't influence the clone.
     let subdir = "cloned-via-http";
     let mut cmd = tokio::process::Command::new("git");
@@ -657,7 +642,7 @@ async fn clone_via_http_and_read_ref(
     cmd.args(["clone", http_url, subdir]);
     let out = cmd.output().await.context("failed to spawn direct clone")?;
     require_success("direct http clone", &out)?;
-    read_local_ref_oid(&host_dir.join(subdir), refname)
+    RepoSnapshot::capture(&host_dir.join(subdir)).context("capturing direct http clone snapshot")
 }
 
 /// Pick the (single) state event whose `d` tag matches `identifier`.
