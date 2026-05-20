@@ -470,8 +470,11 @@ async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Re
 ///
 /// Three things this pins:
 ///
-/// 1. Harness integration: `with_vanilla_git_server("origin")` starts an empty
-///    bare server reachable at `Harness::vanilla_git_server("origin").url()`.
+/// 1. Harness integration: `with_vanilla_git_server("host")` starts an empty
+///    bare server reachable at `Harness::vanilla_git_server("host").url()`. The
+///    role label here is purely a harness lookup key — the server is **not**
+///    added as a git remote anywhere in this test, so naming it after a git
+///    remote (`"origin"`) would be misleading.
 /// 2. `git ls-remote <vanilla_url>` returns exit 0 with empty output — proves
 ///    the in-process Smart-HTTP server is actually serving requests during the
 ///    test, not just that `VanillaGitServer::start_empty` produced a URL
@@ -493,13 +496,13 @@ async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
     .with_relay("default")
-    .with_vanilla_git_server("origin")
+    .with_vanilla_git_server("host")
     .build()
     .await?;
 
     let (repo, state) = harness.arrange_init_state_a_fresh().await?;
 
-    let vanilla_url = harness.vanilla_git_server("origin").url().to_string();
+    let vanilla_url = harness.vanilla_git_server("host").url().to_string();
     let default_relay_url = harness.relay("default").url().to_string();
 
     // Belt-and-braces liveness probe: ls-remote the empty bare repo
