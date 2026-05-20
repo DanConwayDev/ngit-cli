@@ -19,10 +19,16 @@
 //!   additional `vnext` branch. Asserts `main` is preserved, HEAD stays on
 //!   `main`, the new branch shows up everywhere, and the state event now lists
 //!   both refs.
+//! - [`delete_branch`] — builds on [`add_branch`]'s end state, then issues `git
+//!   push origin --delete vnext`. Asserts `main` is preserved, HEAD stays on
+//!   `main`, the deleted branch disappears from every observable surface
+//!   (publisher remote-tracking, both clones, both grasps, state event), and
+//!   the local branch + its upstream config are not collateral damage.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
 //! pinpoint-named in `cargo test` output.
 
 mod add_branch;
+mod delete_branch;
 mod fresh_repo;
