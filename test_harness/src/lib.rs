@@ -20,6 +20,11 @@
 //! - [`grasp::GraspServer`] — `ngit-grasp` subprocess on a loopback port,
 //!   speaking NIP-01 + git smart-http. Required for any test that publishes a
 //!   kind-30617 repo announcement or pushes git data through a GRASP server.
+//! - [`vanilla_git_server::VanillaGitServer`] — in-process smart-HTTP git
+//!   server with **full push and fetch support**, for tests that need a
+//!   non-grasp clone URL on a repo announcement. Covers the
+//!   `is_grasp_server_clone_url == false` branches throughout the codebase
+//!   that `GraspServer` cannot exercise.
 //! - [`Harness`] / [`HarnessBuilder`] — fluent role-keyed roster of relays plus
 //!   grasp servers; emits the `NGITTEST=TRUE` + four `NGIT_*_SET` env vars
 //!   consumed by `Params::default()` in `src/lib/client.rs`.
@@ -42,6 +47,7 @@ pub mod relay;
 pub mod repo;
 pub mod scenarios;
 pub mod snapshot;
+pub mod vanilla_git_server;
 
 pub use clock::tick_to_next_second;
 pub use grasp::GraspServer;
@@ -54,3 +60,4 @@ pub use scenarios::{
     PublishedPatchSeries, PublishedPr, PublishedRepo,
 };
 pub use snapshot::RepoSnapshot;
+pub use vanilla_git_server::VanillaGitServer;

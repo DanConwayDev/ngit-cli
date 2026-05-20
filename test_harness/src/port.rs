@@ -83,6 +83,21 @@ impl PortReservation {
         drop(self);
         port
     }
+
+    /// Consume the reservation and return the bound [`TcpListener`]
+    /// itself. The port number is **never released back to the OS** —
+    /// the fd is handed straight to the caller, which is the zero-TOCTOU
+    /// path for fixtures that can promote a `std` listener into their
+    /// own accept loop (e.g. a hyper server via
+    /// `tokio::net::TcpListener::from_std`).
+    ///
+    /// Prefer this over [`Self::release`] + bind whenever the consuming
+    /// service can take a pre-bound listener; it eliminates the
+    /// microsecond-scale race that `MAX_BIND_ATTEMPTS` loops elsewhere
+    /// in this crate exist to cover.
+    pub fn into_std_listener(self) -> TcpListener {
+        self._listener
+    }
 }
 
 /// Bind `127.0.0.1:0`, capture the assigned port, and **keep the listener

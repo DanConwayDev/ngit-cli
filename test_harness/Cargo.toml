@@ -8,6 +8,9 @@ description = "Integration test harness for ngit. Successor to test_utils."
 [dependencies]
 anyhow = "1.0.98"
 git2 = "0.20.4"
+http-body-util = "0.1"
+hyper = { version = "1.4", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
 nostr = "0.44.1"
 nostr-relay-builder = "0.44.0"
 nostr-sdk = "0.44.1"
