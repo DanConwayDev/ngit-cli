@@ -5,11 +5,7 @@ name: build test
 jobs:
   ci:
     runs-on: ubuntu-latest
-    # Bumped from 15 to 30 to absorb the first-time build of the
-    # ngit-grasp flake input pulled in by the test harness. Subsequent
-    # runs hit /nix/store cache and are much faster; the headroom is
-    # for cold-cache CI runs.
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31
@@ -17,6 +13,4 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
       - run: nix develop --command cargo clippy
       - run: nix develop --command cargo fmt --all -- --check
-      # The dev shell exports NGIT_GRASP_BIN from a pinned ngit-grasp
-      # flake input; no separate binary-install step is needed.
       - run: nix develop --command cargo test
