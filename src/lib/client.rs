@@ -1084,15 +1084,47 @@ pub struct Params {
     pub grasp_default_set: Vec<String>,
 }
 
+/// Parse a `;`-separated list of URLs from an env var.
+///
+/// Returns `Some(vec)` only when the env var is set AND parses into a
+/// non-empty list. Used by the `NGITTEST=true` branch of `Params::default()`
+/// to let the test harness inject per-spawn relay rosters without touching
+/// process-global state.
+///
+/// Empty strings and unparseable URLs are silently filtered out; if every
+/// entry is filtered, we return `None` so the caller falls back to the
+/// hardcoded legacy default.
+fn env_relay_list(var: &str) -> Option<Vec<String>> {
+    let raw = std::env::var(var).ok()?;
+    let parsed: Vec<String> = raw
+        .split(';')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .collect();
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
 impl Default for Params {
     fn default() -> Self {
         Params {
             keys: None,
             relay_default_set: if std::env::var("NGITTEST").is_ok() {
-                vec![
-                    "ws://localhost:8051".to_string(),
-                    "ws://localhost:8052".to_string(),
-                ]
+                env_relay_list("NGIT_RELAY_DEFAULT_SET").unwrap_or_else(|| {
+                    vec![
+                        "ws://localhost:8051".to_string(),
+                        "ws://localhost:8052".to_string(),
+                    ]
+                })
             } else {
                 vec![
                     "wss://relay.damus.io".to_string(), /* free, good reliability, have been
@@ -1104,12 +1136,14 @@ impl Default for Params {
                 ]
             },
             blaster_relays: if std::env::var("NGITTEST").is_ok() {
-                vec!["ws://localhost:8057".to_string()]
+                env_relay_list("NGIT_RELAY_BLASTER_SET")
+                    .unwrap_or_else(|| vec!["ws://localhost:8057".to_string()])
             } else {
                 vec![]
             },
             fallback_signer_relays: if std::env::var("NGITTEST").is_ok() {
-                vec!["ws://localhost:8051".to_string()]
+                env_relay_list("NGIT_RELAY_SIGNER_FALLBACK_SET")
+                    .unwrap_or_else(|| vec!["ws://localhost:8051".to_string()])
             } else {
                 vec![
                     "wss://bucket.coracle.social".to_string(),
@@ -1118,7 +1152,7 @@ impl Default for Params {
                 ]
             },
             grasp_default_set: if std::env::var("NGITTEST").is_ok() {
-                vec![]
+                env_relay_list("NGIT_GRASP_DEFAULT_SET").unwrap_or_default()
             } else {
                 vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
             },

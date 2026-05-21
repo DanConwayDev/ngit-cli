@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Completely replaced the integration test harness with a much more agile one and rewrote all integration tests against it. This was a key blocker for further planned improvements.
+
+### Fixed
+
+- `ngit send --in-reply-to <hex_event_id>` for a non-proposal-root reference (issue mention) emitted an `["e", <id>]` tag on the cover letter instead of the NIP-21 quote `["q", <id>]` tag that the bech32 (`note1...`) form produced; the raw-hex branch in `event_tag_from_nip19_or_hex` ignored `EventRefType::Quote` and unconditionally built `TagStandard::Event`, so hex and bech32 inputs produced different tags for the same logical reference
+
 ## [2.4.4] - 2026-05-16
 
 ### Added

@@ -1192,9 +1192,8 @@ async fn publish_and_finalize(
         false
     };
 
-    let (need_push, need_sync) = if std::env::var("NGITTEST").is_ok() || no_state {
-        // dont push or sync during tests as git-remote-nostr isn't installed during
-        // ngit binary tests
+    let (need_push, need_sync) = if no_state {
+        // user explicitly opted out of state-event creation
         (false, false)
     } else if let Ok(nostr_state) =
         &get_state_from_cache(Some(git_repo.get_path()?), &repo_ref).await

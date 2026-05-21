@@ -224,13 +224,59 @@ Check `Cargo.toml` for feature flags and optional dependencies.
 
 - Located in `tests/` directory
 - Test full workflows (init, push, fetch, etc.)
-- Require test utilities from `test_utils/`
+- All integration tests use `test_harness/`. See
+  `docs/architecture/test-harness.md` for design notes; the rules in
+  "Test harness boundary" below are non-negotiable.
 
 ### Test Utilities
 
-- Mock relay implementation
-- Git repository setup helpers
-- Located in `test_utils/`
+- `test_harness/` — integration test crate. Use this for all new
+  integration tests.
+- `test_utils/` — **frozen**. Retained only as a `[dev-dependencies]`
+  helper for unit tests in `src/` (`#[cfg(test)] mod tests`) that
+  still reference it. Do not extend it; do not import from it in
+  anything under `tests/` or `test_harness/`.
+
+### Test harness boundary (mandatory rules for new tests)
+
+These rules exist because the previous harness collapsed under
+exactly these patterns. They are non-negotiable:
+
+- **Do not import from `test_utils` in any integration test or in
+  `test_harness`.** No `use test_utils::…`, no re-exports, no
+  "convenience" shims. The two crates are hermetically separated;
+  `test_utils` exists only to satisfy `src/` unit tests during the
+  remainder of its sunset.
+- **Do not modify `test_utils/`.** It is frozen. If a `src/` change
+  breaks a unit test that depends on it, port that unit test off
+  `test_utils` rather than patching the helper.
+- **No `#[serial]` annotations.** Test isolation is provided by the
+  harness (per-test temp dirs, per-test ports, per-test env). If a
+  test needs serialisation, the harness contract is wrong; fix the
+  harness.
+- **No PTY / `rexpect` / `dialoguer` interaction.** Drive ngit
+  through flags only. Tests that require an interactive prompt are
+  out of scope; cover the underlying logic with a unit test instead.
+- **No `std::env::set_var` from a test or helper.** Spawned children
+  receive env via `Repo::ngit` / `Repo::git`, which scope vars to the
+  subprocess. Mutating the test process's env is process-global and
+  breaks parallelism.
+- **No exact-stdout assertions.** Assert on observable side-effects
+  (events on relays, refs on disk, git config keys, exit status), not
+  on the literal text ngit prints. The handful of stdout reads that
+  exist today (e.g. parsing the `clone url:` line out of `ngit init`)
+  are tolerated as a regression-catching shortcut and must use
+  case-insensitive prefix matching, never equality.
+- **Push to a nostr remote via `Repo::nostr_push`, never
+  `repo.git(["push", …])`.** `nostr_push` runs the push and then
+  ticks one whole unix second so the next event-publishing operation
+  lands in a strictly later `created_at` second than the
+  auto-generated kind-30618 state event the push just emitted.
+  Bypassing it produces a roughly 30% flake rate where the next
+  publish hits the relay's "this event is deleted" check_id path on
+  a same-second event-id collision. See
+  `docs/architecture/test-harness.md` § "Timing rule" for the chain;
+  `test_harness/src/clock.rs` for the writeup.
 
 ## Common Pitfalls
 

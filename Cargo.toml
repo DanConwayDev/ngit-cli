@@ -50,11 +50,11 @@ mockall = "0.13.1"
 once_cell = "1.21.3"
 rstest = "0.23"
 serial_test = "3.2.0"
-test_utils = { path = "test_utils" }
+test_harness = { path = "test_harness" }
 
 [workspace]
 members = [
-    "test_utils",
+    "test_harness",
 ]
 
 [lib]
@@ -72,6 +72,13 @@ path = "src/bin/ngit/main.rs"
 [[bin]]
 name = "git-remote-nostr"
 path = "src/bin/git_remote_nostr/main.rs"
+
+# `git push` against a nostr:// remote — one submodule per scenario under
+# `tests/git_push_state/`. The directory layout means Cargo doesn't
+# auto-discover this test, so it needs an explicit entry.
+[[test]]
+name = "git_push_state"
+path = "tests/git_push_state/main.rs"
 
 [profile.release]
 lto = true

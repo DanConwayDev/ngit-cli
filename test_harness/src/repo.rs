@@ -1,0 +1,314 @@
+//! `TempDir`-backed git repository fixture with env-pre-configured
+//! `Command` wrappers for `ngit` and `git`.
+//!
+//! Every command spawned via [`Repo::ngit`] / [`Repo::git`] inherits the
+//! harness env (`NGITTEST`, `NGIT_RELAY_*_SET`, ...) and runs with `cwd`
+//! pointed at the repo's working tree. `PATH` is augmented so that `git`
+//! can find `git-remote-nostr` for any test that exercises `nostr://`
+//! remotes — even though the relay-only lighthouse does not need it.
+//!
+//! Spawn returns [`tokio::process::Command`] rather than
+//! [`std::process::Command`] so that awaiting `.output()` from a
+//! `#[tokio::test]` cooperatively yields to the in-process relay tasks. With
+//! the std variant the subprocess wait blocks the current-thread runtime
+//! and the relay never gets a chance to ACK the published events —
+//! symptom is a `Timeout` error inside `nostr-sdk`'s `send_event`.
+//!
+//! The repo is initialised with `main` as the default branch and a benign
+//! `user.name` / `user.email` so commits succeed without touching the
+//! caller's global git identity.
+
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Command as StdCommand,
+};
+
+use anyhow::{Context, Result};
+use tempfile::TempDir;
+use tokio::process::Command;
+
+use crate::{clock, harness::Harness, snapshot::RepoSnapshot};
+
+/// One repo, owned for the lifetime of a test.
+pub struct Repo {
+    /// Owns the underlying tempdir; dropping `Repo` cleans the working tree.
+    _tempdir: TempDir,
+    dir: PathBuf,
+    env: Vec<(String, String)>,
+    ngit_bin: PathBuf,
+    /// `PATH` augmented with the directory containing `git-remote-nostr`,
+    /// so git can resolve the helper when spawning subprocesses.
+    augmented_path: OsString,
+}
+
+impl Repo {
+    pub(crate) fn init(harness: &Harness) -> Result<Self> {
+        let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
+        let dir = tempdir.path().to_path_buf();
+
+        // Setup uses the synchronous std variant — these calls happen during
+        // construction (outside any await), so they can't block the relay's
+        // task runtime. Only the public `.ngit()` / `.git()` accessors hand
+        // out tokio Commands.
+
+        // `git init -b main` works on git ≥ 2.28 (released 2020-07). The CI
+        // baseline assumed by the project is well above this.
+        let status = StdCommand::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .arg(&dir)
+            .status()
+            .context("failed to spawn git init")?;
+        if !status.success() {
+            anyhow::bail!("git init exited {status}");
+        }
+
+        Self::set_default_identity(&dir)?;
+
+        Ok(Self {
+            _tempdir: tempdir,
+            dir,
+            env: harness.env(),
+            ngit_bin: harness.ngit_bin().to_path_buf(),
+            augmented_path,
+        })
+    }
+
+    /// Build a `Repo` by `git clone`-ing `url` into a fresh tempdir.
+    ///
+    /// Unlike [`Repo::init`], no `git init` is run; the clone produces the
+    /// repository layout. Per-repo `user.name` / `user.email` are still
+    /// written after the clone so subsequent `git commit`s succeed without
+    /// touching the caller's global git identity.
+    ///
+    /// The harness env is applied to the spawned `git clone`, so the
+    /// `git-remote-nostr` helper inherits relay-URL injection and clones
+    /// over `nostr://` URLs against the harness's relays / grasp servers.
+    pub(crate) async fn clone(harness: &Harness, url: &str) -> Result<Self> {
+        let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
+        let dir = tempdir.path().to_path_buf();
+
+        // `git clone <url> .` requires the working tree to be empty.
+        // `TempDir::new` returns an empty dir, so this is safe.
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&dir);
+        for (k, v) in harness.env() {
+            cmd.env(k, v);
+        }
+        cmd.env("PATH", &augmented_path);
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        cmd.args(["clone", url, "."]);
+
+        let out = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn git clone {url}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git clone {url} exited {:?}\nstdout: {}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+
+        Self::set_default_identity(&dir)?;
+
+        Ok(Self {
+            _tempdir: tempdir,
+            dir,
+            env: harness.env(),
+            ngit_bin: harness.ngit_bin().to_path_buf(),
+            augmented_path,
+        })
+    }
+
+    /// Allocate a fresh tempdir and an augmented `PATH` (with the
+    /// `git-remote-nostr` directory prepended) for either constructor.
+    fn alloc_tempdir_and_path(harness: &Harness) -> Result<(TempDir, OsString)> {
+        let tempdir = TempDir::new().context("failed to allocate TempDir for Repo")?;
+
+        // Augment PATH with the dir containing git-remote-nostr, so any
+        // future `git clone nostr://...` driven from this repo finds the
+        // helper.
+        let helper_dir = harness
+            .git_remote_nostr_bin()
+            .parent()
+            .context("git-remote-nostr binary has no parent dir")?
+            .to_path_buf();
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths: Vec<PathBuf> = std::env::split_paths(&existing_path).collect();
+        if !paths.contains(&helper_dir) {
+            paths.insert(0, helper_dir);
+        }
+        let augmented_path = std::env::join_paths(paths).context("failed to join PATH")?;
+
+        Ok((tempdir, augmented_path))
+    }
+
+    /// Benign per-repo identity so future `git commit`s don't trip the
+    /// default-identity check. Using `--local` keeps it scoped to the
+    /// tempdir — no contamination of the caller's global config.
+    fn set_default_identity(dir: &Path) -> Result<()> {
+        for (k, v) in [
+            ("user.name", "ngit test"),
+            ("user.email", "ngit-test@example.invalid"),
+            ("commit.gpgSign", "false"),
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(dir)
+                .args(["config", "--local", k, v])
+                .status()
+                .with_context(|| format!("failed to git config {k}"))?;
+            if !status.success() {
+                anyhow::bail!("git config {k} exited {status}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Working tree path.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Build a `Command` for the ngit binary under test. `cwd`, `env`, and
+    /// `PATH` are all pre-configured; callers append args and call
+    /// `.output()` / `.status()` themselves.
+    pub fn ngit<I, S>(&self, args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut cmd = Command::new(&self.ngit_bin);
+        self.configure(&mut cmd);
+        cmd.args(args);
+        cmd
+    }
+
+    /// Build a `Command` for `git` with the harness env applied. Useful for
+    /// driving `git clone`, `git push`, etc. against ngit's remote helper.
+    pub fn git<I, S>(&self, args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut cmd = Command::new("git");
+        self.configure(&mut cmd);
+        cmd.args(args);
+        cmd
+    }
+
+    fn configure(&self, cmd: &mut Command) {
+        cmd.current_dir(&self.dir);
+        // env_clear() would also remove harmless inherited vars like HOME
+        // that git needs; instead we just override the keys we care about.
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        cmd.env("PATH", &self.augmented_path);
+        // Keep ngit deterministic in tests: no interactive prompts, no
+        // global config interference.
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+    }
+
+    /// Read a single git-config key from this repo's local config.
+    ///
+    /// Returns `Ok(None)` when the key is unset, `Err` only on a hard
+    /// failure (process spawn error, malformed output).
+    pub async fn config(&self, key: &str) -> Result<Option<String>> {
+        let out = self
+            .git(["config", "--local", "--get", key])
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn git config --get {key}"))?;
+        if out.status.success() {
+            let s = String::from_utf8(out.stdout)
+                .with_context(|| format!("git config {key} returned non-utf8"))?;
+            Ok(Some(s.trim_end_matches('\n').to_string()))
+        } else if out.status.code() == Some(1) {
+            // git config exits 1 when the key is unset — distinct from a
+            // genuine error (exit 2+).
+            Ok(None)
+        } else {
+            anyhow::bail!(
+                "git config {key} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// Capture the current `HEAD` and refs. Grows as migrated tests demand
+    /// more fields.
+    pub fn snapshot(&self) -> Result<RepoSnapshot> {
+        RepoSnapshot::capture(&self.dir)
+    }
+
+    /// Wait one whole unix second, then `git push <args...>`.
+    ///
+    /// **Use this for every push to a nostr remote.** A push handled by
+    /// `git-remote-nostr` emits an auto-generated kind-30618 state event
+    /// covering the just-pushed ref(s); see `src/bin/git_remote_nostr/push.rs`.
+    /// That state event's `created_at` has unix-second resolution, and the
+    /// `nostr-relay-builder` `MemoryDatabase` tracks superseded
+    /// replaceable-event ids as deleted (it adds them to its `deleted_ids`
+    /// set when discarding during replacement). Two same-coordinate
+    /// replaceable events with identical `(pubkey, kind, tags, content)`
+    /// signed in the same wall-clock second hash to the same id — so an
+    /// about-to-be-published kind-30618 whose id collides with a
+    /// previously-superseded one at the same `(pubkey, kind, d-tag)`
+    /// coordinate is rejected by the relay with
+    /// `"blocked: this event is deleted"` even though no NIP-09 deletion
+    /// ever happened.
+    ///
+    /// The fix belongs *before* the push, not after: the safety property
+    /// is "*this* publish's `created_at` is strictly later than any prior
+    /// same-coordinate publish", which is local to the publish that's
+    /// about to happen. So this helper ticks first, then runs `git push`,
+    /// then returns — and does not rely on whoever ran before it having
+    /// cleaned up. See [`crate::clock`] for the full rationale, and
+    /// [`Harness::publish_state_event`] for the explicit-publish sibling
+    /// that follows the same discipline.
+    pub async fn nostr_push<I, S>(&self, args: I) -> Result<std::process::Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut argv: Vec<std::ffi::OsString> = vec!["push".into()];
+        for a in args {
+            argv.push(a.as_ref().to_owned());
+        }
+        let label = format!("git {}", display_argv(&argv));
+        // Tick before publishing: the sleep is part of preparing to
+        // publish, not cleaning up. See the doc-comment above.
+        clock::tick_to_next_second().await;
+        let out = self
+            .git(&argv)
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn {label}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "{label} exited {:?}\nstdout: {}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        Ok(out)
+    }
+}
+
+/// Best-effort `OsStr` join for the error-message label of `nostr_push`. Lossy
+/// on non-UTF-8 argv (which we don't generate in this codebase).
+fn display_argv(argv: &[std::ffi::OsString]) -> String {
+    argv.iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}

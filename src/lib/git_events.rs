@@ -420,6 +420,13 @@ pub fn event_tag_from_nip19_or_hex(
             }
         }
         if let Ok(id) = nostr::EventId::from_str(&bech32) {
+            if ref_type == EventRefType::Quote {
+                break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Quote {
+                    event_id: id,
+                    relay_url: None,
+                    public_key: None,
+                }));
+            }
             break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
                 event_id: id,
                 relay_url: None,
@@ -1468,6 +1475,82 @@ mod tests {
                 );
                 Ok(())
             }
+        }
+    }
+
+    mod event_tag_from_nip19_or_hex {
+        use nostr::ToBech32;
+
+        use super::*;
+
+        /// Returns the tag's first slot (the tag name, e.g. `"e"` / `"q"`)
+        /// and its second slot (the referenced id, hex-encoded).
+        fn tag_name_and_value(tag: &Tag) -> (String, String) {
+            let s = tag.as_slice();
+            (
+                s.first().cloned().unwrap_or_default(),
+                s.get(1).cloned().unwrap_or_default(),
+            )
+        }
+
+        const EVENT_ID_HEX: &str =
+            "0000000000000000000000000000000000000000000000000000000000000001";
+
+        fn event_id_bech32() -> String {
+            nostr::EventId::from_hex(EVENT_ID_HEX)
+                .expect("valid hex event id")
+                .to_bech32()
+                .expect("encoding event id as note1...")
+        }
+
+        #[test]
+        fn quote_ref_type_emits_q_tag_for_bech32_input() -> Result<()> {
+            let tag = event_tag_from_nip19_or_hex(
+                &event_id_bech32(),
+                "in-reply-to",
+                EventRefType::Quote,
+                false,
+                false,
+            )?;
+            let (name, value) = tag_name_and_value(&tag);
+            assert_eq!(name, "q", "expected NIP-21 quote tag for bech32 input");
+            assert_eq!(value, EVENT_ID_HEX);
+            Ok(())
+        }
+
+        /// Regression: previously the raw-hex branch unconditionally built a
+        /// `TagStandard::Event` (serialised as `["e", <id>]`) regardless of
+        /// `ref_type`, so callers passing `EventRefType::Quote` with a hex id
+        /// got an `e` tag while the bech32 form correctly produced `q`. Now
+        /// both forms should yield `q`.
+        #[test]
+        fn quote_ref_type_emits_q_tag_for_hex_input() -> Result<()> {
+            let tag = event_tag_from_nip19_or_hex(
+                EVENT_ID_HEX,
+                "in-reply-to",
+                EventRefType::Quote,
+                false,
+                false,
+            )?;
+            let (name, value) = tag_name_and_value(&tag);
+            assert_eq!(name, "q", "expected NIP-21 quote tag for raw-hex input");
+            assert_eq!(value, EVENT_ID_HEX);
+            Ok(())
+        }
+
+        #[test]
+        fn root_ref_type_still_emits_e_tag_for_hex_input() -> Result<()> {
+            let tag = event_tag_from_nip19_or_hex(
+                EVENT_ID_HEX,
+                "in-reply-to",
+                EventRefType::Root,
+                false,
+                false,
+            )?;
+            let (name, value) = tag_name_and_value(&tag);
+            assert_eq!(name, "e", "non-Quote ref_type must still emit an `e` tag");
+            assert_eq!(value, EVENT_ID_HEX);
+            Ok(())
         }
     }
 }

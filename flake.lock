@@ -18,6 +18,32 @@
         "type": "github"
       }
     },
+    "ngit-grasp": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "rust-overlay": [
+          "rust-overlay"
+        ]
+      },
+      "locked": {
+        "lastModified": 1778927069,
+        "narHash": "sha256-hUAw3ztSmekXgBG0TCjX0pIZscR78kTchwJ7qu/M5RU=",
+        "ref": "refs/heads/master",
+        "rev": "27130135e38704f20f34073c5d138b6da86517dd",
+        "revCount": 638,
+        "type": "git",
+        "url": "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1760524057,
@@ -53,6 +79,7 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
+        "ngit-grasp": "ngit-grasp",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }
