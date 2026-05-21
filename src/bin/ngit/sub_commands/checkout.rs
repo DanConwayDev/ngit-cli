@@ -1,17 +1,16 @@
-use std::collections::HashSet;
-
 use anyhow::{Context, Result, bail};
 use ngit::{
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache,
     },
-    fetch::fetch_from_git_server,
+    fetch::ensure_commit_local,
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, tag_value,
+        get_parent_commit_from_patch, get_pr_tip_event_or_most_recent_patch_with_ancestors,
+        tag_value,
     },
-    repo_ref::{RepoRef, is_grasp_server_in_list},
+    repo_ref::RepoRef,
 };
 use nostr::nips::nip19::Nip19;
 use nostr_sdk::{EventId, FromBech32};
@@ -85,6 +84,7 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
     } else {
         checkout_patch(
             &git_repo,
+            &repo_ref,
             &cover_letter,
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
             nostr_remote.as_ref().map(|(name, _)| name.as_str()),
@@ -164,7 +164,13 @@ fn checkout_pr(
                 return Ok(());
             }
         }
-        fetch_oid_for_from_servers_for_pr(&proposal_tip, git_repo, repo_ref, proposal_tip_event)?;
+        ensure_commit_local(
+            &proposal_tip,
+            git_repo,
+            repo_ref,
+            &[],
+            &console::Term::stderr(),
+        )?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
         git_repo.checkout(&branch_name)?;
         println!("created and checked out proposal branch '{branch_name}'");
@@ -223,7 +229,13 @@ fn checkout_pr(
 
     // Case 5 (and tip-not-found): diverged — require --force.
     if force {
-        fetch_oid_for_from_servers_for_pr(&proposal_tip, git_repo, repo_ref, proposal_tip_event)?;
+        ensure_commit_local(
+            &proposal_tip,
+            git_repo,
+            repo_ref,
+            &[],
+            &console::Term::stderr(),
+        )?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
         git_repo.checkout(&branch_name)?;
         println!(
@@ -244,6 +256,7 @@ fn checkout_pr(
 #[allow(clippy::too_many_lines)]
 fn checkout_patch(
     git_repo: &Repo,
+    repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
     nostr_remote_name: Option<&str>,
@@ -254,6 +267,27 @@ fn checkout_patch(
     }
 
     let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
+
+    // Best-effort: ensure the patch chain's parent commit is available locally
+    // before any call to `apply_patch_chain` below. The proposal may be based
+    // on a commit we haven't pulled yet (e.g. a new revision authored against
+    // a newer `main`). `ensure_commit_local` short-circuits when the commit is
+    // already present, so this is free in the common case. Errors are ignored
+    // — `apply_patch_chain` will surface a meaningful error if the commit is
+    // still missing.
+    let ensure_patch_parent = || {
+        if let Some(oldest_patch) = most_recent_proposal_patch_chain_or_pr_or_pr_update.last() {
+            if let Ok(parent_oid) = get_parent_commit_from_patch(oldest_patch, Some(git_repo)) {
+                let _ = ensure_commit_local(
+                    &parent_oid,
+                    git_repo,
+                    repo_ref,
+                    &[],
+                    &console::Term::stderr(),
+                );
+            }
+        }
+    };
 
     // Case 1: branch doesn't exist yet — create and apply.
     let branch_exists = git_repo
@@ -273,6 +307,7 @@ fn checkout_patch(
                 return Ok(());
             }
         }
+        ensure_patch_parent();
         let _ = git_repo
             .apply_patch_chain(
                 &branch_name,
@@ -293,6 +328,7 @@ fn checkout_patch(
             .context("there should be at least one patch")?,
     ) else {
         git_repo.checkout(&branch_name)?;
+        ensure_patch_parent();
         let _ = git_repo
             .apply_patch_chain(
                 &branch_name,
@@ -327,6 +363,7 @@ fn checkout_patch(
         // tip, meaning the author appended new patches. Fast-forward.
         if local_is_ancestor_of_published {
             git_repo.checkout(&branch_name)?;
+            ensure_patch_parent();
             let _ = git_repo
                 .apply_patch_chain(
                     &branch_name,
@@ -353,6 +390,7 @@ fn checkout_patch(
         // Require --force to overwrite.
         if force {
             git_repo.checkout(&branch_name)?;
+            ensure_patch_parent();
             let _ = git_repo
                 .apply_patch_chain(
                     &branch_name,
@@ -377,6 +415,7 @@ fn checkout_patch(
     // diverged: require --force to overwrite.
     if force {
         git_repo.checkout(&branch_name)?;
+        ensure_patch_parent();
         let _ = git_repo
             .apply_patch_chain(
                 &branch_name,
@@ -394,56 +433,6 @@ fn checkout_patch(
     bail!(
         "branch '{branch_name}' has diverged from the published proposal; use --force to overwrite"
     )
-}
-
-fn fetch_oid_for_from_servers_for_pr(
-    oid: &str,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    pr_or_pr_update_event: &nostr::Event,
-) -> Result<()> {
-    let git_servers = {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<String> = vec![];
-        for tag in pr_or_pr_update_event.tags.as_slice() {
-            if tag.kind().eq(&nostr::event::TagKind::Clone) {
-                for clone_url in tag.as_slice().iter().skip(1) {
-                    seen.insert(clone_url.clone());
-                }
-            }
-        }
-        for server in &repo_ref.git_server {
-            if seen.insert(server.clone()) {
-                out.push(server.clone());
-            }
-        }
-        out
-    };
-
-    let mut errors = vec![];
-    let term = console::Term::stderr();
-
-    for git_server_url in &git_servers {
-        if let Err(error) = fetch_from_git_server(
-            git_repo,
-            &[oid.to_string()],
-            git_server_url,
-            &repo_ref.to_nostr_git_url(&None),
-            &term,
-            is_grasp_server_in_list(git_server_url, &repo_ref.grasp_servers()),
-        ) {
-            errors.push(error);
-        } else {
-            println!("fetched proposal git data from {git_server_url}");
-            break;
-        }
-    }
-    if !git_repo.does_commit_exist(oid)? {
-        bail!(
-            "cannot find proposal git data from proposal git server hint or repository git servers"
-        )
-    }
-    Ok(())
 }
 
 fn checkout_remote_branch_with_tracking(

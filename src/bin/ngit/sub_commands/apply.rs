@@ -1,15 +1,15 @@
-use std::{collections::HashSet, io::Write};
+use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use ngit::{
     client::get_all_proposal_patch_pr_pr_update_events_from_cache,
-    fetch::fetch_from_git_server,
+    fetch::ensure_commit_local,
     git::str_to_sha1,
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         get_pr_tip_event_or_most_recent_patch_with_ancestors, tag_value,
     },
-    repo_ref::{RepoRef, is_grasp_server_in_list},
+    repo_ref::RepoRef,
 };
 use nostr::nips::nip19::Nip19;
 use nostr_sdk::{EventId, FromBech32};
@@ -94,52 +94,16 @@ fn parse_event_id(id: &str) -> Result<EventId> {
     bail!("invalid event-id or nevent: {id}")
 }
 
-fn fetch_oid_for_pr(
-    oid: &str,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    pr_event: &nostr::Event,
-) -> Result<()> {
-    let git_servers = {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<String> = vec![];
-        for tag in pr_event.tags.as_slice() {
-            if tag.kind().eq(&nostr::event::TagKind::Clone) {
-                for clone_url in tag.as_slice().iter().skip(1) {
-                    seen.insert(clone_url.clone());
-                    out.push(clone_url.clone());
-                }
+fn pr_event_clone_tag_urls(pr_event: &nostr::Event) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for tag in pr_event.tags.as_slice() {
+        if tag.kind().eq(&nostr::event::TagKind::Clone) {
+            for clone_url in tag.as_slice().iter().skip(1) {
+                out.push(clone_url.clone());
             }
         }
-        for server in &repo_ref.git_server {
-            if seen.insert(server.clone()) {
-                out.push(server.clone());
-            }
-        }
-        out
-    };
-
-    let term = console::Term::stderr();
-    for git_server_url in &git_servers {
-        if fetch_from_git_server(
-            git_repo,
-            &[oid.to_string()],
-            git_server_url,
-            &repo_ref.to_nostr_git_url(&None),
-            &term,
-            is_grasp_server_in_list(git_server_url, &repo_ref.grasp_servers()),
-        )
-        .is_ok()
-        {
-            return Ok(());
-        }
     }
-    if !git_repo.does_commit_exist(oid)? {
-        bail!(
-            "cannot find proposal git data from proposal git server hint or repository git servers"
-        );
-    }
-    Ok(())
+    out
 }
 
 fn apply_pr(
@@ -150,10 +114,16 @@ fn apply_pr(
 ) -> Result<()> {
     let tip_oid = tag_value(pr_event, "c").context("PR event is missing 'c' (tip commit) tag")?;
 
-    // Ensure the tip commit is available locally
-    if !git_repo.does_commit_exist(&tip_oid)? {
-        fetch_oid_for_pr(&tip_oid, git_repo, repo_ref, pr_event)?;
-    }
+    // Ensure the tip commit is available locally. `ensure_commit_local`
+    // short-circuits if the commit is already present.
+    let extras = pr_event_clone_tag_urls(pr_event);
+    ensure_commit_local(
+        &tip_oid,
+        git_repo,
+        repo_ref,
+        &extras,
+        &console::Term::stderr(),
+    )?;
 
     let tip = str_to_sha1(&tip_oid).context("invalid tip commit OID in PR event")?;
 

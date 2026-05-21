@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -16,8 +17,74 @@ use crate::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
         utils::check_ssh_keys,
     },
+    repo_ref::{RepoRef, is_grasp_server_in_list},
     utils::{Direction, get_read_protocols_to_try, join_with_and, set_protocol_preference},
 };
+
+/// Ensure a single commit OID is present locally, fetching from git servers
+/// on demand if it isn't.
+///
+/// Short-circuits with `Ok(())` if the commit is already available locally — no
+/// network traffic is generated in that case.
+///
+/// Otherwise it tries each server in turn (extras first, then the repo's
+/// declared git servers, deduplicated). On the first server that returns the
+/// commit, `Ok(())` is returned. If every server fails and the commit is still
+/// not present, this bails.
+///
+/// `extras_to_try_first` is the slot for caller-provided URLs such as the
+/// `clone` tag of a PR event. Callers that don't want to trust submitter-
+/// supplied URLs simply pass `&[]`.
+pub fn ensure_commit_local(
+    oid: &str,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    extras_to_try_first: &[String],
+    term: &console::Term,
+) -> Result<()> {
+    if git_repo.does_commit_exist(oid)? {
+        return Ok(());
+    }
+
+    let nostr_url = repo_ref.to_nostr_git_url(&None);
+    let grasp_servers = repo_ref.grasp_servers();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut ordered_servers: Vec<&String> = Vec::new();
+    for s in extras_to_try_first {
+        if seen.insert(s.clone()) {
+            ordered_servers.push(s);
+        }
+    }
+    for s in &repo_ref.git_server {
+        if seen.insert(s.clone()) {
+            ordered_servers.push(s);
+        }
+    }
+
+    for git_server_url in ordered_servers {
+        if fetch_from_git_server(
+            git_repo,
+            &[oid.to_string()],
+            git_server_url,
+            &nostr_url,
+            term,
+            is_grasp_server_in_list(git_server_url, &grasp_servers),
+        )
+        .is_ok()
+            && git_repo.does_commit_exist(oid)?
+        {
+            let _ = term.write_line(&format!("fetched git data from {git_server_url}"));
+            return Ok(());
+        }
+    }
+
+    if !git_repo.does_commit_exist(oid)? {
+        let short = if oid.len() >= 8 { &oid[..8] } else { oid };
+        bail!("cannot find git data ({short}) on any of the configured git servers");
+    }
+    Ok(())
+}
 
 pub fn fetch_from_git_server(
     git_repo: &Repo,

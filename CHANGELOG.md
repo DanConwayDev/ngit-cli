@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Completely replaced the integration test harness with a much more agile one and rewrote all integration tests against it. This was a key blocker for further planned improvements.
+- `ngit pr apply` / `ngit pr checkout` / `ngit pr list` now consult git servers lazily — only when the specific commit they need is not already present locally — and share a single `ensure_commit_local` helper. Previously each command had its own near-duplicate copy of the fetch logic, and `checkout` issued git-server requests unconditionally even when the commit was already in the working repository
 
 ### Fixed
 
 - `ngit pr checkout` correctly checked out the PR as a branch but left the working directory at the previous state
+- `ngit pr checkout --force` on a patch-kind proposal failed with `failed to find parent commit (...). run git pull and try again.` when the new revision was based on a commit the local repository did not yet have; `checkout_patch` now best-effort-fetches the patch chain's parent from the repo's git servers before applying
 - `ngit send --in-reply-to <hex_event_id>` for a non-proposal-root reference (issue mention) emitted an `["e", <id>]` tag on the cover letter instead of the NIP-21 quote `["q", <id>]` tag that the bech32 (`note1...`) form produced; the raw-hex branch in `event_tag_from_nip19_or_hex` ignored `EventRefType::Quote` and unconditionally built `TagStandard::Event`, so hex and bech32 inputs produced different tags for the same logical reference
 
 ## [2.4.4] - 2026-05-16

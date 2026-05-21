@@ -6,14 +6,14 @@ use ngit::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache,
     },
-    fetch::fetch_from_git_server,
+    fetch::ensure_commit_local,
     git_events::{
         KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         get_commit_id_from_patch, get_labels_and_subject,
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, process_cover_note,
         status_kinds, tag_value,
     },
-    repo_ref::{RepoRef, is_grasp_server_in_list},
+    repo_ref::RepoRef,
 };
 use nostr::{
     FromBech32, ToBech32,
@@ -827,11 +827,12 @@ async fn launch_interactive() -> Result<()> {
                             return Ok(());
                         }
                     }
-                    fetch_oid_for_from_servers_for_pr(
+                    ensure_commit_local(
                         &proposal_tip,
                         &git_repo,
                         &repo_ref,
-                        proposal_tip_event,
+                        &[],
+                        &console::Term::stderr(),
                     )?;
                     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
                     git_repo.checkout(&branch_name)?;
@@ -1277,56 +1278,6 @@ async fn launch_interactive() -> Result<()> {
             }
         };
     }
-}
-
-fn fetch_oid_for_from_servers_for_pr(
-    oid: &str,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    pr_or_pr_update_event: &nostr::Event,
-) -> Result<()> {
-    let git_servers = {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<String> = vec![];
-        for tag in pr_or_pr_update_event.tags.as_slice() {
-            if tag.kind().eq(&nostr::event::TagKind::Clone) {
-                for clone_url in tag.as_slice().iter().skip(1) {
-                    seen.insert(clone_url.clone());
-                }
-            }
-        }
-        for server in &repo_ref.git_server {
-            if seen.insert(server.clone()) {
-                out.push(server.clone());
-            }
-        }
-        out
-    };
-
-    let mut errors = vec![];
-    let term = console::Term::stderr();
-
-    for git_server_url in &git_servers {
-        if let Err(error) = fetch_from_git_server(
-            git_repo,
-            &[oid.to_string()],
-            git_server_url,
-            &repo_ref.to_nostr_git_url(&None),
-            &term,
-            is_grasp_server_in_list(git_server_url, &repo_ref.grasp_servers()),
-        ) {
-            errors.push(error);
-        } else {
-            println!("fetched proposal git data from {git_server_url}");
-            break;
-        }
-    }
-    if !git_repo.does_commit_exist(oid)? {
-        bail!(
-            "cannot find proposal git data from proposal git server hint or repository git servers"
-        )
-    }
-    Ok(())
 }
 
 fn launch_git_am_with_patches(mut patches: Vec<nostr::Event>) -> Result<()> {
