@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ngit pr checkout` correctly checked out the PR as a branch but left the working directory at the previous state
 - `ngit send --in-reply-to <hex_event_id>` for a non-proposal-root reference (issue mention) emitted an `["e", <id>]` tag on the cover letter instead of the NIP-21 quote `["q", <id>]` tag that the bech32 (`note1...`) form produced; the raw-hex branch in `event_tag_from_nip19_or_hex` ignored `EventRefType::Quote` and unconditionally built `TagStandard::Event`, so hex and bech32 inputs produced different tags for the same logical reference
 
 ## [2.4.4] - 2026-05-16

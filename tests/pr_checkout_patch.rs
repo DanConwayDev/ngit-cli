@@ -67,9 +67,14 @@ struct Setup {
     /// smart-http requests for the test's lifetime. The revision scenario
     /// also reaches back in for a second `clone_published_repo`.
     harness: Harness,
-    published: PublishedRepo,
+    _published: PublishedRepo,
     proposals: [PublishedPatchSeries; 3],
     test_repo: Repo,
+    /// Maintainer clone — kept so the revision scenario can publish a
+    /// rebased revision as the maintainer (who is in `permissioned_users`
+    /// and therefore visible to
+    /// `get_all_proposal_patch_pr_pr_update_events_from_cache`).
+    publisher: Repo,
 }
 
 async fn setup() -> Result<Setup> {
@@ -82,7 +87,7 @@ async fn setup() -> Result<Setup> {
     .build()
     .await?;
 
-    let (_publisher, published) = harness
+    let (publisher, published) = harness
         .publish_repo(PublishRepoOpts {
             display_name: Some("pr-checkout-patch maintainer".into()),
             identifier: Some("pr-checkout-patch-repo".into()),
@@ -100,9 +105,10 @@ async fn setup() -> Result<Setup> {
 
     Ok(Setup {
         harness,
-        published,
+        _published: published,
         proposals,
         test_repo,
+        publisher,
     })
 }
 
@@ -246,9 +252,10 @@ async fn is_ancestor(repo: &Repo, maybe_ancestor: &str, descendant: &str) -> Res
 async fn fresh_branch_is_created_checked_out_and_at_published_tip() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         proposals,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let series = &proposals[0];
 
@@ -279,9 +286,10 @@ async fn fresh_branch_is_created_checked_out_and_at_published_tip() -> Result<()
 async fn up_to_date_branch_stays_at_published_tip_after_second_checkout() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         proposals,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let series = &proposals[0];
 
@@ -318,9 +326,10 @@ async fn up_to_date_branch_stays_at_published_tip_after_second_checkout() -> Res
 async fn behind_branch_fast_forwards_to_published_tip() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         proposals,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let series = &proposals[0];
 
@@ -370,9 +379,10 @@ async fn behind_branch_fast_forwards_to_published_tip() -> Result<()> {
 async fn local_amendments_are_preserved_when_checkout_without_force_fails() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         proposals,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let series = &proposals[0];
 
@@ -446,9 +456,10 @@ async fn local_amendments_are_preserved_when_checkout_without_force_fails() -> R
 async fn local_commits_on_top_are_not_discarded() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         proposals,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let series = &proposals[0];
 
@@ -518,44 +529,21 @@ async fn local_commits_on_top_are_not_discarded() -> Result<()> {
 /// new root patch event by branch-name tag to return a useful handle —
 /// pulling that out is more boilerplate than the test body itself.
 ///
-/// # `#[ignore]` — soft-checkout bug in `checkout_remote_branch_with_tracking`
-///
-/// `src/bin/ngit/sub_commands/checkout.rs:512` does `set_head` followed
-/// by `checkout_head(None)` (CHECKOUT_SAFE). Empirically the call
-/// advances HEAD to the new branch but does NOT populate the index or
-/// working tree to match — after the first `ngit pr checkout` against
-/// a real cloned `test_repo`, `git status --porcelain` reports the
-/// proposal's tree entries as `D <file>` (staged-for-deletion vs HEAD)
-/// because the index still reflects `main`. Every other scenario in
-/// this file masks the bug by either (a) calling `git checkout main`
-/// next (which rewrites the index + workdir to main's tree, hiding
-/// the misalignment), (b) making a new commit on the proposal branch
-/// (`stage_and_commit` rebuilds the index, again hiding it), or (c)
-/// going down `checkout_patch`'s `apply_patch_chain` path on the
-/// second call (which does its own checkouts and tidies up). The
-/// revision scenario does none of those between the first and second
-/// `ngit pr checkout`, so it hits `has_outstanding_changes`'s guard
-/// in `checkout_patch` at `checkout.rs:316` head-on.
-///
-/// Worth fixing in src/ — likely by passing
-/// `CheckoutBuilder::new().force()` (or the moral equivalent in
-/// `git2`) to `checkout_head` so the new branch's tree actually
-/// lands. Once fixed, drop this `#[ignore]`.
+/// The revision is published by the maintainer (the `publisher` clone from
+/// `setup()`). Using the maintainer ensures the revision patches pass the
+/// `permissioned_users` filter in
+/// `get_all_proposal_patch_pr_pr_update_events_from_cache` (which allows
+/// maintainers and the original proposal author). A third-party contributor
+/// would be filtered out and the second `ngit pr checkout` would see only
+/// the original patches, incorrectly returning "up-to-date".
 #[tokio::test]
-#[ignore = "FIXME(harness-migration): blocked on a soft-checkout bug in \
-            src/bin/ngit/sub_commands/checkout.rs:512 \
-            (checkout_remote_branch_with_tracking advances HEAD but \
-            checkout_head(None) leaves index + workdir at the previous \
-            ref's tree, so has_outstanding_changes returns true on the \
-            next ngit pr checkout when nothing rewrites the workdir in \
-            between). See the doc-comment on this test for the full \
-            trace."]
 async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
     let Setup {
-        harness,
-        published,
+        harness: _h,
+        _published: _,
         proposals,
         test_repo,
+        publisher,
     } = setup().await?;
     let series = &proposals[0];
 
@@ -565,22 +553,14 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
     let tip_before_revision = rev_parse(&test_repo, &branch).await?;
     assert_eq!(tip_before_revision, series.tip);
 
-    // (2) Reviser publishes a rebased revision — fresh contributor so
-    //     `ngit send` has a signing key. Mirrors legacy
-    //     `create_proposals_with_rebased_first_proposal`.
-    let reviser = harness
-        .clone_published_repo(
-            &published,
-            CloneLogin::AsContributor {
-                display_name: "revising contributor".into(),
-            },
-        )
-        .await?;
-    std::fs::write(reviser.dir().join("amazing.md"), "rebase base content\n")
+    // (2) Publisher (maintainer) publishes a rebased revision.
+    //     Using the maintainer ensures the revision patches are visible to
+    //     `get_all_proposal_patch_pr_pr_update_events_from_cache`.
+    std::fs::write(publisher.dir().join("amazing.md"), "rebase base content\n")
         .context("write amazing.md")?;
-    git_ok(&reviser, ["add", "amazing.md"], "git add amazing.md").await?;
+    git_ok(&publisher, ["add", "amazing.md"], "git add amazing.md").await?;
     git_ok(
-        &reviser,
+        &publisher,
         [
             "commit",
             "-m",
@@ -590,48 +570,43 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
         "git commit rebase base",
     )
     .await?;
+    // Push the "rebase base" commit to origin so the test_repo can fetch it
+    // when `ngit pr checkout --force` needs to apply the revision patches.
+    publisher.nostr_push(["origin", "main"]).await?;
     git_ok(
-        &reviser,
+        &publisher,
         ["checkout", "-b", &series.branch_name],
         "git checkout -b feature (revision)",
     )
     .await?;
-    std::fs::write(reviser.dir().join("revised-a3.md"), "revised a3\n")
+    std::fs::write(publisher.dir().join("revised-a3.md"), "revised a3\n")
         .context("write revised-a3.md")?;
-    git_ok(&reviser, ["add", "revised-a3.md"], "git add revised-a3").await?;
+    git_ok(&publisher, ["add", "revised-a3.md"], "git add revised-a3").await?;
     git_ok(
-        &reviser,
+        &publisher,
         ["commit", "-m", "add revised-a3.md", "--no-gpg-sign"],
         "git commit revised-a3",
     )
     .await?;
-    std::fs::write(reviser.dir().join("revised-a4.md"), "revised a4\n")
+    std::fs::write(publisher.dir().join("revised-a4.md"), "revised a4\n")
         .context("write revised-a4.md")?;
-    git_ok(&reviser, ["add", "revised-a4.md"], "git add revised-a4").await?;
+    git_ok(&publisher, ["add", "revised-a4.md"], "git add revised-a4").await?;
     git_ok(
-        &reviser,
+        &publisher,
         ["commit", "-m", "add revised-a4.md", "--no-gpg-sign"],
         "git commit revised-a4",
     )
     .await?;
-    let revised_tip = rev_parse(&reviser, "HEAD").await?;
+    let revised_tip = rev_parse(&publisher, "HEAD").await?;
     assert_ne!(revised_tip, series.tip);
 
     let in_reply_to_hex = root_event_id_hex(series);
-    let send_out = reviser
+    let send_out = publisher
         .ngit([
             "send",
             "HEAD~2",
             "--force-patch",
             "--no-cover-letter",
-            // Reviser's local main has an extra "rebase base" commit
-            // that hasn't been pushed to origin, so ngit's
-            // ahead-of-origin/main guard would otherwise bail with
-            // "proposal builds on a commit 1 ahead of 'origin/main'.
-            // use --force to proceed". The legacy fixture sidestepped
-            // this by populating both originating repos from the same
-            // deterministic seed; here we just opt into the override.
-            "--force",
             "--in-reply-to",
             &in_reply_to_hex,
         ])

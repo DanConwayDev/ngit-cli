@@ -537,14 +537,29 @@ fn checkout_remote_branch_with_tracking(
         .name()
         .context("failed to get local branch ref name")?;
 
+    // checkout_tree first (with the commit as the explicit treeish), then
+    // set_head.  This mirrors the order used by Repo::checkout() in
+    // src/lib/git/mod.rs and is critical for correctness: checkout_tree uses
+    // the *current* HEAD as the baseline when deciding which working-tree
+    // files to touch, so it must run before HEAD is moved.  Calling
+    // set_head first and then checkout_head(None) (GIT_CHECKOUT_SAFE) leaves
+    // the index and working tree at the old branch's tree because libgit2
+    // sees the workdir files as "modified relative to the new baseline" and
+    // refuses to overwrite them.
+    //
+    // GIT_CHECKOUT_SAFE (the default) preserves untracked files, ignored
+    // files, staged changes, and any working-tree modifications to files that
+    // differ between the old and new trees — exactly the behaviour the user
+    // expects from a normal `git checkout`.
+    let commit_obj = commit.as_object();
+    git_repo
+        .git_repo
+        .checkout_tree(commit_obj, None)
+        .context("failed to checkout tree for new branch")?;
     git_repo
         .git_repo
         .set_head(local_branch_ref_name)
         .context("failed to set head to local branch")?;
-    git_repo
-        .git_repo
-        .checkout_head(None)
-        .context("failed to checkout head")?;
 
     Ok(())
 }
