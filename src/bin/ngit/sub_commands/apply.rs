@@ -1,21 +1,15 @@
-use std::{
-    collections::HashSet,
-    io::Write,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::io::Write;
 
 use anyhow::{Context, Result, bail};
-use indicatif::{ProgressBar, ProgressStyle};
 use ngit::{
     client::get_all_proposal_patch_pr_pr_update_events_from_cache,
-    fetch::fetch_from_git_server,
+    fetch::ensure_commit_local,
     git::str_to_sha1,
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, pr_event_clone_tag_urls, tag_value,
     },
-    repo_ref::{RepoRef, is_grasp_server_in_list},
+    repo_ref::RepoRef,
 };
 use nostr::nips::nip19::Nip19;
 use nostr_sdk::{EventId, FromBech32};
@@ -25,60 +19,6 @@ use crate::{
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
-
-fn run_git_fetch(remote_name: &str) -> Result<()> {
-    let verbose = ngit::client::is_verbose();
-    if verbose {
-        println!("fetching from {remote_name}...");
-    }
-
-    let spinner = if verbose {
-        None
-    } else {
-        let pb = ProgressBar::new_spinner()
-            .with_style(
-                ProgressStyle::with_template("{spinner} {msg}")
-                    .unwrap()
-                    .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
-            )
-            .with_message(format!("Fetching from {remote_name}..."));
-        pb.enable_steady_tick(Duration::from_millis(100));
-        Some(pb)
-    };
-
-    let output = Command::new("git")
-        .args(["fetch", remote_name])
-        .stdout(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .stderr(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .output()
-        .context("failed to run git fetch")?;
-
-    if let Some(spinner) = spinner {
-        spinner.finish_and_clear();
-    }
-
-    if !output.status.success() {
-        if !verbose {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                eprintln!("{stderr}");
-            }
-        }
-        bail!(
-            "git fetch {remote_name} exited with error: {}",
-            output.status
-        );
-    }
-    Ok(())
-}
 
 pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
     let event_id = parse_event_id(id)?;
@@ -92,18 +32,8 @@ pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    let nostr_remote = git_repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await
-        .ok()
-        .flatten();
-
     if !offline {
-        if let Some((remote_name, _)) = &nostr_remote {
-            run_git_fetch(remote_name)?;
-        } else {
-            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        }
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
@@ -164,54 +94,6 @@ fn parse_event_id(id: &str) -> Result<EventId> {
     bail!("invalid event-id or nevent: {id}")
 }
 
-fn fetch_oid_for_pr(
-    oid: &str,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    pr_event: &nostr::Event,
-) -> Result<()> {
-    let git_servers = {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<String> = vec![];
-        for tag in pr_event.tags.as_slice() {
-            if tag.kind().eq(&nostr::event::TagKind::Clone) {
-                for clone_url in tag.as_slice().iter().skip(1) {
-                    seen.insert(clone_url.clone());
-                    out.push(clone_url.clone());
-                }
-            }
-        }
-        for server in &repo_ref.git_server {
-            if seen.insert(server.clone()) {
-                out.push(server.clone());
-            }
-        }
-        out
-    };
-
-    let term = console::Term::stderr();
-    for git_server_url in &git_servers {
-        if fetch_from_git_server(
-            git_repo,
-            &[oid.to_string()],
-            git_server_url,
-            &repo_ref.to_nostr_git_url(&None),
-            &term,
-            is_grasp_server_in_list(git_server_url, &repo_ref.grasp_servers()),
-        )
-        .is_ok()
-        {
-            return Ok(());
-        }
-    }
-    if !git_repo.does_commit_exist(oid)? {
-        bail!(
-            "cannot find proposal git data from proposal git server hint or repository git servers"
-        );
-    }
-    Ok(())
-}
-
 fn apply_pr(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -220,10 +102,16 @@ fn apply_pr(
 ) -> Result<()> {
     let tip_oid = tag_value(pr_event, "c").context("PR event is missing 'c' (tip commit) tag")?;
 
-    // Ensure the tip commit is available locally
-    if !git_repo.does_commit_exist(&tip_oid)? {
-        fetch_oid_for_pr(&tip_oid, git_repo, repo_ref, pr_event)?;
-    }
+    // Ensure the tip commit is available locally. `ensure_commit_local`
+    // short-circuits if the commit is already present.
+    let extras = pr_event_clone_tag_urls(pr_event);
+    ensure_commit_local(
+        &tip_oid,
+        git_repo,
+        repo_ref,
+        &extras,
+        &console::Term::stderr(),
+    )?;
 
     let tip = str_to_sha1(&tip_oid).context("invalid tip commit OID in PR event")?;
 

@@ -1,26 +1,19 @@
-use std::{
-    collections::HashSet,
-    io::Write,
-    ops::Add,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{collections::HashSet, io::Write, ops::Add};
 
 use anyhow::{Context, Result, bail};
-use indicatif::{ProgressBar, ProgressStyle};
 use ngit::{
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache,
     },
-    fetch::fetch_from_git_server,
+    fetch::ensure_commit_local,
     git_events::{
         KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         get_commit_id_from_patch, get_labels_and_subject,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, process_cover_note,
-        status_kinds, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, pr_event_clone_tag_urls,
+        process_cover_note, status_kinds, tag_value,
     },
-    repo_ref::{RepoRef, is_grasp_server_in_list},
+    repo_ref::RepoRef,
 };
 use nostr::{
     FromBech32, ToBech32,
@@ -40,61 +33,8 @@ use crate::{
         get_parent_commit_from_patch,
     },
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
 };
-
-fn run_git_fetch(remote_name: &str) -> Result<()> {
-    let verbose = ngit::client::is_verbose();
-    if verbose {
-        println!("fetching from {remote_name}...");
-    }
-
-    let spinner = if verbose {
-        None
-    } else {
-        let pb = ProgressBar::new_spinner()
-            .with_style(
-                ProgressStyle::with_template("{spinner} {msg}")
-                    .unwrap()
-                    .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
-            )
-            .with_message(format!("Fetching from {remote_name}..."));
-        pb.enable_steady_tick(Duration::from_millis(100));
-        Some(pb)
-    };
-
-    let output = Command::new("git")
-        .args(["fetch", remote_name])
-        .stdout(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .stderr(if verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
-        .output()
-        .context("failed to run git fetch")?;
-
-    if let Some(spinner) = spinner {
-        spinner.finish_and_clear();
-    }
-
-    if !output.status.success() {
-        if !verbose {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                eprintln!("{stderr}");
-            }
-        }
-        bail!(
-            "git fetch {remote_name} exited with error: {}",
-            output.status
-        );
-    }
-    Ok(())
-}
 
 #[allow(clippy::too_many_lines)]
 pub async fn launch(
@@ -116,22 +56,8 @@ pub async fn launch(
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    let nostr_remote = git_repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await
-        .ok()
-        .flatten();
-
     if !offline {
-        if let Some((remote_name, _)) = &nostr_remote {
-            if std::env::var("NGITTEST").is_ok() {
-                fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-            } else {
-                run_git_fetch(remote_name)?;
-            }
-        } else {
-            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        }
+        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
@@ -694,21 +620,15 @@ async fn launch_interactive() -> Result<()> {
 
     let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
 
-    let nostr_remote = git_repo
+    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+
+    let nostr_remote_name: Option<String> = git_repo
         .get_first_nostr_remote_when_in_ngit_binary()
         .await
         .ok()
-        .flatten();
-
-    if let Some((remote_name, _)) = &nostr_remote {
-        if std::env::var("NGITTEST").is_ok() {
-            fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-        } else {
-            run_git_fetch(remote_name)?;
-        }
-    } else {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-    }
+        .flatten()
+        .map(|(name, _)| name);
+    let nostr_remote_name: Option<&str> = nostr_remote_name.as_deref();
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
@@ -908,26 +828,54 @@ async fn launch_interactive() -> Result<()> {
                             .checkout(&branch_name)
                             .context("cannot checkout existing proposal branch")?;
                         if local_branch_tip.to_string() == proposal_tip {
-                            println!("checked out up-to-date proposal branch '{branch_name}'");
+                            let tracked = maybe_setup_nostr_remote_tracking(
+                                &git_repo,
+                                nostr_remote_name,
+                                &branch_name,
+                            )?;
+                            println!(
+                                "checked out up-to-date proposal branch '{branch_name}'{}",
+                                tracking_suffix(tracked, nostr_remote_name),
+                            );
                             return Ok(());
                         }
                         if git_repo.does_commit_exist(&proposal_tip)? {
-                            println!("checked out proposal branch and updated tip '{branch_name}'");
+                            let tracked = maybe_setup_nostr_remote_tracking(
+                                &git_repo,
+                                nostr_remote_name,
+                                &branch_name,
+                            )?;
+                            println!(
+                                "checked out proposal branch and updated tip '{branch_name}'{}",
+                                tracking_suffix(tracked, nostr_remote_name),
+                            );
                             return Ok(());
                         }
                     }
-                    fetch_oid_for_from_servers_for_pr(
+                    ensure_commit_local(
                         &proposal_tip,
                         &git_repo,
                         &repo_ref,
-                        proposal_tip_event,
+                        &pr_event_clone_tag_urls(proposal_tip_event),
+                        &console::Term::stderr(),
                     )?;
                     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
                     git_repo.checkout(&branch_name)?;
+                    let tracked = maybe_setup_nostr_remote_tracking(
+                        &git_repo,
+                        nostr_remote_name,
+                        &branch_name,
+                    )?;
                     if local_branch_tip.is_some() {
-                        println!("created and checked out proposal branch '{branch_name}'");
+                        println!(
+                            "created and checked out proposal branch '{branch_name}'{}",
+                            tracking_suffix(tracked, nostr_remote_name),
+                        );
                     } else {
-                        println!("checked out proposal branch and pulled updates '{branch_name}'");
+                        println!(
+                            "checked out proposal branch and pulled updates '{branch_name}'{}",
+                            tracking_suffix(tracked, nostr_remote_name),
+                        );
                     }
                     return Ok(());
                 }
@@ -953,6 +901,16 @@ async fn launch_interactive() -> Result<()> {
         let checked_out_proposal_branch = git_repo
             .get_checked_out_branch_name()?
             .eq(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?);
+
+        // TODO(follow-up): the patch-kind interactive checkout arms below
+        // (~975-1297) do not yet call `maybe_setup_nostr_remote_tracking` /
+        // append `tracking_suffix(...)` to their success-path prints. The
+        // non-interactive `ngit pr checkout` path covers both PR-kind and
+        // patch-kind; this interactive sibling currently only does PR-kind
+        // (see the arm just above at ~830). `nostr_remote_name` is already
+        // in scope and the helpers are imported from `crate::sub_commands::
+        // checkout`; the change is mechanical but voluminous (10+ println
+        // sites) and was deferred to keep this diff reviewable.
 
         let last_patch = most_recent_proposal_patch_chain_or_pr_or_pr_update
             .last()
@@ -1366,56 +1324,6 @@ async fn launch_interactive() -> Result<()> {
             }
         };
     }
-}
-
-fn fetch_oid_for_from_servers_for_pr(
-    oid: &str,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    pr_or_pr_update_event: &nostr::Event,
-) -> Result<()> {
-    let git_servers = {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<String> = vec![];
-        for tag in pr_or_pr_update_event.tags.as_slice() {
-            if tag.kind().eq(&nostr::event::TagKind::Clone) {
-                for clone_url in tag.as_slice().iter().skip(1) {
-                    seen.insert(clone_url.clone());
-                }
-            }
-        }
-        for server in &repo_ref.git_server {
-            if seen.insert(server.clone()) {
-                out.push(server.clone());
-            }
-        }
-        out
-    };
-
-    let mut errors = vec![];
-    let term = console::Term::stderr();
-
-    for git_server_url in &git_servers {
-        if let Err(error) = fetch_from_git_server(
-            git_repo,
-            &[oid.to_string()],
-            git_server_url,
-            &repo_ref.to_nostr_git_url(&None),
-            &term,
-            is_grasp_server_in_list(git_server_url, &repo_ref.grasp_servers()),
-        ) {
-            errors.push(error);
-        } else {
-            println!("fetched proposal git data from {git_server_url}");
-            break;
-        }
-    }
-    if !git_repo.does_commit_exist(oid)? {
-        bail!(
-            "cannot find proposal git data from proposal git server hint or repository git servers"
-        )
-    }
-    Ok(())
 }
 
 fn launch_git_am_with_patches(mut patches: Vec<nostr::Event>) -> Result<()> {
