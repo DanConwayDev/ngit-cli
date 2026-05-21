@@ -7,7 +7,7 @@ use ngit::{
     git::str_to_sha1,
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, pr_event_clone_tag_urls, tag_value,
     },
     repo_ref::RepoRef,
 };
@@ -92,18 +92,6 @@ fn parse_event_id(id: &str) -> Result<EventId> {
         return Ok(event_id);
     }
     bail!("invalid event-id or nevent: {id}")
-}
-
-fn pr_event_clone_tag_urls(pr_event: &nostr::Event) -> Vec<String> {
-    let mut out: Vec<String> = vec![];
-    for tag in pr_event.tags.as_slice() {
-        if tag.kind().eq(&nostr::event::TagKind::Clone) {
-            for clone_url in tag.as_slice().iter().skip(1) {
-                out.push(clone_url.clone());
-            }
-        }
-    }
-    out
 }
 
 fn apply_pr(

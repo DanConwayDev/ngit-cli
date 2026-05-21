@@ -8,7 +8,7 @@ use ngit::{
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
         get_parent_commit_from_patch, get_pr_tip_event_or_most_recent_patch_with_ancestors,
-        tag_value,
+        pr_event_clone_tag_urls, tag_value,
     },
     repo_ref::RepoRef,
 };
@@ -168,7 +168,7 @@ fn checkout_pr(
             &proposal_tip,
             git_repo,
             repo_ref,
-            &[],
+            &pr_event_clone_tag_urls(proposal_tip_event),
             &console::Term::stderr(),
         )?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
@@ -233,7 +233,7 @@ fn checkout_pr(
             &proposal_tip,
             git_repo,
             repo_ref,
-            &[],
+            &pr_event_clone_tag_urls(proposal_tip_event),
             &console::Term::stderr(),
         )?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;

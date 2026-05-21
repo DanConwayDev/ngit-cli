@@ -29,6 +29,27 @@ pub fn tag_value(event: &Event, tag_name: &str) -> Result<String> {
         .clone())
 }
 
+/// Extract submitter-provided git-server URLs from a PR-event's `clone` tags.
+///
+/// These URLs are caller-controlled (anyone can publish a PR with any value)
+/// so the result must only be used in contexts where the user has explicitly
+/// targeted this specific event (e.g. `ngit pr apply <id>` /
+/// `ngit pr checkout <id>`). Do NOT use as a fallback for passive operations
+/// like clone or generic fetch — see the rationale in
+/// `src/bin/git_remote_nostr/list.rs::get_open_and_draft_proposals_state`.
+#[must_use]
+pub fn pr_event_clone_tag_urls(event: &Event) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for tag in event.tags.as_slice() {
+        if tag.kind().eq(&TagKind::Clone) {
+            for clone_url in tag.as_slice().iter().skip(1) {
+                out.push(clone_url.clone());
+            }
+        }
+    }
+    out
+}
+
 pub fn get_commit_id_from_patch(event: &Event) -> Result<String> {
     let value = tag_value(event, "commit");
 

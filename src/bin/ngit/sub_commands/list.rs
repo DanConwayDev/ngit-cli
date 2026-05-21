@@ -10,8 +10,8 @@ use ngit::{
     git_events::{
         KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         get_commit_id_from_patch, get_labels_and_subject,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, process_cover_note,
-        status_kinds, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, pr_event_clone_tag_urls,
+        process_cover_note, status_kinds, tag_value,
     },
     repo_ref::RepoRef,
 };
@@ -831,7 +831,7 @@ async fn launch_interactive() -> Result<()> {
                         &proposal_tip,
                         &git_repo,
                         &repo_ref,
-                        &[],
+                        &pr_event_clone_tag_urls(proposal_tip_event),
                         &console::Term::stderr(),
                     )?;
                     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
