@@ -5,6 +5,7 @@ use ngit::{
         get_proposals_and_revisions_from_cache,
     },
     fetch::ensure_commit_local,
+    git::sha1_to_oid,
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, get_commit_id_from_patch,
         get_parent_commit_from_patch, get_pr_tip_event_or_most_recent_patch_with_ancestors,
@@ -154,16 +155,6 @@ fn checkout_pr(
 
     // Case 1: branch doesn't exist yet — create it.
     let Ok(local_branch_tip) = git_repo.get_tip_of_branch(&branch_name) else {
-        if let Some(remote_name) = nostr_remote_name {
-            let remote_branch = format!("{remote_name}/{branch_name}");
-            if git_repo.get_tip_of_branch(&remote_branch).is_ok() {
-                checkout_remote_branch_with_tracking(git_repo, remote_name, &branch_name)?;
-                println!(
-                    "checked out proposal branch '{branch_name}' with tracking to {remote_name}"
-                );
-                return Ok(());
-            }
-        }
         ensure_commit_local(
             &proposal_tip,
             git_repo,
@@ -173,7 +164,11 @@ fn checkout_pr(
         )?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
         git_repo.checkout(&branch_name)?;
-        println!("created and checked out proposal branch '{branch_name}'");
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+        println!(
+            "created and checked out proposal branch '{branch_name}'{}",
+            tracking_suffix(tracked, nostr_remote_name),
+        );
         return Ok(());
     };
 
@@ -182,21 +177,10 @@ fn checkout_pr(
         git_repo
             .checkout(&branch_name)
             .context("cannot checkout existing proposal branch")?;
-        println!("checked out up-to-date proposal branch '{branch_name}'");
-        return Ok(());
-    }
-
-    // Branch has a tracking remote — defer to git pull for updates.
-    if git_repo.get_upstream_for_branch(&branch_name)?.is_some() {
-        git_repo
-            .checkout(&branch_name)
-            .context("cannot checkout existing proposal branch")?;
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
         println!(
-            "{}",
-            console::style(format!(
-                "Local branch '{branch_name}' is behind. Run git pull to update."
-            ))
-            .yellow()
+            "checked out up-to-date proposal branch '{branch_name}'{}",
+            tracking_suffix(tracked, nostr_remote_name),
         );
         return Ok(());
     }
@@ -211,7 +195,12 @@ fn checkout_pr(
         if local_is_ancestor_of_published {
             git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
             git_repo.checkout(&branch_name)?;
-            println!("checked out proposal branch and updated tip '{branch_name}'");
+            let tracked =
+                maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+            println!(
+                "checked out proposal branch and updated tip '{branch_name}'{}",
+                tracking_suffix(tracked, nostr_remote_name),
+            );
             return Ok(());
         }
 
@@ -220,8 +209,11 @@ fn checkout_pr(
             git_repo
                 .checkout(&branch_name)
                 .context("cannot checkout existing proposal branch")?;
+            let tracked =
+                maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
             println!(
-                "checked out proposal branch '{branch_name}' (local branch has unpublished commits on top)"
+                "checked out proposal branch '{branch_name}' (local branch has unpublished commits on top){}",
+                tracking_suffix(tracked, nostr_remote_name),
             );
             return Ok(());
         }
@@ -238,8 +230,10 @@ fn checkout_pr(
         )?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
         git_repo.checkout(&branch_name)?;
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
         println!(
-            "checked out proposal branch '{branch_name}' updated to published tip (overwrote diverged local branch)"
+            "checked out proposal branch '{branch_name}' updated to published tip (overwrote diverged local branch){}",
+            tracking_suffix(tracked, nostr_remote_name),
         );
         return Ok(());
     }
@@ -297,16 +291,6 @@ fn checkout_patch(
         .any(|n| n.eq(&branch_name));
 
     if !branch_exists {
-        if let Some(remote_name) = nostr_remote_name {
-            let remote_branch = format!("{remote_name}/{branch_name}");
-            if git_repo.get_tip_of_branch(&remote_branch).is_ok() {
-                checkout_remote_branch_with_tracking(git_repo, remote_name, &branch_name)?;
-                println!(
-                    "checked out proposal branch '{branch_name}' with tracking to {remote_name}"
-                );
-                return Ok(());
-            }
-        }
         ensure_patch_parent();
         let _ = git_repo
             .apply_patch_chain(
@@ -314,7 +298,11 @@ fn checkout_patch(
                 most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
             )
             .context("failed to apply patch chain")?;
-        println!("checked out proposal as '{branch_name}' branch");
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+        println!(
+            "checked out proposal as '{branch_name}' branch{}",
+            tracking_suffix(tracked, nostr_remote_name),
+        );
         return Ok(());
     }
 
@@ -335,20 +323,32 @@ fn checkout_patch(
                 most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
             )
             .context("failed to apply patch chain")?;
-        println!("checked out updated proposal as '{branch_name}' branch");
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+        println!(
+            "checked out updated proposal as '{branch_name}' branch{}",
+            tracking_suffix(tracked, nostr_remote_name),
+        );
         return Ok(());
     };
 
     let Ok(proposal_tip) = str_to_sha1(&proposal_tip_str) else {
         git_repo.checkout(&branch_name)?;
-        println!("checked out proposal as '{branch_name}' branch");
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+        println!(
+            "checked out proposal as '{branch_name}' branch{}",
+            tracking_suffix(tracked, nostr_remote_name),
+        );
         return Ok(());
     };
 
     // Case 2: already up to date.
     if proposal_tip.eq(&local_branch_tip) {
         git_repo.checkout(&branch_name)?;
-        println!("branch '{branch_name}' checked out and up-to-date");
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+        println!(
+            "branch '{branch_name}' checked out and up-to-date{}",
+            tracking_suffix(tracked, nostr_remote_name),
+        );
         return Ok(());
     }
 
@@ -370,7 +370,12 @@ fn checkout_patch(
                     most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
                 )
                 .context("failed to apply patch chain")?;
-            println!("checked out updated proposal as '{branch_name}' branch");
+            let tracked =
+                maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+            println!(
+                "checked out updated proposal as '{branch_name}' branch{}",
+                tracking_suffix(tracked, nostr_remote_name),
+            );
             return Ok(());
         }
 
@@ -379,8 +384,11 @@ fn checkout_patch(
         // commits.
         if published_is_ancestor_of_local {
             git_repo.checkout(&branch_name)?;
+            let tracked =
+                maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
             println!(
-                "checked out proposal branch '{branch_name}' (local branch has unpublished commits on top)"
+                "checked out proposal branch '{branch_name}' (local branch has unpublished commits on top){}",
+                tracking_suffix(tracked, nostr_remote_name),
             );
             return Ok(());
         }
@@ -397,8 +405,11 @@ fn checkout_patch(
                     most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
                 )
                 .context("failed to apply patch chain")?;
+            let tracked =
+                maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
             println!(
-                "checked out updated proposal as '{branch_name}' branch (overwrote diverged local branch)"
+                "checked out updated proposal as '{branch_name}' branch (overwrote diverged local branch){}",
+                tracking_suffix(tracked, nostr_remote_name),
             );
             return Ok(());
         }
@@ -422,8 +433,10 @@ fn checkout_patch(
                 most_recent_proposal_patch_chain_or_pr_or_pr_update.to_vec(),
             )
             .context("failed to apply patch chain")?;
+        let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
         println!(
-            "checked out updated proposal as '{branch_name}' branch (overwrote diverged local branch)"
+            "checked out updated proposal as '{branch_name}' branch (overwrote diverged local branch){}",
+            tracking_suffix(tracked, nostr_remote_name),
         );
         return Ok(());
     }
@@ -435,57 +448,86 @@ fn checkout_patch(
     )
 }
 
-fn checkout_remote_branch_with_tracking(
+/// After a successful checkout of a PR/patch branch, configure it to track
+/// the nostr remote so the user can run `git pull` later.
+///
+/// - Updates (or creates) `refs/remotes/<remote>/<branch>` at the branch's
+///   current tip.
+/// - If the branch has no upstream yet, sets the upstream to
+///   `<remote>/<branch>`. Existing upstreams (e.g. user-configured) are
+///   preserved.
+///
+/// Returns `Ok(true)` if a nostr remote was found and the ref/upstream was
+/// updated, `Ok(false)` if no nostr remote is configured (no-op).
+///
+/// Determinism note: the OID written to the remote-tracking ref is the local
+/// branch tip. For PR-kind proposals this matches the canonical `c` tag.
+/// For patch-kind proposals the OID is whatever `apply_patch_chain`
+/// produced; `git-remote-nostr` reconstructs from the same patch events via
+/// the same `create_commit_from_patch` code path, so a later `git pull`
+/// will see a matching OID and report "already up to date".
+pub fn maybe_setup_nostr_remote_tracking(
+    git_repo: &Repo,
+    nostr_remote_name: Option<&str>,
+    branch_name: &str,
+) -> Result<bool> {
+    let Some(remote_name) = nostr_remote_name else {
+        return Ok(false);
+    };
+
+    let tip_sha1 = git_repo
+        .get_tip_of_branch(branch_name)
+        .context("failed to read tip of branch to set up nostr-remote tracking")?;
+    let tip_oid = sha1_to_oid(&tip_sha1)?;
+
+    set_nostr_remote_tracking_ref(git_repo, remote_name, branch_name, tip_oid)?;
+
+    if git_repo
+        .get_upstream_for_branch(branch_name)
+        .context("failed to look up branch upstream")?
+        .is_none()
+    {
+        let mut branch = git_repo
+            .git_repo
+            .find_branch(branch_name, git2::BranchType::Local)
+            .context("failed to find local branch to set upstream")?;
+        branch
+            .set_upstream(Some(&format!("{remote_name}/{branch_name}")))
+            .context("failed to set upstream tracking")?;
+    }
+    Ok(true)
+}
+
+/// Write (or update) `refs/remotes/<remote>/<branch>` to point at `oid`.
+///
+/// The caller must have verified `oid` is in the local object store. This
+/// is purely local bookkeeping; the next `git pull` against the nostr
+/// remote will re-advertise the same ref from the PR event's `c` tag
+/// (PR-kind) or by reconstructing commits from patch events (patch-kind)
+/// via the same `create_commit_from_patch` code path that
+/// `apply_patch_chain` uses, so the OIDs match.
+fn set_nostr_remote_tracking_ref(
     git_repo: &Repo,
     remote_name: &str,
     branch_name: &str,
+    oid: git2::Oid,
 ) -> Result<()> {
-    let remote_branch_ref = format!("refs/remotes/{remote_name}/{branch_name}");
-    let remote_branch = git_repo
-        .git_repo
-        .find_reference(&remote_branch_ref)
-        .context(format!("failed to find remote branch {remote_branch_ref}"))?;
-    let commit = remote_branch
-        .peel_to_commit()
-        .context("failed to peel remote branch to commit")?;
-
-    let mut local_branch = git_repo
-        .git_repo
-        .branch(branch_name, &commit, false)
-        .context("failed to create local branch")?;
-
-    local_branch
-        .set_upstream(Some(&format!("{remote_name}/{branch_name}")))
-        .context("failed to set upstream tracking")?;
-
-    let local_branch_ref = local_branch.into_reference();
-    let local_branch_ref_name = local_branch_ref
-        .name()
-        .context("failed to get local branch ref name")?;
-
-    // checkout_tree first (with the commit as the explicit treeish), then
-    // set_head.  This mirrors the order used by Repo::checkout() in
-    // src/lib/git/mod.rs and is critical for correctness: checkout_tree uses
-    // the *current* HEAD as the baseline when deciding which working-tree
-    // files to touch, so it must run before HEAD is moved.  Calling
-    // set_head first and then checkout_head(None) (GIT_CHECKOUT_SAFE) leaves
-    // the index and working tree at the old branch's tree because libgit2
-    // sees the workdir files as "modified relative to the new baseline" and
-    // refuses to overwrite them.
-    //
-    // GIT_CHECKOUT_SAFE (the default) preserves untracked files, ignored
-    // files, staged changes, and any working-tree modifications to files that
-    // differ between the old and new trees — exactly the behaviour the user
-    // expects from a normal `git checkout`.
-    let commit_obj = commit.as_object();
-    git_repo
-        .git_repo
-        .checkout_tree(commit_obj, None)
-        .context("failed to checkout tree for new branch")?;
-    git_repo
-        .git_repo
-        .set_head(local_branch_ref_name)
-        .context("failed to set head to local branch")?;
-
+    let target_ref = format!("refs/remotes/{remote_name}/{branch_name}");
+    if let Ok(mut r) = git_repo.git_repo.find_reference(&target_ref) {
+        r.set_target(oid, "set by ngit pr checkout")
+            .context("failed to update remote-tracking ref")?;
+    } else {
+        git_repo
+            .git_repo
+            .reference(&target_ref, oid, false, "created by ngit pr checkout")
+            .context("failed to create remote-tracking ref")?;
+    }
     Ok(())
+}
+
+pub fn tracking_suffix(tracked: bool, nostr_remote_name: Option<&str>) -> String {
+    match (tracked, nostr_remote_name) {
+        (true, Some(name)) => format!(" with tracking to {name}"),
+        _ => String::new(),
+    }
 }

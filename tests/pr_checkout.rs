@@ -29,35 +29,23 @@
 //!   the long-form `pr/<branch>(<shorthand>)` ref path; every assertion against
 //!   an expected ref builds that long form via [`expected_branch_name`].
 //!
-//! ## PR-kind divergence from the legacy patch-kind contract
+//! ## PR-kind branch tracking
 //!
-//! `src/bin/ngit/sub_commands/checkout.rs::checkout_pr` takes a path
-//! the patch-equivalent doesn't:
+//! After `ngit pr checkout` on a PR-kind proposal,
+//! `src/bin/ngit/sub_commands/checkout.rs::checkout_pr` always wires
+//! the local branch's upstream to the nostr remote (writing
+//! `refs/remotes/<remote>/<pr-branch>` at the checked-out tip and
+//! calling `set_upstream`) so that the user can `git pull` later.
+//! That's true regardless of whether the test_repo was cloned via
+//! `git clone <nostr-url>` (which would have pre-populated those
+//! remote-tracking refs) or just had the remote added afterwards.
 //!
-//! - **Case 1 (fresh)**: when a nostr remote is present *and* a
-//!   `refs/remotes/<remote>/<pr-branch>` already exists locally,
-//!   `checkout_remote_branch_with_tracking` creates the local branch *with
-//!   upstream set*. Our cloned `test_repo` always has those remote-tracking
-//!   refs (`git-remote-nostr/list.rs` advertises them and `git clone` fetches
-//!   them), so the first `ngit pr checkout` in every test wires upstream.
-//! - **Case 2.5 (upstream deferral, `checkout.rs:247`)**: as soon as the local
-//!   branch has any upstream, *every* subsequent `ngit pr checkout` returns Ok
-//!   with "Local branch 'X' is behind. Run git pull to update." — including
-//!   when the branch has diverged from the published tip. The behind /
-//!   fast-forward, diverged-bails-without-force, and force-overwrites paths
-//!   never fire.
-//!
-//! The patch-kind path (`checkout_patch`) has no upstream-deferral
-//! short-circuit, so the legacy tests passed end-to-end. Three of the
-//! six PR-kind cases here exercise the deferral path and are
-//! `#[ignore]`d below with `FIXME(harness-migration)` markers
-//! pointing back at this comment block. The complementary
-//! `tests/pr_checkout_patch.rs` re-asserts the legacy behaviour
-//! against patch-kind proposals so the regression coverage isn't
-//! lost while the PR-kind divergence is being resolved (either by
-//! treating the upstream-set diverged path as a bug to fix in
-//! `checkout.rs`, or by retiring the legacy assertions in favour of
-//! a `git pull`-shaped happy path).
+//! Successive `ngit pr checkout` invocations against the same PR
+//! follow the regular Cases 2-5 in `checkout_pr` (up-to-date,
+//! fast-forward, local-commits-on-top, diverged) — no upstream-set
+//! short-circuit. The complementary `tests/pr_checkout_patch.rs`
+//! re-asserts the same end-state contract against patch-kind
+//! proposals.
 //!
 //! ## Event ids straight off `PublishedPr`
 //!
@@ -88,9 +76,14 @@ struct Setup {
     /// requests for the duration of the test. Several tests also reach back
     /// into it for `clone_published_repo` to spin up a second clone.
     harness: Harness,
-    published: PublishedRepo,
+    _published: PublishedRepo,
     prs: [PublishedPr; 3],
     test_repo: Repo,
+    /// Maintainer clone — kept so the revision scenario can publish a
+    /// rebased revision as the maintainer (who is in `permissioned_users`
+    /// and therefore visible to
+    /// `get_all_proposal_patch_pr_pr_update_events_from_cache`).
+    publisher: Repo,
 }
 
 /// One harness boot + three PR-kind proposals + a fresh logged-out
@@ -106,7 +99,7 @@ async fn setup() -> Result<Setup> {
     .build()
     .await?;
 
-    let (_publisher, published) = harness
+    let (publisher, published) = harness
         .publish_repo(PublishRepoOpts {
             display_name: Some("pr-checkout maintainer".into()),
             identifier: Some("pr-checkout-repo".into()),
@@ -128,9 +121,10 @@ async fn setup() -> Result<Setup> {
 
     Ok(Setup {
         harness,
-        published,
+        _published: published,
         prs,
         test_repo,
+        publisher,
     })
 }
 
@@ -271,9 +265,10 @@ async fn is_ancestor(repo: &Repo, maybe_ancestor: &str, descendant: &str) -> Res
 async fn fresh_branch_is_created_checked_out_and_at_published_tip() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         prs,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let pr = &prs[0];
 
@@ -308,9 +303,10 @@ async fn fresh_branch_is_created_checked_out_and_at_published_tip() -> Result<()
 async fn up_to_date_branch_stays_at_published_tip_after_second_checkout() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         prs,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let pr = &prs[0];
 
@@ -344,22 +340,13 @@ async fn up_to_date_branch_stays_at_published_tip_after_second_checkout() -> Res
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "FIXME(harness-migration): checkout_pr's upstream-deferral path \
-            (checkout.rs:247) returns Ok with 'Run git pull to update.' \
-            instead of fast-forwarding when the local PR branch has an \
-            upstream set — which it always does for a real cloned test_repo \
-            after the first ngit pr checkout (see module-level doc-comment). \
-            The legacy assertion (one-step fast-forward) holds for patch-kind \
-            via checkout_patch (covered by tests/pr_checkout_patch.rs) but \
-            not for PR-kind. Either treat the upstream-set diverged path as \
-            a bug and unblock this assertion, or replace it with a \
-            `ngit pr checkout` + `git pull` two-step happy-path test."]
 async fn behind_branch_fast_forwards_to_published_tip() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         prs,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let pr = &prs[0];
 
@@ -415,22 +402,13 @@ async fn behind_branch_fast_forwards_to_published_tip() -> Result<()> {
 /// branch is diverged from the published tip. `ngit pr checkout` without
 /// `--force` should bail and leave the local amendment intact.
 #[tokio::test]
-#[ignore = "FIXME(harness-migration): same root cause as \
-            behind_branch_fast_forwards_to_published_tip — checkout_pr's \
-            upstream-deferral path at checkout.rs:247 returns Ok with \
-            'Run git pull to update.' instead of bailing on the diverged \
-            branch. The legacy `assert!(res.is_err())` fires only against \
-            checkout_patch (covered by tests/pr_checkout_patch.rs). The \
-            'Run git pull' message is even arguably misleading here: a \
-            diverged branch can't fast-forward via git pull, so the \
-            deferral path either needs to discriminate behind-vs-diverged \
-            or stop firing for diverged."]
 async fn local_amendments_are_preserved_when_checkout_without_force_fails() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         prs,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let pr = &prs[0];
 
@@ -505,9 +483,10 @@ async fn local_amendments_are_preserved_when_checkout_without_force_fails() -> R
 async fn local_commits_on_top_are_not_discarded() -> Result<()> {
     let Setup {
         harness: _h,
-        published: _,
+        _published: _,
         prs,
         test_repo,
+        publisher: _,
     } = setup().await?;
     let pr = &prs[0];
 
@@ -572,25 +551,33 @@ async fn local_commits_on_top_are_not_discarded() -> Result<()> {
 /// `KIND_PULL_REQUEST_UPDATE` (see `src/lib/git_events.rs:551
 /// is_pr_update`).
 ///
+/// Drives the revision manually: the maintainer (`publisher` from
+/// `setup()`) adds a local "rebase base" commit on main, branches off it
+/// for the feature, and runs `ngit send --force-pr --in-reply-to <orig>`.
+/// With the original proposal being a `KIND_PULL_REQUEST`, the resulting
+/// event becomes a `KIND_PULL_REQUEST_UPDATE` (see
+/// `src/lib/git_events.rs:551 is_pr_update`).
+///
+/// The revision is published by the maintainer (not a fresh contributor)
+/// to satisfy the `permissioned_users` filter in
+/// `get_all_proposal_patch_pr_pr_update_events_from_cache` (which keeps
+/// only events authored by maintainers or the original proposal author).
+/// A third-party contributor would be filtered out and the second
+/// `ngit pr checkout` would see only the original PR event, incorrectly
+/// returning "up-to-date".
+///
 /// We cannot reuse `Harness::publish_pr` for this because it filters its
 /// verification query on `kind(KIND_PULL_REQUEST)` only — a `PR_UPDATE`
 /// would fail that probe. Inlining the revision here keeps PR 2 free of
 /// new scenario builders, as the migration plan prescribes.
 #[tokio::test]
-#[ignore = "FIXME(harness-migration): same root cause as the other two \
-            ignored cases — once upstream is set on the local PR branch, \
-            checkout_pr's deferral path at checkout.rs:247 swallows every \
-            subsequent ngit pr checkout call, including the post-revision \
-            'should bail without --force; should succeed with --force' \
-            pair. Patch-kind variant in tests/pr_checkout_patch.rs preserves \
-            the legacy assertions; resolving the PR-kind deferral path \
-            (bug fix or contract change) unblocks this one."]
 async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
     let Setup {
-        harness,
-        published,
+        harness: _h,
+        _published: _,
         prs,
         test_repo,
+        publisher,
     } = setup().await?;
     let pr = &prs[0];
 
@@ -600,25 +587,19 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
     let tip_before_revision = rev_parse(&test_repo, &branch).await?;
     assert_eq!(tip_before_revision, pr.tip);
 
-    // (2) reviser publishes a rebased revision of the proposal.
-    //     Fresh contributor identity so `ngit send` has a signing key.
-    let reviser = harness
-        .clone_published_repo(
-            &published,
-            CloneLogin::AsContributor {
-                display_name: "revising contributor".into(),
-            },
-        )
-        .await?;
-
+    // (2) Publisher (maintainer) publishes a rebased revision. Using the
+    //     maintainer ensures the revision PR_UPDATE passes the
+    //     `permissioned_users` filter and is visible to
+    //     `get_all_proposal_patch_pr_pr_update_events_from_cache`.
+    //
     // local "rebase base" commit on main — mirrors legacy
     // `create_proposals_with_rebased_first_proposal`'s "commit for
     // rebasing on top of".
-    std::fs::write(reviser.dir().join("amazing.md"), "rebase base content\n")
+    std::fs::write(publisher.dir().join("amazing.md"), "rebase base content\n")
         .context("write amazing.md")?;
-    git_ok(&reviser, ["add", "amazing.md"], "git add amazing.md").await?;
+    git_ok(&publisher, ["add", "amazing.md"], "git add amazing.md").await?;
     git_ok(
-        &reviser,
+        &publisher,
         [
             "commit",
             "-m",
@@ -628,43 +609,49 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
         "git commit rebase base",
     )
     .await?;
+    // Push the rebase-base commit to origin so the test_repo's
+    // `ensure_commit_local` (driven from `checkout_pr` --force) can walk
+    // back from the revision's tip and find a known ancestor.
+    publisher.nostr_push(["origin", "main"]).await?;
 
     // Use the same branch name as the original proposal so the
     // revision's `branch-name` tag matches and `list.rs` groups it under
     // the same proposal address.
     git_ok(
-        &reviser,
+        &publisher,
         ["checkout", "-b", &pr.branch_name],
         "git checkout -b feature (revision)",
     )
     .await?;
-    std::fs::write(reviser.dir().join("revised-a3.md"), "revised a3\n")
+    std::fs::write(publisher.dir().join("revised-a3.md"), "revised a3\n")
         .context("write revised-a3.md")?;
-    git_ok(&reviser, ["add", "revised-a3.md"], "git add revised-a3").await?;
+    git_ok(&publisher, ["add", "revised-a3.md"], "git add revised-a3").await?;
     git_ok(
-        &reviser,
+        &publisher,
         ["commit", "-m", "add revised-a3.md", "--no-gpg-sign"],
         "git commit revised-a3",
     )
     .await?;
-    std::fs::write(reviser.dir().join("revised-a4.md"), "revised a4\n")
+    std::fs::write(publisher.dir().join("revised-a4.md"), "revised a4\n")
         .context("write revised-a4.md")?;
-    git_ok(&reviser, ["add", "revised-a4.md"], "git add revised-a4").await?;
+    git_ok(&publisher, ["add", "revised-a4.md"], "git add revised-a4").await?;
     git_ok(
-        &reviser,
+        &publisher,
         ["commit", "-m", "add revised-a4.md", "--no-gpg-sign"],
         "git commit revised-a4",
     )
     .await?;
-    let revised_tip = rev_parse(&reviser, "HEAD").await?;
+    let revised_tip = rev_parse(&publisher, "HEAD").await?;
     assert_ne!(revised_tip, pr.tip);
 
     let in_reply_to_hex = pr.event_id.to_hex();
-    let send_out = reviser
+    let send_out = publisher
         .ngit([
             "send",
             "HEAD~2",
             "--force-pr",
+            "--force",
+            "--defaults",
             "--in-reply-to",
             &in_reply_to_hex,
         ])

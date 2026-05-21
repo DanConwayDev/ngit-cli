@@ -33,6 +33,7 @@ use crate::{
         get_parent_commit_from_patch,
     },
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
 };
 
 #[allow(clippy::too_many_lines)]
@@ -621,6 +622,14 @@ async fn launch_interactive() -> Result<()> {
 
     fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 
+    let nostr_remote_name: Option<String> = git_repo
+        .get_first_nostr_remote_when_in_ngit_binary()
+        .await
+        .ok()
+        .flatten()
+        .map(|(name, _)| name);
+    let nostr_remote_name: Option<&str> = nostr_remote_name.as_deref();
+
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
 
     let proposals_and_revisions: Vec<nostr::Event> =
@@ -819,11 +828,27 @@ async fn launch_interactive() -> Result<()> {
                             .checkout(&branch_name)
                             .context("cannot checkout existing proposal branch")?;
                         if local_branch_tip.to_string() == proposal_tip {
-                            println!("checked out up-to-date proposal branch '{branch_name}'");
+                            let tracked = maybe_setup_nostr_remote_tracking(
+                                &git_repo,
+                                nostr_remote_name,
+                                &branch_name,
+                            )?;
+                            println!(
+                                "checked out up-to-date proposal branch '{branch_name}'{}",
+                                tracking_suffix(tracked, nostr_remote_name),
+                            );
                             return Ok(());
                         }
                         if git_repo.does_commit_exist(&proposal_tip)? {
-                            println!("checked out proposal branch and updated tip '{branch_name}'");
+                            let tracked = maybe_setup_nostr_remote_tracking(
+                                &git_repo,
+                                nostr_remote_name,
+                                &branch_name,
+                            )?;
+                            println!(
+                                "checked out proposal branch and updated tip '{branch_name}'{}",
+                                tracking_suffix(tracked, nostr_remote_name),
+                            );
                             return Ok(());
                         }
                     }
@@ -836,10 +861,21 @@ async fn launch_interactive() -> Result<()> {
                     )?;
                     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
                     git_repo.checkout(&branch_name)?;
+                    let tracked = maybe_setup_nostr_remote_tracking(
+                        &git_repo,
+                        nostr_remote_name,
+                        &branch_name,
+                    )?;
                     if local_branch_tip.is_some() {
-                        println!("created and checked out proposal branch '{branch_name}'");
+                        println!(
+                            "created and checked out proposal branch '{branch_name}'{}",
+                            tracking_suffix(tracked, nostr_remote_name),
+                        );
                     } else {
-                        println!("checked out proposal branch and pulled updates '{branch_name}'");
+                        println!(
+                            "checked out proposal branch and pulled updates '{branch_name}'{}",
+                            tracking_suffix(tracked, nostr_remote_name),
+                        );
                     }
                     return Ok(());
                 }
@@ -865,6 +901,16 @@ async fn launch_interactive() -> Result<()> {
         let checked_out_proposal_branch = git_repo
             .get_checked_out_branch_name()?
             .eq(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?);
+
+        // TODO(follow-up): the patch-kind interactive checkout arms below
+        // (~975-1297) do not yet call `maybe_setup_nostr_remote_tracking` /
+        // append `tracking_suffix(...)` to their success-path prints. The
+        // non-interactive `ngit pr checkout` path covers both PR-kind and
+        // patch-kind; this interactive sibling currently only does PR-kind
+        // (see the arm just above at ~830). `nostr_remote_name` is already
+        // in scope and the helpers are imported from `crate::sub_commands::
+        // checkout`; the change is mechanical but voluminous (10+ println
+        // sites) and was deferred to keep this diff reviewable.
 
         let last_patch = most_recent_proposal_patch_chain_or_pr_or_pr_update
             .last()
