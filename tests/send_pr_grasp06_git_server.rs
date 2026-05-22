@@ -1,43 +1,47 @@
 //! End-to-end coverage of `ngit send --force-pr --git-server <url>` where the
-//! supplied git server is a **plain vanilla** (non-grasp) HTTP git server whose
-//! URL is not listed in the repo's kind-30617 announcement.
+//! supplied git server is a **GRASP-06-enabled** grasp server whose base URL is
+//! given as `ws://127.0.0.1:<port>` — the form a user would type when they know
+//! only the server's domain (e.g. `--git-server ws://relay.example.com`).
 //!
 //! ## What this test covers
 //!
 //! `select_servers_push_refs_and_generate_pr_or_pr_update_event`
-//! (push.rs:422-448) accepts an optional `git_server` argument. When the value
-//! ends with `.git` (or starts with `git@`) `user_server_is_direct_url` is set
-//! and the URL is prepended to `to_try` verbatim — ahead of all the repo's own
-//! announcement-listed servers. That first URL then drives two outcomes:
+//! (push.rs:428-448) inspects the `--git-server` value. When it does **not**
+//! end with `.git` and does **not** start with `git@`,
+//! `user_server_is_direct_url` is `false` and the server is treated as a GRASP
+//! base URL. `format_grasp_server_url_as_grasp06_prs_url` is called, converting
+//! `ws://127.0.0.1:PORT` →
+//! `http://127.0.0.1:PORT/prs/<contributor-npub>/<identifier>.git`, and that
+//! GRASP-06 endpoint is prepended to `to_try`.
 //!
-//! 1. The unsigned PR event is generated with that URL in the `clone` tag
-//!    (push.rs:648-655 — generated on the first server in `to_try`, reused for
-//!    all subsequent ones).
-//! 2. Git data is pushed to the vanilla server via `push_to_remote`
-//!    (push.rs:687-695 — the `!is_grasp_server_clone_url` branch of
-//!    push.rs:664).
+//! The test then verifies that:
 //!
-//! The test then verifies that the announcement-listed grasp servers ALSO
-//! receive the same PR ref (push.rs:465-472 appends them to `to_try` after the
-//! user-supplied server, and the inner loop at push.rs:637 iterates every entry
-//! so all servers receive the push).
+//! 1. The PR event's `clone` tag carries the GRASP-06 `/prs/` URL on the
+//!    user-specified server, not any regular grasp clone URL.
+//! 2. All three servers — the GRASP-06 server and both announcement grasps —
+//!    received the git data push.
+//! 3. The GRASP-06 server's base URL does not appear in the repo announcement
+//!    `clone` tag (it was never passed to `ngit init`).
+//! 4. No KIND_PULL_REQUEST_UPDATE was emitted.
 //!
 //! ## Arrangement
 //!
-//! Steps 1–6 mirror `send_pr.rs` exactly so the two tests can be read side by
-//! side; the only departure is the `--git-server` flag in step 7.
+//! Steps 1–6 mirror `send_pr_vanilla_git_server.rs` exactly so the two tests
+//! can be read side by side; the only departure is the `--git-server` value
+//! (ws:// URL instead of a `.git` URL) and the extra server type (GRASP-06
+//! instead of a vanilla git server).
 //!
-//! 1. Harness: one vanilla relay (`"default"`), two grasp servers (`"repo"` and
-//!    `"repo_secondary"`), one vanilla git server (`"extra"`).
-//! 2. Maintainer publishes the repo with **both** grasps in the announcement.
-//!    The vanilla git server is **not** mentioned in the announcement.
+//! 1. Harness: one relay (`"default"`), two standard grasps (`"repo"` and
+//!    `"repo_secondary"`), one GRASP-06 grasp (`"extra_grasp"`).
+//! 2. Maintainer publishes the repo with **both** standard grasps in the
+//!    announcement. The GRASP-06 server is **not** mentioned.
 //! 3. A fresh contributor clones and checks out the `"feature"` branch.
 //! 4. Contributor commits `t3.md` — establishes the fork point.
 //! 5. **Maintainer advances `main`** so `merge_base_oid ≠
 //!    main_tip_at_send_time`.
 //! 6. Contributor commits `t4.md`.
 //! 7. Contributor runs `ngit send HEAD~2 --force-pr --title … --description …
-//!    --git-server http://127.0.0.1:<port>/test-repo.git`.
+//!    --git-server ws://127.0.0.1:<extra_grasp_port>`.
 //! 8. [`capture_snapshot`] reads all events and git refs; harness drops.
 //!
 //! ## Coverage (one `#[rstest]` per bullet)
@@ -47,12 +51,13 @@
 //! 3. The `c` tag equals the contributor's feature-branch tip OID.
 //! 4. The `merge-base` tag equals the fork point.
 //! 5. The `branch-name` tag equals `"feature"`.
-//! 6. The PR event's `clone` tag has exactly one URL equal to the vanilla
-//!    server's URL (not any grasp URL).
-//! 7. All three servers — both grasps and the vanilla git server — have a
-//!    `refs/nostr/<event_id>` ref resolving to the contributor's tip OID.
-//! 8. The vanilla server's URL does NOT appear in the repo announcement's
-//!    `clone` tag (the server was bypassed at push time, not registered).
+//! 6. The PR event's `clone` tag has exactly one URL equal to the GRASP-06
+//!    `/prs/<contributor-npub>/<identifier>.git` endpoint on `extra_grasp`.
+//! 7. All three servers — both standard grasps and the GRASP-06 extra server —
+//!    have a `refs/nostr/<event_id>` ref resolving to the contributor's tip
+//!    OID.
+//! 8. The GRASP-06 server's URL does NOT appear in the repo announcement's
+//!    `clone` tag.
 //! 9. No KIND_PULL_REQUEST_UPDATE event was emitted on any surface.
 
 use std::{path::Path, sync::Arc};
@@ -63,19 +68,12 @@ use rstest::*;
 use test_harness::{CloneLogin, Harness, PublishRepoOpts};
 use tokio::sync::OnceCell;
 
-/// Identifier passed to `ngit init --identifier`. Distinct from `send_pr.rs`
-/// (`"pr-test-repo"`) and `send_pr_update.rs` (`"pr-update-test-repo"`) to
-/// prevent cross-test relay pollution on the shared vanilla relay surface.
-const IDENTIFIER: &str = "pr-vanilla-git-server-test-repo";
+/// Identifier passed to `ngit init --identifier`. Distinct from all other
+/// send-PR tests to prevent cross-test relay pollution.
+const IDENTIFIER: &str = "pr-grasp06-git-server-test-repo";
 
 /// Feature branch name the contributor checks out before committing.
 const BRANCH: &str = "feature";
-
-/// Path component appended to the vanilla server's base URL to form a valid
-/// `.git`-terminated clone URL. `VanillaGitServer` routes by path suffix
-/// (`ends_with("/info/refs")` etc.) so any path works; we pick a descriptive
-/// name rather than a bare `/` so the URL is self-documenting in logs.
-const VANILLA_REPO_PATH: &str = "/test-repo.git";
 
 /// `KIND_PULL_REQUEST` (kind 1618). Mirrored from `src/lib/git_events.rs`.
 const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
@@ -112,43 +110,54 @@ struct Snapshot {
     identifier: String,
 
     /// OID the contributor branched from (parent of the first PR commit).
-    /// Must match the `merge-base` tag (assertion 4) and must differ from
-    /// both `main_tip_at_send_time` and `pr_tip_oid` (pre-condition).
+    /// Must match the `merge-base` tag (assertion 4).
     merge_base_oid: String,
 
     /// OID of `main` after the maintainer's "advance main" push. Used only
-    /// in the pre-condition check that ensures `merge_base_oid` is distinct.
+    /// in the pre-condition check.
     main_tip_at_send_time: String,
 
-    /// Contributor's feature-branch tip (the `t4.md` commit). Must match
-    /// the `c` tag (assertion 3) and the `refs/nostr/<event_id>` OID on
-    /// all three servers (assertion 7).
+    /// Contributor's feature-branch tip (the `t4.md` commit). Must match the
+    /// `c` tag (assertion 3) and the `refs/nostr/<event_id>` OID on all three
+    /// servers (assertion 7).
     pr_tip_oid: String,
 
     /// Feature branch name (always `BRANCH`). Must match `branch-name` tag
     /// (assertion 5).
     branch_name: String,
 
-    /// The full git-server URL passed to `--git-server`:
-    /// `http://127.0.0.1:<port>/test-repo.git`. This is the URL that must
-    /// appear (alone) in the PR event's `clone` tag (assertion 6).
-    git_server_url: String,
+    /// The GRASP-06 `/prs/` URL that ngit should have placed in the PR
+    /// event's `clone` tag:
+    /// `http://127.0.0.1:<extra_grasp_port>/prs/<contributor-npub>/<IDENTIFIER>.git`
+    ///
+    /// Constructed independently of ngit's own
+    /// `format_grasp_server_url_as_grasp06_prs_url` so the assertion is not
+    /// tautological.
+    extra_grasp_prs_clone_url: String,
 
-    /// All `clone` tag values from the kind-30617 repo announcement. None
-    /// of them must contain the vanilla server's base URL (assertion 8).
+    /// Base URL of the GRASP-06 server (`http://127.0.0.1:<port>`). Used in
+    /// assertion 8 to verify it is absent from the repo announcement clone
+    /// tags.
+    extra_grasp_http_base: String,
+
+    /// All `clone` tag values from the kind-30617 repo announcement. None of
+    /// them must contain the extra grasp's base URL (assertion 8).
     announcement_clone_urls: Vec<String>,
 
-    /// OID at `refs/nostr/<pr_event_id>` in the primary grasp's bare repo.
+    /// OID at `refs/nostr/<pr_event_id>` in the primary grasp's bare repo
+    /// (`<git_data_path>/<maintainer_npub>/<IDENTIFIER>.git`).
     /// Must equal `pr_tip_oid` (assertion 7).
     grasp_primary_pr_ref_oid: String,
 
-    /// OID at `refs/nostr/<pr_event_id>` in the secondary grasp's bare repo.
+    /// OID at `refs/nostr/<pr_event_id>` in the secondary grasp's bare repo
+    /// (`<git_data_path>/<maintainer_npub>/<IDENTIFIER>.git`).
     /// Must equal `pr_tip_oid` (assertion 7).
     grasp_secondary_pr_ref_oid: String,
 
-    /// OID at `refs/nostr/<pr_event_id>` in the vanilla git server's bare
-    /// repo. Must equal `pr_tip_oid` (assertion 7).
-    vanilla_pr_ref_oid: String,
+    /// OID at `refs/nostr/<pr_event_id>` in the GRASP-06 server's bare repo
+    /// at `<git_data_path>/prs/<contributor_pubkey_hex>/<IDENTIFIER>.git`.
+    /// Must equal `pr_tip_oid` (assertion 7).
+    extra_grasp_pr_ref_oid: String,
 }
 
 static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
@@ -162,7 +171,7 @@ async fn snapshot() -> Arc<Snapshot> {
             Arc::new(
                 capture_snapshot()
                     .await
-                    .expect("send_pr_vanilla_git_server fixture: capture_snapshot failed"),
+                    .expect("send_pr_grasp06_git_server fixture: capture_snapshot failed"),
             )
         })
         .await
@@ -174,14 +183,12 @@ async fn snapshot() -> Arc<Snapshot> {
 // ---------------------------------------------------------------------------
 
 async fn capture_snapshot() -> Result<Snapshot> {
-    // --- Harness: vanilla relay + two grasp servers + one vanilla git
-    // --- server --
+    // --- Harness: vanilla relay + two standard grasps + one GRASP-06 grasp --
     //
-    // `VanillaGitServer` requires a multi-thread tokio runtime because the
-    // accept loop is a spawned task; blocking git pushes from the test
-    // thread need a worker thread available while the accept loop services
-    // them. Every `#[rstest]` in this file therefore carries
-    // `#[tokio::test(flavor = "multi_thread")]`.
+    // The GRASP-06 server (`extra_grasp`) is deliberately NOT included in the
+    // repo announcement — the test verifies ngit routes the PR to its /prs/
+    // endpoint solely because the user passed its ws:// base URL via
+    // `--git-server`, and that the announcement grasps also receive the push.
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -189,27 +196,25 @@ async fn capture_snapshot() -> Result<Snapshot> {
     .with_relay("default")
     .with_grasp_server("repo")
     .with_grasp_server("repo_secondary")
-    .with_vanilla_git_server("extra")
+    .with_grasp_server_grasp06("extra_grasp")
     .build()
     .await?;
 
-    // Full clone URL passed to `--git-server`. The path component ends with
-    // `.git` so `user_server_is_direct_url` (push.rs:430-432) is `true` and
-    // the URL arrives in `to_try` verbatim — no GRASP-06 reformatting.
-    let git_server_url = format!(
-        "{}{}",
-        harness.vanilla_git_server("extra").url(),
-        VANILLA_REPO_PATH,
-    );
+    // ws:// URL the contributor passes to `--git-server`. This is how a real
+    // user would specify a grasp server they know by domain — just the base
+    // relay URL, not a full clone path. push.rs detects that it doesn't end
+    // with `.git` and is not an SSH URL (`user_server_is_direct_url = false`),
+    // so it calls `format_grasp_server_url_as_grasp06_prs_url` to build the
+    // GRASP-06 endpoint before prepending it to `to_try`.
+    let extra_grasp_ws_url = harness.grasp("extra_grasp").relay_url(); // "ws://127.0.0.1:PORT"
+    let extra_grasp_http_base = harness.grasp("extra_grasp").url().to_string(); // "http://127.0.0.1:PORT"
 
-    // --- 1. Maintainer publishes the repo with both grasps -------------------
+    // --- 1. Maintainer publishes the repo with both standard grasps ----------
     //
-    // The vanilla git server is deliberately NOT included here. The test
-    // verifies it receives push data anyway (via `--git-server`) but is
-    // absent from the announcement.
+    // The GRASP-06 server is deliberately NOT included here.
     let (publisher, published) = harness
         .publish_repo(PublishRepoOpts {
-            display_name: Some("pr-vanilla-test maintainer".into()),
+            display_name: Some("pr-grasp06-test maintainer".into()),
             identifier: Some(IDENTIFIER.into()),
             additional_grasp_roles: vec!["repo_secondary".into()],
             ..Default::default()
@@ -217,12 +222,11 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await?;
 
     let maintainer_pubkey = published.maintainer_keys.public_key();
+    let maintainer_npub = maintainer_pubkey
+        .to_bech32()
+        .context("failed to bech32-encode maintainer pubkey")?;
 
-    // --- 2. Extract announcement clone URLs (before the vanilla server push)
-    // ---
-    //
-    // Read these now so the assertion in case 8 is comparing against what
-    // the announcement actually contained, not what we expect it to contain.
+    // --- 2. Extract announcement clone URLs (before any extra-server push) ---
     let announcements = harness
         .relay("default")
         .events(
@@ -242,10 +246,27 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .clone_published_repo(
             &published,
             CloneLogin::AsContributor {
-                display_name: "pr-vanilla-test contributor".into(),
+                display_name: "pr-grasp06-test contributor".into(),
             },
         )
         .await?;
+
+    // Contributor pubkey — needed to build the expected /prs/ URL and to
+    // locate the GRASP-06 bare repo on disk.
+    let contributor_nsec = contributor
+        .config("nostr.nsec")
+        .await?
+        .context("nostr.nsec missing after AsContributor login")?;
+    let contributor_keys =
+        Keys::parse(&contributor_nsec).context("contributor nostr.nsec is not a valid key")?;
+    let contributor_pubkey = contributor_keys.public_key();
+    let contributor_npub = contributor_pubkey
+        .to_bech32()
+        .context("failed to bech32-encode contributor pubkey")?;
+    // Lowercase hex — used for the on-disk `prs/<hex>/<id>.git` path.
+    // ngit-grasp stores the submitter pubkey in hex on disk even though the
+    // HTTP path uses npub; see ngit-grasp/src/grasp06/paths.rs::prs_repo_path.
+    let contributor_pubkey_hex = contributor_pubkey.to_hex();
 
     // --- 4. Contributor: feature branch + first commit (t3.md) ---------------
     run_git(&contributor, &["checkout", "-b", BRANCH]).await?;
@@ -307,13 +328,31 @@ async fn capture_snapshot() -> Result<Snapshot> {
         );
     }
 
-    // --- 7. Contributor: ngit send --force-pr --git-server <vanilla_url> -----
+    // --- 7. Build expected GRASP-06 /prs/ clone URL --------------------------
     //
-    // `--git-server http://127.0.0.1:<port>/test-repo.git` ends with `.git`
-    // so `user_server_is_direct_url` (push.rs:430) is true: the URL enters
-    // `to_try` verbatim, ahead of the repo's grasp servers. The unsigned PR
-    // event is generated with this URL as the `clone` hint and the same
-    // unsigned event is reused for all subsequent servers in the loop.
+    // push.rs calls `format_grasp_server_url_as_grasp06_prs_url(ws_url, pk, id)`
+    // which normalises ws:// → http:// and produces:
+    // `http://<host>:<port>/prs/<contributor-npub>/<identifier>.git`
+    //
+    // We replicate that construction here independently — using the http base
+    // we already have — so the assertion is not tautological against ngit's own
+    // URL building helpers.
+    let extra_grasp_prs_clone_url = format!(
+        "{}/prs/{}/{}.git",
+        extra_grasp_http_base.trim_end_matches('/'),
+        contributor_npub,
+        IDENTIFIER,
+    );
+
+    // --- 8. Contributor: ngit send --force-pr --git-server <ws_url> ----------
+    //
+    // `ws://127.0.0.1:<port>` does NOT end with `.git` and does NOT start with
+    // `git@`, so `user_server_is_direct_url` (push.rs:430-432) is `false`.
+    // push.rs calls `format_grasp_server_url_as_grasp06_prs_url` and prepends
+    // the resulting /prs/ URL to `to_try` ahead of the repo's own grasps.
+    // The PR event is generated against that first URL, which therefore becomes
+    // the sole `clone` tag value; then the loop continues and pushes the same
+    // git data to the two announcement grasps.
     let send_out = contributor
         .ngit([
             "send",
@@ -324,29 +363,21 @@ async fn capture_snapshot() -> Result<Snapshot> {
             "--description",
             "this adds the feature",
             "--git-server",
-            &git_server_url,
+            &extra_grasp_ws_url,
         ])
         .output()
         .await
-        .context("failed to spawn ngit send --force-pr --git-server")?;
+        .context("failed to spawn ngit send --force-pr --git-server (GRASP-06)")?;
     if !send_out.status.success() {
         bail!(
-            "ngit send --force-pr --git-server exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            "ngit send --force-pr --git-server (GRASP-06) exited non-zero ({:?})\nstdout: {}\nstderr: {}",
             send_out.status,
             String::from_utf8_lossy(&send_out.stdout),
             String::from_utf8_lossy(&send_out.stderr),
         );
     }
 
-    // --- 8. Capture events from all surfaces ---------------------------------
-
-    let contributor_nsec = contributor
-        .config("nostr.nsec")
-        .await?
-        .context("nostr.nsec missing after AsContributor login")?;
-    let contributor_keys =
-        Keys::parse(&contributor_nsec).context("contributor nostr.nsec is not a valid key")?;
-    let contributor_pubkey = contributor_keys.public_key();
+    // --- 9. Capture events from all surfaces ---------------------------------
 
     let pr_events_primary = harness
         .grasp("repo")
@@ -362,7 +393,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .find(|e| event_branch_name_tag(e).as_deref() == Some(BRANCH))
         .context(
             "no KIND_PULL_REQUEST with branch-name=\"feature\" authored by contributor \
-             found on primary grasp after `ngit send --force-pr --git-server`",
+             found on primary grasp after `ngit send --force-pr --git-server` (GRASP-06)",
         )?;
 
     let pr_updates_primary = harness
@@ -392,16 +423,20 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let pr_update_count =
         pr_updates_primary.len() + pr_updates_secondary.len() + pr_updates_relay.len();
 
-    // --- 9. Read git refs from both grasps and the vanilla server -----------
+    // --- 10. Read git refs from both standard grasps and the GRASP-06 server -
     //
-    // All three bare-repo dirs must be read while the harness is still alive
-    // (TempDirs drop on harness drop).
+    // Standard grasps store repos at `<git_data_path>/<maintainer_npub>/<id>.git`
+    // (layout imposed by ngit-grasp's announcement handler).
+    //
+    // The GRASP-06 server stores the push at
+    // `<git_data_path>/prs/<contributor_pubkey_hex>/<id>.git` (ngit-grasp
+    // /src/grasp06/paths.rs::prs_repo_path). Note: hex on disk, npub in URL.
     let pr_event_id_hex = pr_event.id.to_hex();
 
     let bare_primary = harness
         .grasp("repo")
         .git_data_path()
-        .join(&published.maintainer_npub)
+        .join(&maintainer_npub)
         .join(format!("{IDENTIFIER}.git"));
     let grasp_primary_pr_ref_oid = read_nostr_ref(&bare_primary, &pr_event_id_hex)
         .await
@@ -415,7 +450,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let bare_secondary = harness
         .grasp("repo_secondary")
         .git_data_path()
-        .join(&published.maintainer_npub)
+        .join(&maintainer_npub)
         .join(format!("{IDENTIFIER}.git"));
     let grasp_secondary_pr_ref_oid = read_nostr_ref(&bare_secondary, &pr_event_id_hex)
         .await
@@ -426,20 +461,18 @@ async fn capture_snapshot() -> Result<Snapshot> {
             )
         })?;
 
-    // The vanilla server routes ALL requests to a single bare repo regardless
-    // of the URL path — `handle_request` dispatches on `path.ends_with(…)`.
-    // So the push to `http://…/test-repo.git` lands in the same bare repo
-    // that `repo_path()` points at.
-    let vanilla_bare = harness
-        .vanilla_git_server("extra")
-        .repo_path()
-        .to_path_buf();
-    let vanilla_pr_ref_oid = read_nostr_ref(&vanilla_bare, &pr_event_id_hex)
+    let bare_extra_grasp = harness
+        .grasp("extra_grasp")
+        .git_data_path()
+        .join("prs")
+        .join(&contributor_pubkey_hex)
+        .join(format!("{IDENTIFIER}.git"));
+    let extra_grasp_pr_ref_oid = read_nostr_ref(&bare_extra_grasp, &pr_event_id_hex)
         .await
         .with_context(|| {
             format!(
-                "reading refs/nostr/{pr_event_id_hex} from vanilla git server bare repo at {}",
-                vanilla_bare.display()
+                "reading refs/nostr/{pr_event_id_hex} from GRASP-06 extra grasp bare repo at {}",
+                bare_extra_grasp.display()
             )
         })?;
 
@@ -453,11 +486,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
         main_tip_at_send_time,
         pr_tip_oid,
         branch_name: BRANCH.to_string(),
-        git_server_url,
+        extra_grasp_prs_clone_url,
+        extra_grasp_http_base,
         announcement_clone_urls,
         grasp_primary_pr_ref_oid,
         grasp_secondary_pr_ref_oid,
-        vanilla_pr_ref_oid,
+        extra_grasp_pr_ref_oid,
     })
 }
 
@@ -468,7 +502,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
 /// Assertion 1: exactly one KIND_PULL_REQUEST event is published by the
 /// contributor on the primary grasp.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn pr_event_exactly_one(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
@@ -482,7 +516,7 @@ async fn pr_event_exactly_one(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
 
 /// Assertion 2: the `a` tag encodes the maintainer's repo coordinate.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn a_tag_is_repo_coordinate(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let expected = format!("30617:{}:{}", s.maintainer_pubkey, s.identifier);
@@ -507,7 +541,7 @@ async fn a_tag_is_repo_coordinate(#[future] snapshot: Arc<Snapshot>) -> Result<(
 
 /// Assertion 3: the `c` tag equals the contributor's feature-branch tip OID.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn c_tag_is_pr_tip(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
@@ -523,7 +557,7 @@ async fn c_tag_is_pr_tip(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
 
 /// Assertion 4: the `merge-base` tag equals the fork point, not `main` tip.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn merge_base_tag_is_fork_point(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
@@ -541,7 +575,7 @@ async fn merge_base_tag_is_fork_point(#[future] snapshot: Arc<Snapshot>) -> Resu
 
 /// Assertion 5: the `branch-name` tag equals `"feature"`.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn branch_name_tag_matches(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
@@ -556,19 +590,19 @@ async fn branch_name_tag_matches(#[future] snapshot: Arc<Snapshot>) -> Result<()
 }
 
 /// Assertion 6: the PR event's `clone` tag has exactly one URL and it is the
-/// vanilla git server's URL (not a grasp URL).
+/// GRASP-06 `/prs/<contributor-npub>/<identifier>.git` endpoint on the
+/// user-specified GRASP-06 server.
 ///
-/// Because `user_server_is_direct_url` is true when the URL ends with `.git`
-/// (push.rs:430-432), the supplied URL enters `to_try` first (push.rs:438).
+/// Because `user_server_is_direct_url` is `false` when the value doesn't end
+/// with `.git` (push.rs:430-432), the ws:// URL is passed through
+/// `format_grasp_server_url_as_grasp06_prs_url` (push.rs:441-446). The
+/// resulting `/prs/` URL enters `to_try` first (push.rs:446),
 /// `push_refs_and_generate_pr_or_pr_update_event` generates the unsigned PR
-/// event on the **first successful push** and reuses it for all subsequent
-/// servers (push.rs:638-655), so the vanilla URL is the sole `clone` value.
-///
-/// A regression where the grasp URL appeared here would mean the server
-/// iteration order changed or the event was regenerated on a later server.
+/// event on that first server and reuses it for all subsequent servers
+/// (push.rs:638-655), so the GRASP-06 URL is the sole `clone` value.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
-async fn clone_tag_is_vanilla_git_server_url(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+#[tokio::test]
+async fn clone_tag_is_grasp06_prs_url(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let clone_tag_urls = tag_values(&s.pr_event, "clone");
     assert_eq!(
@@ -579,26 +613,28 @@ async fn clone_tag_is_vanilla_git_server_url(#[future] snapshot: Arc<Snapshot>) 
         clone_tag_urls,
     );
     assert_eq!(
-        clone_tag_urls[0], s.git_server_url,
-        "PR event's `clone` URL should be the vanilla git server URL (not a grasp URL); \
-         got {:?}, want {:?}",
-        clone_tag_urls[0], s.git_server_url,
+        clone_tag_urls[0], s.extra_grasp_prs_clone_url,
+        "PR event's `clone` URL should be the GRASP-06 /prs/ endpoint on the \
+         user-specified server (not a standard grasp clone URL);\n\
+         got:  {:?}\nwant: {:?}",
+        clone_tag_urls[0], s.extra_grasp_prs_clone_url,
     );
     Ok(())
 }
 
-/// Assertion 7: all three servers received the git data push — both grasps
-/// and the vanilla git server each have `refs/nostr/<pr_event_id>` resolving
-/// to the contributor's tip OID.
+/// Assertion 7: all three servers received the git data push — both standard
+/// grasps and the GRASP-06 extra server each have `refs/nostr/<pr_event_id>`
+/// resolving to the contributor's tip OID.
 ///
 /// The loop in `push_refs_and_generate_pr_or_pr_update_event` (push.rs:637)
-/// iterates every entry in `to_try`, which is `[vanilla, grasp_primary,
-/// grasp_secondary]`. Pushing to each server but only crediting the first in
-/// the `clone` tag is exactly the multi-server push contract; a premature
-/// `break` or off-by-one in the loop would leave one or more servers with a
-/// missing ref.
+/// iterates every entry in `to_try`, which is
+/// `[grasp06_prs_url, grasp_primary, grasp_secondary]`. The GRASP-06 /prs/
+/// URL is recognised as a grasp clone URL by `is_grasp_server_clone_url`
+/// (contains npub in path) and routed through `push_to_remote_url`, so ngit-
+/// grasp stores the result at `prs/<hex>/<id>.git`. The standard grasps are
+/// also recognised and land at `<maintainer_npub>/<id>.git` as normal.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn all_three_servers_have_pr_ref(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
@@ -614,39 +650,31 @@ async fn all_three_servers_have_pr_ref(#[future] snapshot: Arc<Snapshot>) -> Res
         s.grasp_secondary_pr_ref_oid, s.pr_tip_oid,
     );
     assert_eq!(
-        s.vanilla_pr_ref_oid, s.pr_tip_oid,
-        "vanilla git server: refs/nostr/<pr_event_id> should resolve to pr_tip_oid; \
-         got {:?}, want {:?}",
-        s.vanilla_pr_ref_oid, s.pr_tip_oid,
+        s.extra_grasp_pr_ref_oid, s.pr_tip_oid,
+        "GRASP-06 extra grasp: refs/nostr/<pr_event_id> in prs/<hex>/<id>.git should \
+         resolve to pr_tip_oid; got {:?}, want {:?}",
+        s.extra_grasp_pr_ref_oid, s.pr_tip_oid,
     );
     Ok(())
 }
 
-/// Assertion 8: the vanilla git server's URL does not appear in the repo
+/// Assertion 8: the GRASP-06 server's base URL does not appear in the repo
 /// announcement's `clone` tag.
 ///
 /// The server was supplied at send-time via `--git-server`; it was never
 /// passed to `ngit init --grasp-server` and is therefore not part of the
 /// kind-30617 announcement. This assertion guards against a regression where
-/// `select_servers_push_refs_and_generate_pr_or_pr_update_event` or
-/// `apply_grasp_infrastructure` accidentally injected the user-supplied URL
-/// back into the announcement.
+/// the user-supplied server was accidentally injected into the announcement.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
-async fn vanilla_server_not_in_announcement(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+#[tokio::test]
+async fn extra_grasp_not_in_announcement(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
-    // Strip the path component to get the bare `http://host:port` base —
-    // if any announcement URL even *starts with* the vanilla server's address
-    // something has gone wrong.
-    let vanilla_base = s
-        .git_server_url
-        .strip_suffix(VANILLA_REPO_PATH)
-        .unwrap_or(&s.git_server_url);
     for url in &s.announcement_clone_urls {
         assert!(
-            !url.contains(vanilla_base),
-            "vanilla git server base URL ({vanilla_base:?}) should not appear in the \
-             repo announcement's clone tag, but found it in {url:?}",
+            !url.contains(&s.extra_grasp_http_base),
+            "GRASP-06 extra server base URL ({:?}) should not appear in the repo \
+             announcement's clone tag, but found it in {url:?}",
+            s.extra_grasp_http_base,
         );
     }
     Ok(())
@@ -654,7 +682,7 @@ async fn vanilla_server_not_in_announcement(#[future] snapshot: Arc<Snapshot>) -
 
 /// Assertion 9: no KIND_PULL_REQUEST_UPDATE event was emitted on any surface.
 #[rstest]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn no_pr_update_event(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
