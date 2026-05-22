@@ -3,7 +3,7 @@ name = "test_harness"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Integration test harness for ngit. Successor to test_utils."
+description = "Integration test harness for ngit."
 
 [dependencies]
 anyhow = "1.0.98"

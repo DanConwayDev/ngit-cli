@@ -887,8 +887,7 @@ mod tests {
 
     use super::*;
 
-    // Locally-defined fixtures (previously imported from the `test_utils`
-    // crate). Two stable nsec values are used so the public-key-ordered
+    // Two stable nsec values are used so the public-key-ordered
     // `maintainers` tag is deterministic.
     static TEST_KEY_1_NSEC: &str =
         "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";

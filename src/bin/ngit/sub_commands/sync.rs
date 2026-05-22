@@ -891,10 +891,10 @@ mod tests {
 
     use super::*;
 
-    /// Minimal in-process git repository fixture for these unit tests
-    /// (previously imported from the `test_utils` crate). The binary crate
-    /// can't see the lib's `#[cfg(test)]` helpers, so we keep a tiny copy
-    /// here. Only the surface area exercised by these tests is implemented.
+    /// Minimal in-process git repository fixture for these unit tests.
+    /// The binary crate can't see the lib's `#[cfg(test)]` helpers, so we keep
+    /// a tiny copy here. Only the surface area exercised by these tests is
+    /// implemented.
     mod test_helpers {
         use std::{
             env::current_dir,

@@ -438,9 +438,7 @@ async fn maintainers_is_just_me(#[future] snapshot: Arc<Snapshot>) -> Result<()>
 /// Equivalent of legacy
 /// `with_name_and_grasp_server::earliest_unique_commit_is_root`. The
 /// `r ... euc` tag value matches the captured root commit oid — caught
-/// dynamically against the arrange's `root_oid` rather than the
-/// hardcoded `9ee507fc...` baked into legacy
-/// `test_utils::generate_repo_ref_event`.
+/// dynamically against the arrange's `root_oid`.
 #[rstest]
 #[tokio::test]
 async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Result<()> {

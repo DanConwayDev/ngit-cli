@@ -18,8 +18,7 @@ mod tests {
 
     use super::*;
 
-    // Locally-defined fixtures (previously imported from the `test_utils`
-    // crate). Keep these values stable: TEST_KEY_1_ENCRYPTED /
+    // Keep these values stable: TEST_KEY_1_ENCRYPTED /
     // TEST_KEY_1_ENCRYPTED_WEAK are precomputed ciphertexts of
     // TEST_KEY_1_NSEC under TEST_PASSWORD / TEST_WEAK_PASSWORD respectively,
     // so the "ciphertext has not silently changed format" regression tests

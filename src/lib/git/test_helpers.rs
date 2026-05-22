@@ -1,7 +1,5 @@
 //! Test fixtures for the `git` module's own `#[cfg(test)] mod tests`.
-//!
-//! Previously imported from the (now deleted) `test_utils` crate. Kept
-//! co-located with the module being tested so the git unit tests stay
+//! Kept co-located with the module being tested so the git unit tests stay
 //! self-contained — see AGENTS.md § "Test harness boundary".
 
 use std::{
@@ -105,8 +103,7 @@ pub struct GitTestRepo {
 
 impl Default for GitTestRepo {
     fn default() -> Self {
-        // Mirror the legacy `test_utils::git::GitTestRepo::default()` behaviour:
-        // create a repo on `main` and seed `nostr.repo` with a coordinate that
+        // Create a repo on `main` and seed `nostr.repo` with a coordinate that
         // matches `generate_repo_ref_event()`.
         let repo_event = generate_repo_ref_event();
         let coordinate = Nip19Coordinate {

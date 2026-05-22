@@ -45,7 +45,7 @@ ngit/
 │       ├── repo_state.rs        # Repository state
 │       └── utils.rs             # Utilities
 ├── tests/                       # Integration tests
-├── test_utils/                  # Test utilities and helpers
+├── test_harness/                # e2e test utility
 └── git_hooks/                   # Git hooks for development
 ```
 
@@ -56,7 +56,6 @@ ngit/
 - **`repo_ref.rs`**: Repository reference handling, URL parsing, grasp server detection
   - Functions: `is_grasp_server_in_list()`, `is_grasp_server_clone_url()`, `normalize_grasp_server_url()`
   - Critical for identifying and validating repository URLs
-  
 - **`repo_state.rs`**: Manages repository state (refs, commits, etc.)
 
 - **`client.rs`**: Nostr client wrapper and relay communication
@@ -124,7 +123,7 @@ cargo build --release
 
 ### Adding New Features
 
-1. **Identify the correct module**: 
+1. **Identify the correct module**:
    - Git operations → `src/lib/git/`
    - Nostr operations → `src/lib/client.rs`, `src/lib/git_events.rs`
    - CLI commands → `src/bin/ngit/sub_commands/`
@@ -232,24 +231,11 @@ Check `Cargo.toml` for feature flags and optional dependencies.
 
 - `test_harness/` — integration test crate. Use this for all new
   integration tests.
-- `test_utils/` — **frozen**. Retained only as a `[dev-dependencies]`
-  helper for unit tests in `src/` (`#[cfg(test)] mod tests`) that
-  still reference it. Do not extend it; do not import from it in
-  anything under `tests/` or `test_harness/`.
 
 ### Test harness boundary (mandatory rules for new tests)
 
 These rules exist because the previous harness collapsed under
 exactly these patterns. They are non-negotiable:
-
-- **Do not import from `test_utils` in any integration test or in
-  `test_harness`.** No `use test_utils::…`, no re-exports, no
-  "convenience" shims. The two crates are hermetically separated;
-  `test_utils` exists only to satisfy `src/` unit tests during the
-  remainder of its sunset.
-- **Do not modify `test_utils/`.** It is frozen. If a `src/` change
-  breaks a unit test that depends on it, port that unit test off
-  `test_utils` rather than patching the helper.
 - **No `#[serial]` annotations.** Test isolation is provided by the
   harness (per-test temp dirs, per-test ports, per-test env). If a
   test needs serialisation, the harness contract is wrong; fix the
@@ -284,7 +270,8 @@ exactly these patterns. They are non-negotiable:
 
 **Problem**: Using wrong normalization function leads to incorrect comparisons.
 
-**Solution**: 
+**Solution**:
+
 - For full URL comparison: Direct string comparison
 - For server identification: Use `normalize_grasp_server_url()`
 
@@ -355,6 +342,7 @@ fetch_from_remote()                    // Fetch from git server
 ## Support and Questions
 
 For questions about the codebase or contributions:
+
 - Check existing issues on [gitworkshop.dev](https://gitworkshop.dev/dan@gitworkshop.dev/ngit)
 - Review test files for usage examples
 - Examine integration tests for workflow examples

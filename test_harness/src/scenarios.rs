@@ -679,9 +679,8 @@ impl Harness {
     ///
     /// **Identifier discipline.** ngit's `RepoState::build` uses
     /// `repo_ref.identifier.clone()` as the `d` tag value — the bare
-    /// identifier from the kind-30617 announcement, not the
-    /// `{root_commit}-{identifier}` variant the legacy `test_utils`
-    /// hardcoded. Pass [`PublishedRepo::identifier`] straight through.
+    /// identifier from the kind-30617 announcement.
+    /// Pass [`PublishedRepo::identifier`] straight through.
     ///
     /// **Signing.** Defaults to [`PublishedRepo::maintainer_keys`] because
     /// `list.rs:64-69` filters candidate state events by
@@ -1275,11 +1274,10 @@ pub enum PublishStateEventTarget {
 ///   `state_a_fresh::earliest_unique_commit_is_root` would pass even with a
 ///   single-commit repo, but only because EUC == HEAD; capturing the root oid
 ///   separately catches a regression where ngit emits HEAD's oid as the EUC).
-/// - The shape mirrors legacy `GitTestRepo::populate` (initial empty commit +
-///   `t1.md` + `t2.md`), so the migrated tests assert the *same* semantic
-///   property the legacy tests did, only against dynamically-captured oids
-///   instead of the hardcoded `9ee507fc...` baked into
-///   `test_utils::generate_repo_ref_event`.
+/// - The shape mirrors `GitTestRepo::populate` (initial empty commit + `t1.md`
+///   + `t2.md`), so the migrated tests assert the *same* semantic property the
+///     legacy tests did, only against dynamically-captured oids instead of
+///     hardcoded values.
 async fn populate_init_seed_commits(repo: &Repo) -> Result<(String, String)> {
     // Initial empty commit — `--allow-empty` because no files have been
     // staged yet. Mirrors legacy `initial_commit()`.

@@ -1,9 +1,5 @@
 //! Integration test harness for ngit.
 //!
-//! Successor to `test_utils`. Do not import from `test_utils` here, and
-//! do not re-export `test_utils` types — the boundary is hermetic by design
-//! (see `docs/architecture/test-harness.md`).
-//!
 //! ## Scope
 //!
 //! Building blocks for driving ngit subcommands against either a vanilla
