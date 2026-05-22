@@ -434,7 +434,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         );
     } else {
         eprintln!(
-            "The repository doesn't list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request."
+            "The repository doesn't list a grasp server so your proposal cannot be submitted as a nostr Pull Request."
         );
     }
     // use repo grasp servers
@@ -515,22 +515,20 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         if all_candidates.is_empty() {
             if repo_grasps.is_empty() {
                 bail!(
-                    "failed to push PR data: the repository lists no grasp servers and your \
-                     KIND_USER_GRASP_LIST is empty or all servers are unreachable. \
-                     Add a GRASP-06-enabled server to your user grasp list to enable the \
-                     /prs/ fallback."
+                    "failed to push PR: the repository has no grasp servers configured and your \
+                     user server list is empty. Add a server to your profile to enable \
+                     pushing PRs."
                 )
             }
             bail!(
-                "failed to push PR data to any repo or GRASP-06 fallback server. \
-                 All repo grasp servers are unreachable and your KIND_USER_GRASP_LIST \
-                 is empty or all listed servers were also unreachable. \
-                 Add a GRASP-06-enabled server to your user grasp list."
+                "failed to push PR: the repository's grasp servers are down or not accepting \
+                 the push right now, and your user server list is empty or all listed \
+                 servers were also unreachable. Add a server to your profile and try again."
             )
         }
 
         eprintln!(
-            "falling back to GRASP-06 /prs/ endpoint on contributor's preferred grasp server"
+            "repository servers are down or not accepting your PR right now, pushing to servers in your user server list instead"
         );
 
         let mut fallback_events: Option<Vec<Event>> = None;
@@ -565,8 +563,9 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
 
         fallback_events.ok_or_else(|| {
             anyhow::anyhow!(
-                "failed to push PR data to any GRASP-06 /prs/ endpoint: \
-                 all fallback servers were unreachable or rejected the push."
+                "failed to push PR: repository servers are down or not accepting the push, \
+                 and all fallback servers in your user server list were also unreachable \
+                 or rejected the push."
             )
         })?
     };
