@@ -110,6 +110,28 @@ pub struct PublishRepoOpts {
     ///
     /// Defaults to empty: announcement carries only the grasp's relay.
     pub extra_repo_relays: Vec<String>,
+    /// Additional grasp-server roles to include in the kind-30617
+    /// announcement alongside the always-present `"repo"` role.
+    ///
+    /// Each role label is resolved via [`Harness::grasp(role)`] and its
+    /// HTTP URL is appended as a further `--grasp-server <url>` argument
+    /// to `ngit init`. The resulting `clone` tag on the announcement
+    /// therefore lists URLs in the order `["repo", ...additional_grasp_roles]`.
+    /// That iteration order is also what
+    /// `push_refs_and_generate_pr_or_pr_update_event` (push.rs:735-794)
+    /// uses to build its `to_try` server list, so the **first** clone URL
+    /// is always the "repo" grasp's URL — both for the PR event's own
+    /// `clone` tag and for the underlying `git push` target.
+    ///
+    /// Defaults to empty (single-grasp announcement — the `"repo"` server
+    /// only). Populate when a test needs to exercise multi-grasp behaviour,
+    /// e.g. verifying that every grasp in the announcement receives the PR
+    /// git data even though the PR event's `clone` tag only lists the first
+    /// one.
+    ///
+    /// Requires one `with_grasp_server(role)` call per entry on the harness
+    /// builder; panics at lookup time if any role has not been registered.
+    pub additional_grasp_roles: Vec<String>,
 }
 
 /// Metadata about a repository that has been published to the grasp via
@@ -305,6 +327,17 @@ impl Harness {
             for npub in &additional_maintainer_npubs {
                 init_args.push(npub.clone());
             }
+        }
+        // Additional grasp servers are appended in order so the kind-30617
+        // `clone` tag ends up as [repo, ...additional_grasp_roles]. The
+        // iteration order in push_refs_and_generate_pr_or_pr_update_event
+        // (push.rs:735-794) mirrors that order, so the first clone URL
+        // is always the "repo" grasp — both for the PR event's `clone` tag
+        // and for which server's URL is embedded in the generated event.
+        for role in &opts.additional_grasp_roles {
+            let url = self.grasp(role).url().to_string();
+            init_args.push("--grasp-server".into());
+            init_args.push(url);
         }
         // Extra repo relays are appended *after* the grasp server is
         // already in `init_args`. `init.rs:758-770` treats `--relay` as
