@@ -60,6 +60,11 @@ const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
 /// harness crate keeps a small dep tree.
 const STATE_KIND: Kind = Kind::Custom(30618);
 
+/// `KIND_USER_GRASP_LIST` from `src/lib/git_events.rs:115` — kind 10317.
+/// A replaceable nostr event that lists the user's preferred grasp servers
+/// as `g` tags with relay URLs (`ws://`). Hand-synced rather than imported.
+const KIND_USER_GRASP_LIST: Kind = Kind::Custom(10317);
+
 /// Knobs for [`Harness::publish_repo`]. All fields are optional and
 /// defaults match what unit-style tests usually want.
 #[derive(Clone, Debug, Default)]
@@ -816,6 +821,70 @@ impl Harness {
         }
 
         Ok(event)
+    }
+
+    /// Publish a `KIND_USER_GRASP_LIST` event (kind 10317) for `user_keys`,
+    /// listing the ws:// relay URLs of every grasp server registered under
+    /// the given `grasp_roles`.
+    ///
+    /// The event is published to the default relay so that subsequent ngit
+    /// invocations (which fetch the user's profile from
+    /// `NGIT_RELAY_DEFAULT_SET`) see the grasp list and can use those
+    /// servers as personal-fork targets when all repo servers are down.
+    ///
+    /// ## When to call
+    ///
+    /// Call this after creating the contributor's account (via
+    /// [`Harness::clone_published_repo`] with [`CloneLogin::AsContributor`])
+    /// but before taking any repo servers offline and running `ngit send`.
+    ///
+    /// ## URL format
+    ///
+    /// ngit stores user grasp lists as `ws://` relay URLs (not `http://`
+    /// clone URLs) — see `src/lib/login/user.rs:UserGraspList::to_event`.
+    /// The harness uses `GraspServer::relay_url()` so the produced `g` tags
+    /// match what `push.rs:617` stores when updating the grasp list
+    /// interactively.
+    pub async fn publish_user_grasp_list(
+        &self,
+        user_keys: &Keys,
+        grasp_roles: &[&str],
+    ) -> Result<()> {
+        let tags: Vec<Tag> = grasp_roles
+            .iter()
+            .map(|role| {
+                let ws_url = self.grasp(role).relay_url();
+                Tag::custom(TagKind::Custom("g".into()), vec![ws_url])
+            })
+            .collect();
+
+        clock::tick_to_next_second().await;
+
+        let event = EventBuilder::new(KIND_USER_GRASP_LIST, "")
+            .tags(tags)
+            .sign_with_keys(user_keys)
+            .context("failed to sign user grasp list event")?;
+
+        let relay_url = self.relay("default").url().to_string();
+        let client = Client::default();
+        client.add_relay(&relay_url).await.with_context(|| {
+            format!("failed to add relay {relay_url} for user grasp list publish")
+        })?;
+        client.connect().await;
+        let output = client
+            .send_event_to([relay_url.as_str()], &event)
+            .await
+            .with_context(|| format!("failed to publish user grasp list to {relay_url}"))?;
+        client.disconnect().await;
+        if !output.failed.is_empty() {
+            bail!(
+                "relay at {relay_url} rejected user grasp list event id={}: {:?}",
+                event.id,
+                output.failed,
+            );
+        }
+
+        Ok(())
     }
 
     /// Internal shared driver for [`Harness::publish_pr`] and
