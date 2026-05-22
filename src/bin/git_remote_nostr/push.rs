@@ -644,9 +644,13 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     git_server: Option<&str>,
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
+    let commits_too_big = git_repo.are_commits_too_big_for_patches(ahead);
+    let has_submodules = git_repo.do_commits_contain_submodules(ahead);
+    let repo_has_grasp_server = !repo_ref.grasp_servers().is_empty();
     let use_pr = parent_is_pr
-        || git_repo.are_commits_too_big_for_patches(ahead)
-        || git_repo.do_commits_contain_submodules(ahead);
+        || commits_too_big
+        || has_submodules
+        || (root_proposal.is_none() && repo_has_grasp_server);
 
     if use_pr {
         let tip = ahead.last().context("no commits")?; // ahead is oldest first (callers reverse it)
@@ -689,8 +693,10 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             "{} run `ngit send` for more options.",
             if parent_is_pr {
                 "couldn't generate PR update event."
-            } else {
+            } else if commits_too_big || has_submodules {
                 "a commit in your proposal is too big for a nostr patch so we tried to create it as a nostr PR instead. Unfortunately this failed."
+            } else {
+                "the repository uses a GRASP server so the proposal was submitted as a PR kind, but creating the PR failed."
             },
         ))
     } else {

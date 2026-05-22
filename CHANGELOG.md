@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `git push pr/<branch>` now defaults to PR kind (kind 1618) for new proposals when the repository announcement lists at least one GRASP server; previously only very large commits (>60 KB) or commits containing submodules triggered PR kind automatically
 - When a PR cannot be pushed to the repository's GRASP servers, ngit now falls back to pushing to a server from the contributor's own server list instead of prompting for an alternative URL and creating a personal-fork repository announcement
 - Completely replaced the integration test harness with a much more agile one and rewrote all integration tests against it. This was a key blocker for further planned improvements.
 - `ngit pr apply` / `ngit pr checkout` / `ngit pr list` now consult git servers lazily — only when the specific commit they need is not already present locally — and share a single `ensure_commit_local` helper. Previously each command had its own near-duplicate copy of the fetch logic, and `checkout` issued git-server requests unconditionally even when the commit was already in the working repository — thanks to m0wer (nostr:npub1w3vaxva0vcrx7pnvlpmede5smvafdl69xnu7ma82kaxl9us89zdsht4c5c) for the contribution
