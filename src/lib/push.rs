@@ -3,8 +3,7 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -14,16 +13,13 @@ use nostr::{
     event::{Event, EventBuilder, Kind, Tag, TagStandard, UnsignedEvent},
     hashes::sha1::Hash as Sha1Hash,
     key::PublicKey,
-    nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19Coordinate},
+    nips::nip10::Marker,
     signer::NostrSigner,
 };
 
 use crate::{
-    cli_interactor::{
-        Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
-        count_lines_per_msg_vec, multi_select_with_custom_value, show_multi_input_prompt_success,
-    },
-    client::{Connect, get_repo_ref_from_cache, send_events, sign_draft_event, sign_event},
+    cli_interactor::count_lines_per_msg_vec,
+    client::{Connect, sign_draft_event, sign_event},
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
@@ -32,8 +28,8 @@ use crate::{
     git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
     login::user::UserRef,
     repo_ref::{
-        RepoRef, format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url,
-        is_grasp_server_clone_url, is_grasp_server_in_list, normalize_grasp_server_url,
+        RepoRef, format_grasp_server_url_as_grasp06_prs_url, is_grasp_server_clone_url,
+        is_grasp_server_in_list, normalize_grasp_server_url,
     },
     utils::{
         Direction, get_short_git_server_name, get_write_protocols_to_try, join_with_and,
@@ -417,50 +413,23 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     tip: &Sha1Hash,
     first_commit: &Sha1Hash,
     merge_base: Option<&Sha1Hash>,
-    user_ref: &mut UserRef,
+    user_ref: &UserRef,
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
     signer: &Arc<dyn NostrSigner>,
-    interactive: bool,
     term: &Term,
     git_server_push_options: &[&str],
 ) -> Result<Vec<Event>> {
-    let git_repo_path = git_repo.get_path()?;
     let mut to_try = vec![];
     let mut tried = vec![];
     let repo_grasps = repo_ref.grasp_servers();
-    // if the user already has a fork, or is a maintainer, use those git servers
-    let mut user_repo_ref = get_repo_ref_from_cache(
-        Some(git_repo_path),
-        &Nip19Coordinate {
-            coordinate: Coordinate {
-                kind: nostr::event::Kind::GitRepoAnnouncement,
-                public_key: user_ref.public_key,
-                identifier: repo_ref.identifier.clone(),
-            },
-            relays: vec![],
-        },
-    )
-    .await
-    .ok();
-    if let Some(user_repo_ref) = &user_repo_ref {
-        for url in &user_repo_ref.git_server {
-            if CloneUrl::from_str(url).is_ok() {
-                to_try.push(url.clone());
-            }
-        }
-    }
-    if !to_try.is_empty() || !repo_grasps.is_empty() {
+    if !repo_grasps.is_empty() {
         eprintln!(
             "pushing proposal refs to {}",
             if repo_ref.maintainers.contains(&user_ref.public_key) {
                 "repository git servers"
-            } else if to_try.is_empty() {
-                "repository grasp servers"
-            } else if repo_grasps.is_empty() {
-                "the git servers listed in your fork"
             } else {
-                "the git servers listed in your fork and repository grasp servers"
+                "repository grasp servers"
             }
         );
     } else {
@@ -468,7 +437,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
             "The repository doesn't list a grasp server which would otherwise be used to submit your proposal as nostr Pull Request."
         );
     }
-    // also use repo grasp servers
+    // use repo grasp servers
     for url in &repo_ref.git_server {
         if let Ok(normalized) = normalize_grasp_server_url(url) {
             if repo_grasps.contains(&normalized) && !to_try.contains(url) {
@@ -477,229 +446,131 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         }
     }
 
-    let mut git_ref = None;
-    let events = loop {
-        let (events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
-            git_repo,
-            repo_ref,
-            tip,
-            first_commit,
-            merge_base,
-            user_ref,
-            root_proposal,
-            title_description_overide,
-            &to_try,
-            git_ref.clone(),
-            signer,
-            term,
-            git_server_push_options,
-        )
-        .await?;
-        for url in to_try {
-            tried.push(url);
-        }
-        to_try = vec![];
-        if let Some(events) = events {
-            break events;
-        }
-        // fallback to creating user personal-fork on their grasp servers
-        let untried_user_grasp_servers: Vec<String> = user_ref
+    let git_ref: Option<String> = None;
+
+    // --- Primary path: try all repo grasp servers ---
+    let (primary_events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
+        git_repo,
+        repo_ref,
+        tip,
+        first_commit,
+        merge_base,
+        user_ref,
+        root_proposal,
+        title_description_overide,
+        &to_try,
+        git_ref.clone(),
+        signer,
+        term,
+        git_server_push_options,
+    )
+    .await?;
+    tried.extend(to_try);
+
+    let events = if let Some(events) = primary_events {
+        events
+    } else {
+        // GRASP-06 fallback: push to /prs/<contributor-npub>/<identifier>.git on a
+        // server from the contributor's KIND_USER_GRASP_LIST (or the default grasp
+        // set). No kind-30617 personal-fork announcement is ever created.
+
+        // Build normalised set of servers already tried so we can exclude them.
+        let tried_normalized: Vec<String> = tried
+            .iter()
+            .filter_map(|t| normalize_grasp_server_url(t).ok())
+            .collect();
+
+        // 1. Contributor's KIND_USER_GRASP_LIST
+        let user_candidates: Vec<String> = user_ref
             .grasp_list
             .urls
             .iter()
-            .map(std::string::ToString::to_string)
+            .map(|u| u.to_string())
             .filter(|g| {
-                // is a grasp server not in list of tried
-                !is_grasp_server_in_list(g, &tried)
+                !is_grasp_server_in_list(
+                    &normalize_grasp_server_url(g).unwrap_or_default(),
+                    &tried_normalized,
+                )
             })
             .collect();
 
-        if untried_user_grasp_servers.is_empty() {
-            if !interactive {
-                if repo_grasps.is_empty() {
-                    bail!(
-                        "failed to write PR data. nostr repo doesnt lists any grasp servers which allow you to write PR branches. run `ngit send` to select an alternative git server to host your PR diff."
-                    )
-                }
+        // 2. Default grasp set — only servers not already covered by user_candidates
+        let user_candidates_normalized: Vec<String> = user_candidates
+            .iter()
+            .filter_map(|u| normalize_grasp_server_url(u).ok())
+            .collect();
+        let default_candidates: Vec<String> = client
+            .get_grasp_default_set()
+            .iter()
+            .filter(|g| {
+                let g_norm = normalize_grasp_server_url(g).unwrap_or_default();
+                !is_grasp_server_in_list(&g_norm, &tried_normalized)
+                    && !is_grasp_server_in_list(&g_norm, &user_candidates_normalized)
+            })
+            .cloned()
+            .collect();
+
+        let all_candidates: Vec<String> = [user_candidates, default_candidates].concat();
+
+        if all_candidates.is_empty() {
+            if repo_grasps.is_empty() {
                 bail!(
-                    "failed to write PR data to git servers associated with this nostr repo. run `ngit send` to select an alternative git server to host your PR diff."
+                    "failed to push PR data: the repository lists no grasp servers and your \
+                     KIND_USER_GRASP_LIST is empty or all servers are unreachable. \
+                     Add a GRASP-06-enabled server to your user grasp list to enable the \
+                     /prs/ fallback."
                 )
             }
-            if Interactor::default().choice(
-                PromptChoiceParms::default()
-                    .with_prompt("choose alternative git server")
-                    .dont_report()
-                    .with_choices(vec![
-                        "choose grasp server(s)".to_string(),
-                        "enter a git repo url with write permission".to_string(),
-                    ])
-                    .with_default(0),
-            )? == 1
-            {
-                loop {
-                    let clone_url = Interactor::default()
-                        .input(
-                            PromptInputParms::default()
-                                .with_prompt("git repo url with write permission"),
-                        )?
-                        .clone();
-                    if CloneUrl::from_str(&clone_url).is_ok() {
-                        to_try.push(clone_url);
-                        let mut git_ref_or_branch_name = Interactor::default()
-                            .input(
-                                PromptInputParms::default()
-                                    .with_prompt("ref / branch name")
-                                    .with_default(
-                                        git_ref.unwrap_or("refs/nostr/<event-id>".to_string()),
-                                    ),
-                            )?
-                            .clone();
-                        if !git_ref_or_branch_name.starts_with("refs/") {
-                            git_ref_or_branch_name = format!("refs/heads/{git_ref_or_branch_name}");
-                        }
-                        git_ref = Some(git_ref_or_branch_name);
-                        break;
-                    }
-                    eprintln!("invalid clone url");
-                }
-                continue;
-            }
+            bail!(
+                "failed to push PR data to any repo or GRASP-06 fallback server. \
+                 All repo grasp servers are unreachable and your KIND_USER_GRASP_LIST \
+                 is empty or all listed servers were also unreachable. \
+                 Add a GRASP-06-enabled server to your user grasp list."
+            )
         }
 
-        let mut new_grasp_server_events: Vec<Event> = vec![];
-
-        let grasp_servers = if untried_user_grasp_servers.is_empty() {
-            let default_choices: Vec<String> = client
-                .get_grasp_default_set()
-                .iter()
-                .filter(|g| !is_grasp_server_in_list(g, &tried))
-                .cloned()
-                .collect();
-            let selections = vec![true; default_choices.len()]; // all selected by default
-            let grasp_servers = multi_select_with_custom_value(
-                "alternative grasp server(s)",
-                "grasp server",
-                default_choices,
-                selections,
-                normalize_grasp_server_url,
-            )?;
-            show_multi_input_prompt_success("alternative grasp server(s)", &grasp_servers);
-            if grasp_servers.is_empty() {
-                // ask again
-                continue;
-            }
-            let normalised_grasp_servers: Vec<String> = grasp_servers
-                .iter()
-                .filter_map(|g| normalize_grasp_server_url(g).ok())
-                .collect();
-            // if any grasp servers not listed in user grasp list prompt to update
-            let grasp_servers_not_in_user_prefs: Vec<String> = normalised_grasp_servers
-                .iter()
-                .filter(|g| {
-                    !user_ref.grasp_list.urls.contains(
-                        // unwrap is safe as we constructed g
-                        &nostr::Url::parse(&format_grasp_server_url_as_relay_url(g).unwrap())
-                            .unwrap(),
-                    )
-                })
-                .cloned()
-                .collect();
-            if !grasp_servers_not_in_user_prefs.is_empty()
-                && Interactor::default().confirm(
-                    PromptConfirmParms::default()
-                        .with_prompt(
-                            "add these to your list of prefered grasp servers?".to_string(),
-                        )
-                        .with_default(true),
-                )?
-            {
-                for g in &normalised_grasp_servers {
-                    let as_url = nostr::Url::parse(&format_grasp_server_url_as_relay_url(g)?)?;
-                    if !user_ref.grasp_list.urls.contains(&as_url) {
-                        user_ref.grasp_list.urls.push(as_url);
-                    }
-                }
-                new_grasp_server_events.push(user_ref.grasp_list.to_event(signer).await?);
-            }
-            normalised_grasp_servers
-        } else {
-            untried_user_grasp_servers
-        };
         eprintln!(
-            "{} personal-fork so we can push commits to your prefered grasp servers",
-            if user_repo_ref.is_some() {
-                "Updating"
-            } else {
-                "Creating a"
-            },
+            "falling back to GRASP-06 /prs/ endpoint on contributor's preferred grasp server"
         );
 
-        let grasp_servers_as_personal_clone_url: Vec<String> = grasp_servers
-            .iter()
-            .filter_map(|g| {
-                format_grasp_server_url_as_clone_url(g, &user_ref.public_key, &repo_ref.identifier)
-                    .ok()
-            })
-            .collect();
-
-        // create personal-fork / update existing user repo and add these grasp servers
-        let updated_user_repo_ref = {
-            if let Some(mut user_repo_ref) = user_repo_ref {
-                for g in &grasp_servers_as_personal_clone_url {
-                    user_repo_ref.add_grasp_server(g)?;
-                }
-                user_repo_ref
-            } else {
-                // clone repo_ref and reset as personal-fork
-                let mut user_repo_ref = repo_ref.clone();
-                user_repo_ref.trusted_maintainer = user_ref.public_key;
-                user_repo_ref.maintainers = vec![user_ref.public_key];
-                user_repo_ref.git_server = vec![];
-                user_repo_ref.relays = vec![];
-                if !user_repo_ref
-                    .hashtags
-                    .contains(&"personal-fork".to_string())
-                {
-                    user_repo_ref.hashtags.push("personal-fork".to_string());
-                }
-                user_repo_ref
-            }
-        };
-        // pubish event to my-relays and my-fork-relays
-        new_grasp_server_events.push(updated_user_repo_ref.to_event(signer).await?);
-        let _ = send_events(
-            client,
-            Some(git_repo_path),
-            new_grasp_server_events,
-            user_ref.relays.write(),
-            updated_user_repo_ref.relays.clone(),
-            #[cfg(test)]
-            true,
-            #[cfg(not(test))]
-            false,
-            false,
-        )
-        .await?;
-        user_repo_ref = Some(updated_user_repo_ref);
-        // wait a few seconds
-        let countdown_start = 5;
-        let term = console::Term::stdout();
-        for i in (1..=countdown_start).rev() {
-            term.write_line(
-                format!("waiting {i}s grasp servers to create your repo before we push your data")
-                    .as_str(),
+        let mut fallback_events: Option<Vec<Event>> = None;
+        for server in all_candidates {
+            let prs_url = format_grasp_server_url_as_grasp06_prs_url(
+                &server,
+                &user_ref.public_key,
+                &repo_ref.identifier,
             )?;
-            thread::sleep(Duration::new(1, 0)); // Sleep for 1 second
-            term.clear_last_lines(1)?;
+            let (events, _) = push_refs_and_generate_pr_or_pr_update_event(
+                git_repo,
+                repo_ref,
+                tip,
+                first_commit,
+                merge_base,
+                user_ref,
+                root_proposal,
+                title_description_overide,
+                std::slice::from_ref(&prs_url),
+                git_ref.clone(),
+                signer,
+                term,
+                git_server_push_options,
+            )
+            .await?;
+            if let Some(events) = events {
+                fallback_events = Some(events);
+                break;
+            }
+            tried.push(prs_url);
         }
-        term.flush().unwrap(); // Ensure the output is flushed to the terminal
 
-        // add grasp servers to to_try
-        for url in grasp_servers_as_personal_clone_url {
-            to_try.push(url);
-        }
-        // the loop with continue with the grasp servers
+        fallback_events.ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to push PR data to any GRASP-06 /prs/ endpoint: \
+                 all fallback servers were unreachable or rejected the push."
+            )
+        })?
     };
+
     eprintln!(
         "posting {}",
         if events.iter().any(|e| e.kind.eq(&Kind::GitStatusClosed)) {

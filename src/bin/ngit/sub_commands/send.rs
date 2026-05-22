@@ -338,7 +338,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
     };
 
-    let (signer, mut user_ref, _) = login::login_or_signup(
+    let (signer, user_ref, _) = login::login_or_signup(
         &Some(&git_repo),
         &extract_signer_cli_arguments(cli_args).unwrap_or(None),
         &cli_args.password,
@@ -365,11 +365,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 tip,
                 first_commit,
                 git_repo.get_commit_parent(first_commit).ok().as_ref(),
-                &mut user_ref,
+                &user_ref,
                 root_proposal.as_ref(),
                 &cover_letter_title_description,
                 &signer,
-                true,
                 &console::Term::stdout(),
                 &push_options_refs,
             )

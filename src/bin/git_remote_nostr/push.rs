@@ -671,7 +671,6 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             root_proposal,
             &title_description.map(|(t, d)| (t.clone(), d.clone())),
             signer,
-            false,
             term,
             &push_options_refs,
         )
