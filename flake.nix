@@ -69,6 +69,7 @@
           pname = manifest.package.name;
           version = manifest.package.version;
           src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
           buildInputs = [
             pkg-config # required by git2
             openssl
