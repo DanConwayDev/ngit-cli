@@ -195,6 +195,17 @@ impl Harness {
     pub fn fresh_repo(&self) -> Result<Repo> {
         Repo::init(self)
     }
+
+    /// `git clone <url>` into a fresh tempdir, inheriting the harness env.
+    ///
+    /// Lower-level sibling of [`Harness::clone_published_repo`] for tests
+    /// that need to clone from a URL that is not described by a
+    /// [`PublishedRepo`] struct — for example, a failover test that builds
+    /// its own announcement via manual `ngit init` steps rather than
+    /// [`Harness::publish_repo`].
+    pub async fn clone_url(&self, url: &str) -> Result<Repo> {
+        Repo::clone(self, url).await
+    }
 }
 
 /// Fluent builder for [`Harness`].
