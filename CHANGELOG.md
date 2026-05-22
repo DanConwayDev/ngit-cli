@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- When a PR cannot be pushed to the repository's GRASP servers, ngit now falls back to pushing to a server from the contributor's own server list instead of prompting for an alternative URL and creating a personal-fork repository announcement
 - Completely replaced the integration test harness with a much more agile one and rewrote all integration tests against it. This was a key blocker for further planned improvements.
 - `ngit pr apply` / `ngit pr checkout` / `ngit pr list` now consult git servers lazily — only when the specific commit they need is not already present locally — and share a single `ensure_commit_local` helper. Previously each command had its own near-duplicate copy of the fetch logic, and `checkout` issued git-server requests unconditionally even when the commit was already in the working repository — thanks to m0wer (nostr:npub1w3vaxva0vcrx7pnvlpmede5smvafdl69xnu7ma82kaxl9us89zdsht4c5c) for the contribution
 - `ngit pr checkout` (and the interactive checkout path in `ngit pr list`) now tries the submitter-supplied `clone`-tag URLs on the PR event as a fallback if the repo's declared git servers don't carry the PR tip, matching what `ngit pr apply` already did. This is safe because the user has explicitly targeted that PR by id; the same fallback remains deliberately disabled for the passive `git clone` / `git fetch` paths in the remote helper, where a malicious submitter could otherwise slow down every operation against the repo
