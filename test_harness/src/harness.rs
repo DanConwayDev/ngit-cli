@@ -211,7 +211,11 @@ impl Harness {
 /// Fluent builder for [`Harness`].
 pub struct HarnessBuilder {
     relay_roles: Vec<String>,
-    grasp_roles: Vec<String>,
+    /// Each entry is `(role_label, grasp06_enabled)`. `grasp06_enabled` is
+    /// `true` when registered via
+    /// [`with_grasp_server_grasp06`][Self::with_grasp_server_grasp06];
+    /// `false` for the standard [`with_grasp_server`][Self::with_grasp_server].
+    grasp_roles: Vec<(String, bool)>,
     vanilla_git_server_roles: Vec<String>,
     ngit_bin: PathBuf,
     git_remote_nostr_bin: PathBuf,
@@ -235,7 +239,23 @@ impl HarnessBuilder {
     /// regardless of role — the role label is purely for the test's own
     /// look-ups via `Harness::grasp(role)`.
     pub fn with_grasp_server(mut self, role: impl Into<String>) -> Self {
-        self.grasp_roles.push(role.into());
+        self.grasp_roles.push((role.into(), false));
+        self
+    }
+
+    /// Register a GRASP-06-enabled `ngit-grasp` subprocess under the given
+    /// role label.
+    ///
+    /// Identical to [`with_grasp_server`][Self::with_grasp_server] in all
+    /// respects — same port-reservation, same `NGIT_GRASP_DEFAULT_SET`
+    /// injection, same `Harness::grasp(role)` look-up — except the
+    /// spawned process receives `NGIT_GRASP06_ENABLE=true`, which flips on
+    /// the `/prs/<contributor-npub>/<identifier>.git` endpoint described in
+    /// GRASP-06 (`/persistent/clones/grasp/06.md`). The GRASP-01 relay
+    /// surface (kind-30617 announcements, NIP-34 patches, state events) is
+    /// still present on the same port.
+    pub fn with_grasp_server_grasp06(mut self, role: impl Into<String>) -> Self {
+        self.grasp_roles.push((role.into(), true));
         self
     }
 
@@ -287,12 +307,20 @@ impl HarnessBuilder {
         }
 
         let mut grasps: BTreeMap<String, Vec<GraspServer>> = BTreeMap::new();
-        for role in self.grasp_roles {
+        for (role, grasp06) in self.grasp_roles {
             let reservation = port::reserve_port()
                 .with_context(|| format!("failed to reserve port for grasp role {role:?}"))?;
-            let server = GraspServer::start(role.clone(), reservation)
-                .await
-                .with_context(|| format!("failed to start ngit-grasp for role {role:?}"))?;
+            let server = if grasp06 {
+                GraspServer::start_grasp06(role.clone(), reservation)
+                    .await
+                    .with_context(|| {
+                        format!("failed to start ngit-grasp (GRASP-06) for role {role:?}")
+                    })?
+            } else {
+                GraspServer::start(role.clone(), reservation)
+                    .await
+                    .with_context(|| format!("failed to start ngit-grasp for role {role:?}"))?
+            };
             grasps.entry(role).or_default().push(server);
         }
 

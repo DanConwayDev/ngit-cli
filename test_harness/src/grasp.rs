@@ -102,7 +102,33 @@ impl GraspServer {
         role: impl Into<String>,
         reservation: PortReservation,
     ) -> Result<Self> {
-        let role = role.into();
+        Self::start_inner(role.into(), reservation, false).await
+    }
+
+    /// Spawn ngit-grasp with GRASP-06 `/prs/` endpoint enabled
+    /// (`NGIT_GRASP06_ENABLE=true`).
+    ///
+    /// Identical to [`start`][Self::start] in every other respect: same
+    /// port reservation logic, same retry-on-early-exit loop, same GRASP-01
+    /// relay surface. The only difference is the additional env var that
+    /// opts the process into serving
+    /// `/prs/<npub>/<percent-encoded-identifier>.git` as described in
+    /// GRASP-06 (`/persistent/clones/grasp/06.md`).
+    pub(crate) async fn start_grasp06(
+        role: impl Into<String>,
+        reservation: PortReservation,
+    ) -> Result<Self> {
+        Self::start_inner(role.into(), reservation, true).await
+    }
+
+    /// Common implementation for [`start`][Self::start] and
+    /// [`start_grasp06`][Self::start_grasp06]. `grasp06` controls whether
+    /// `NGIT_GRASP06_ENABLE=true` is passed to the subprocess.
+    async fn start_inner(
+        role: String,
+        reservation: PortReservation,
+        grasp06: bool,
+    ) -> Result<Self> {
         let binary = locate_binary()?;
 
         let mut reservation = Some(reservation);
@@ -114,7 +140,7 @@ impl GraspServer {
             let r = reservation
                 .take()
                 .expect("reservation always present on attempt entry");
-            match Self::try_start_once(role.clone(), &binary, r).await {
+            match Self::try_start_once(role.clone(), &binary, r, grasp06).await {
                 Ok(server) => return Ok(server),
                 Err(StartFailure::EarlyExit { status }) if attempt < MAX_BIND_ATTEMPTS => {
                     eprintln!(
@@ -144,10 +170,14 @@ impl GraspServer {
     /// reservation. Returns `Err(StartFailure::EarlyExit)` specifically
     /// when the subprocess died before becoming ready — the caller may
     /// retry in that case.
+    ///
+    /// `grasp06` controls whether `NGIT_GRASP06_ENABLE=true` is injected
+    /// into the subprocess environment, enabling the `/prs/` endpoint.
     async fn try_start_once(
         role: String,
         binary: &Path,
         reservation: PortReservation,
+        grasp06: bool,
     ) -> std::result::Result<Self, StartFailure> {
         let port = reservation.port();
         let bind_address = format!("127.0.0.1:{port}");
@@ -181,6 +211,14 @@ impl GraspServer {
             // INFO output makes `cargo test --nocapture` unreadable.
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+
+        // Opt the subprocess into GRASP-06 `/prs/` endpoint support when
+        // requested. The env var is consumed by ngit-grasp's config layer
+        // (`NGIT_GRASP06_ENABLE`) and is off by default — existing tests
+        // that use plain `start()` are unaffected.
+        if grasp06 {
+            cmd.env("NGIT_GRASP06_ENABLE", "true");
+        }
 
         // Release the port reservation immediately before spawning the
         // subprocess that will bind it. Holding the reservation through
