@@ -816,6 +816,33 @@ pub fn format_grasp_server_url_as_clone_url(
     ))
 }
 
+/// GRASP-06 `/prs/<signer-npub>/<percent-encoded-identifier>.git` endpoint URL
+/// on `grasp_server`. The signer is the PR event signer (the contributor),
+/// not a maintainer — ngit-grasp's policy rejects npub != signer.
+///
+/// Different from [`format_grasp_server_url_as_clone_url`], which builds the
+/// GRASP-01 `/{npub}/{id}.git` repo-announcement endpoint.
+///
+/// See `/persistent/clones/grasp/06.md` § "Git Smart HTTP Service".
+pub fn format_grasp_server_url_as_grasp06_prs_url(
+    grasp_server: &str,
+    signer: &PublicKey,
+    identifier: &str,
+) -> Result<String> {
+    let grasp_server_url = normalize_grasp_server_url(grasp_server)?;
+
+    let prefix = if grasp_server_url.contains("http://") {
+        ""
+    } else {
+        "https://"
+    };
+    Ok(format!(
+        "{prefix}{grasp_server_url}/prs/{}/{}.git",
+        signer.to_bech32()?,
+        pct_encode(identifier)
+    ))
+}
+
 /// Find the latest announcement event (by `created_at`) across all maintainer
 /// events and parse it into a `RepoRef` for shared metadata (name, description,
 /// web, etc.).
@@ -1368,6 +1395,74 @@ mod tests {
             assert!(is_grasp_server_clone_url(
                 "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/repo123.git"
             ));
+        }
+
+        // GRASP-06 /prs/{npub}/{id}.git form
+
+        #[test]
+        fn valid_grasp06_prs_http_url() {
+            // /prs/<npub>/<id>.git should be accepted — uses same HTTP push path
+            assert!(is_grasp_server_clone_url(
+                "http://localhost:8080/prs/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+
+        #[test]
+        fn valid_grasp06_prs_https_url() {
+            assert!(is_grasp_server_clone_url(
+                "https://relay.ngit.dev/prs/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/my-repo.git"
+            ));
+        }
+    }
+
+    mod format_grasp_server_url_as_grasp06_prs_url {
+        use nostr::key::Keys;
+
+        use super::*;
+
+        fn test_pk() -> PublicKey {
+            Keys::parse("nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq")
+                .unwrap()
+                .public_key()
+        }
+
+        #[test]
+        fn ws_scheme_maps_to_http() {
+            // ws:// grasp servers normalize to http://
+            let url = format_grasp_server_url_as_grasp06_prs_url(
+                "ws://127.0.0.1:8080",
+                &test_pk(),
+                "my-repo",
+            )
+            .unwrap();
+            let npub = test_pk().to_bech32().unwrap();
+            assert_eq!(url, format!("http://127.0.0.1:8080/prs/{npub}/my-repo.git"));
+        }
+
+        #[test]
+        fn bare_host_maps_to_https() {
+            // bare host (no scheme) → https://
+            let url =
+                format_grasp_server_url_as_grasp06_prs_url("relay.ngit.dev", &test_pk(), "my-repo")
+                    .unwrap();
+            let npub = test_pk().to_bech32().unwrap();
+            assert_eq!(
+                url,
+                format!("https://relay.ngit.dev/prs/{npub}/my-repo.git")
+            );
+        }
+
+        #[test]
+        fn identifier_is_pct_encoded() {
+            // spaces and special chars in identifier must be percent-encoded
+            let url =
+                format_grasp_server_url_as_grasp06_prs_url("relay.ngit.dev", &test_pk(), "my repo")
+                    .unwrap();
+            let npub = test_pk().to_bech32().unwrap();
+            assert_eq!(
+                url,
+                format!("https://relay.ngit.dev/prs/{npub}/my%20repo.git")
+            );
         }
     }
 }

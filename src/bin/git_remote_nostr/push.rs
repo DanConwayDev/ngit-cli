@@ -65,6 +65,7 @@ pub async fn run_push(
     list_outputs: Option<HashMap<String, (HashMap<String, String>, bool)>>,
     title_description: Option<(String, String)>,
     git_server_push_options: Vec<String>,
+    git_server: Option<String>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
 
@@ -150,6 +151,7 @@ pub async fn run_push(
             &term,
             title_description.as_ref(),
             &git_server_push_options,
+            git_server.as_deref(),
         )
         .await?;
 
@@ -278,6 +280,7 @@ async fn create_and_publish_events_and_proposals(
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
+    git_server: Option<&str>,
 ) -> Result<(
     Vec<String>,
     bool,
@@ -397,6 +400,7 @@ async fn create_and_publish_events_and_proposals(
         term,
         title_description,
         git_server_push_options,
+        git_server,
     )
     .await?;
     for e in proposal_events {
@@ -451,6 +455,7 @@ async fn process_proposal_refspecs(
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
+    git_server: Option<&str>,
 ) -> Result<(Vec<Event>, Vec<String>)> {
     let mut events = vec![];
     let mut rejected_proposal_refspecs = vec![];
@@ -494,6 +499,7 @@ async fn process_proposal_refspecs(
                         term,
                         title_description,
                         git_server_push_options,
+                        git_server,
                     )
                     .await?
                     {
@@ -537,6 +543,7 @@ async fn process_proposal_refspecs(
                                 term,
                                 title_description,
                                 git_server_push_options,
+                                git_server,
                             )
                             .await?
                             {
@@ -609,6 +616,7 @@ async fn process_proposal_refspecs(
                 term,
                 title_description,
                 git_server_push_options,
+                git_server,
             )
             .await?
             {
@@ -633,6 +641,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
+    git_server: Option<&str>,
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
     let use_pr = parent_is_pr
@@ -671,9 +680,9 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             root_proposal,
             &title_description.map(|(t, d)| (t.clone(), d.clone())),
             signer,
-            false,
             term,
             &push_options_refs,
+            git_server,
         )
         .await
         .context(format!(

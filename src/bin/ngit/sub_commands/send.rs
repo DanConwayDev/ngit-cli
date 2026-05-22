@@ -53,6 +53,11 @@ pub struct SubCommandArgs {
     #[clap(long = "push-option", short = 'o', value_parser, num_args = 0..)]
     /// git push options to pass to the git server (eg. -o secret-scanning.skip)
     pub(crate) push_options: Vec<String>,
+    #[clap(long = "git-server")]
+    /// git server URL to use for pushing the PR; accepts either a GRASP server
+    /// base URL (eg. relay.ngit.dev) or a full clone URL (eg.
+    /// <https://github.com/user/repo.git>)
+    pub(crate) git_server: Option<String>,
 }
 
 /// Validates send command arguments for non-interactive mode.
@@ -338,7 +343,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         }
     };
 
-    let (signer, mut user_ref, _) = login::login_or_signup(
+    let (signer, user_ref, _) = login::login_or_signup(
         &Some(&git_repo),
         &extract_signer_cli_arguments(cli_args).unwrap_or(None),
         &cli_args.password,
@@ -365,13 +370,13 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 tip,
                 first_commit,
                 git_repo.get_commit_parent(first_commit).ok().as_ref(),
-                &mut user_ref,
+                &user_ref,
                 root_proposal.as_ref(),
                 &cover_letter_title_description,
                 &signer,
-                true,
                 &console::Term::stdout(),
                 &push_options_refs,
+                args.git_server.as_deref(),
             )
             .await?
         }

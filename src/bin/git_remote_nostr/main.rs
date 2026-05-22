@@ -30,6 +30,7 @@ use crate::{client::Client, git::Repo};
 struct PushOptions {
     title: Option<String>,
     description: Option<String>,
+    git_server: Option<String>,
     git_server_extras: Vec<String>,
 }
 
@@ -193,6 +194,10 @@ async fn main() -> Result<()> {
                             push_options.description = Some(decode_push_option_escapes(value));
                             true
                         }
+                        "git-server" => {
+                            push_options.git_server = Some(value.to_string());
+                            true
+                        }
                         _ => false,
                     }
                 } else {
@@ -220,6 +225,7 @@ async fn main() -> Result<()> {
                     list_outputs.clone(),
                     title_description,
                     push_options.git_server_extras.clone(),
+                    push_options.git_server.clone(),
                 )
                 .await?;
                 push_options = PushOptions::default();
