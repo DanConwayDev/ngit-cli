@@ -69,15 +69,6 @@
           pname = manifest.package.name;
           version = manifest.package.version;
           src = ./.;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "rexpect-0.5.0" =
-                "0amxyp81r90gfqlx5dnfjsmd403kf5hcw0crzpcmsbaviavxff4y";
-              "simple-websockets-0.1.6" =
-                "0910bbl7p3by18w3wks8gbgdg8879hn2c39z1bkr5pcvfkcxmaf3";
-            };
-          };
           buildInputs = [
             pkg-config # required by git2
             openssl
