@@ -1,37 +1,43 @@
 //! Companion to `tests/send_pr.rs`: the same `ngit send --force-pr` flow
-//! but with the **first** grasp listed in the kind-30617 announcement
-//! unreachable throughout the entire arrange + act sequence.
+//! but with the **first** grasp listed in the kind-30617 announcement taken
+//! offline immediately before `ngit send` executes.
 //!
 //! ## Why this test exists
 //!
 //! `push_refs_and_generate_pr_or_pr_update_event` (push.rs:735-794) builds
 //! the unsigned PR event on the first **successful** push, not the first
-//! attempted push. When the first listed server is unreachable:
+//! attempted push. When the first listed server goes offline between the clone
+//! and the send:
 //!
-//! - The initial push loop entry for that server must fail gracefully (no panic
-//!   / bail) and advance to the next server.
+//! - The push loop entry for that server must fail gracefully (no panic / bail)
+//!   and advance to the next server.
 //! - The unsigned PR event must be built against the **second** server's clone
 //!   URL, not the dead first server's URL.
 //! - The `clone` tag on the published PR event must therefore reference the
 //!   second (live) server, not the first (dead) one.
 //!
-//! A secondary goal is to verify that `ngit init`'s publication step and the
-//! `nostr_push` graduation are each resilient when the first listed grasp's
-//! relay is unreachable — they must not bail as long as at least one relay
-//! accepts the event.
-//!
 //! ## Arrangement
 //!
 //! Same as `send_pr.rs` except:
 //!
-//! 1. Both grasp servers are started so we can reserve their ports and capture
-//!    both URLs.
-//! 2. The primary (`"repo"`) is killed immediately after the harness builds,
-//!    before any `ngit` invocations, so it is never reachable.
-//! 3. `ngit init` is called with the dead URL first and the live URL second. It
-//!    must succeed even though the first server cannot be reached.
-//! 4. Everything else (contributor clone, advance main, contributor commits,
-//!    `ngit send --force-pr`) runs with only the secondary server alive.
+//! 1. Harness: one vanilla relay (`"default"`), two grasp servers (`"repo"` and
+//!    `"repo_secondary"`).
+//! 2. Maintainer publishes the repo with **both** grasps in the announcement
+//!    (via `PublishRepoOpts::additional_grasp_roles`) — both servers are alive
+//!    at this point.
+//! 3. A fresh contributor clones — both servers still alive.
+//! 4. Contributor commits `t3.md`.
+//! 5. **Maintainer advances `main`** (same as `send_pr.rs`) — both servers
+//!    still alive.
+//! 6. Contributor commits `t4.md`.
+//! 7. **Primary grasp (`"repo"`) is taken offline** via `Harness::take_grasp`
+//!    + `drop` — `127.0.0.1:<primary_port>` no longer accepts connections.
+//! 8. Contributor runs `ngit send HEAD~2 --force-pr`. The contributor's env
+//!    (`NGIT_GRASP_DEFAULT_SET`) was snapshot-ted before the kill, so it still
+//!    lists the dead server first — exactly the path through the push loop that
+//!    must be exercised.
+//! 9. [`capture_snapshot`] reads events and git refs; harness drops. Each
+//!    `#[rstest]` case asserts on a different slice of the snapshot.
 //!
 //! ## Coverage (one `#[rstest]` per bullet)
 //!
@@ -45,14 +51,14 @@
 //!    SUCCESSFUL push determined which server's URL ends up in the event.
 //! 7. The secondary grasp's bare repo contains `refs/nostr/<event_id>`
 //!    resolving to the contributor's tip OID.
-//! 8. No KIND_PULL_REQUEST_UPDATE event was emitted on any surface.
+//! 8. No KIND_PULL_REQUEST_UPDATE event was emitted on any live surface.
 
 use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 use rstest::*;
-use test_harness::Harness;
+use test_harness::{CloneLogin, Harness, PublishRepoOpts};
 use tokio::sync::OnceCell;
 
 /// Identifier passed to `ngit init --identifier`. Deliberately distinct from
@@ -80,8 +86,8 @@ const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
 /// the eight `#[rstest]` cases via [`SNAPSHOT`].
 struct Snapshot {
     /// The KIND_PULL_REQUEST event published by the contributor, read from
-    /// the secondary grasp (the only live relay surface). Assertions 2–6
-    /// read from here.
+    /// the secondary grasp (the only live relay surface at send time).
+    /// Assertions 2–6 read from here.
     pr_event: Event,
 
     /// Number of KIND_PULL_REQUEST events authored by the contributor on the
@@ -103,16 +109,14 @@ struct Snapshot {
     identifier: String,
 
     /// OID of the commit the contributor branched off from — i.e. the parent
-    /// of the first PR commit (`t3.md`). Derived from the initial commit OID
-    /// (which is `main` when the contributor cloned). The `merge-base` tag
-    /// on the PR event must equal this (assertion 4). Also used in the
-    /// pre-condition check: must differ from both `main_tip_at_send_time`
-    /// and `pr_tip_oid`.
+    /// of the first PR commit (`t3.md`). Derived from
+    /// `PublishedRepo::initial_oid`. The `merge-base` tag on the PR event
+    /// must equal this (assertion 4).
     merge_base_oid: String,
 
-    /// OID of `main` after the maintainer's "advance main" push. Verified
-    /// during capture to differ from `merge_base_oid` so the merge-base
-    /// assertion (assertion 4) cannot pass trivially by coincidence.
+    /// OID of `main` after the maintainer's "advance main" push. Verified to
+    /// differ from `merge_base_oid` so the merge-base assertion cannot pass
+    /// trivially by coincidence.
     main_tip_at_send_time: String,
 
     /// Contributor's feature-branch tip (the `t4.md` commit). The `c` tag
@@ -125,23 +129,21 @@ struct Snapshot {
 
     /// Full HTTP clone URL of the **secondary** grasp server as it appears
     /// in the kind-30617 announcement's `clone` tag (the second entry, since
-    /// the first entry is the dead primary's URL).
+    /// the first is the now-dead primary's URL).
     ///
     /// Because `push_refs_and_generate_pr_or_pr_update_event` generates the
     /// unsigned PR event on the first **successful** push (push.rs:736-753),
-    /// and the primary server is always unreachable throughout this test, the
-    /// event is generated using the secondary server's URL.  This URL must
-    /// therefore appear as the sole `clone` value on the PR event's `clone`
-    /// tag (assertion 6).
+    /// and the primary server is offline at send time, the event is generated
+    /// with the secondary server's URL. That URL must therefore appear as the
+    /// sole `clone` value on the PR event's `clone` tag (assertion 6).
     ///
-    /// Shape: `http://127.0.0.1:<port>/<maintainer_npub>/<identifier>.git`.
     /// Extracted from the actual announcement rather than constructed so the
-    /// assertion is not tautological against the URL-construction logic.
+    /// assertion is not tautological against URL-construction logic.
     grasp_secondary_clone_url: String,
 
     /// OID that `refs/nostr/<pr_event_id>` resolves to inside the secondary
     /// grasp's bare repo. Must equal `pr_tip_oid` (assertion 7). The primary
-    /// is dead so there is no matching assertion for it.
+    /// is dead at send time so there is no matching assertion for it.
     grasp_secondary_pr_ref_oid: String,
 }
 
@@ -170,9 +172,7 @@ async fn snapshot() -> Arc<Snapshot> {
 async fn capture_snapshot() -> Result<Snapshot> {
     // --- Harness: one vanilla relay + two grasp servers ----------------------
     //
-    // Both grasps are registered so their ports are reserved and their URLs
-    // are available for capture. The primary ("repo") is killed immediately
-    // after the build — before any ngit invocations.
+    // `mut` because `take_grasp` requires mutable access to the roster.
     let mut harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -183,115 +183,30 @@ async fn capture_snapshot() -> Result<Snapshot> {
     .build()
     .await?;
 
-    // --- 1. Capture URLs, then kill primary immediately ---------------------
+    // --- 1. Maintainer publishes the repo with both grasps -------------------
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("pr-failover maintainer".into()),
+            identifier: Some(IDENTIFIER.into()),
+            additional_grasp_roles: vec!["repo_secondary".into()],
+            ..Default::default()
+        })
+        .await?;
+
+    let maintainer_pubkey = published.maintainer_keys.public_key();
+
+    // --- 2. Extract the secondary clone URL from the announcement ------------
     //
-    // We save the primary's URL while it is still live (before take_grasp
-    // removes it from harness.env()), so we can pass the dead URL to ngit
-    // init. After drop(primary_grasp), the port is no longer bound and
-    // connection attempts get ECONNREFUSED.
-    let dead_primary_url = harness.grasp("repo").url().to_string();
-    let live_secondary_url = harness.grasp("repo_secondary").url().to_string();
-
-    let primary_grasp = harness
-        .take_grasp("repo")
-        .context("primary grasp was already taken or never registered")?;
-    drop(primary_grasp);
-
-    // Sanity: verify the primary really is down before any ngit work begins.
-    let probe =
-        tokio::net::TcpStream::connect(dead_primary_url.trim_start_matches("http://")).await;
-    assert!(
-        probe.is_err(),
-        "primary grasp should be unreachable after drop, but TCP connect to \
-         {dead_primary_url} succeeded — cannot test server-down path",
-    );
-
-    // --- 2. Publisher: account create ----------------------------------------
-    let publisher = harness.fresh_repo()?;
-    let display_name = "pr-failover maintainer";
-
-    run_git(&publisher, &["checkout", "-b", "main"]).await.ok();
-    check_ngit(
-        "ngit account create",
-        publisher
-            .ngit(["account", "create", "--local", "--name", display_name])
-            .output()
-            .await
-            .context("failed to spawn ngit account create")?,
-    )?;
-
-    let nsec = publisher
-        .config("nostr.nsec")
-        .await?
-        .context("nostr.nsec missing after account create")?;
-    let maintainer_keys =
-        Keys::parse(&nsec).context("nostr.nsec from local config is not a valid key")?;
-    let maintainer_pubkey = maintainer_keys.public_key();
-    let maintainer_npub = maintainer_pubkey
-        .to_bech32()
-        .context("failed to bech32-encode maintainer pubkey")?;
-
-    // --- 3. Seed commit -------------------------------------------------------
-    std::fs::write(publisher.dir().join("README.md"), "hello, ngit!\n")
-        .context("failed to write README.md in publisher repo")?;
-    run_git(&publisher, &["add", "README.md"]).await?;
-    run_git(&publisher, &["commit", "-m", "initial", "--no-gpg-sign"]).await?;
-
-    // --- 4. ngit init with dead primary URL first, live secondary URL second --
+    // The announcement's `clone` tag carries two entries:
+    //   [0] = primary ("repo") grasp clone URL
+    //   [1] = secondary ("repo_secondary") grasp clone URL
     //
-    // `ngit init` must succeed even though the first listed `--grasp-server`
-    // is unreachable. The announcement will carry both URLs in its `clone`
-    // tag, with the dead primary first and the live secondary second.
-    let init_out = publisher
-        .ngit([
-            "init",
-            "--name",
-            display_name,
-            "--identifier",
-            IDENTIFIER,
-            "--grasp-server",
-            &dead_primary_url,
-            &live_secondary_url,
-            "-d",
-        ])
-        .output()
-        .await
-        .context("failed to spawn ngit init")?;
-    if !init_out.status.success() {
-        bail!(
-            "ngit init exited non-zero ({:?}) — is ngit init resilient when \
-             the first grasp server is down?\nstdout: {}\nstderr: {}",
-            init_out.status,
-            String::from_utf8_lossy(&init_out.stdout),
-            String::from_utf8_lossy(&init_out.stderr),
-        );
-    }
-
-    // --- 5. nostr_push to graduate the announcement --------------------------
-    //
-    // `Repo::nostr_push` ticks one second before pushing so the kind-30618
-    // state event lands in a strictly later unix second — see
-    // `test_harness/src/clock.rs`. The push must succeed via the secondary
-    // server even though the primary is dead.
-    publisher
-        .nostr_push(["-u", "origin", "main"])
-        .await
-        .context(
-            "nostr_push (publish graduation) failed — does push tolerate a dead first server?",
-        )?;
-
-    let merge_base_oid = git_rev_parse(&publisher, "HEAD").await?;
-
-    // --- 6. Extract secondary clone URL from announcement --------------------
-    //
-    // The announcement carries two `clone` tag entries: [dead_primary_url,
-    // live_secondary_url]. The secondary's entry (index 1) is what ngit send
-    // will embed in the PR event's `clone` tag once the primary push fails
-    // and the secondary push succeeds. We read it from the actual announcement
-    // (rather than constructing it) so the assertion is not tautological
-    // against URL-construction code.
+    // When the primary is offline at send time, `push_refs_and_generate_…`
+    // succeeds on the secondary and embeds [1] in the PR event. We read this
+    // from the actual announcement so the assertion is not tautological against
+    // our own URL-construction code.
     let announcements = harness
-        .grasp("repo_secondary")
+        .relay("default")
         .events(
             Filter::new()
                 .author(maintainer_pubkey)
@@ -301,55 +216,31 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let announcement = announcements
         .iter()
         .find(|e| tag_value(e, "d").as_deref() == Some(IDENTIFIER))
-        .context(
-            "no kind-30617 with expected identifier on secondary grasp after publish — \
-             did nostr_push fail to reach the secondary relay?",
-        )?;
+        .context("no kind-30617 with expected identifier on default relay after publish_repo")?;
     let clone_tag_urls = tag_values(announcement, "clone");
-    // clone_tag_urls[0] = dead primary's clone path, [1] = live secondary's.
     let grasp_secondary_clone_url = clone_tag_urls.get(1).cloned().context(
-        "announcement's clone tag has fewer than two entries — \
-             expected [dead_primary_url, live_secondary_url]",
+        "announcement clone tag has fewer than two URLs — expected [primary, secondary]",
     )?;
 
-    // --- 7. Clone as a fresh contributor -------------------------------------
-    //
-    // Clone URL has no relay hint (`nostr://<npub>/<identifier>` rather than
-    // the full URL with embedded relay) so discovery falls back to
-    // `NGIT_RELAY_DEFAULT_SET` (the vanilla "default" relay that received
-    // the announcement during the nostr_push fan-out). Using the hint-less
-    // URL avoids depending on whether the init step embedded the dead
-    // primary's relay hint or the live secondary's.
-    let clone_url = format!("nostr://{maintainer_npub}/{IDENTIFIER}");
+    // --- 3. Clone as a fresh contributor -------------------------------------
     let contributor = harness
-        .clone_url(&clone_url)
-        .await
-        .context("git clone over nostr:// failed — check relay discovery via default relay")?;
-
-    check_ngit(
-        "ngit account create (contributor)",
-        contributor
-            .ngit([
-                "account",
-                "create",
-                "--local",
-                "--name",
-                "pr-failover contributor",
-            ])
-            .output()
-            .await
-            .context("failed to spawn ngit account create for contributor")?,
-    )?;
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "pr-failover contributor".into(),
+            },
+        )
+        .await?;
 
     let contributor_nsec = contributor
         .config("nostr.nsec")
         .await?
-        .context("nostr.nsec missing after contributor account create")?;
+        .context("nostr.nsec missing after AsContributor login")?;
     let contributor_keys =
-        Keys::parse(&contributor_nsec).context("contributor nsec is not valid")?;
+        Keys::parse(&contributor_nsec).context("contributor nostr.nsec is not a valid key")?;
     let contributor_pubkey = contributor_keys.public_key();
 
-    // --- 8. Contributor: feature branch + first commit (t3.md) ---------------
+    // --- 4. Contributor: feature branch + first commit (t3.md) ---------------
     run_git(&contributor, &["checkout", "-b", BRANCH]).await?;
     std::fs::write(contributor.dir().join("t3.md"), "some content\n")
         .context("failed to write t3.md")?;
@@ -360,7 +251,9 @@ async fn capture_snapshot() -> Result<Snapshot> {
     )
     .await?;
 
-    // --- 9. Maintainer: advance main -----------------------------------------
+    let merge_base_oid = published.initial_oid.clone();
+
+    // --- 5. Maintainer: advance main -----------------------------------------
     //
     // `Repo::nostr_push` is mandatory (not raw `git push`) — see timing rule
     // in `test_harness/src/clock.rs`.
@@ -378,7 +271,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .context("maintainer nostr_push (advance main) failed")?;
     let main_tip_at_send_time = git_rev_parse(&publisher, "HEAD").await?;
 
-    // --- 10. Contributor: second commit (t4.md) -------------------------------
+    // --- 6. Contributor: second commit (t4.md) --------------------------------
     std::fs::write(contributor.dir().join("t4.md"), "some content\n")
         .context("failed to write t4.md")?;
     run_git(&contributor, &["add", "t4.md"]).await?;
@@ -400,7 +293,30 @@ async fn capture_snapshot() -> Result<Snapshot> {
         bail!("arrange bug: main_tip_at_send_time == pr_tip_oid ({main_tip_at_send_time})");
     }
 
-    // --- 11. Contributor: ngit send --force-pr --------------------------------
+    // --- 7. Take primary grasp offline just before the send ------------------
+    //
+    // `take_grasp` removes "repo" from the harness roster and returns it;
+    // `drop` kills the subprocess. After this point the primary's port no
+    // longer accepts connections.
+    //
+    // Critically, `contributor` captured `harness.env()` at clone time so
+    // its `NGIT_GRASP_DEFAULT_SET` still lists the dead server first — which
+    // is exactly the code path we need to exercise in the push loop.
+    let primary_grasp = harness
+        .take_grasp("repo")
+        .context("primary grasp was already taken or never registered")?;
+    let dead_url = primary_grasp.url().to_string();
+    drop(primary_grasp);
+
+    // Sanity: confirm the primary is actually down before invoking ngit send.
+    let probe = tokio::net::TcpStream::connect(dead_url.trim_start_matches("http://")).await;
+    assert!(
+        probe.is_err(),
+        "primary grasp should be unreachable after drop, but TCP connect to \
+         {dead_url} succeeded — cannot test server-down path",
+    );
+
+    // --- 8. Contributor: ngit send --force-pr --------------------------------
     let send_out = contributor
         .ngit([
             "send",
@@ -423,7 +339,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         );
     }
 
-    // --- 12. Capture events from all live surfaces ---------------------------
+    // --- 9. Capture events from all live surfaces ----------------------------
 
     // Secondary grasp: KIND_PULL_REQUEST events by contributor.
     let pr_events_secondary = harness
@@ -462,12 +378,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await?;
     let pr_update_count = pr_updates_secondary.len() + pr_updates_relay.len();
 
-    // --- 13. Read git ref from secondary bare repo ---------------------------
+    // --- 10. Read git ref from secondary bare repo ---------------------------
     let pr_event_id_hex = pr_event.id.to_hex();
     let bare_secondary = harness
         .grasp("repo_secondary")
         .git_data_path()
-        .join(&maintainer_npub)
+        .join(&published.maintainer_npub)
         .join(format!("{IDENTIFIER}.git"));
     let grasp_secondary_pr_ref_oid = read_nostr_ref(&bare_secondary, &pr_event_id_hex)
         .await
@@ -498,7 +414,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
 // ---------------------------------------------------------------------------
 
 /// Assertion 1: exactly one KIND_PULL_REQUEST event is published by the
-/// contributor on the secondary (and only) live grasp server.
+/// contributor on the secondary (surviving) grasp server.
 ///
 /// A count > 1 would indicate a duplicate-publish bug or test isolation
 /// failure. A count of 0 reaching this assertion is impossible:
@@ -563,7 +479,7 @@ async fn c_tag_is_pr_tip(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
 /// Assertion 4: the PR event's `merge-base` tag equals the OID the contributor
 /// branched from, NOT the current `main` tip.
 ///
-/// The arrangement advances `main` on the maintainer side (step 9) **after**
+/// The arrangement advances `main` on the maintainer side (step 5) **after**
 /// the contributor has already branched, so `merge_base_oid` (the branch-off
 /// commit) differs from `main_tip_at_send_time` (the current remote `main`).
 #[rstest]
@@ -605,15 +521,15 @@ async fn branch_name_tag_matches(#[future] snapshot: Arc<Snapshot>) -> Result<()
 ///
 /// `push_refs_and_generate_pr_or_pr_update_event` (push.rs:736-753) generates
 /// the unsigned PR event on the first **successful** push. Because the primary
-/// server is unreachable (the push returns `Err`), the event is not generated
-/// on the first iteration; on the second iteration the secondary server
-/// succeeds and the event is generated with the secondary's clone URL. That
-/// URL is therefore what appears in the `clone` tag — the property this test
-/// was written to guard.
+/// server is offline when `ngit send` runs (step 7 drops it), the push attempt
+/// to the primary returns `Err` and the event is not generated on that
+/// iteration. On the next iteration the secondary succeeds, and the event is
+/// generated with the secondary's clone URL. That URL is therefore what appears
+/// in the `clone` tag — the property this test was written to guard.
 ///
-/// Asserting the exact URL (not just its presence) catches a regression where
-/// the server-failure path accidentally keeps the dead primary's URL in the
-/// event rather than using the first succeeding server.
+/// Asserting the exact URL catches a regression where the server-failure path
+/// accidentally keeps the dead primary's URL in the event rather than using
+/// the first succeeding server's URL.
 #[rstest]
 #[tokio::test]
 async fn clone_tag_is_secondary_grasp_url(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
@@ -638,9 +554,9 @@ async fn clone_tag_is_secondary_grasp_url(#[future] snapshot: Arc<Snapshot>) -> 
 /// Assertion 7: the secondary grasp received the git data push — its bare repo
 /// has a `refs/nostr/<pr_event_id>` ref resolving to the contributor's tip OID.
 ///
-/// The primary is permanently down so there is no corresponding assertion for
-/// it. The property being guarded here is that the surviving server actually
-/// received the data (i.e. the push loop did not silently skip all servers).
+/// The primary is dead at send time so there is no corresponding assertion for
+/// it. The property guarded here is that the surviving server actually received
+/// the data (i.e. the push loop did not silently skip all servers on failure).
 #[rstest]
 #[tokio::test]
 async fn secondary_grasp_has_pr_ref(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
@@ -691,21 +607,6 @@ async fn run_git(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
     } else {
         bail!(
             "`{label}` exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        )
-    }
-}
-
-/// Assert a spawned ngit command exited successfully, bailing with full
-/// stdout/stderr on failure.
-fn check_ngit(label: &str, out: std::process::Output) -> Result<()> {
-    if out.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "{label} exited non-zero ({:?})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
