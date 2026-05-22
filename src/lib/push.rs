@@ -419,10 +419,34 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     signer: &Arc<dyn NostrSigner>,
     term: &Term,
     git_server_push_options: &[&str],
+    git_server: Option<&str>,
 ) -> Result<Vec<Event>> {
     let mut to_try = vec![];
     let mut tried = vec![];
     let repo_grasps = repo_ref.grasp_servers();
+
+    // Determine whether the user-supplied server is a direct clone URL
+    // (ends with .git or an SSH URL) or a GRASP server base URL.
+    let user_server_is_direct_url = git_server
+        .map(|s| s.ends_with(".git") || s.starts_with("git@"))
+        .unwrap_or(false);
+
+    // If the user specified a server, put it first in to_try so it is tried
+    // before the repo's own servers and its URL appears in the PR clone hint.
+    if let Some(server) = git_server {
+        if user_server_is_direct_url {
+            to_try.push(server.to_string());
+        } else {
+            // GRASP base URL — format as the GRASP-06 /prs/ contributor endpoint.
+            let prs_url = format_grasp_server_url_as_grasp06_prs_url(
+                server,
+                &user_ref.public_key,
+                &repo_ref.identifier,
+            )?;
+            to_try.push(prs_url);
+        }
+    }
+
     if !repo_grasps.is_empty() {
         eprintln!(
             "pushing proposal refs to {}",
@@ -432,12 +456,13 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
                 "repository grasp servers"
             }
         );
-    } else {
+    } else if git_server.is_none() {
         eprintln!(
             "The repository doesn't list a grasp server so your proposal cannot be submitted as a nostr Pull Request."
         );
     }
-    // use repo grasp servers
+
+    // Append repo GRASP servers after the user-specified server.
     for url in &repo_ref.git_server {
         if let Ok(normalized) = normalize_grasp_server_url(url) {
             if repo_grasps.contains(&normalized) && !to_try.contains(url) {
@@ -448,7 +473,8 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
 
     let git_ref: Option<String> = None;
 
-    // --- Primary path: try all repo grasp servers ---
+    // --- Primary path: try user-specified server (if any) then repo grasp servers
+    // ---
     let (primary_events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
         git_repo,
         repo_ref,
@@ -512,18 +538,24 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
 
         let all_candidates: Vec<String> = [user_candidates, default_candidates].concat();
 
+        let git_server_hint = match git_server {
+            None => "\nspecify a git server with --git-server <url> (or -o git-server=<url> via git push)".to_string(),
+            Some(s) => format!("\nthe server you specified ({s}) was tried but failed or was unreachable"),
+        };
+
         if all_candidates.is_empty() {
             if repo_grasps.is_empty() {
                 bail!(
                     "failed to push PR: the repository has no grasp servers configured and your \
                      user server list is empty. Add a server to your profile to enable \
-                     pushing PRs."
+                     pushing PRs.{git_server_hint}"
                 )
             }
             bail!(
                 "failed to push PR: the repository's grasp servers are down or not accepting \
                  the push right now, and your user server list is empty or all listed \
-                 servers were also unreachable. Add a server to your profile and try again."
+                 servers were also unreachable. Add a server to your profile and try \
+                 again.{git_server_hint}"
             )
         }
 
@@ -565,7 +597,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
             anyhow::anyhow!(
                 "failed to push PR: repository servers are down or not accepting the push, \
                  and all fallback servers in your user server list were also unreachable \
-                 or rejected the push."
+                 or rejected the push.{git_server_hint}"
             )
         })?
     };
