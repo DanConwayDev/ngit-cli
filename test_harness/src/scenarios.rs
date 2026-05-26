@@ -1867,6 +1867,24 @@ impl Harness {
     /// pubkey) so tests that want to drive ngit *as* the co-maintainer
     /// in a follow-up can do so without re-deriving.
     pub async fn arrange_init_state_c_my_announcement(&self) -> Result<(Repo, ArrangedInitStateC)> {
+        self.arrange_init_state_c_my_announcement_with_extra_tags(vec![])
+            .await
+    }
+
+    /// Same as [`Self::arrange_init_state_c_my_announcement`] but appends
+    /// `extra_tags` verbatim to the fabricated kind-30617 before signing.
+    ///
+    /// Used by tests that need to verify ngit's round-trip behaviour for
+    /// tags it doesn't itself emit — e.g. unknown tags added by a future
+    /// ngit version or third-party tools. The extras land in the
+    /// fabricated event's tag list *after* the ngit-known tags
+    /// (`d`/`name`/`description`/`clone`/`relays`/`maintainers`), which
+    /// matters for any parser whose dedup rule is "last wins" on
+    /// repeated known names.
+    pub async fn arrange_init_state_c_my_announcement_with_extra_tags(
+        &self,
+        extra_tags: Vec<Tag>,
+    ) -> Result<(Repo, ArrangedInitStateC)> {
         let (repo, state_b) = self.arrange_init_state_b_coordinate_only().await?;
 
         let additional_maintainer_keys: Vec<Keys> = vec![Keys::generate()];
@@ -1889,7 +1907,7 @@ impl Harness {
             maintainers.push(k.public_key().to_string());
         }
 
-        let tags: Vec<Tag> = vec![
+        let mut tags: Vec<Tag> = vec![
             Tag::identifier(state_b.coordinate_identifier.clone()),
             // `["r", "<oid>", "euc"]` — the earliest-unique-commit
             // marker, 3-element so we can't use TagStandard::Reference
@@ -1913,6 +1931,11 @@ impl Harness {
             Tag::custom(TagKind::Custom("relays".into()), existing_relays.clone()),
             Tag::custom(TagKind::Custom("maintainers".into()), maintainers),
         ];
+        // Extras land *after* the ngit-known tags so that any "last wins"
+        // dedup on repeated known names (e.g. an extras-provided `name`)
+        // sees the extras and the existing announcement's own name in a
+        // realistic order.
+        tags.extend(extra_tags);
 
         // Back-date by 30s. Two events with `(pubkey, kind, d)`
         // matching are replaceable: the relay keeps whichever has the
