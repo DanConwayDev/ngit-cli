@@ -68,8 +68,13 @@
 //!   revision root
 //! - `revision_2_tip_root_is_revision_2_root` — the second revision tip threads
 //!   under the second revision root
+//! - `fresh_clone_exactly_one_pr_branch` — a fresh `CloneLogin::None` clone
+//!   advertises exactly one branch-shaped proposal ref of the form
+//!   `(refs/heads/)?pr/<branch>(<shorthand>)`.  Two would mean `list.rs` is
+//!   double-advertising the proposal (e.g. by treating a revision root as its
+//!   own independent proposal); zero would mean `list.rs` lost the proposal.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use nostr_sdk::prelude::*;
@@ -137,6 +142,23 @@ struct Snapshot {
     /// Count of `KIND_PULL_REQUEST_UPDATE` events on the GRASP.  Must be 0 —
     /// a PR-update event is only valid when the root proposal is PR-kind.
     pr_update_count: usize,
+
+    /// Branch name of the original series — used to recognise branch-shaped
+    /// proposal advertisements in [`Self::nostr_clone_ls_refs`].
+    original_branch_name: String,
+
+    /// Refs advertised by a fresh `git ls-remote origin` against the
+    /// `nostr://` URL from a third clone with no nostr login
+    /// (`CloneLogin::None`).  Each entry is `(ref_name, oid)`.
+    ///
+    /// `list.rs` advertises proposal branches as
+    /// `(refs/heads/)?pr/<branch>(<shorthand>)` where the 8-char shorthand
+    /// is derived from `event_to_cover_letter(proposal).event_id` — and
+    /// `proposal` is always the original patch root because revision-root
+    /// events are filtered out by `get_open_or_draft_proposals` at
+    /// `utils.rs:144-149`.  After two force-push revisions there must still
+    /// be exactly one such advertisement.
+    nostr_clone_ls_refs: BTreeMap<String, String>,
 }
 
 static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
@@ -498,6 +520,39 @@ async fn capture_snapshot() -> Result<Snapshot> {
             )
         })?;
 
+    // --- 15. Fresh nostr-URL clone: run `git ls-remote` ----------------------
+    //
+    // A third clone with no logged-in nostr identity (`CloneLogin::None`)
+    // exercises `list.rs` end-to-end against the now-twice-revised patch
+    // proposal.  We assert downstream that exactly one branch-shaped
+    // proposal advertisement is exposed — even though there are three
+    // patch-series roots on the GRASP (original + two revision roots),
+    // revision-root events are filtered out by `utils.rs:144-149` so the
+    // only `proposal` `list.rs` sees is the original patch root.
+    let new_clone = harness
+        .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+    let ls_out = new_clone
+        .git(["ls-remote", "origin"])
+        .output()
+        .await
+        .context("failed to spawn git ls-remote origin on fresh clone")?;
+    anyhow::ensure!(
+        ls_out.status.success(),
+        "fresh-clone `git ls-remote origin` exited {:?}\nstdout: {}\nstderr: {}",
+        ls_out.status,
+        String::from_utf8_lossy(&ls_out.stdout),
+        String::from_utf8_lossy(&ls_out.stderr),
+    );
+    let ls_stdout = String::from_utf8(ls_out.stdout)
+        .context("fresh-clone `git ls-remote origin` stdout is not UTF-8")?;
+    let nostr_clone_ls_refs: BTreeMap<String, String> = ls_stdout
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("ref: "))
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(oid, name)| (name.to_string(), oid.to_string()))
+        .collect();
+
     Ok(Snapshot {
         all_patch_events,
         revision_root,
@@ -508,6 +563,8 @@ async fn capture_snapshot() -> Result<Snapshot> {
         original_root_patch_id,
         pr_count,
         pr_update_count,
+        original_branch_name: series.branch_name.clone(),
+        nostr_clone_ls_refs,
     })
 }
 
@@ -803,6 +860,71 @@ async fn revision_2_tip_root_is_revision_2_root(#[future] snapshot: Arc<Snapshot
         root_e.as_slice().get(1),
         s.revision_root.id.to_hex(),
         s.original_root_patch_id.to_hex(),
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fresh-clone `git ls-remote` — proposal branch advertisement
+// ---------------------------------------------------------------------------
+//
+// `list.rs` exposes proposal branches under two namespaces:
+//
+// * `refs/pr/<branch>(<shorthand>)` — emitted by `get_all_proposals_state` for
+//   every proposal regardless of status.
+// * `refs/heads/pr/<branch>(<shorthand>)` — emitted by
+//   `get_open_and_draft_proposals_state` only for open/draft proposals whose
+//   tip commit is locally available.
+//
+// Either is acceptable for this test; we just want to count
+// branch-shaped advertisements with the form `pr/<branch>(<shorthand>)`.
+
+/// Helper: collect every ref whose name ends in `pr/<branch>(<8-hex>)` —
+/// the branch-shaped proposal advertisement — from the fresh-clone
+/// `ls-remote` map.  Excludes the `refs/pr/<full-event-id>/head`
+/// canonical refs (those don't carry the human branch name).
+fn branch_shaped_pr_refs<'a>(
+    map: &'a std::collections::BTreeMap<String, String>,
+    branch: &str,
+) -> Vec<(&'a String, &'a String)> {
+    let needle_prefix = format!("pr/{branch}(");
+    map.iter()
+        .filter(|(name, _)| {
+            // Trim any leading `refs/heads/` or `refs/` so we match against
+            // the suffix `pr/<branch>(<...>)`.
+            let suffix = name
+                .strip_prefix("refs/heads/")
+                .or_else(|| name.strip_prefix("refs/"))
+                .unwrap_or(name.as_str());
+            suffix.starts_with(&needle_prefix) && suffix.ends_with(')')
+        })
+        .collect()
+}
+
+/// Exactly one branch-shaped proposal advertisement
+/// (`(refs/heads/)?pr/<branch>(<shorthand>)`) in the fresh clone's
+/// `ls-remote` output.
+///
+/// Two would mean `list.rs` is double-advertising the proposal — for
+/// example, by treating one of the revision roots as its own
+/// independent proposal (which would happen if revision-root filtering
+/// in `utils.rs:144-149` stopped masking patch-kind revision roots).
+/// Zero would mean the proposal disappeared entirely from the
+/// catalogue, e.g. because all candidate roots got filtered out.
+#[rstest]
+#[tokio::test]
+async fn fresh_clone_exactly_one_pr_branch(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    let pr_branch_refs = branch_shaped_pr_refs(&s.nostr_clone_ls_refs, &s.original_branch_name);
+    assert_eq!(
+        pr_branch_refs.len(),
+        1,
+        "expected exactly one branch-shaped proposal advertisement \
+         (`(refs/heads/)?pr/{}(<shorthand>)`) in the fresh clone after two \
+         force-push revisions; got {} (full ls-remote map: {:#?})",
+        s.original_branch_name,
+        pr_branch_refs.len(),
+        s.nostr_clone_ls_refs,
     );
     Ok(())
 }
