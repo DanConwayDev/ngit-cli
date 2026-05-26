@@ -302,6 +302,62 @@ impl Repo {
         }
         Ok(out)
     }
+
+    /// Run `git <args>` and bail with `label` plus captured output on
+    /// non-zero exit.
+    ///
+    /// Equivalent to the local `run_git` / `run_git_ok` helpers that are
+    /// duplicated across `tests/send_pr*.rs`. Callers supply a short
+    /// human-readable `label` (e.g. `"git add t3.md"`) for the error
+    /// message — this lets the message be concise without re-serialising
+    /// the raw `OsStr` args.
+    pub async fn git_ok<I, S>(&self, args: I, label: &str) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let out = self
+            .git(args)
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn `{label}`"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "`{label}` exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            )
+        }
+    }
+
+    /// Resolve `rev` to its full 40-character OID hex string via
+    /// `git rev-parse`.
+    ///
+    /// Wraps the boilerplate `git rev-parse` + output-parse that recurs
+    /// across `tests/send_pr*.rs`. Returns an error if `rev` cannot be
+    /// resolved or if the output is not valid UTF-8.
+    pub async fn rev_parse(&self, rev: &str) -> Result<String> {
+        let out = self
+            .git(["rev-parse", rev])
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn git rev-parse {rev}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git rev-parse {rev} exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        Ok(String::from_utf8(out.stdout)
+            .context("git rev-parse returned non-utf8")?
+            .trim()
+            .to_string())
+    }
 }
 
 /// Best-effort `OsStr` join for the error-message label of `nostr_push`. Lossy

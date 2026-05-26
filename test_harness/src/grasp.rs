@@ -315,6 +315,65 @@ impl GraspServer {
     pub async fn events(&self, filter: Filter) -> Result<Vec<Event>> {
         query::fetch_events(&self.relay_url(), filter).await
     }
+    /// Read the OID that `refs/nostr/<event_id_hex>` resolves to inside the
+    /// bare repository at
+    /// `<git_data_path>/<npub>/<identifier>.git`.
+    ///
+    /// Folds the three-step lookup that `tests/send_pr.rs`,
+    /// `tests/send_pr_update.rs`, and `tests/send_pr_update_rebase.rs` all
+    /// reimplement:
+    ///
+    /// 1. Build the bare-repo path from `git_data_path()` + `npub` +
+    ///    `<identifier>.git`.
+    /// 2. Run `git for-each-ref refs/nostr/<event_id_hex>` in that dir.
+    /// 3. Trim and return the OID string; error if empty (ref not found = the
+    ///    push never landed).
+    ///
+    /// Returns an error if the ref does not exist — that is a genuine test
+    /// failure: the PR data push did not reach this grasp server.
+    pub async fn read_nostr_ref(
+        &self,
+        npub: &str,
+        identifier: &str,
+        event_id_hex: &str,
+    ) -> Result<String> {
+        let bare_repo = self
+            .git_data_path
+            .join(npub)
+            .join(format!("{identifier}.git"));
+        let refname = format!("refs/nostr/{event_id_hex}");
+        let out = tokio::process::Command::new("git")
+            .arg("for-each-ref")
+            .arg(&refname)
+            .arg("--format=%(objectname)")
+            .current_dir(&bare_repo)
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to spawn `git for-each-ref {refname}` in {}",
+                    bare_repo.display()
+                )
+            })?;
+        if !out.status.success() {
+            bail!(
+                "`git for-each-ref {refname}` exited non-zero in {}: {}",
+                bare_repo.display(),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        let oid = String::from_utf8(out.stdout)
+            .context("git for-each-ref output is not valid UTF-8")?
+            .trim()
+            .to_string();
+        if oid.is_empty() {
+            bail!(
+                "ref {refname} not found in bare repo at {} — the push did not land",
+                bare_repo.display(),
+            );
+        }
+        Ok(oid)
+    }
 }
 
 impl Drop for GraspServer {

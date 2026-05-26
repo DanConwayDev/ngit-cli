@@ -48,17 +48,12 @@ use anyhow::{Context, Result, bail};
 use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
 use nostr_sdk::prelude::*;
 
-use crate::{clock, harness::Harness, repo::Repo};
-
-/// `KIND_PULL_REQUEST` from `src/lib/git_events.rs`. Mirrored locally so the
-/// harness doesn't pull in the ngit lib crate just for one number. Kept in
-/// sync by hand — if `src/` ever renumbers PR events both sides must move.
-const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
-
-/// `STATE_KIND` from `src/lib/client.rs:2381` — kind 30618. Same mirroring
-/// rule as `KIND_PULL_REQUEST`: hand-synced rather than imported so the
-/// harness crate keeps a small dep tree.
-const STATE_KIND: Kind = Kind::Custom(30618);
+use crate::{
+    clock,
+    harness::Harness,
+    nostr::{KIND_PULL_REQUEST, KIND_REPO_STATE, event_branch_name_tag},
+    repo::Repo,
+};
 
 /// `KIND_USER_GRASP_LIST` from `src/lib/git_events.rs:115` — kind 10317.
 /// A replaceable nostr event that lists the user's preferred grasp servers
@@ -688,8 +683,9 @@ impl Harness {
         })
     }
 
-    /// Fabricate and publish a kind-30618 *state* event (`STATE_KIND` in
-    /// `src/lib/client.rs:2381`) directly to a chosen relay surface — a
+    /// Fabricate and publish a kind-30618 *state* event (`KIND_REPO_STATE` in
+    /// `test_harness::nostr`; mirrors `STATE_KIND` in `src/lib/client.rs`)
+    /// directly to a chosen relay surface — a
     /// thinner abstraction than [`Harness::publish_repo`], for tests that
     /// need to drive `git-remote-nostr list`'s state-event selection logic
     /// (`src/bin/git_remote_nostr/list.rs:55-90`) without going through
@@ -782,7 +778,7 @@ impl Harness {
         // can publish "older resolvable" + "newer unresolvable" events
         // whose creation-time ordering is deterministic regardless of how
         // close together the two publishes run.
-        let mut builder = EventBuilder::new(STATE_KIND, "").tags(tags);
+        let mut builder = EventBuilder::new(KIND_REPO_STATE, "").tags(tags);
         if let Some(offset) = opts.created_at_offset_secs {
             let ts = Timestamp::now() - offset;
             builder = builder.custom_created_at(ts);
@@ -2383,20 +2379,6 @@ async fn read_clone_pubkey(clone: &Repo) -> Result<PublicKey> {
     let keys = Keys::parse(&nsec)
         .context("nostr.nsec in clone's local config is not a valid bech32 nsec")?;
     Ok(keys.public_key())
-}
-
-/// First value of the `["branch-name", <name>]` tag on a nostr event, if
-/// present. PR and patch events both carry this; we use it to disambiguate
-/// the event for one proposal from any others published in the same test.
-fn event_branch_name_tag(event: &Event) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.first().map(String::as_str) == Some("branch-name") {
-            s.get(1).cloned()
-        } else {
-            None
-        }
-    })
 }
 
 /// `true` when `event` carries `["t", "cover-letter"]` — the marker that

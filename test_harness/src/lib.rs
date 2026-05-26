@@ -43,6 +43,7 @@
 pub mod clock;
 pub mod grasp;
 pub mod harness;
+pub mod nostr;
 pub mod port;
 mod query;
 pub mod relay;
@@ -54,6 +55,10 @@ pub mod vanilla_git_server;
 pub use clock::tick_to_next_second;
 pub use grasp::GraspServer;
 pub use harness::{Harness, HarnessBuilder};
+pub use nostr::{
+    KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_REPO_STATE, event_branch_name_tag, tag_value,
+    tag_values,
+};
 pub use relay::VanillaRelay;
 pub use repo::Repo;
 pub use scenarios::{
