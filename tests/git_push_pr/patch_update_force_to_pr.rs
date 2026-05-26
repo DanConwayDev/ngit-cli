@@ -39,11 +39,13 @@
 //!
 //! ## Assertions (one `#[rstest]` per)
 //!
+//! Force-push (patch→PR upgrade):
+//!
 //! - `three_patch_events_total` — 2 original + 1 FF push, no new patches from
 //!   the force push (the upgrade replaces patches with a single PR)
 //! - `one_pr_event` — exactly one `KIND_PULL_REQUEST` event on the GRASP
-//! - `zero_pr_update_events` — patch→PR upgrade emits `KIND_PULL_REQUEST`, not
-//!   `KIND_PULL_REQUEST_UPDATE`
+//! - `zero_pr_update_events_after_upgrade` — patch→PR upgrade emits
+//!   `KIND_PULL_REQUEST`, not `KIND_PULL_REQUEST_UPDATE`
 //! - `pr_event_e_tag_references_original_root` — PR event carries an `e` tag
 //!   with the original root patch id in slot 1
 //! - `pr_event_p_tag_references_original_root_author` — PR event carries a `p`
@@ -54,6 +56,26 @@
 //!   tip OID
 //! - `pr_event_authored_by_maintainer` — PR event is signed by the maintainer
 //!   (the actor who ran the force push)
+//!
+//! Follow-up push (PR update against the upgraded thread):
+//!
+//! - `pr_update_event_exists` — exactly one `KIND_PULL_REQUEST_UPDATE` event
+//!   after the follow-up push
+//! - `no_new_patch_events_from_followup` — patch count stays at 3
+//! - `still_only_one_pr_event_after_followup` — PR count stays at 1
+//! - `pr_update_event_e_tag_references_pr_event` — **load-bearing for
+//!   e66a47a**.  The update's `E` tag must reference the upgrade PR event id,
+//!   proving that `effective_root = pr_upgrade_root.unwrap_or(proposal)`
+//!   (push.rs:475-478) threaded the PR event through.
+//! - `pr_update_event_e_tag_does_not_reference_original_patch_root` — negative
+//!   companion: the update must NOT `E`-tag the pre-upgrade patch root.  Locks
+//!   out a regression to the old behaviour.
+//! - `pr_update_event_p_tag_references_pr_event_author` — the `P` tag matches
+//!   the PR event's author (the maintainer).
+//! - `pr_update_event_c_tag_is_followup_tip` — the update's `c` tag equals the
+//!   follow-up commit OID.
+//! - `pr_update_event_authored_by_maintainer` — the update is signed by the
+//!   maintainer.
 
 use std::sync::Arc;
 
@@ -82,29 +104,57 @@ const BIG_FILE_BYTES: usize = 100 * 1024;
 // ---------------------------------------------------------------------------
 
 /// Everything observable after the publish → first-push → big-amend →
-/// force-push arrangement, captured once per test binary via [`SNAPSHOT`]
-/// and shared read-only across all `#[rstest]` cases.
+/// force-push → follow-up-push arrangement, captured once per test binary
+/// via [`SNAPSHOT`] and shared read-only across all `#[rstest]` cases.
+///
+/// State captured at two distinct stages of the scenario:
+///
+/// * "stage 1" (immediately after the force push that does the patch→PR
+///   upgrade) — only one field, [`Self::pr_update_count_after_upgrade`], is
+///   read here, locking in that the upgrade itself does **not** emit a
+///   PR-update event.
+///
+/// * "final" (after the subsequent fast-forward push that adds a new commit on
+///   top of the upgraded PR) — every other field is the final GRASP state.
+///   Patch counts and PR counts are unchanged from stage 1 because the
+///   follow-up push goes through the PR-update path.
 struct Snapshot {
-    /// All `Kind::GitPatch` events on the GRASP after the force push.
-    /// Expected count: 3 (2 original + 1 first push).  The force push
-    /// emits a PR event, not new patches.
+    /// All `Kind::GitPatch` events on the GRASP at the end of the scenario.
+    /// Expected count: 3 (2 original + 1 first push).  Neither the force
+    /// push nor the follow-up push emits a new patch event.
     all_patch_events: Vec<Event>,
 
-    /// All `KIND_PULL_REQUEST` events on the GRASP after the force push.
-    /// Expected: exactly one — the patch→PR upgrade event.
+    /// All `KIND_PULL_REQUEST` events on the GRASP at the end of the
+    /// scenario.  Expected: exactly one — the patch→PR upgrade event.
+    /// The follow-up push must not emit a second PR event.
     pr_events: Vec<Event>,
 
     /// The single upgrade PR event extracted from [`Self::pr_events`] —
     /// disambiguated by `branch-name` matching the original series.
     pr_event: Event,
 
-    /// Count of `KIND_PULL_REQUEST_UPDATE` events on the GRASP.  Must be
-    /// 0 — the upgrade is itself the new root, not an update.
-    pr_update_count: usize,
+    /// Count of `KIND_PULL_REQUEST_UPDATE` events on the GRASP captured
+    /// immediately after the force push and before the follow-up push.
+    /// Must be 0 — the upgrade is itself the new root, not an update.
+    pr_update_count_after_upgrade: usize,
+
+    /// The single `KIND_PULL_REQUEST_UPDATE` event published by the
+    /// follow-up push.  Its `E` tag must reference the upgrade PR event
+    /// (not the original patch root), confirming `effective_root =
+    /// pr_upgrade_root.unwrap_or(proposal)` in
+    /// `git_remote_nostr/push.rs:469-478` correctly threaded the PR event
+    /// through.
+    pr_update_event: Event,
+
+    /// Total `KIND_PULL_REQUEST_UPDATE` events on the GRASP at the end of
+    /// the scenario.  Must be 1.
+    pr_update_count_final: usize,
 
     /// Event ID of the original series root patch published by
     /// [`Harness::publish_patch_series`].  The upgrade PR event's `e` tag
-    /// must equal this.
+    /// must equal this.  Critically, the **PR-update event's `E` tag
+    /// must NOT equal this** — that's the regression the e66a47a fix
+    /// prevents.
     original_root_patch_id: EventId,
 
     /// Pubkey of the original series root patch (the contributor).  The
@@ -121,8 +171,13 @@ struct Snapshot {
     /// `c` tag must equal.
     amended_tip_oid: String,
 
-    /// Maintainer's pubkey — the actor running the force push and
-    /// therefore the expected signer of the upgrade PR event.
+    /// Tip OID after the follow-up commit — what the PR-update event's
+    /// `c` tag must equal.
+    followup_tip_oid: String,
+
+    /// Maintainer's pubkey — the actor running both the force push and
+    /// the follow-up push, and therefore the expected signer of the
+    /// upgrade PR event and the PR-update event.
     maintainer_pubkey: PublicKey,
 }
 
@@ -314,7 +369,61 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await
         .context("nostr_push -f (force push after big-content amend) failed")?;
 
-    // --- 10. Query GRASP state -----------------------------------------------
+    // --- 10. Stage-1 query: confirm no PR-update yet -------------------------
+    //
+    // The force-push upgrade itself must not emit a `KIND_PULL_REQUEST_UPDATE`
+    // event.  We snapshot the count before doing the follow-up push so the
+    // assertion can isolate "the upgrade is a fresh PR root, not an update".
+    let pr_update_count_after_upgrade = harness
+        .grasp("repo")
+        .events(Filter::new().kind(KIND_PULL_REQUEST_UPDATE))
+        .await?
+        .len();
+
+    // --- 11. Follow-up commit and fast-forward push (PR update) --------------
+    //
+    // After the upgrade the proposal thread root is the PR event.  A
+    // subsequent push on the same branch should route through the
+    // patch→PR-already-PR arm of `git_remote_nostr/push.rs:533-552`
+    // (`effective_root.kind == KIND_PULL_REQUEST`) and emit a
+    // `KIND_PULL_REQUEST_UPDATE` event.  The fix in e66a47a ensures the
+    // update's `E` tag references the PR event id (via
+    // `pr_upgrade_root.unwrap_or(proposal)`), not the original patch root.
+    std::fs::write(
+        maintainer_clone.dir().join("followup.md"),
+        "second maintainer follow-up after the PR upgrade\n",
+    )
+    .context("failed to write followup.md")?;
+    maintainer_clone
+        .git_ok(["add", "followup.md"], "git add followup.md")
+        .await?;
+    maintainer_clone
+        .git_ok(
+            [
+                "commit",
+                "-m",
+                "follow-up after PR upgrade",
+                "--no-gpg-sign",
+            ],
+            "git commit followup.md",
+        )
+        .await?;
+
+    let followup_tip_oid = maintainer_clone
+        .rev_parse("HEAD")
+        .await
+        .context("rev-parse HEAD after follow-up commit")?;
+
+    maintainer_clone
+        .nostr_push(["origin", &remote_branch])
+        .await
+        .context("nostr_push of follow-up commit (post-upgrade) failed")?;
+
+    // --- 12. Final query of GRASP state --------------------------------------
+    //
+    // Patch and PR-event counts must be unchanged from stage 1 — the
+    // follow-up push goes through the PR-update path so it produces a single
+    // `KIND_PULL_REQUEST_UPDATE` event and nothing else.
     let all_patch_events = harness
         .grasp("repo")
         .events(Filter::new().kind(Kind::GitPatch))
@@ -325,13 +434,13 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .events(Filter::new().kind(KIND_PULL_REQUEST))
         .await?;
 
-    let pr_update_count = harness
+    let pr_update_events = harness
         .grasp("repo")
         .events(Filter::new().kind(KIND_PULL_REQUEST_UPDATE))
-        .await?
-        .len();
+        .await?;
+    let pr_update_count_final = pr_update_events.len();
 
-    // --- 11. Identify the upgrade PR event -----------------------------------
+    // --- 13. Identify the upgrade PR event -----------------------------------
     //
     // The PR event derives its `branch-name` tag from the original root
     // patch's cover-letter (via `event_to_cover_letter`).  Match on that to
@@ -350,15 +459,40 @@ async fn capture_snapshot() -> Result<Snapshot> {
             )
         })?;
 
+    // --- 14. Identify the PR-update event ------------------------------------
+    //
+    // The follow-up push must have produced exactly one
+    // `KIND_PULL_REQUEST_UPDATE` event authored by the maintainer.  We
+    // disambiguate by the `c` tag matching the follow-up tip OID — the
+    // unique observable side-effect of the second push.
+    let pr_update_event = pr_update_events
+        .iter()
+        .find(|e| tag_value(e, "c").as_deref() == Some(followup_tip_oid.as_str()))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "no KIND_PULL_REQUEST_UPDATE event on GRASP with c={:?} after the \
+                 follow-up push; all update event ids: {:?}",
+                followup_tip_oid,
+                pr_update_events
+                    .iter()
+                    .map(|e| e.id.to_hex())
+                    .collect::<Vec<_>>(),
+            )
+        })?;
+
     Ok(Snapshot {
         all_patch_events,
         pr_events,
         pr_event,
-        pr_update_count,
+        pr_update_count_after_upgrade,
+        pr_update_event,
+        pr_update_count_final,
         original_root_patch_id,
         original_root_patch_pubkey,
         original_branch_name: series.branch_name.clone(),
         amended_tip_oid,
+        followup_tip_oid,
         maintainer_pubkey,
     })
 }
@@ -414,18 +548,20 @@ async fn one_pr_event(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     Ok(())
 }
 
-/// Zero `KIND_PULL_REQUEST_UPDATE` events — patch→PR upgrade emits a
-/// fresh `KIND_PULL_REQUEST` (the root of the new PR thread), not an
-/// update.  An update would only be valid if the thread root were
-/// already PR-kind.
+/// Zero `KIND_PULL_REQUEST_UPDATE` events immediately after the force-
+/// push upgrade — the upgrade emits a fresh `KIND_PULL_REQUEST` (the
+/// root of the new PR thread), not an update.  Asserts on the stage-1
+/// snapshot taken **before** the follow-up push (which does legitimately
+/// emit one update event; see [`pr_update_event_exists`]).
 #[rstest]
 #[tokio::test]
-async fn zero_pr_update_events(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+async fn zero_pr_update_events_after_upgrade(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
-        s.pr_update_count, 0,
-        "expected zero KIND_PULL_REQUEST_UPDATE events on GRASP; got {}",
-        s.pr_update_count,
+        s.pr_update_count_after_upgrade, 0,
+        "expected zero KIND_PULL_REQUEST_UPDATE events on GRASP immediately \
+         after the patch→PR upgrade force push; got {}",
+        s.pr_update_count_after_upgrade,
     );
     Ok(())
 }
@@ -538,6 +674,193 @@ async fn pr_event_authored_by_maintainer(#[future] snapshot: Arc<Snapshot>) -> R
          the force push; got {}",
         s.maintainer_pubkey.to_hex(),
         s.pr_event.pubkey.to_hex(),
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Follow-up-push assertions — PR-update threading after the upgrade
+// ---------------------------------------------------------------------------
+
+/// Exactly one `KIND_PULL_REQUEST_UPDATE` event on the GRASP at the end
+/// of the scenario — the follow-up push emits one update event, not
+/// multiple and not zero.
+#[rstest]
+#[tokio::test]
+async fn pr_update_event_exists(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        s.pr_update_count_final, 1,
+        "expected exactly one KIND_PULL_REQUEST_UPDATE event on GRASP after \
+         the follow-up push; got {}",
+        s.pr_update_count_final,
+    );
+    Ok(())
+}
+
+/// Follow-up push must not have produced any **additional** patch events
+/// — the total stays at 3 because the existing PR-kind thread root
+/// forces the push through the PR-update arm.
+#[rstest]
+#[tokio::test]
+async fn no_new_patch_events_from_followup(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        s.all_patch_events.len(),
+        3,
+        "expected exactly 3 Kind::GitPatch events on GRASP after the follow-up \
+         push (no new patches; the follow-up should be a PR-update, not a \
+         patch); got {} (event ids: {:?})",
+        s.all_patch_events.len(),
+        s.all_patch_events
+            .iter()
+            .map(|e| e.id.to_hex())
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
+/// Follow-up push must not have produced a second PR-kind event — the
+/// upgrade PR remains the unique thread root.
+#[rstest]
+#[tokio::test]
+async fn still_only_one_pr_event_after_followup(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        s.pr_events.len(),
+        1,
+        "expected exactly one KIND_PULL_REQUEST event on GRASP after the \
+         follow-up push (the upgrade PR is the unique thread root); got {} \
+         (event ids: {:?})",
+        s.pr_events.len(),
+        s.pr_events
+            .iter()
+            .map(|e| e.id.to_hex())
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
+/// **Load-bearing for e66a47a.**  The PR-update event's `E` (uppercase,
+/// root marker) tag must reference the upgrade PR event id — not the
+/// original patch root.  Before the fix, `effective_root` was set to the
+/// proposal directly, which for the patch→PR upgrade scenario kept
+/// pointing at the original patch root and produced an `E` tag
+/// referencing the wrong event.  Now `effective_root =
+/// pr_upgrade_root.unwrap_or(proposal)` (push.rs:475-478) threads the PR
+/// event through.
+///
+/// `pr_update_specific_tags` (`git_events.rs:520-535`) emits the tag as
+/// `["E", <hex>]` (slot 1 carries the id).
+#[rstest]
+#[tokio::test]
+async fn pr_update_event_e_tag_references_pr_event(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let e_values: Vec<String> = s
+        .pr_update_event
+        .tags
+        .iter()
+        .filter(|t| t.as_slice().first().map(String::as_str) == Some("E"))
+        .filter_map(|t| t.as_slice().get(1).cloned())
+        .collect();
+    assert!(
+        e_values.contains(&s.pr_event.id.to_hex()),
+        "PR-update event should carry an `E` tag with the upgrade PR event id \
+         {:?}; got E values: {:?}",
+        s.pr_event.id.to_hex(),
+        e_values,
+    );
+    Ok(())
+}
+
+/// **Negative companion to [`pr_update_event_e_tag_references_pr_event`].**
+/// The PR-update event must NOT reference the original patch root via
+/// `E` — that's the exact regression e66a47a prevented.  Asserting the
+/// absence makes the test fail loudly if a future change re-introduces
+/// the "effective_root = proposal" shortcut.
+#[rstest]
+#[tokio::test]
+async fn pr_update_event_e_tag_does_not_reference_original_patch_root(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let e_values: Vec<String> = s
+        .pr_update_event
+        .tags
+        .iter()
+        .filter(|t| t.as_slice().first().map(String::as_str) == Some("E"))
+        .filter_map(|t| t.as_slice().get(1).cloned())
+        .collect();
+    assert!(
+        !e_values.contains(&s.original_root_patch_id.to_hex()),
+        "PR-update event should NOT carry an `E` tag with the original patch \
+         root id {:?} (it should reference the upgrade PR event, not the \
+         pre-upgrade patch root); got E values: {:?}",
+        s.original_root_patch_id.to_hex(),
+        e_values,
+    );
+    Ok(())
+}
+
+/// PR-update event's `P` (uppercase, root author) tag must reference the
+/// upgrade PR event's author — the maintainer.  Emitted by
+/// `pr_update_specific_tags` as `["P", <hex>]`.  Same reasoning as the
+/// `E` tag check: the root author must move with the root event when
+/// the patch→PR upgrade happens.
+#[rstest]
+#[tokio::test]
+async fn pr_update_event_p_tag_references_pr_event_author(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let p_values: Vec<String> = s
+        .pr_update_event
+        .tags
+        .iter()
+        .filter(|t| t.as_slice().first().map(String::as_str) == Some("P"))
+        .filter_map(|t| t.as_slice().get(1).cloned())
+        .collect();
+    assert!(
+        p_values.contains(&s.pr_event.pubkey.to_hex()),
+        "PR-update event should carry a `P` tag with the upgrade PR event \
+         author {:?}; got P values: {:?}",
+        s.pr_event.pubkey.to_hex(),
+        p_values,
+    );
+    Ok(())
+}
+
+/// PR-update event's `c` tag equals the follow-up commit's OID — what
+/// the follow-up push actually published.
+#[rstest]
+#[tokio::test]
+async fn pr_update_event_c_tag_is_followup_tip(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        tag_value(&s.pr_update_event, "c").as_deref(),
+        Some(s.followup_tip_oid.as_str()),
+        "PR-update event c tag should equal the follow-up tip OID {:?}; got {:?}",
+        s.followup_tip_oid,
+        tag_value(&s.pr_update_event, "c"),
+    );
+    Ok(())
+}
+
+/// PR-update event is signed by the maintainer — the actor running the
+/// follow-up push.
+#[rstest]
+#[tokio::test]
+async fn pr_update_event_authored_by_maintainer(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        s.pr_update_event.pubkey,
+        s.maintainer_pubkey,
+        "PR-update event should be authored by the maintainer ({}) who ran \
+         the follow-up push; got {}",
+        s.maintainer_pubkey.to_hex(),
+        s.pr_update_event.pubkey.to_hex(),
     );
     Ok(())
 }
