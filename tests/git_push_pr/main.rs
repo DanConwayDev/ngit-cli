@@ -35,6 +35,12 @@
 //!   push`es.  Asserts that the push produces another `Kind::GitPatch` event
 //!   (not `KIND_PULL_REQUEST` or `KIND_PULL_REQUEST_UPDATE`) — the
 //!   patch-kind-stays-patch-kind rule from `push.rs:655-658`.
+//! - [`patch_update_force`] — extends `patch_update` with an amend-and-force-
+//!   push step.  Asserts that the force push publishes 3 new `Kind::GitPatch`
+//!   events as a revision: the first carries `["t", "root-revision"]` and an
+//!   `["e", <original_root>, _, "reply"]` back-reference; the tip patch carries
+//!   `["e", <revision_root>, _, "root"]` and `["e", <second_patch>, _,
+//!   "reply"]`.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -45,4 +51,5 @@ mod new_pr;
 mod new_pr_custom_subject_desc;
 mod patch_kind_when_no_grasp;
 mod patch_update;
+mod patch_update_force;
 mod rebase_update;
