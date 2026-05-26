@@ -76,8 +76,26 @@
 //!   follow-up commit OID.
 //! - `pr_update_event_authored_by_maintainer` — the update is signed by the
 //!   maintainer.
+//!
+//! Fresh-clone `git ls-remote` (proposal branch advertisement):
+//!
+//! `list.rs` uses two ref namespaces: `refs/pr/<branch>(<shorthand>)` (every
+//! proposal, regardless of status) and `refs/heads/pr/<branch>(<shorthand>)`
+//! (open/draft proposals whose tip is locally available — the user-facing
+//! remote-branch surface).  We assert on whichever namespace the proposal
+//! lands in by matching refs that end in `pr/<branch>(<8-hex>)`.
+//!
+//! - `fresh_clone_exactly_one_pr_branch` — exactly one branch-shaped
+//!   advertisement.
+//! - `fresh_clone_pr_branch_uses_original_root_shorthand_and_latest_tip` — the
+//!   advertised ref ends in `pr/<branch>(<original_root_8>)` and resolves to
+//!   the follow-up tip OID.  Shorthand sourced from the original patch root id
+//!   (revision-root events excluded from `proposal` by `utils.rs:144-149`); OID
+//!   from the latest PR-update's `c` tag.
+//! - `fresh_clone_does_not_advertise_pr_event_shorthand_branch` — negative
+//!   companion: no `pr/<branch>(<pr_event_8>)` advertisement in any namespace.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use nostr_sdk::prelude::*;
@@ -179,6 +197,20 @@ struct Snapshot {
     /// the follow-up push, and therefore the expected signer of the
     /// upgrade PR event and the PR-update event.
     maintainer_pubkey: PublicKey,
+
+    /// Refs advertised by a fresh `git ls-remote origin` against the
+    /// `nostr://` URL from a third clone with no nostr login
+    /// (`CloneLogin::None`).  Each entry is `(ref_name, oid)`.
+    ///
+    /// `list.rs:233-292` derives the advertised PR branch name from
+    /// `event_to_cover_letter(proposal)` — and `proposal` is always the
+    /// original patch root (revision-root events are filtered out by
+    /// `get_open_or_draft_proposals` at `utils.rs:144-149`).  So the
+    /// 8-char shorthand must come from the **original root patch id**,
+    /// not the PR upgrade event id.  The advertised OID is read from the
+    /// `c` tag of the latest PR-or-PR-update in the chain
+    /// (`list.rs:247-258`) — i.e. the follow-up tip.
+    nostr_clone_ls_refs: BTreeMap<String, String>,
 }
 
 static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
@@ -481,6 +513,43 @@ async fn capture_snapshot() -> Result<Snapshot> {
             )
         })?;
 
+    // --- 15. Fresh nostr-URL clone: run `git ls-remote` ----------------------
+    //
+    // Mounts the cover-letter / list.rs round-trip end-to-end: the
+    // newly-cloned repo has no logged-in nostr identity (`CloneLogin::None`),
+    // so `list.rs:236-244` keeps the long-form `pr/<branch>(<8-hex>)` ref
+    // name (the short form is only used when the current user is the
+    // proposal author).  The 8-hex shorthand is sourced from
+    // `event_to_cover_letter(proposal).event_id`, and the `proposal` for
+    // an upgraded patch thread is still the **original patch root** —
+    // revision-root events (including the PR upgrade) are filtered out
+    // upstream by `utils.rs:144-149`.  So the asserted shorthand below
+    // must equal `original_root_patch_id[..8]`, never the PR event's
+    // shorthand.
+    let new_clone = harness
+        .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+    let ls_out = new_clone
+        .git(["ls-remote", "origin"])
+        .output()
+        .await
+        .context("failed to spawn git ls-remote origin on fresh clone")?;
+    anyhow::ensure!(
+        ls_out.status.success(),
+        "fresh-clone `git ls-remote origin` exited {:?}\nstdout: {}\nstderr: {}",
+        ls_out.status,
+        String::from_utf8_lossy(&ls_out.stdout),
+        String::from_utf8_lossy(&ls_out.stderr),
+    );
+    let ls_stdout = String::from_utf8(ls_out.stdout)
+        .context("fresh-clone `git ls-remote origin` stdout is not UTF-8")?;
+    let nostr_clone_ls_refs: BTreeMap<String, String> = ls_stdout
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("ref: "))
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(oid, name)| (name.to_string(), oid.to_string()))
+        .collect();
+
     Ok(Snapshot {
         all_patch_events,
         pr_events,
@@ -494,6 +563,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         amended_tip_oid,
         followup_tip_oid,
         maintainer_pubkey,
+        nostr_clone_ls_refs,
     })
 }
 
@@ -861,6 +931,157 @@ async fn pr_update_event_authored_by_maintainer(#[future] snapshot: Arc<Snapshot
          the follow-up push; got {}",
         s.maintainer_pubkey.to_hex(),
         s.pr_update_event.pubkey.to_hex(),
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fresh-clone `git ls-remote` — proposal branch shorthand & tip OID
+// ---------------------------------------------------------------------------
+//
+// `list.rs` exposes two advertisement namespaces:
+//
+// * `refs/pr/<branch>(<shorthand>)` and `refs/pr/<event-id>/head` — emitted by
+//   `get_all_proposals_state` (`list.rs:300-334`) for **every** proposal,
+//   regardless of status.  No `does_commit_exist` check.
+// * `refs/heads/pr/<branch>(<shorthand>)` — emitted by
+//   `get_open_and_draft_proposals_state` (`list.rs:143-296`) only for
+//   open/draft proposals AND only once the tip commit is locally available.
+//   This namespace is the user-facing "remote branch" surface (`git branch
+//   -r`).
+//
+// The two namespaces are intentionally distinct: `refs/pr/*` is the
+// complete catalogue, `refs/heads/pr/*` is the filtered "show me
+// branches I can interact with" subset.  We assert on the
+// branch-shaped advertisement that ends in `pr/<branch>(<shorthand>)`
+// without pinning to either prefix, so the test stays correct whether
+// the proposal happens to land in the open/draft remote-tracking
+// surface for this scenario or only in the all-proposals catalogue.
+
+/// Helper: collect every ref whose name ends in
+/// `pr/<branch>(<8-hex>)` — the branch-shaped proposal advertisement —
+/// from the fresh-clone `ls-remote` map.  Excludes the
+/// `refs/pr/<full-event-id>/head` canonical refs (those don't carry
+/// the human branch name).
+fn branch_shaped_pr_refs<'a>(
+    map: &'a std::collections::BTreeMap<String, String>,
+    branch: &str,
+) -> Vec<(&'a String, &'a String)> {
+    let needle_prefix = format!("pr/{branch}(");
+    map.iter()
+        .filter(|(name, _)| {
+            // Trim any leading `refs/heads/` or `refs/` so we match against
+            // the suffix `pr/<branch>(<...>)`.
+            let suffix = name
+                .strip_prefix("refs/heads/")
+                .or_else(|| name.strip_prefix("refs/"))
+                .unwrap_or(name.as_str());
+            suffix.starts_with(&needle_prefix) && suffix.ends_with(')')
+        })
+        .collect()
+}
+
+/// Exactly one branch-shaped proposal advertisement
+/// (`(refs/heads/)?pr/<branch>(<shorthand>)`) in the fresh clone's
+/// `ls-remote` output.
+///
+/// Two would mean `list.rs` is double-advertising the proposal — for
+/// example, by treating the PR upgrade event as its own proposal root
+/// (which would happen if revision-root filtering in
+/// `utils.rs:144-149` stopped masking PR-kind revisions).
+#[rstest]
+#[tokio::test]
+async fn fresh_clone_exactly_one_pr_branch(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    let pr_branch_refs = branch_shaped_pr_refs(&s.nostr_clone_ls_refs, &s.original_branch_name);
+    assert_eq!(
+        pr_branch_refs.len(),
+        1,
+        "expected exactly one branch-shaped proposal advertisement \
+         (`(refs/heads/)?pr/{}(<shorthand>)`) in the fresh clone; got {} \
+         (full ls-remote map: {:#?})",
+        s.original_branch_name,
+        pr_branch_refs.len(),
+        s.nostr_clone_ls_refs,
+    );
+    Ok(())
+}
+
+/// The single branch-shaped advertisement uses the **original root patch
+/// id**'s 8-char shorthand and resolves to the follow-up tip OID.
+///
+/// Branch-name shorthand comes from `event_to_cover_letter(proposal)`
+/// (`list.rs:234-235` / `list.rs:308-309`) where `proposal` is filtered
+/// to exclude revision-root / PR-upgrade events at `utils.rs:144-149`.
+/// Tip OID comes from the latest PR-or-PR-update's `c` tag
+/// (`list.rs:247-258` / `list.rs:319-325`) — here, the follow-up
+/// push's PR-update event.
+#[rstest]
+#[tokio::test]
+async fn fresh_clone_pr_branch_uses_original_root_shorthand_and_latest_tip(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let pr_branch_refs = branch_shaped_pr_refs(&s.nostr_clone_ls_refs, &s.original_branch_name);
+    let (ref_name, oid) = pr_branch_refs.first().ok_or_else(|| {
+        anyhow!(
+            "no branch-shaped proposal advertisement in fresh clone ls-remote; \
+             full map: {:#?}",
+            s.nostr_clone_ls_refs,
+        )
+    })?;
+    let original_shorthand = &s.original_root_patch_id.to_hex()[..8];
+    let expected_suffix = format!("pr/{}({})", s.original_branch_name, original_shorthand);
+    assert!(
+        ref_name.ends_with(&expected_suffix),
+        "branch-shaped proposal advertisement {:?} should end in {:?} (using \
+         the original root patch id shorthand, not the PR upgrade event \
+         shorthand); full ls-remote map: {:#?}",
+        ref_name,
+        expected_suffix,
+        s.nostr_clone_ls_refs,
+    );
+    assert_eq!(
+        oid.as_str(),
+        s.followup_tip_oid.as_str(),
+        "branch-shaped proposal advertisement {:?} should resolve to the \
+         follow-up tip OID {:?} (read from the PR-update event's `c` tag); \
+         got {:?}",
+        ref_name,
+        s.followup_tip_oid,
+        oid,
+    );
+    Ok(())
+}
+
+/// **Negative companion** to
+/// [`fresh_clone_pr_branch_uses_original_root_shorthand_and_latest_tip`]:
+/// the fresh clone must NOT advertise any ref ending in
+/// `pr/<branch>(<pr_event_8>)`.  If it did, the PR upgrade event would
+/// be acting as an independent proposal root rather than a revision of
+/// the original patch thread — exactly the failure mode that
+/// revision-root filtering at `utils.rs:144-149` prevents.
+#[rstest]
+#[tokio::test]
+async fn fresh_clone_does_not_advertise_pr_event_shorthand_branch(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    let pr_event_shorthand = &s.pr_event.id.to_hex()[..8];
+    let bad_suffix = format!("pr/{}({})", s.original_branch_name, pr_event_shorthand);
+    let offending: Vec<&String> = s
+        .nostr_clone_ls_refs
+        .keys()
+        .filter(|name| name.ends_with(&bad_suffix))
+        .collect();
+    assert!(
+        offending.is_empty(),
+        "fresh clone should NOT advertise any ref ending in {:?} — the PR \
+         upgrade event must not appear as an independent proposal root.  \
+         Offending refs: {:?}\nFull ls-remote map: {:#?}",
+        bad_suffix,
+        offending,
+        s.nostr_clone_ls_refs,
     );
     Ok(())
 }
