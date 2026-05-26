@@ -62,8 +62,16 @@ pub fn tag_value(event: &Event, key: &str) -> Option<String> {
 /// Returns all values (slots 1+) of the first tag whose name (slot 0)
 /// equals `key`. Returns an empty `Vec` when no such tag is present.
 ///
-/// Used for multi-value tags such as `clone` and `relays`. Matches the
-/// inline `tag_values` helper duplicated in `tests/send_pr*.rs`.
+/// Used for **multi-value single-instance tags** — i.e. tags emitted as a
+/// single `Tag` with several slots after the name, such as
+/// `["clone", url1, url2]` or `["relays", url1, url2]`.
+///
+/// **Not** appropriate for tags that appear as several separate single-value
+/// tag entries (e.g. patch events emit `["t", "root"]` and `["t",
+/// "root-revision"]` as two distinct tags). Use [`tag_values_multiple`] for
+/// that shape.
+///
+/// Matches the inline `tag_values` helper duplicated in `tests/send_pr*.rs`.
 pub fn tag_values(event: &Event, key: &str) -> Vec<String> {
     event
         .tags
@@ -71,6 +79,40 @@ pub fn tag_values(event: &Event, key: &str) -> Vec<String> {
         .find(|t| t.as_slice().first().map(String::as_str) == Some(key))
         .map(|t| t.as_slice()[1..].to_vec())
         .unwrap_or_default()
+}
+
+/// Returns the slot-1 value of **every** tag whose name (slot 0) equals
+/// `key`, in event order. Returns an empty `Vec` when no such tag is
+/// present.
+///
+/// Used for **multi-instance single-value tags** — i.e. tags that appear
+/// repeatedly as separate `Tag` entries, such as the hashtag namespace on
+/// patch events:
+///
+/// ```text
+/// ["t", "root"]
+/// ["t", "root-revision"]
+/// ```
+///
+/// [`tag_values_multiple`] returns `["root", "root-revision"]` for that
+/// shape, whereas [`tag_values`] would return only `["root"]` (the slots of
+/// the first matching tag).
+///
+/// Tags with fewer than two slots are skipped silently — they carry no
+/// value to return.
+pub fn tag_values_multiple(event: &Event, key: &str) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            if s.first().map(String::as_str) == Some(key) {
+                s.get(1).cloned()
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Returns the value of the `branch-name` tag on a nostr event, if present.

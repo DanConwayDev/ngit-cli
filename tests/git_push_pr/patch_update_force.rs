@@ -52,7 +52,7 @@ use nostr_sdk::prelude::*;
 use rstest::*;
 use test_harness::{
     CloneLogin, Harness, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, PublishPatchSeriesOpts,
-    PublishRepoOpts, event_branch_name_tag, tag_value, tag_values,
+    PublishRepoOpts, event_branch_name_tag, tag_value, tag_values_multiple,
 };
 use tokio::sync::OnceCell;
 
@@ -309,7 +309,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let revision_root = all_patch_events
         .iter()
         .find(|e| {
-            tag_values(e, "t")
+            tag_values_multiple(e, "t")
                 .iter()
                 .any(|v| v == "root-revision" || v == "revision-root")
         })
@@ -439,11 +439,11 @@ async fn zero_pr_update_events(#[future] snapshot: Arc<Snapshot>) -> Result<()> 
 async fn revision_root_has_t_root(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert!(
-        tag_values(&s.revision_root, "t")
+        tag_values_multiple(&s.revision_root, "t")
             .iter()
             .any(|v| v == "root"),
         "revision root should carry `t root`; t tags: {:?}",
-        tag_values(&s.revision_root, "t"),
+        tag_values_multiple(&s.revision_root, "t"),
     );
     Ok(())
 }
@@ -455,7 +455,7 @@ async fn revision_root_has_t_root(#[future] snapshot: Arc<Snapshot>) -> Result<(
 #[tokio::test]
 async fn revision_root_has_t_revision_root(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
-    let t_values = tag_values(&s.revision_root, "t");
+    let t_values = tag_values_multiple(&s.revision_root, "t");
     assert!(
         t_values
             .iter()

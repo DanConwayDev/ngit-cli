@@ -57,7 +57,7 @@ pub use grasp::GraspServer;
 pub use harness::{Harness, HarnessBuilder};
 pub use nostr::{
     KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_REPO_STATE, event_branch_name_tag, tag_value,
-    tag_values,
+    tag_values, tag_values_multiple,
 };
 pub use relay::VanillaRelay;
 pub use repo::Repo;
