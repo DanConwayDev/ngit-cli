@@ -372,6 +372,50 @@ impl VanillaGitServer {
         &self.repo_path
     }
 
+    /// Read the OID that `refs/nostr/<event_id_hex>` resolves to inside this
+    /// server's bare repository.
+    ///
+    /// Mirrors [`crate::GraspServer::read_nostr_ref`] for the vanilla
+    /// (non-grasp) git server case, where the bare repo is `repo_path()`
+    /// directly with no npub/identifier subdirectory.
+    ///
+    /// Returns an error if the ref does not exist — that is a genuine test
+    /// failure: the PR push did not reach this server.
+    pub async fn read_nostr_ref(&self, event_id_hex: &str) -> Result<String> {
+        let refname = format!("refs/nostr/{event_id_hex}");
+        let out = tokio::process::Command::new("git")
+            .arg("for-each-ref")
+            .arg(&refname)
+            .arg("--format=%(objectname)")
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to spawn `git for-each-ref {refname}` in {}",
+                    self.repo_path.display()
+                )
+            })?;
+        if !out.status.success() {
+            bail!(
+                "`git for-each-ref {refname}` exited non-zero in {}: {}",
+                self.repo_path.display(),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        let oid = String::from_utf8(out.stdout)
+            .context("git for-each-ref output is not valid UTF-8")?
+            .trim()
+            .to_string();
+        if oid.is_empty() {
+            bail!(
+                "ref {refname} not found in bare repo at {} — the push did not land",
+                self.repo_path.display(),
+            );
+        }
+        Ok(oid)
+    }
+
     /// Explicit shutdown. Equivalent to dropping, but `await`able and
     /// surfaces task-join errors. Prefer drop in tests.
     pub async fn stop(mut self) {

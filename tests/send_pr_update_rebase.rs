@@ -59,12 +59,15 @@
 //! 8. No new KIND_PULL_REQUEST event was published — the original PR event
 //!    count on the primary grasp is still exactly one.
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 use rstest::*;
-use test_harness::{CloneLogin, Harness, PublishRepoOpts};
+use test_harness::{
+    CloneLogin, Harness, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, PublishRepoOpts,
+    event_branch_name_tag, tag_value,
+};
 use tokio::sync::OnceCell;
 
 /// Identifier passed to `ngit init --identifier`. Distinct from both
@@ -75,12 +78,6 @@ const IDENTIFIER: &str = "pr-update-rebase-test-repo";
 
 /// Feature branch name the contributor checks out before committing.
 const BRANCH: &str = "feature";
-
-/// `KIND_PULL_REQUEST` (kind 1618). Mirrored from `src/lib/git_events.rs`.
-const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
-
-/// `KIND_PULL_REQUEST_UPDATE` (kind 1619). Mirrored for the same reason.
-const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
 
 // ---------------------------------------------------------------------------
 // Snapshot — all observable side-effects captured once and shared
@@ -214,15 +211,23 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // The parent of this commit is `published.initial_oid` — that is the
     // original fork point that the `merge-base` tag must NOT equal after
     // the rebase.
-    run_git(&contributor, &["checkout", "-b", BRANCH]).await?;
+    contributor
+        .git_ok(
+            ["checkout", "-b", BRANCH],
+            &format!("git checkout -b {BRANCH}"),
+        )
+        .await?;
     std::fs::write(contributor.dir().join("t3.md"), "some content\n")
         .context("failed to write t3.md in contributor clone")?;
-    run_git(&contributor, &["add", "t3.md"]).await?;
-    run_git(
-        &contributor,
-        &["commit", "-m", "add t3.md", "--no-gpg-sign"],
-    )
-    .await?;
+    contributor
+        .git_ok(["add", "t3.md"], "git add t3.md")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "add t3.md", "--no-gpg-sign"],
+            "git commit -m add t3.md --no-gpg-sign",
+        )
+        .await?;
 
     let original_fork_point_oid = published.initial_oid.clone();
 
@@ -233,12 +238,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // rationale as send_pr_update.rs step 4).
     std::fs::write(publisher.dir().join("main-v1.md"), "content\n")
         .context("failed to write main-v1.md on publisher side")?;
-    run_git(&publisher, &["add", "main-v1.md"]).await?;
-    run_git(
-        &publisher,
-        &["commit", "-m", "advance main (v1)", "--no-gpg-sign"],
-    )
-    .await?;
+    publisher
+        .git_ok(["add", "main-v1.md"], "git add main-v1.md")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "advance main (v1)", "--no-gpg-sign"],
+            "git commit -m advance main (v1) --no-gpg-sign",
+        )
+        .await?;
     publisher
         .nostr_push(["-u", "origin", "main"])
         .await
@@ -247,12 +255,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // --- 5. Contributor: second commit (t4.md) --------------------------------
     std::fs::write(contributor.dir().join("t4.md"), "some content\n")
         .context("failed to write t4.md in contributor clone")?;
-    run_git(&contributor, &["add", "t4.md"]).await?;
-    run_git(
-        &contributor,
-        &["commit", "-m", "add t4.md", "--no-gpg-sign"],
-    )
-    .await?;
+    contributor
+        .git_ok(["add", "t4.md"], "git add t4.md")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "add t4.md", "--no-gpg-sign"],
+            "git commit -m add t4.md --no-gpg-sign",
+        )
+        .await?;
 
     // --- 6. Contributor: send original PR (HEAD~2) ----------------------------
     //
@@ -305,12 +316,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // the PR update event.
     std::fs::write(publisher.dir().join("main-v2.md"), "content\n")
         .context("failed to write main-v2.md on publisher side")?;
-    run_git(&publisher, &["add", "main-v2.md"]).await?;
-    run_git(
-        &publisher,
-        &["commit", "-m", "advance main (v2)", "--no-gpg-sign"],
-    )
-    .await?;
+    publisher
+        .git_ok(["add", "main-v2.md"], "git add main-v2.md")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "advance main (v2)", "--no-gpg-sign"],
+            "git commit -m advance main (v2) --no-gpg-sign",
+        )
+        .await?;
     publisher
         .nostr_push(["origin", "main"])
         .await
@@ -328,13 +342,17 @@ async fn capture_snapshot() -> Result<Snapshot> {
     //   [initial] → [main-v1] → [main-v2] → [rebased-t3] → [rebased-t4]
     //                                ↑
     //                         HEAD~2 = new fork point
-    run_git(&contributor, &["fetch", "origin"]).await?;
-    run_git(&contributor, &["rebase", "origin/main"]).await?;
+    contributor
+        .git_ok(["fetch", "origin"], "git fetch origin")
+        .await?;
+    contributor
+        .git_ok(["rebase", "origin/main"], "git rebase origin/main")
+        .await?;
 
     // Capture the new fork point immediately after the rebase (before adding
     // t5.md). After adding t5.md, HEAD~2 will be rebased-t3, but HEAD~3 will
     // still be main-v2 — so we capture HEAD~2 now = main-v2 OID.
-    let rebased_merge_base_oid = git_rev_parse(&contributor, "HEAD~2").await?;
+    let rebased_merge_base_oid = contributor.rev_parse("HEAD~2").await?;
 
     // Sanity check: the rebase must have moved the fork point.
     if rebased_merge_base_oid == original_fork_point_oid {
@@ -351,13 +369,16 @@ async fn capture_snapshot() -> Result<Snapshot> {
     //   HEAD = t5, HEAD~1 = rebased-t4, HEAD~2 = rebased-t3, HEAD~3 = main-v2
     std::fs::write(contributor.dir().join("t5.md"), "more content\n")
         .context("failed to write t5.md in contributor clone")?;
-    run_git(&contributor, &["add", "t5.md"]).await?;
-    run_git(
-        &contributor,
-        &["commit", "-m", "add t5.md", "--no-gpg-sign"],
-    )
-    .await?;
-    let update_tip_oid = git_rev_parse(&contributor, "HEAD").await?;
+    contributor
+        .git_ok(["add", "t5.md"], "git add t5.md")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "add t5.md", "--no-gpg-sign"],
+            "git commit -m add t5.md --no-gpg-sign",
+        )
+        .await?;
+    let update_tip_oid = contributor.rev_parse("HEAD").await?;
 
     // --- 10. Contributor: ngit send --in-reply-to (PR Update) ----------------
     //
@@ -418,33 +439,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 12. Read git refs from both grasps before harness drops -------------
     let update_event_id_hex = pr_update_event.id.to_hex();
-    let bare_primary = harness
+    let grasp_primary_update_ref_oid = harness
         .grasp("repo")
-        .git_data_path()
-        .join(&published.maintainer_npub)
-        .join(format!("{IDENTIFIER}.git"));
-    let grasp_primary_update_ref_oid = read_nostr_ref(&bare_primary, &update_event_id_hex)
-        .await
-        .with_context(|| {
-            format!(
-                "reading refs/nostr/{update_event_id_hex} from primary grasp bare repo at {}",
-                bare_primary.display()
-            )
-        })?;
+        .read_nostr_ref(&published.maintainer_npub, IDENTIFIER, &update_event_id_hex)
+        .await?;
 
-    let bare_secondary = harness
+    let grasp_secondary_update_ref_oid = harness
         .grasp("repo_secondary")
-        .git_data_path()
-        .join(&published.maintainer_npub)
-        .join(format!("{IDENTIFIER}.git"));
-    let grasp_secondary_update_ref_oid = read_nostr_ref(&bare_secondary, &update_event_id_hex)
-        .await
-        .with_context(|| {
-            format!(
-                "reading refs/nostr/{update_event_id_hex} from secondary grasp bare repo at {}",
-                bare_secondary.display()
-            )
-        })?;
+        .read_nostr_ref(&published.maintainer_npub, IDENTIFIER, &update_event_id_hex)
+        .await?;
 
     Ok(Snapshot {
         pr_update_event,
@@ -659,112 +662,4 @@ async fn no_new_pr_event(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
         s.pr_count_primary,
     );
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Helpers — identical to send_pr_update.rs copies; kept local to avoid
-// cross-test coupling.
-// ---------------------------------------------------------------------------
-
-/// Run `git <args>` inside `repo`, bailing with captured output on non-zero
-/// exit.
-async fn run_git(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
-    let label = format!("git {}", args.join(" "));
-    let out = repo
-        .git(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn `{label}`"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "`{label}` exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        )
-    }
-}
-
-/// Resolve `<rev>` to its full OID hex via `git rev-parse` inside `repo`.
-async fn git_rev_parse(repo: &test_harness::Repo, rev: &str) -> Result<String> {
-    let out = repo
-        .git(["rev-parse", rev])
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn git rev-parse {rev}"))?;
-    if !out.status.success() {
-        bail!(
-            "git rev-parse {rev} exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-    }
-    Ok(String::from_utf8(out.stdout)
-        .context("git rev-parse returned non-utf8")?
-        .trim()
-        .to_string())
-}
-
-/// Read the OID that `refs/nostr/<event_id_hex>` resolves to inside the bare
-/// repository at `bare_repo`. Returns an error if the ref is absent.
-async fn read_nostr_ref(bare_repo: &Path, event_id_hex: &str) -> Result<String> {
-    let refname = format!("refs/nostr/{event_id_hex}");
-    let out = tokio::process::Command::new("git")
-        .arg("for-each-ref")
-        .arg(&refname)
-        .arg("--format=%(objectname)")
-        .current_dir(bare_repo)
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "failed to spawn `git for-each-ref {refname}` in {}",
-                bare_repo.display()
-            )
-        })?;
-    if !out.status.success() {
-        bail!(
-            "`git for-each-ref {refname}` exited non-zero in {}: {}",
-            bare_repo.display(),
-            String::from_utf8_lossy(&out.stderr),
-        );
-    }
-    let oid = String::from_utf8(out.stdout)
-        .context("git for-each-ref output is not valid UTF-8")?
-        .trim()
-        .to_string();
-    if oid.is_empty() {
-        bail!(
-            "ref {refname} not found in bare repo at {} — the update push did not land",
-            bare_repo.display(),
-        );
-    }
-    Ok(oid)
-}
-
-/// First value of the first tag whose name slot equals `key`, if any.
-fn tag_value(event: &Event, key: &str) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.first().map(String::as_str) == Some(key) {
-            s.get(1).cloned()
-        } else {
-            None
-        }
-    })
-}
-
-/// The value of the `branch-name` tag on an event, if present.
-fn event_branch_name_tag(event: &Event) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.first().map(String::as_str) == Some("branch-name") {
-            s.get(1).cloned()
-        } else {
-            None
-        }
-    })
 }

@@ -374,6 +374,61 @@ impl GraspServer {
         }
         Ok(oid)
     }
+
+    /// Read the OID that `refs/nostr/<event_id_hex>` resolves to inside the
+    /// GRASP-06 `/prs/` bare repository at
+    /// `<git_data_path>/prs/<contributor_pubkey_hex>/<identifier>.git`.
+    ///
+    /// ngit-grasp stores the submitter pubkey as lowercase 64-char hex on disk
+    /// even though the HTTP endpoint uses npub (`/prs/<npub>/<id>.git`);
+    /// see ngit-grasp `src/grasp06/paths.rs::prs_repo_path`.
+    ///
+    /// Returns an error if the ref does not exist — that is a genuine test
+    /// failure: the PR push to the GRASP-06 `/prs/` endpoint did not land.
+    pub async fn read_nostr_ref_prs(
+        &self,
+        contributor_pubkey_hex: &str,
+        identifier: &str,
+        event_id_hex: &str,
+    ) -> Result<String> {
+        let bare_repo = self
+            .git_data_path
+            .join("prs")
+            .join(contributor_pubkey_hex)
+            .join(format!("{identifier}.git"));
+        let refname = format!("refs/nostr/{event_id_hex}");
+        let out = tokio::process::Command::new("git")
+            .arg("for-each-ref")
+            .arg(&refname)
+            .arg("--format=%(objectname)")
+            .current_dir(&bare_repo)
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to spawn `git for-each-ref {refname}` in {}",
+                    bare_repo.display()
+                )
+            })?;
+        if !out.status.success() {
+            bail!(
+                "`git for-each-ref {refname}` exited non-zero in {}: {}",
+                bare_repo.display(),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        let oid = String::from_utf8(out.stdout)
+            .context("git for-each-ref output is not valid UTF-8")?
+            .trim()
+            .to_string();
+        if oid.is_empty() {
+            bail!(
+                "ref {refname} not found in GRASP-06 prs bare repo at {} — the push did not land",
+                bare_repo.display(),
+            );
+        }
+        Ok(oid)
+    }
 }
 
 impl Drop for GraspServer {

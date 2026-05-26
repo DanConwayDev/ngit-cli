@@ -53,12 +53,15 @@
 //!    resolving to the contributor's tip OID.
 //! 8. No KIND_PULL_REQUEST_UPDATE event was emitted on any live surface.
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 use rstest::*;
-use test_harness::{CloneLogin, Harness, PublishRepoOpts};
+use test_harness::{
+    CloneLogin, Harness, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, PublishRepoOpts,
+    event_branch_name_tag, tag_value, tag_values,
+};
 use tokio::sync::OnceCell;
 
 /// Identifier passed to `ngit init --identifier`. Deliberately distinct from
@@ -68,14 +71,6 @@ const IDENTIFIER: &str = "pr-failover-test-repo";
 
 /// Feature branch name the contributor checks out before committing.
 const BRANCH: &str = "feature";
-
-/// `KIND_PULL_REQUEST` from `src/lib/git_events.rs:113`. Mirrored here so
-/// the test crate does not have to depend on the ngit lib crate.
-const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
-
-/// `KIND_PULL_REQUEST_UPDATE` from `src/lib/git_events.rs:114`. Mirrored for
-/// the same reason as `KIND_PULL_REQUEST`.
-const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
 
 // ---------------------------------------------------------------------------
 // Snapshot — captured side-effects of one `ngit send --force-pr` invocation
@@ -241,15 +236,23 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let contributor_pubkey = contributor_keys.public_key();
 
     // --- 4. Contributor: feature branch + first commit (t3.md) ---------------
-    run_git(&contributor, &["checkout", "-b", BRANCH]).await?;
+    contributor
+        .git_ok(
+            ["checkout", "-b", BRANCH],
+            &format!("git checkout -b {BRANCH}"),
+        )
+        .await?;
     std::fs::write(contributor.dir().join("t3.md"), "some content\n")
         .context("failed to write t3.md")?;
-    run_git(&contributor, &["add", "t3.md"]).await?;
-    run_git(
-        &contributor,
-        &["commit", "-m", "add t3.md", "--no-gpg-sign"],
-    )
-    .await?;
+    contributor
+        .git_ok(["add", "t3.md"], "git add t3.md")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "add t3.md", "--no-gpg-sign"],
+            "git commit -m add t3.md --no-gpg-sign",
+        )
+        .await?;
 
     let merge_base_oid = published.initial_oid.clone();
 
@@ -259,28 +262,34 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // in `test_harness/src/clock.rs`.
     std::fs::write(publisher.dir().join("t-on-main.md"), "content\n")
         .context("failed to write t-on-main.md")?;
-    run_git(&publisher, &["add", "t-on-main.md"]).await?;
-    run_git(
-        &publisher,
-        &["commit", "-m", "advance main", "--no-gpg-sign"],
-    )
-    .await?;
+    publisher
+        .git_ok(["add", "t-on-main.md"], "git add t-on-main.md")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "advance main", "--no-gpg-sign"],
+            "git commit -m advance main --no-gpg-sign",
+        )
+        .await?;
     publisher
         .nostr_push(["-u", "origin", "main"])
         .await
         .context("maintainer nostr_push (advance main) failed")?;
-    let main_tip_at_send_time = git_rev_parse(&publisher, "HEAD").await?;
+    let main_tip_at_send_time = publisher.rev_parse("HEAD").await?;
 
     // --- 6. Contributor: second commit (t4.md) --------------------------------
     std::fs::write(contributor.dir().join("t4.md"), "some content\n")
         .context("failed to write t4.md")?;
-    run_git(&contributor, &["add", "t4.md"]).await?;
-    run_git(
-        &contributor,
-        &["commit", "-m", "add t4.md", "--no-gpg-sign"],
-    )
-    .await?;
-    let pr_tip_oid = git_rev_parse(&contributor, "HEAD").await?;
+    contributor
+        .git_ok(["add", "t4.md"], "git add t4.md")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "add t4.md", "--no-gpg-sign"],
+            "git commit -m add t4.md --no-gpg-sign",
+        )
+        .await?;
+    let pr_tip_oid = contributor.rev_parse("HEAD").await?;
 
     // Pre-condition: all three oids must be distinct.
     if merge_base_oid == main_tip_at_send_time {
@@ -380,19 +389,10 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 10. Read git ref from secondary bare repo ---------------------------
     let pr_event_id_hex = pr_event.id.to_hex();
-    let bare_secondary = harness
+    let grasp_secondary_pr_ref_oid = harness
         .grasp("repo_secondary")
-        .git_data_path()
-        .join(&published.maintainer_npub)
-        .join(format!("{IDENTIFIER}.git"));
-    let grasp_secondary_pr_ref_oid = read_nostr_ref(&bare_secondary, &pr_event_id_hex)
-        .await
-        .with_context(|| {
-            format!(
-                "reading refs/nostr/{pr_event_id_hex} from secondary grasp bare repo at {}",
-                bare_secondary.display()
-            )
-        })?;
+        .read_nostr_ref(&published.maintainer_npub, IDENTIFIER, &pr_event_id_hex)
+        .await?;
 
     Ok(Snapshot {
         pr_event,
@@ -587,122 +587,4 @@ async fn no_pr_update_event(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
         s.pr_update_count,
     );
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Run `git <args>` inside `repo`, bailing with captured output on non-zero
-/// exit.
-async fn run_git(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
-    let label = format!("git {}", args.join(" "));
-    let out = repo
-        .git(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn `{label}`"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "`{label}` exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        )
-    }
-}
-
-/// Resolve `<rev>` to its full OID hex via `git rev-parse` inside `repo`.
-async fn git_rev_parse(repo: &test_harness::Repo, rev: &str) -> Result<String> {
-    let out = repo
-        .git(["rev-parse", rev])
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn git rev-parse {rev}"))?;
-    if !out.status.success() {
-        bail!(
-            "git rev-parse {rev} exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-    }
-    Ok(String::from_utf8(out.stdout)
-        .context("git rev-parse returned non-utf8")?
-        .trim()
-        .to_string())
-}
-
-/// Read the OID that `refs/nostr/<event_id_hex>` resolves to inside the bare
-/// repository at `bare_repo`. Uses `git for-each-ref` rather than git2 to
-/// avoid pulling the git2 library into the test's critical path.
-async fn read_nostr_ref(bare_repo: &Path, event_id_hex: &str) -> Result<String> {
-    let refname = format!("refs/nostr/{event_id_hex}");
-    let out = tokio::process::Command::new("git")
-        .arg("for-each-ref")
-        .arg(&refname)
-        .arg("--format=%(objectname)")
-        .current_dir(bare_repo)
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "failed to spawn `git for-each-ref {refname}` in {}",
-                bare_repo.display()
-            )
-        })?;
-    if !out.status.success() {
-        bail!(
-            "`git for-each-ref {refname}` exited non-zero in {}: {}",
-            bare_repo.display(),
-            String::from_utf8_lossy(&out.stderr),
-        );
-    }
-    let oid = String::from_utf8(out.stdout)
-        .context("git for-each-ref output is not valid UTF-8")?
-        .trim()
-        .to_string();
-    if oid.is_empty() {
-        bail!(
-            "ref {refname} not found in bare repo at {} — the PR push did not land",
-            bare_repo.display(),
-        );
-    }
-    Ok(oid)
-}
-
-/// First value of the first tag whose name slot equals `key`, if any.
-fn tag_value(event: &Event, key: &str) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.first().map(String::as_str) == Some(key) {
-            s.get(1).cloned()
-        } else {
-            None
-        }
-    })
-}
-
-/// All values (slots 1+) of the first tag whose name slot equals `key`.
-fn tag_values(event: &Event, key: &str) -> Vec<String> {
-    event
-        .tags
-        .iter()
-        .find(|t| t.as_slice().first().map(String::as_str) == Some(key))
-        .map(|t| t.as_slice()[1..].to_vec())
-        .unwrap_or_default()
-}
-
-/// The value of the `branch-name` tag on a nostr event, if present.
-fn event_branch_name_tag(event: &Event) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.first().map(String::as_str) == Some("branch-name") {
-            s.get(1).cloned()
-        } else {
-            None
-        }
-    })
 }
