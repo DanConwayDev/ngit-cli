@@ -7,25 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `ngit init --clean` drops any tags on the existing announcement that this version of ngit doesn't itself emit; by default such tags are now round-tripped verbatim so a tag added by a future ngit version or third-party tool isn't silently lost on republish, with a yellow stderr warning listing the carried-over tag names
+## [2.5.0] - 2026-05-26
 
 ### Changed
 
-- `ngit init` republishes now preserve unknown tags from the existing kind-30617 announcement instead of silently stripping them; on State C (MyAnnouncement) the publisher's own extras carry through, on State D (CoMaintainer) extras cascade from whichever maintainer's announcement has the newest `created_at` (same source as `name`/`description`/`web`/`hashtags`); repeated tags whose name matches one ngit already emits (e.g. two `clone` or `name` tags) are still collapsed to a single emission from the typed field
-- `git push pr/<branch>` and `ngit send` now default to PR kind (kind 1618) for new proposals when the repository announcement lists at least one GRASP server; previously only very large commits (>60 KB) or commits containing submodules triggered PR kind automatically
-- When a PR cannot be pushed to the repository's GRASP servers, ngit now falls back to pushing to a server from the contributor's own server list instead of prompting for an alternative URL and creating a personal-fork repository announcement
-- Completely replaced the integration test harness with a much more agile one and rewrote all integration tests against it. This was a key blocker for further planned improvements.
-- `ngit pr apply` / `ngit pr checkout` / `ngit pr list` now consult git servers lazily — only when the specific commit they need is not already present locally — and share a single `ensure_commit_local` helper. Previously each command had its own near-duplicate copy of the fetch logic, and `checkout` issued git-server requests unconditionally even when the commit was already in the working repository — thanks to m0wer (nostr:npub1w3vaxva0vcrx7pnvlpmede5smvafdl69xnu7ma82kaxl9us89zdsht4c5c) for the contribution
-- `ngit pr checkout` (and the interactive checkout path in `ngit pr list`) now tries the submitter-supplied `clone`-tag URLs on the PR event as a fallback if the repo's declared git servers don't carry the PR tip, matching what `ngit pr apply` already did. This is safe because the user has explicitly targeted that PR by id; the same fallback remains deliberately disabled for the passive `git clone` / `git fetch` paths in the remote helper, where a malicious submitter could otherwise slow down every operation against the repo
+- `git push pr/<branch>` and `ngit send` now default to PR kind for new proposals when the repository has at least one GRASP server; previously only oversized commits (>60 KB) or those containing submodules triggered PR kind automatically
+- When a PR cannot be pushed to the repository's GRASP servers, ngit uses GRASP-06 instead of creating a new personal-fork announcement; `ngit send --git-server` or `git push -o git-server=<url>` lets contributors target a custom git URL or GRASP server explicitly
+- `ngit init` republishes now preserve unknown tags from the existing announcement instead of silently stripping them, so tags added by a future ngit version or third-party tool are never lost on republish; a yellow warning lists the carried-over tag names and `--clean` will remove them
+- `ngit pr apply`, `ngit pr checkout`, and `ngit pr list` now consult git servers lazily — only when the needed commit is not already present locally — and share a single fetch helper; previously each command had its own near-duplicate fetch logic, and `checkout` fetched unconditionally even when the commit was already local — thanks to m0wer for the contribution
+- `ngit pr checkout` (and the interactive path in `ngit pr list`) now tries the submitter-supplied clone URLs from the PR event as a fallback when the repo's declared git servers don't carry the PR tip, matching the existing behaviour in `ngit pr apply`; this fallback is disabled for passive `git clone`/`git fetch` paths to prevent a malicious submitter slowing down every repo operation
+- Integration test harness completely rewritten for greater reliability and speed
 
 ### Fixed
 
-- `git push -f origin pr/<branch>` after rebasing a PR branch onto newer `main` produced a PR update event with a stale `merge-base` tag; the force-push path in the remote helper incorrectly forwarded the original PR event's stored `merge-base` tag, giving the pre-rebase fork point; fixed by always computing the merge-base from the actual git topology (`git merge-base <tip> <origin/main>`) for every push type, removing reliance on the stored event value entirely
-- `ngit pr checkout` correctly checked out the PR as a branch but left the working directory at the previous state
-- `ngit pr checkout --force` on a patch-kind proposal failed with `failed to find parent commit (...). run git pull and try again.` when the new revision was based on a commit the local repository did not yet have; `checkout_patch` now best-effort-fetches the patch chain's parent from the repo's git servers before applying
-- `ngit send --in-reply-to <hex_event_id>` for a non-proposal-root reference (issue mention) emitted an `["e", <id>]` tag on the cover letter instead of the NIP-21 quote `["q", <id>]` tag that the bech32 (`note1...`) form produced; the raw-hex branch in `event_tag_from_nip19_or_hex` ignored `EventRefType::Quote` and unconditionally built `TagStandard::Event`, so hex and bech32 inputs produced different tags for the same logical reference
+- Force-pushing a rebased `pr/<branch>` produced a PR update event with a stale `merge-base` tag; the remote helper was forwarding the original stored tag instead of recomputing from the actual git topology; the merge-base is now always recomputed from `git merge-base` for every push type
+- `ngit pr checkout` correctly checked out the PR as a local branch but left the working directory at its previous state
+- `ngit pr checkout --force` on a patch-kind proposal failed with "failed to find parent commit" when the new revision depended on a commit not yet in the local repo; the fetcher now retrieves the parent from the git servers before applying
+- `ngit send --in-reply-to <hex_event_id>` for a non-root reference (e.g. an issue mention) emitted an `["e", ...]` tag instead of the NIP-21 `["q", ...]` quote tag; hex and bech32 inputs now produce the same tag
 
 ## [2.4.4] - 2026-05-16
 
@@ -51,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- when a repo has multiple `nostr://` remotes sharing the same identifier, relays could return state events authored by maintainers of the *other* remote; without filtering, the newest event won regardless of author, pointing refs at the wrong commits; state event candidates in `run_list` are now filtered to maintainers of the current remote's repo announcement
+- when a repo has multiple `nostr://` remotes sharing the same identifier, relays could return state events authored by maintainers of the _other_ remote; without filtering, the newest event won regardless of author, pointing refs at the wrong commits; state event candidates in `run_list` are now filtered to maintainers of the current remote's repo announcement
 
 ## [2.4.2] - 2026-04-28
 
