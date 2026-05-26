@@ -24,4 +24,5 @@
 //! and follow the same fixture / case shape so failures stay
 //! pinpoint-named in `cargo test` output.
 
+mod ff_update;
 mod new_pr;
