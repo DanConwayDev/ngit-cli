@@ -47,6 +47,13 @@
 //!   result is one `KIND_PULL_REQUEST` event (not three new patches and not a
 //!   `KIND_PULL_REQUEST_UPDATE`) whose `e`/`p` tags back-reference the original
 //!   patch-series root and its author.
+//! - [`patch_update_to_pr`] — simpler companion to `patch_update_force_to_pr`:
+//!   no amend, no `-f`.  A plain fast-forward push of a single >64 KiB commit
+//!   on top of an existing patch series fires the size-triggered upgrade arm in
+//!   `push.rs:536-556`.  Asserts the result is one `KIND_PULL_REQUEST` event
+//!   (not a `Kind::GitPatch` and not a `KIND_PULL_REQUEST_UPDATE`) and that a
+//!   fresh clone advertises the single `pr/<branch>(<original_root_8>)` ref
+//!   resolving to the new commit OID.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -59,4 +66,5 @@ mod patch_kind_when_no_grasp;
 mod patch_update;
 mod patch_update_force;
 mod patch_update_force_to_pr;
+mod patch_update_to_pr;
 mod rebase_update;
