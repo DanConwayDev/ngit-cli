@@ -26,3 +26,4 @@
 
 mod ff_update;
 mod new_pr;
+mod rebase_update;
