@@ -565,11 +565,14 @@ fn branch_shaped_pr_refs<'a>(
         .collect()
 }
 
-/// Exactly one branch-shaped proposal advertisement
-/// (`(refs/heads/)?pr/<branch>(<shorthand>)`) in the fresh clone's
-/// `ls-remote` output.
+/// Exactly two branch-shaped proposal advertisements in the fresh clone's
+/// `ls-remote` output — one per namespace:
 ///
-/// Two would mean `list.rs` is double-advertising the proposal — for
+/// * `refs/pr/<branch>(<shorthand>)` from `get_all_proposals_state`
+/// * `refs/heads/pr/<branch>(<shorthand>)` from
+///   `get_open_and_draft_proposals_state`
+///
+/// Four would mean `list.rs` is double-advertising the proposal — for
 /// example, by treating the PR upgrade event as its own proposal root
 /// (which would happen if revision-root filtering in
 /// `utils.rs:144-149` stopped masking PR-kind revisions).
@@ -580,10 +583,10 @@ async fn fresh_clone_exactly_one_pr_branch(#[future] snapshot: Arc<Snapshot>) ->
     let pr_branch_refs = branch_shaped_pr_refs(&s.nostr_clone_ls_refs, &s.original_branch_name);
     assert_eq!(
         pr_branch_refs.len(),
-        1,
-        "expected exactly one branch-shaped proposal advertisement \
-         (`(refs/heads/)?pr/{}(<shorthand>)`) in the fresh clone; got {} \
-         (full ls-remote map: {:#?})",
+        2,
+        "expected exactly two branch-shaped proposal advertisements \
+         (one each under `refs/pr/` and `refs/heads/pr/` for `{}`) in the \
+         fresh clone; got {} (full ls-remote map: {:#?})",
         s.original_branch_name,
         pr_branch_refs.len(),
         s.nostr_clone_ls_refs,
@@ -591,7 +594,7 @@ async fn fresh_clone_exactly_one_pr_branch(#[future] snapshot: Arc<Snapshot>) ->
     Ok(())
 }
 
-/// The single branch-shaped advertisement uses the **original root patch
+/// Each branch-shaped advertisement uses the **original root patch
 /// id**'s 8-char shorthand and resolves to the new commit OID.
 ///
 /// Branch-name shorthand comes from `event_to_cover_letter(proposal)`
