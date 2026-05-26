@@ -69,6 +69,9 @@
 //!    `refs/remotes/origin/pr/feature` resolves to the new tip OID.
 //! 6. **grasp_has_refs_nostr_for_update** — the GRASP bare repo carries
 //!    `refs/nostr/<update_event_id>` resolving to the new tip OID.
+//! 7. **non_force_push_rejected** — a plain `git push origin pr/feature`
+//!    (without `-f`) after the rebase must be rejected by the remote; the force
+//!    flag is required to update a branch whose history has been rewritten.
 
 use std::sync::Arc;
 
@@ -137,6 +140,12 @@ struct Snapshot {
     /// OID that `refs/nostr/<update_event_id>` resolves to in the GRASP bare
     /// repo.  Must equal `update_tip_oid` (assertion 6).
     grasp_update_ref_oid: String,
+
+    /// `true` when the plain `git push origin pr/feature` (without `-f`)
+    /// attempt made after the rebase was rejected by the remote.
+    /// Expected to always be `true`; stored so that assertion 7 can fail the
+    /// test if the push unexpectedly succeeds.
+    non_force_push_was_rejected: bool,
 }
 
 static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
@@ -361,7 +370,22 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await
         .context("rev-parse HEAD after t3.md commit")?;
 
-    // --- 10. Contributor: force push — PR update after rebase ---------------
+    // --- 10. Contributor: attempt plain push (no -f) — must be rejected ------
+    //
+    // After a rebase the local branch history has diverged from the remote
+    // tracking ref (the original PR tip).  The remote must reject a non-force
+    // push because it is not a fast-forward.  We capture the outcome so that
+    // assertion 7 can verify the rejection, and we skip the force push below
+    // when this attempt unexpectedly succeeds (so the remaining assertions can
+    // still observe the event data from the successful push).
+    let plain_push_out = contributor
+        .git(["push", "origin", &format!("pr/{BRANCH}")])
+        .output()
+        .await
+        .context("failed to spawn git push origin pr/feature (no -f)")?;
+    let non_force_push_was_rejected = !plain_push_out.status.success();
+
+    // --- 11. Contributor: force push — PR update after rebase ---------------
     //
     // `git push -f origin pr/feature` (via nostr_push ["-f", ...]). The
     // remote helper detects the refspec starts with '+' (force flag), looks
@@ -371,12 +395,17 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // `root_proposal = Some(original_pr_event)` and `is_force_push = true`.
     // The merge-base must be computed as `get_commit_parent(first_commit)` =
     // main-v2, NOT as the original PR's stale `merge-base` tag (initial_oid).
-    contributor
-        .nostr_push(["-f", "origin", &format!("pr/{BRANCH}")])
-        .await
-        .context("nostr_push -f origin pr/feature (force push after rebase) failed")?;
+    //
+    // Skipped when the plain push above unexpectedly succeeded — the data is
+    // already on the remote so the subsequent snapshot reads still work.
+    if non_force_push_was_rejected {
+        contributor
+            .nostr_push(["-f", "origin", &format!("pr/{BRANCH}")])
+            .await
+            .context("nostr_push -f origin pr/feature (force push after rebase) failed")?;
+    }
 
-    // --- 11. Capture contributor local state after the force push -----------
+    // --- 12. Capture contributor local state after the force push -----------
     let contributor_snap = contributor
         .snapshot()
         .context("capturing contributor snapshot after force push")?;
@@ -392,7 +421,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         })?
         .clone();
 
-    // --- 12. Capture events from the GRASP after the force push -------------
+    // --- 13. Capture events from the GRASP after the force push -------------
     let pr_events_final = harness
         .grasp("repo")
         .events(
@@ -417,7 +446,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
          after `git push -f origin pr/feature` (force push after rebase)",
     )?;
 
-    // --- 13. Read the GRASP bare-repo ref before the harness drops ----------
+    // --- 14. Read the GRASP bare-repo ref before the harness drops ----------
     let update_event_id_hex = pr_update_event.id.to_hex();
     let grasp_update_ref_oid = harness
         .grasp("repo")
@@ -434,6 +463,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         update_tip_oid,
         contributor_remote_tracking_oid,
         grasp_update_ref_oid,
+        non_force_push_was_rejected,
     })
 }
 
@@ -584,6 +614,27 @@ async fn grasp_has_refs_nostr_for_update(#[future] snapshot: Arc<Snapshot>) -> R
         "GRASP refs/nostr/<update_event_id> resolves to {} but expected update tip {}; \
          git data may not have been pushed for the force-push rebase update",
         s.grasp_update_ref_oid, s.update_tip_oid,
+    );
+    Ok(())
+}
+
+/// Assertion 7: a plain `git push origin pr/feature` (without `-f`) must be
+/// rejected by the remote after the rebase.
+///
+/// After rebasing, the local `pr/feature` history has diverged from the
+/// remote tracking ref — the original PR tip is no longer an ancestor.  The
+/// remote (GRASP / git-remote-nostr) must refuse a non-fast-forward push
+/// unless the force flag is supplied.  If the plain push had been accepted the
+/// test marks it as a failure and (in [`capture_snapshot`]) skips the
+/// subsequent force push so the remaining assertions are still observable.
+#[rstest]
+#[tokio::test]
+async fn non_force_push_rejected(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert!(
+        s.non_force_push_was_rejected,
+        "plain `git push origin pr/{BRANCH}` (no -f) after rebase was unexpectedly \
+         accepted by the remote; a non-fast-forward push should be rejected without -f",
     );
     Ok(())
 }
