@@ -238,14 +238,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         &main_tip,
     )?;
 
+    let commits_too_big = git_repo.are_commits_too_big_for_patches(&commits);
+    let has_submodules = git_repo.do_commits_contain_submodules(&commits);
+    let repo_has_grasp_server = !repo_ref.grasp_servers().is_empty();
     let should_be_pr = {
         if let Some(root_proposal) = &root_proposal {
             proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
         } else {
             false
         }
-    } || git_repo.are_commits_too_big_for_patches(&commits)
-        || git_repo.do_commits_contain_submodules(&commits);
+    } || commits_too_big
+        || has_submodules
+        || (root_proposal.is_none() && repo_has_grasp_server);
 
     let as_pr = if args.force_patch {
         false

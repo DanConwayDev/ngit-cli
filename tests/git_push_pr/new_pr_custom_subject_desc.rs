@@ -22,11 +22,10 @@
 //! 3. A fresh contributor clones and logs in as a new account.
 //! 4. Contributor checks out a `pr/feature` branch and makes two commits with
 //!    plain commit messages (not used for the PR title/description here).
-//! 5. Contributor runs:
-//!    `git push -o title=bla -o 'description=bla\n\ntest' -u origin pr/feature`
-//!    (via [`Repo::nostr_push`] for timing safety; the `\n` sequences in the
-//!    description option string are literal backslash-n characters that
-//!    `decode_push_option_escapes` turns into real newlines).
+//! 5. Contributor runs: `git push -o title=bla -o 'description=bla\n\ntest' -u
+//!    origin pr/feature` (via [`Repo::nostr_push`] for timing safety; the `\n`
+//!    sequences in the description option string are literal backslash-n
+//!    characters that `decode_push_option_escapes` turns into real newlines).
 //! 6. [`capture_snapshot`] reads all observable side-effects into a
 //!    [`Snapshot`].  The harness then drops.
 //! 7. Each `#[rstest]` case asserts on a different slice of the snapshot.
@@ -45,10 +44,9 @@
 //! 10. A fresh nostr-URL clone lists the branch as `pr/feature(<8-hex>)`.
 //! 11. PR event `subject` tag equals `PR_TITLE` (the `-o title=` value), NOT
 //!     the first commit's summary — confirming the override path fired.
-//! 12. PR event `content` equals `PR_DESCRIPTION` with **real** newlines
-//!     (i.e. `bla` + LF + LF + `test`), confirming that `\n` sequences in
-//!     the `-o description=` value were decoded by
-//!     `decode_push_option_escapes`.
+//! 12. PR event `content` equals `PR_DESCRIPTION` with **real** newlines (i.e.
+//!     `bla` + LF + LF + `test`), confirming that `\n` sequences in the `-o
+//!     description=` value were decoded by `decode_push_option_escapes`.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -104,9 +102,9 @@ async fn snapshot() -> Arc<Snapshot> {
     SNAPSHOT
         .get_or_init(|| async {
             Arc::new(
-                capture_snapshot()
-                    .await
-                    .expect("git_push_pr::new_pr_custom_subject_desc fixture: capture_snapshot failed"),
+                capture_snapshot().await.expect(
+                    "git_push_pr::new_pr_custom_subject_desc fixture: capture_snapshot failed",
+                ),
             )
         })
         .await
@@ -429,7 +427,8 @@ async fn upstream_tracking_config_set(#[future] snapshot: Arc<Snapshot>) -> Resu
 async fn grasp_has_refs_nostr_for_pr(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
-        s.grasp_pr_ref_oid, s.contributor_tip_oid,
+        s.grasp_pr_ref_oid,
+        s.contributor_tip_oid,
         "GRASP refs/nostr/{} resolves to {} but expected tip {}",
         &s.pr_event_id_hex[..16],
         s.grasp_pr_ref_oid,
@@ -552,11 +551,9 @@ async fn pr_event_content_is_custom_description_with_real_newlines(
 ) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
-        s.pr_event.content,
-        PR_DESCRIPTION,
+        s.pr_event.content, PR_DESCRIPTION,
         "PR event content should equal custom description {:?} (with real newlines); got {:?}",
-        PR_DESCRIPTION,
-        s.pr_event.content,
+        PR_DESCRIPTION, s.pr_event.content,
     );
     Ok(())
 }

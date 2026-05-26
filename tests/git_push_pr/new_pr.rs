@@ -643,9 +643,7 @@ async fn new_clone_lists_pr_feature_branch(#[future] snapshot: Arc<Snapshot>) ->
 /// preserved verbatim in the tag.
 #[rstest]
 #[tokio::test]
-async fn pr_event_subject_is_first_commit_subject(
-    #[future] snapshot: Arc<Snapshot>,
-) -> Result<()> {
+async fn pr_event_subject_is_first_commit_subject(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
         tag_value(&s.pr_event, "subject").as_deref(),
@@ -672,11 +670,9 @@ async fn pr_event_content_is_first_commit_description(
 ) -> Result<()> {
     let s = snapshot.await;
     assert_eq!(
-        s.pr_event.content,
-        COMMIT_DESCRIPTION,
+        s.pr_event.content, COMMIT_DESCRIPTION,
         "PR event content should equal first commit description {:?}; got {:?}",
-        COMMIT_DESCRIPTION,
-        s.pr_event.content,
+        COMMIT_DESCRIPTION, s.pr_event.content,
     );
     Ok(())
 }

@@ -19,9 +19,9 @@
 //!   `-u` upstream config are correctly written, the grasp bare repo carries
 //!   `refs/nostr/<event_id>`, and a fresh clone lists the branch as
 //!   `pr/feature(<shorthand>)`.
- //! - [`new_pr_custom_subject_desc`] — contributor pushes `pr/feature` with
-//!   `-o title=bla -o 'description=bla\n\ntest'` push options.  Asserts that
-//!   the `subject` tag and `content` field of the PR event carry the override
+//! - [`new_pr_custom_subject_desc`] — contributor pushes `pr/feature` with `-o
+//!   title=bla -o 'description=bla\n\ntest'` push options.  Asserts that the
+//!   `subject` tag and `content` field of the PR event carry the override
 //!   values and that `\n` (backslash + 'n') sequences in the description are
 //!   decoded into real newline characters by `decode_push_option_escapes`.
 //! - [`patch_kind_when_no_grasp`] — contributor pushes a `pr/feature` branch
