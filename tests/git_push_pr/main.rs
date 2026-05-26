@@ -29,6 +29,12 @@
 //!   Asserts the complementary code path: `Kind::GitPatch` events are produced
 //!   (not KIND_PULL_REQUEST), confirming that `repo_has_grasp_server = false`
 //!   routes back to the traditional patch-kind format.
+//! - [`patch_update`] — a fresh contributor publishes a patch-series proposal
+//!   via `ngit send --force-patch`; the maintainer then clones, checks out the
+//!   remote-tracking `pr/<branch>(<shorthand>)` branch, commits, and `git
+//!   push`es.  Asserts that the push produces another `Kind::GitPatch` event
+//!   (not `KIND_PULL_REQUEST` or `KIND_PULL_REQUEST_UPDATE`) — the
+//!   patch-kind-stays-patch-kind rule from `push.rs:655-658`.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -38,4 +44,5 @@ mod ff_update;
 mod new_pr;
 mod new_pr_custom_subject_desc;
 mod patch_kind_when_no_grasp;
+mod patch_update;
 mod rebase_update;
