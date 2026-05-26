@@ -80,6 +80,13 @@ path = "src/bin/git_remote_nostr/main.rs"
 name = "git_push_state"
 path = "tests/git_push_state/main.rs"
 
+# `git push pr/<branch>` producing PR events — one submodule per scenario under
+# `tests/git_push_pr/`. The directory layout means Cargo doesn't auto-discover
+# this test, so it needs an explicit entry.
+[[test]]
+name = "git_push_pr"
+path = "tests/git_push_pr/main.rs"
+
 [profile.release]
 lto = true
 strip = "symbols"
