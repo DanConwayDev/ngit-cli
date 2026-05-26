@@ -198,6 +198,28 @@ fn example() -> Result<()> {
 2. **Ref naming**: PRs use `pr/` prefix
 3. **State sync**: Must keep git refs in sync with nostr events
 
+### Tag round-tripping (kind:30617 announcements)
+
+`RepoRef::try_from` preserves any tag whose first slot is not in
+`is_known_tag_name` into `RepoRef::extra_tags`. `RepoRef::to_event`
+re-emits those tags verbatim after the typed-field block. The intent
+is that ngit never silently strips a tag added by a future ngit
+version or a third-party tool.
+
+When adding a new typed tag to ngit's emission:
+
+1. Add a parse arm in `RepoRef::try_from` (`src/lib/repo_ref.rs`).
+2. Add the name to `is_known_tag_name` so duplicates on the source
+   event don't smuggle past the typed field and produce a double
+   emission. The `extra_tags_round_trip::allowlist_matches_emitted_tag_names`
+   unit test catches this drift.
+3. Decide whether the field should cascade from the latest event
+   across maintainers (like `name`/`description`/`web`/`hashtags`/
+   `extra_tags`) by sourcing it from `latest_event_repo_ref(rr)` in
+   `init.rs::resolve_fields`.
+
+`ngit init --clean` drops the inherited `extra_tags` on republish.
+
 ## Dependencies to Be Aware Of
 
 ### Critical Dependencies

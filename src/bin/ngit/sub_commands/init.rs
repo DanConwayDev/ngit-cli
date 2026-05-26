@@ -113,6 +113,12 @@ struct ResolvedFields {
     blossoms: Vec<Url>,
     hashtags: Vec<String>,
     selected_grasp_servers: Vec<String>,
+    /// Tags from the source announcement that aren't in ngit's known
+    /// allowlist ([`is_known_tag_name`]), preserved verbatim on
+    /// republish so that tags added by a future ngit version or a
+    /// third-party tool aren't silently dropped. Cleared when
+    /// `--clean` is passed. See [`SubCommandArgs::clean`].
+    extra_tags: Vec<nostr::Tag>,
 }
 
 /// Extract my own announcement's `RepoRef` from the events map.
@@ -434,6 +440,11 @@ pub struct SubCommandArgs {
     /// only publish nostr events to repo relays, not to user or default relays
     /// (sets nostr.repo-relay-only in local git config)
     repo_relay_only: bool,
+    #[clap(long)]
+    /// drop unknown tags from the existing announcement when republishing
+    /// (default is to preserve them so tags added by future ngit versions
+    /// or third-party tools aren't silently lost)
+    clean: bool,
 }
 
 impl SubCommandArgs {
@@ -449,6 +460,7 @@ impl SubCommandArgs {
             || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
             || self.repo_relay_only
+            || self.clean
     }
 }
 
@@ -1057,6 +1069,22 @@ fn resolve_fields(
         selected
     };
 
+    // --- Extra (unknown) tags ---
+    // Cascade: --clean wipes them, otherwise inherit from the latest
+    // event across all maintainers (so a co-maintainer's newer publish
+    // propagates new tags, matching how name/description/web cascade).
+    // Falls back to my own event for symmetry; in MyAnnouncement state
+    // my event *is* the latest so both branches return the same set.
+    let extra_tags: Vec<nostr::Tag> = if args.clean {
+        vec![]
+    } else if let Some(ref lr) = latest {
+        lr.extra_tags.clone()
+    } else if let Some(ref mr) = my_ref {
+        mr.extra_tags.clone()
+    } else {
+        vec![]
+    };
+
     Ok(ResolvedFields {
         identifier,
         name,
@@ -1069,6 +1097,7 @@ fn resolve_fields(
         blossoms,
         hashtags,
         selected_grasp_servers,
+        extra_tags,
     })
 }
 
@@ -1160,6 +1189,31 @@ async fn publish_and_finalize(
     let git_repo_path = git_repo.get_path()?;
 
     // Step 1: Build RepoRef
+    //
+    // `fields.extra_tags` carries any tags on the source announcement
+    // that this ngit doesn't itself emit (see `is_known_tag_name`).
+    // They are round-tripped verbatim so a tag added by a future ngit
+    // version or third-party tool isn't silently lost; `--clean`
+    // suppresses the carry-over upstream in `resolve_fields`.
+    if !fields.extra_tags.is_empty() {
+        let names: Vec<String> = fields
+            .extra_tags
+            .iter()
+            .filter_map(|t| t.as_slice().first().cloned())
+            .collect();
+        let warn_style = Style::new().yellow();
+        eprintln!(
+            "{}",
+            warn_style.apply_to(format!(
+                "warning: preserving unknown tag(s) from existing announcement: {}",
+                names.join(", "),
+            )),
+        );
+        eprintln!(
+            "{}",
+            warn_style.apply_to("         pass --clean to drop them on republish"),
+        );
+    }
     let repo_ref = RepoRef {
         identifier: fields.identifier.clone(),
         name: fields.name,
@@ -1175,11 +1229,7 @@ async fn publish_and_finalize(
         maintainers: fields.maintainers.clone(),
         events: HashMap::new(),
         nostr_git_url: None,
-        // Phase 2 (CLI) will populate this from the latest event's
-        // `extra_tags` so unknown tags round-trip on republish. Until
-        // then, ngit init re-emits exactly the typed fields, same
-        // behaviour as before this change.
-        extra_tags: vec![],
+        extra_tags: fields.extra_tags,
     };
 
     // Step 2: Create event
