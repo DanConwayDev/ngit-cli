@@ -1175,6 +1175,11 @@ async fn publish_and_finalize(
         maintainers: fields.maintainers.clone(),
         events: HashMap::new(),
         nostr_git_url: None,
+        // Phase 2 (CLI) will populate this from the latest event's
+        // `extra_tags` so unknown tags round-trip on republish. Until
+        // then, ngit init re-emits exactly the typed fields, same
+        // behaviour as before this change.
+        extra_tags: vec![],
     };
 
     // Step 2: Create event

@@ -48,6 +48,36 @@ pub struct RepoRef {
     pub maintainers_without_annoucnement: Option<Vec<PublicKey>>,
     pub events: HashMap<Nip19Coordinate, nostr::Event>,
     pub nostr_git_url: Option<NostrUrlDecoded>,
+    /// Tags on the source announcement event whose first slot is not a name
+    /// this version of ngit knows about. Round-tripped verbatim on republish
+    /// so that tags added by a future ngit version or a third-party tool are
+    /// not silently dropped. See [`is_known_tag_name`] for the allowlist of
+    /// names this field excludes.
+    pub extra_tags: Vec<Tag>,
+}
+
+/// Names of tags ngit itself parses on `kind:30617` (`GitRepoAnnouncement`)
+/// events. Used by [`RepoRef::try_from`] to decide whether a tag is "ours"
+/// (consumed by a typed field, with duplicates collapsed on re-emission) or
+/// foreign (preserved verbatim in [`RepoRef::extra_tags`]).
+///
+/// `alt` is in the list because [`RepoRef::to_event`] regenerates it from
+/// `self.name`; a stale `alt` on the source event would otherwise survive
+/// alongside the regenerated one.
+pub fn is_known_tag_name(name: &str) -> bool {
+    matches!(
+        name,
+        "d" | "name"
+            | "description"
+            | "clone"
+            | "web"
+            | "r"
+            | "relays"
+            | "t"
+            | "blossoms"
+            | "maintainers"
+            | "alt"
+    )
 }
 
 impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
@@ -79,6 +109,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
             maintainers_without_annoucnement: None,
             events: HashMap::new(),
             nostr_git_url: None,
+            extra_tags: Vec::new(),
         };
 
         for tag in event.tags.iter() {
@@ -143,7 +174,22 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                         );
                     }
                 }
-                _ => {}
+                _ => {
+                    // Catch-all: any tag that didn't match a typed arm above.
+                    //
+                    // - If the first slot is a *known* tag name, drop it. Either the typed arm
+                    //   already consumed an earlier occurrence (this is a duplicate that would
+                    //   otherwise smuggle past ngit's "one tag per known name on emission"
+                    //   invariant) or the tag is malformed for its known shape. Either way, ngit's
+                    //   typed field is the single source of truth on republish.
+                    // - Otherwise the tag is foreign — preserve it verbatim so a future ngit
+                    //   version's or third-party tool's tag isn't silently stripped on the next
+                    //   republish.
+                    let first = tag.as_slice().first().map(String::as_str);
+                    if !first.is_some_and(is_known_tag_name) {
+                        r.extra_tags.push(tag.clone());
+                    }
+                }
             }
         }
 
@@ -240,6 +286,13 @@ impl RepoRef {
                                 .map(|r| r.to_string_without_trailing_slash()),
                         )]
                     },
+                    // Unknown tags carried over verbatim from the source
+                    // announcement. See [`RepoRef::extra_tags`] and
+                    // [`is_known_tag_name`]: ngit-known names never end up
+                    // here (they round-trip through their typed field), so
+                    // appending unconditionally cannot duplicate a typed
+                    // tag emitted above.
+                    self.extra_tags.clone(),
                     // code languages and hashtags
                 ]
                 .concat(),
@@ -951,6 +1004,7 @@ mod tests {
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             events: HashMap::new(),
             nostr_git_url: None,
+            extra_tags: vec![],
         }
         .to_event(&TEST_KEY_1_SIGNER)
         .await
@@ -1200,6 +1254,171 @@ mod tests {
             async fn no_other_tags() {
                 assert_eq!(create().await.tags.len(), 9)
             }
+        }
+    }
+
+    /// Round-trip behaviour of [`RepoRef::extra_tags`]: unknown tags on the
+    /// source event survive `try_from` → `to_event`, known-name duplicates
+    /// do not, and the [`is_known_tag_name`] allowlist matches what
+    /// [`RepoRef::to_event`] actually emits.
+    ///
+    /// CLI-level behaviour (`--clean` flag, yellow warning, inheritance from
+    /// the latest event across maintainers) is tested separately in
+    /// `tests/init_preserves_unknown_tags.rs`. These tests pin only the
+    /// library-level invariant the CLI relies on.
+    mod extra_tags_round_trip {
+        use nostr::EventBuilder;
+
+        use super::*;
+
+        /// Build the canonical fixture event from [`create`], then re-sign a
+        /// copy with `extra` appended after its existing tags. Uses
+        /// [`EventBuilder`] (not [`nostr::Event::from_json`] string surgery)
+        /// so the new tags land on a valid signed event the same shape ngit
+        /// itself produces.
+        async fn create_with_extra_tags(extra: Vec<Tag>) -> nostr::Event {
+            let base = create().await;
+            let mut tags: Vec<Tag> = base.tags.iter().cloned().collect();
+            tags.extend(extra);
+            EventBuilder::new(base.kind, base.content)
+                .tags(tags)
+                .sign_with_keys(&TEST_KEY_1_KEYS)
+                .unwrap()
+        }
+
+        /// `is_known_tag_name` returns true for every tag name
+        /// [`RepoRef::to_event`] emits. If a future change adds a new
+        /// typed tag without updating the allowlist, that tag would end up
+        /// in `extra_tags` on round-trip and get emitted twice — once from
+        /// the typed field, once from `extra_tags`. This test catches that
+        /// drift by parsing the canonical fixture event and asserting no
+        /// emitted tag name leaks into `extra_tags`.
+        #[tokio::test]
+        async fn allowlist_matches_emitted_tag_names() {
+            let parsed = RepoRef::try_from((create().await, None)).unwrap();
+            let leaked: Vec<&str> = parsed
+                .extra_tags
+                .iter()
+                .filter_map(|t| t.as_slice().first().map(String::as_str))
+                .collect();
+            assert!(
+                leaked.is_empty(),
+                "tag name(s) {leaked:?} leaked into extra_tags from the \
+                 canonical fixture — every tag name `to_event` emits must \
+                 be in `is_known_tag_name`",
+            );
+        }
+
+        /// A single-value unknown tag (`["example", "value"]`) survives
+        /// parse → re-emit verbatim.
+        #[tokio::test]
+        async fn preserves_single_value_unknown_tag() {
+            let extras = vec![Tag::custom(
+                nostr::TagKind::Custom("example".into()),
+                vec!["value".to_string()],
+            )];
+            let event = create_with_extra_tags(extras).await;
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+            let matching: Vec<&[String]> = re_emitted
+                .tags
+                .iter()
+                .map(nostr::Tag::as_slice)
+                .filter(|s| s.first().map(String::as_str) == Some("example"))
+                .collect();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(
+                matching[0],
+                &["example".to_string(), "value".to_string()][..],
+            );
+        }
+
+        /// A multi-value unknown tag (`["multi", "v1", "v2"]`) survives as
+        /// one tag with both values, not split or truncated.
+        #[tokio::test]
+        async fn preserves_multi_value_unknown_tag() {
+            let extras = vec![Tag::custom(
+                nostr::TagKind::Custom("multi".into()),
+                vec!["v1".to_string(), "v2".to_string()],
+            )];
+            let event = create_with_extra_tags(extras).await;
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+            let matching: Vec<&[String]> = re_emitted
+                .tags
+                .iter()
+                .map(nostr::Tag::as_slice)
+                .filter(|s| s.first().map(String::as_str) == Some("multi"))
+                .collect();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(
+                matching[0],
+                &["multi".to_string(), "v1".to_string(), "v2".to_string()][..],
+            );
+        }
+
+        /// Two separate tags with the *same* unknown name survive as two
+        /// distinct tags. Required by any schema that uses repeated tags
+        /// of the same name (NIP-style `t`/`r`/etc. shape).
+        #[tokio::test]
+        async fn preserves_repeated_unknown_tag_name() {
+            let extras = vec![
+                Tag::custom(
+                    nostr::TagKind::Custom("repeat".into()),
+                    vec!["v1".to_string()],
+                ),
+                Tag::custom(
+                    nostr::TagKind::Custom("repeat".into()),
+                    vec!["v2".to_string()],
+                ),
+            ];
+            let event = create_with_extra_tags(extras).await;
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+            let matching: Vec<&[String]> = re_emitted
+                .tags
+                .iter()
+                .map(nostr::Tag::as_slice)
+                .filter(|s| s.first().map(String::as_str) == Some("repeat"))
+                .collect();
+            assert_eq!(matching.len(), 2);
+            let values: Vec<&str> = matching
+                .iter()
+                .filter_map(|t| t.get(1).map(String::as_str))
+                .collect();
+            assert!(values.contains(&"v1"));
+            assert!(values.contains(&"v2"));
+        }
+
+        /// A duplicate of a *known* tag name on the source event must not
+        /// leak into `extra_tags` — `to_event` would otherwise emit two
+        /// `name` tags (one from the typed field, one from extras). The
+        /// typed field is the single source of truth for known names.
+        #[tokio::test]
+        async fn drops_duplicate_known_name_tag_from_extras() {
+            let extras = vec![Tag::custom(
+                nostr::TagKind::Custom("name".into()),
+                vec!["smuggled".to_string()],
+            )];
+            let event = create_with_extra_tags(extras).await;
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(
+                parsed.extra_tags.is_empty(),
+                "duplicate `name` tag leaked into extra_tags: {:?}",
+                parsed.extra_tags,
+            );
+            let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+            let name_tags: Vec<&[String]> = re_emitted
+                .tags
+                .iter()
+                .map(nostr::Tag::as_slice)
+                .filter(|s| s.first().map(String::as_str) == Some("name"))
+                .collect();
+            assert_eq!(
+                name_tags.len(),
+                1,
+                "expected exactly one `name` tag after round-trip; got {name_tags:?}",
+            );
         }
     }
 

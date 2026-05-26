@@ -135,6 +135,7 @@ pub async fn accept_maintainership_with_defaults(
         maintainers,
         events: HashMap::new(),
         nostr_git_url: None,
+        extra_tags: vec![],
     };
 
     // --- Step 5: sign and publish the announcement ---
