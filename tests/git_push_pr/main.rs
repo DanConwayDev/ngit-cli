@@ -41,6 +41,12 @@
 //!   `["e", <original_root>, _, "reply"]` back-reference; the tip patch carries
 //!   `["e", <revision_root>, _, "root"]` and `["e", <second_patch>, _,
 //!   "reply"]`.
+//! - [`patch_update_force_to_pr`] — like `patch_update_force`, but the amended
+//!   commit writes a >64 KiB file so `are_commits_too_big_for_patches` returns
+//!   true and the force push fires the patch→PR upgrade path.  Asserts that the
+//!   result is one `KIND_PULL_REQUEST` event (not three new patches and not a
+//!   `KIND_PULL_REQUEST_UPDATE`) whose `e`/`p` tags back-reference the original
+//!   patch-series root and its author.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -52,4 +58,5 @@ mod new_pr_custom_subject_desc;
 mod patch_kind_when_no_grasp;
 mod patch_update;
 mod patch_update_force;
+mod patch_update_force_to_pr;
 mod rebase_update;
