@@ -142,7 +142,7 @@ async fn fetch_open_or_draft_proposals_from_patches(
         let current_user = get_curent_user(git_repo)?;
 
         for refstr in proposal_refs.keys() {
-            if let Some((_, (_, events_to_apply))) = find_proposal_and_patches_by_branch_name(
+            if let Some((_, (_, events_to_apply, _))) = find_proposal_and_patches_by_branch_name(
                 refstr,
                 &open_and_draft_proposals,
                 current_user.as_ref(),

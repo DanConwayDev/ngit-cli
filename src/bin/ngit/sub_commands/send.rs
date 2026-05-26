@@ -47,7 +47,8 @@ pub struct SubCommandArgs {
     /// publish as Pull Request even if each commit is < 60kb
     #[arg(long, action)]
     pub(crate) force_pr: bool,
-    /// publish as Patches even if they may be > 60kb
+    /// publish as Patches even if they may be > 60kb; cannot be used when the
+    /// existing proposal is already a PR kind (downgrades are not possible)
     #[arg(long, action)]
     pub(crate) force_patch: bool,
     #[clap(long = "push-option", short = 'o', value_parser, num_args = 0..)]
@@ -241,17 +242,22 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let commits_too_big = git_repo.are_commits_too_big_for_patches(&commits);
     let has_submodules = git_repo.do_commits_contain_submodules(&commits);
     let repo_has_grasp_server = !repo_ref.grasp_servers().is_empty();
-    let should_be_pr = {
-        if let Some(root_proposal) = &root_proposal {
-            proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
-        } else {
-            false
-        }
-    } || commits_too_big
+    let existing_thread_is_pr = if let Some(root_proposal) = &root_proposal {
+        proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
+    } else {
+        false
+    };
+    let should_be_pr = existing_thread_is_pr
+        || commits_too_big
         || has_submodules
         || (root_proposal.is_none() && repo_has_grasp_server);
 
     let as_pr = if args.force_patch {
+        if existing_thread_is_pr {
+            bail!(
+                "cannot downgrade an existing PR proposal to patches; omit --force-patch to send as a PR update"
+            );
+        }
         false
     } else if args.force_pr {
         true

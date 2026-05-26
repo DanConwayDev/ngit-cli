@@ -180,7 +180,7 @@ async fn get_open_and_draft_proposals_state(
     // below.
     let mut missing_pr_oids: Vec<String> = open_and_draft_proposals
         .values()
-        .filter_map(|(_, events)| {
+        .filter_map(|(_, events, _)| {
             events
                 .iter()
                 .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
@@ -230,7 +230,7 @@ async fn get_open_and_draft_proposals_state(
 
     let mut state = HashMap::new();
     let current_user = get_curent_user(git_repo)?;
-    for (_, (proposal, events_to_apply)) in open_and_draft_proposals {
+    for (_, (proposal, events_to_apply, _)) in open_and_draft_proposals {
         if let Ok(cl) = event_to_cover_letter(&proposal) {
             if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
                 branch_name = if let Some(public_key) = current_user {
@@ -304,7 +304,7 @@ async fn get_all_proposals_state(
     let mut state = HashMap::new();
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
     let current_user = get_curent_user(git_repo)?;
-    for (proposal, events_to_apply) in all_proposals.values() {
+    for (proposal, events_to_apply, _) in all_proposals.values() {
         if let Ok(cl) = event_to_cover_letter(proposal) {
             if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
                 branch_name = if let Some(public_key) = current_user {

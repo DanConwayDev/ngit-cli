@@ -117,10 +117,26 @@ pub fn read_line<'a>(stdin: &io::Stdin, line: &'a mut String) -> io::Result<Vec<
     Ok(tokens)
 }
 
+/// Returns the `KIND_PULL_REQUEST` revision-root event from a proposal's full
+/// event set — present only when the original patch proposal was later upgraded
+/// to a PR kind via a force-push or `--force-pr` send.  Returns `None` for
+/// normal patch threads and for proposals that started as `KIND_PULL_REQUEST`.
+///
+/// This is the event that subsequent PR updates should reference via their `E`
+/// tag, ensuring the tag always points at the PR kind event (never a PR update)
+/// regardless of how many PR updates have occurred since the upgrade.
+fn pr_upgrade_root(commits_events: &[Event]) -> Option<Event> {
+    commits_events
+        .iter()
+        .filter(|e| event_is_revision_root(e) && e.kind.eq(&KIND_PULL_REQUEST))
+        .max_by_key(|e| e.created_at)
+        .cloned()
+}
+
 pub async fn get_open_or_draft_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-) -> Result<HashMap<EventId, (Event, Vec<Event>)>> {
+) -> Result<HashMap<EventId, (Event, Vec<Event>, Option<Event>)>> {
     let git_repo_path = git_repo.get_path()?;
     let proposals: Vec<nostr::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
@@ -164,7 +180,11 @@ pub async fn get_open_or_draft_proposals(
                 {
                     open_or_draft_proposals.insert(
                         proposal.id,
-                        (proposal.clone(), most_recent_proposal_patch_chain),
+                        (
+                            proposal.clone(),
+                            most_recent_proposal_patch_chain,
+                            pr_upgrade_root(&commits_events),
+                        ),
                     );
                 }
             }
@@ -176,7 +196,7 @@ pub async fn get_open_or_draft_proposals(
 pub async fn get_all_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-) -> Result<HashMap<EventId, (Event, Vec<Event>)>> {
+) -> Result<HashMap<EventId, (Event, Vec<Event>, Option<Event>)>> {
     let git_repo_path = git_repo.get_path()?;
     let proposals: Vec<nostr::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
@@ -202,7 +222,14 @@ pub async fn get_all_proposals(
             if let Ok(most_recent_proposal_patch_chain) =
                 get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
             {
-                all_proposals.insert(proposal.id, (proposal, most_recent_proposal_patch_chain));
+                all_proposals.insert(
+                    proposal.id,
+                    (
+                        proposal,
+                        most_recent_proposal_patch_chain,
+                        pr_upgrade_root(&commits_events),
+                    ),
+                );
             }
         }
     }
@@ -240,12 +267,13 @@ pub async fn proposal_tip_is_pr_or_pr_update(
     ))
 }
 
+#[allow(clippy::type_complexity)]
 pub fn find_proposal_and_patches_by_branch_name<'a>(
     refstr: &'a str,
-    proposals: &'a HashMap<EventId, (Event, Vec<Event>)>,
+    proposals: &'a HashMap<EventId, (Event, Vec<Event>, Option<Event>)>,
     current_user: Option<&PublicKey>,
-) -> Option<(&'a EventId, &'a (Event, Vec<Event>))> {
-    proposals.iter().find(|(_, (proposal, _))| {
+) -> Option<(&'a EventId, &'a (Event, Vec<Event>, Option<Event>))> {
+    proposals.iter().find(|(_, (proposal, _, _))| {
         is_event_proposal_root_for_branch(proposal, refstr, current_user).unwrap_or(false)
     })
 }

@@ -469,9 +469,15 @@ async fn process_proposal_refspecs(
         let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
 
         // this failed to find existing PR from user
-        if let Some((_, (proposal, patches))) =
+        if let Some((_, (proposal, patches, pr_upgrade_root))) =
             find_proposal_and_patches_by_branch_name(to, &all_proposals, Some(&current_user))
         {
+            // After a patch→PR upgrade, pr_upgrade_root is the KIND_PULL_REQUEST
+            // event that should be referenced as the root of any subsequent PR
+            // updates (its E tag).  For normal PRs (proposal is already PR kind)
+            // and plain patch threads there is no pr_upgrade_root so we fall back
+            // to the proposal event itself.
+            let effective_root: &Event = pr_upgrade_root.as_ref().unwrap_or(proposal);
             if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
                 .concat()
                 .contains(&user_ref.public_key)
@@ -493,7 +499,7 @@ async fn process_proposal_refspecs(
                         repo_ref,
                         &ahead,
                         user_ref,
-                        Some(proposal),
+                        Some(effective_root),
                         signer,
                         term,
                         title_description,
@@ -527,7 +533,7 @@ async fn process_proposal_refspecs(
                                 "cannot push '{from}' as proposal as branch isn't ahead of proposal on nostr"
                             );
                         }
-                        if proposal.kind.eq(&KIND_PULL_REQUEST)
+                        if effective_root.kind.eq(&KIND_PULL_REQUEST)
                             || git_repo.are_commits_too_big_for_patches(&ahead)
                             || git_repo.do_commits_contain_submodules(&ahead)
                         {
@@ -537,7 +543,7 @@ async fn process_proposal_refspecs(
                                 repo_ref,
                                 &ahead,
                                 user_ref,
-                                Some(proposal),
+                                Some(effective_root),
                                 signer,
                                 term,
                                 title_description,
