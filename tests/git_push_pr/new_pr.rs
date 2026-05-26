@@ -51,6 +51,8 @@
 //!    maintainer's announcement.
 //! 10. A fresh nostr-URL clone lists the branch as
 //!     `pr/feature(<8-hex-shorthand>)` in its `git ls-remote origin` output.
+//! 11. PR event `subject` tag equals the first commit's subject line.
+//! 12. PR event `content` equals the first commit's description body.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -70,6 +72,16 @@ const IDENTIFIER: &str = "git-push-pr-new-pr";
 /// Feature branch name; pushed as `pr/feature`. The `branch-name` tag on the
 /// PR event should carry `"feature"` (with the `pr/` prefix stripped).
 const BRANCH: &str = "feature";
+
+/// Subject line of the first commit. The PR event's `subject` tag is derived
+/// from the first commit's summary (`get_commit_message_summary`) when no
+/// explicit title/description override is provided.
+const COMMIT_SUBJECT: &str = "add t1.md";
+
+/// Description body of the first commit (everything after the blank line that
+/// follows the subject). The PR event's `content` field is set to this value
+/// after stripping the subject prefix and trimming whitespace.
+const COMMIT_DESCRIPTION: &str = "this adds the t1.md file";
 
 // ---------------------------------------------------------------------------
 // Snapshot — captured side-effects of one `git push -u origin pr/feature`
@@ -219,7 +231,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await?;
     contributor
         .git_ok(
-            ["commit", "-m", "add t1.md", "--no-gpg-sign"],
+            [
+                "commit",
+                "-m",
+                &format!("{COMMIT_SUBJECT}\n\n{COMMIT_DESCRIPTION}"),
+                "--no-gpg-sign",
+            ],
             "git commit t1.md",
         )
         .await?;
@@ -613,6 +630,53 @@ async fn new_clone_lists_pr_feature_branch(#[future] snapshot: Arc<Snapshot>) ->
         s.contributor_tip_oid,
         got_oid,
         s.nostr_clone_ls_refs,
+    );
+    Ok(())
+}
+
+/// Case 11: PR event `subject` tag equals the first commit's subject line.
+///
+/// `generate_unsigned_pr_or_update_event` (git_events.rs) sets the `subject`
+/// tag via `get_commit_message_summary(first_commit)` when no explicit
+/// title/description override is provided. The first commit in the push is the
+/// base of the branch, so its subject line (`COMMIT_SUBJECT`) should be
+/// preserved verbatim in the tag.
+#[rstest]
+#[tokio::test]
+async fn pr_event_subject_is_first_commit_subject(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        tag_value(&s.pr_event, "subject").as_deref(),
+        Some(COMMIT_SUBJECT),
+        "PR event subject tag should be {:?} (first commit subject line); got {:?}",
+        COMMIT_SUBJECT,
+        tag_value(&s.pr_event, "subject"),
+    );
+    Ok(())
+}
+
+/// Case 12: PR event `content` equals the first commit's description body.
+///
+/// `generate_unsigned_pr_or_update_event` (git_events.rs) builds the event
+/// with `EventBuilder::new(KIND_PULL_REQUEST, description)`. The description
+/// is extracted from the first commit's full message by stripping the subject
+/// prefix and trimming surrounding whitespace, leaving only the body text
+/// (`COMMIT_DESCRIPTION`). An incorrect value would mean the description is
+/// lost or corrupted in the round-trip from commit message to nostr event.
+#[rstest]
+#[tokio::test]
+async fn pr_event_content_is_first_commit_description(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        s.pr_event.content,
+        COMMIT_DESCRIPTION,
+        "PR event content should equal first commit description {:?}; got {:?}",
+        COMMIT_DESCRIPTION,
+        s.pr_event.content,
     );
     Ok(())
 }
