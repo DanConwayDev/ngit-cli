@@ -19,6 +19,11 @@
 //!   `-u` upstream config are correctly written, the grasp bare repo carries
 //!   `refs/nostr/<event_id>`, and a fresh clone lists the branch as
 //!   `pr/feature(<shorthand>)`.
+//! - [`patch_kind_when_no_grasp`] — contributor pushes a `pr/feature` branch
+//!   against a repo whose kind-30617 announcement has **no** GRASP server.
+//!   Asserts the complementary code path: `Kind::GitPatch` events are produced
+//!   (not KIND_PULL_REQUEST), confirming that `repo_has_grasp_server = false`
+//!   routes back to the traditional patch-kind format.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -26,4 +31,5 @@
 
 mod ff_update;
 mod new_pr;
+mod patch_kind_when_no_grasp;
 mod rebase_update;
