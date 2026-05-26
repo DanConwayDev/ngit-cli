@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `git push -f origin pr/<branch>` after rebasing a PR branch onto newer `main` produced a PR update event with a stale `merge-base` tag; the force-push path in the remote helper incorrectly forwarded the original PR event's stored `merge-base` tag, giving the pre-rebase fork point; fixed by always computing the merge-base from the actual git topology (`git merge-base <tip> <origin/main>`) for every push type, removing reliance on the stored event value entirely
 - `ngit pr checkout` correctly checked out the PR as a branch but left the working directory at the previous state
 - `ngit pr checkout --force` on a patch-kind proposal failed with `failed to find parent commit (...). run git pull and try again.` when the new revision was based on a commit the local repository did not yet have; `checkout_patch` now best-effort-fetches the patch chain's parent from the repo's git servers before applying
 - `ngit send --in-reply-to <hex_event_id>` for a non-proposal-root reference (issue mention) emitted an `["e", <id>]` tag on the cover letter instead of the NIP-21 quote `["q", <id>]` tag that the bech32 (`note1...`) form produced; the raw-hex branch in `event_tag_from_nip19_or_hex` ignored `EventRefType::Quote` and unconditionally built `TagStandard::Event`, so hex and bech32 inputs produced different tags for the same logical reference

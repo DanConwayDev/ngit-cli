@@ -55,6 +55,7 @@ pub trait RepoActions {
     fn does_commit_exist(&self, commit: &str) -> Result<bool>;
     fn get_head_commit(&self) -> Result<Sha1Hash>;
     fn get_commit_parent(&self, commit: &Sha1Hash) -> Result<Sha1Hash>;
+    fn get_merge_base(&self, a: &Sha1Hash, b: &Sha1Hash) -> Result<Sha1Hash>;
     fn get_commit_message(&self, commit: &Sha1Hash) -> Result<String>;
     fn get_commit_message_summary(&self, commit: &Sha1Hash) -> Result<String>;
     #[allow(clippy::doc_link_with_quotes)]
@@ -298,6 +299,14 @@ impl RepoActions for Repo {
             .parent_id(0)
             .context(format!("could not find parent of commit {commit}"))?;
         Ok(oid_to_sha1(&parent_oid))
+    }
+
+    fn get_merge_base(&self, a: &Sha1Hash, b: &Sha1Hash) -> Result<Sha1Hash> {
+        let oid = self
+            .git_repo
+            .merge_base(sha1_to_oid(a)?, sha1_to_oid(b)?)
+            .with_context(|| format!("failed to compute merge-base of {a} and {b}"))?;
+        Ok(oid_to_sha1(&oid))
     }
 
     fn get_commit_message(&self, commit: &Sha1Hash) -> Result<String> {

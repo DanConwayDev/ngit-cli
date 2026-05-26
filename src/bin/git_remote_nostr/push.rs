@@ -11,10 +11,9 @@ use client::{
     sign_event,
 };
 use console::Term;
-use git::{RepoActions, sha1_to_oid, str_to_sha1};
+use git::{RepoActions, sha1_to_oid};
 use git_events::{
     generate_cover_letter_and_patch_events, generate_patch_event, get_commit_id_from_patch,
-    tag_value,
 };
 use git2::{Oid, Repository};
 use ngit::{
@@ -657,29 +656,28 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         let first_commit = ahead.first().context("no commits")?;
         let push_options_refs: Vec<&str> =
             git_server_push_options.iter().map(String::as_str).collect();
-        // For a PR update (FF push on top of an existing PR), the merge-base
-        // must be taken from the existing PR event rather than computed as the
-        // parent of the first *new* commit.  Using the parent of the first new
-        // commit would set the merge-base to the previous PR tip, which is
-        // wrong.  The original merge-base (i.e. where the branch diverged from
-        // main) is stored in the "merge-base" tag of the root PR event.
-        let pr_merge_base: Option<Sha1Hash> = root_proposal
-            .filter(|p| p.kind.eq(&KIND_PULL_REQUEST))
-            .and_then(|p| tag_value(p, "merge-base").ok())
-            .and_then(|v| str_to_sha1(&v).ok());
-        let fallback_merge_base: Option<Sha1Hash> = if pr_merge_base.is_none() {
-            git_repo.get_commit_parent(first_commit).ok()
-        } else {
-            None
-        };
-        let merge_base = pr_merge_base.as_ref().or(fallback_merge_base.as_ref());
+        // Always compute the merge-base from the actual git topology: the
+        // point where this branch diverges from the default remote branch.
+        // This is correct for all push types:
+        //   - new PR: first_commit's parent == merge-base (ahead is vs main)
+        //   - FF push on existing PR: merge-base(tip, main) == original fork point (not
+        //     the previous PR tip, which get_commit_parent(first) would give — the
+        //     840c581 bug)
+        //   - force push after rebase: merge-base(tip, main) == new fork point (not the
+        //     stale value from the original PR event tag)
+        // Using the git DAG directly means no stored event values can ever
+        // propagate a stale or incorrect fork point.
+        let merge_base: Option<Sha1Hash> = git_repo
+            .get_main_or_master_branch()
+            .ok()
+            .and_then(|(_, main_tip)| git_repo.get_merge_base(tip, &main_tip).ok());
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
             git_repo,
             repo_ref,
             tip,
             first_commit,
-            merge_base,
+            merge_base.as_ref(),
             user_ref,
             root_proposal,
             &title_description.map(|(t, d)| (t.clone(), d.clone())),
