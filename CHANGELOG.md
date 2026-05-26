@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ngit init --clean` drops any tags on the existing announcement that this version of ngit doesn't itself emit; by default such tags are now round-tripped verbatim so a tag added by a future ngit version or third-party tool isn't silently lost on republish, with a yellow stderr warning listing the carried-over tag names
+
 ### Changed
 
+- `ngit init` republishes now preserve unknown tags from the existing kind-30617 announcement instead of silently stripping them; on State C (MyAnnouncement) the publisher's own extras carry through, on State D (CoMaintainer) extras cascade from whichever maintainer's announcement has the newest `created_at` (same source as `name`/`description`/`web`/`hashtags`); repeated tags whose name matches one ngit already emits (e.g. two `clone` or `name` tags) are still collapsed to a single emission from the typed field
 - `git push pr/<branch>` and `ngit send` now default to PR kind (kind 1618) for new proposals when the repository announcement lists at least one GRASP server; previously only very large commits (>60 KB) or commits containing submodules triggered PR kind automatically
 - When a PR cannot be pushed to the repository's GRASP servers, ngit now falls back to pushing to a server from the contributor's own server list instead of prompting for an alternative URL and creating a personal-fork repository announcement
 - Completely replaced the integration test harness with a much more agile one and rewrote all integration tests against it. This was a key blocker for further planned improvements.
