@@ -1,9 +1,15 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
-use indicatif::{ProgressBar, ProgressStyle};
 use nostr::nips::nip46::NostrConnectURI;
 use nostr_connect::client::NostrConnect;
 use nostr_sdk::{EventBuilder, Keys, Metadata, NostrSigner, PublicKey, RelayUrl, ToBech32};
@@ -322,24 +328,32 @@ pub async fn get_fresh_nip46_signer(
             .with_prompt("login to nostr with remote signer")
             .with_default(0)
             .with_choices(vec![
-                "show QR code to scan in signer app".to_string(),
-                "show nostrconnect:// url to paste into signer".to_string(),
+                "bunker (scan QR code, copy connection string, or paste bunker:// url)"
+                    .to_string(),
                 "use NIP-05 address to connect to signer".to_string(),
-                "paste in bunker:// url from signer app".to_string(),
                 "back".to_string(),
             ])
             .dont_report(),
     )?;
     let url = match signer_choice {
-        0 | 1 => {
-            // Loop so the user can change relays and see a refreshed QR/URL.
+        0 => {
+            // Unified bunker flow: show the QR code and connection string and
+            // listen for the signer to connect in the background, while a menu
+            // concurrently offers to paste a bunker:// url, change relays, or
+            // cancel.  Loop so the user can change relays and see a refreshed
+            // QR/URL.
             let mut current_url = nostr_connect_url;
             loop {
-                // Display QR or URL with the current relay list.
-                display_nostr_connect(signer_choice, &current_url)?;
+                // Display QR code and connection string with the current relay
+                // list, followed by the menu options.
+                display_nostr_connect(&current_url)?;
+                print_connect_menu_options();
 
                 // Start listening for the signer immediately after displaying
-                // the QR/URL — don't wait for the user to press anything.
+                // the QR/URL — don't wait for the user to press anything.  The
+                // `done` flag lets the (blocking) menu poll loop notice when the
+                // listener has finished so it can return without leaving a
+                // thread blocked on a terminal read.
                 let nostr_connect = Arc::new(NostrConnect::new(
                     current_url.clone(),
                     app_key.clone(),
@@ -347,90 +361,54 @@ pub async fn get_fresh_nip46_signer(
                     None,
                 )?);
                 let signer_arc: Arc<dyn NostrSigner> = nostr_connect.clone();
-                let pubkey_handle = tokio::spawn(async move { signer_arc.get_public_key().await });
+                let done = Arc::new(AtomicBool::new(false));
+                let done_listener = Arc::clone(&done);
+                let pubkey_handle = tokio::spawn(async move {
+                    let res = signer_arc.get_public_key().await;
+                    done_listener.store(true, Ordering::Relaxed);
+                    res
+                });
 
-                // Show a spinner while waiting; Ctrl+C lets the user change
-                // relays or go back instead of waiting indefinitely.
-                eprintln!();
-                // TODO: remove the dim delay note once the rust-nostr
-                // NostrConnect handshake delay bug is fixed.
-                let spinner_msg = format!(
-                    "{} {}",
-                    console::style("waiting for signer app to connect...").bold(),
-                    console::style("(may take 10s+ to connect once added)").color256(247),
-                );
-                let spinner = ProgressBar::new_spinner()
-                    .with_style(
-                        ProgressStyle::with_template("{spinner} {msg}")
-                            .unwrap()
-                            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
-                    )
-                    .with_message(spinner_msg);
-                spinner.enable_steady_tick(Duration::from_millis(100));
+                // Wait (on a blocking thread so it doesn't stall the listener)
+                // for either the signer to connect or the user to pick an option.
+                let done_menu = Arc::clone(&done);
+                let choice =
+                    tokio::task::spawn_blocking(move || wait_for_signer_or_menu_choice(&done_menu))
+                        .await
+                        .context("connect menu task panicked")??;
 
-                let res = tokio::select! {
-                    result = pubkey_handle => {
-                        spinner.finish_and_clear();
-                        match result {
-                            Ok(Ok(pk)) => Some(pk),
-                            _ => None,
+                match choice {
+                    // Signer connected (or the listener finished) on its own.
+                    None => match pubkey_handle.await {
+                        Ok(Ok(public_key)) => {
+                            let bunker_url = nostr_connect
+                                .bunker_uri()
+                                .await
+                                .context("failed to get bunker URI from NostrConnect client")?;
+                            let signer_info = SignerInfo::Bunker {
+                                bunker_uri: bunker_url.to_string(),
+                                bunker_app_key: app_key.secret_key().to_secret_hex(),
+                                npub: Some(public_key.to_bech32()?),
+                            };
+                            return Ok(Some((
+                                nostr_connect as Arc<dyn NostrSigner>,
+                                public_key,
+                                signer_info,
+                                SignerInfoSource::GitGlobal,
+                            )));
+                        }
+                        _ => {
+                            // Connection failed — redisplay and listen again.
+                            eprintln!("failed to connect to signer, trying again...");
+                            continue;
                         }
                     },
-                    _ = signal::ctrl_c() => {
-                        spinner.finish_and_clear();
-                        None
+                    Some(ConnectMenuChoice::EnterBunkerUri) => {
+                        pubkey_handle.abort();
+                        break prompt_for_bunker_url()?;
                     }
-                };
-
-                if let Some(public_key) = res {
-                    // Connection succeeded — retrieve the canonical bunker URI
-                    // and return.
-                    let bunker_url = nostr_connect
-                        .bunker_uri()
-                        .await
-                        .context("failed to get bunker URI from NostrConnect client")?;
-                    let signer_info = SignerInfo::Bunker {
-                        bunker_uri: bunker_url.to_string(),
-                        bunker_app_key: app_key.secret_key().to_secret_hex(),
-                        npub: Some(public_key.to_bech32()?),
-                    };
-                    return Ok(Some((
-                        nostr_connect as Arc<dyn NostrSigner>,
-                        public_key,
-                        signer_info,
-                        SignerInfoSource::GitGlobal,
-                    )));
-                }
-
-                // Ctrl+C was pressed — offer the user a chance to change
-                // relays or go back to the top-level login menu.
-                let action = Interactor::default().choice(
-                    PromptChoiceParms::default()
-                        .with_prompt(format!(
-                            "signer relays: {}",
-                            current_url
-                                .relays()
-                                .iter()
-                                .map(std::string::ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ))
-                        .with_default(0)
-                        .with_choices(vec![
-                            "try again".to_string(),
-                            "change signer relays".to_string(),
-                            "back".to_string(),
-                        ])
-                        .dont_report(),
-                )?;
-
-                match action {
-                    0 => {
-                        // Redisplay QR/URL and start listening again.
-                        continue;
-                    }
-                    1 => {
-                        // Change relays and rebuild URL.
+                    Some(ConnectMenuChoice::ChangeRelays) => {
+                        pubkey_handle.abort();
                         let selected = select_signer_relays(&current_url)?;
                         if !selected.is_empty() {
                             let new_relays: Vec<RelayUrl> =
@@ -439,11 +417,14 @@ pub async fn get_fresh_nip46_signer(
                                 NostrConnectURI::client(app_key.public_key(), new_relays, "ngit");
                         }
                     }
-                    _ => return Ok(None),
+                    Some(ConnectMenuChoice::Cancel) => {
+                        pubkey_handle.abort();
+                        return Ok(None);
+                    }
                 }
             }
         }
-        2 => {
+        1 => {
             let mut error = None;
             loop {
                 let input = Interactor::default()
@@ -456,24 +437,6 @@ pub async fn get_fresh_nip46_signer(
                     )
                     .context("failed to get NIP-05 address input from interactor")?;
                 match fetch_nip46_uri_from_nip05(&input).await {
-                    Ok(url) => break url,
-                    Err(e) => error = Some(e),
-                }
-            }
-        }
-        3 => {
-            let mut error = None;
-            loop {
-                let input = Interactor::default()
-                    .input(
-                        PromptInputParms::default().with_prompt(if let Some(error) = error {
-                            format!("error: {error}. try again with bunker url")
-                        } else {
-                            "bunker url".to_string()
-                        }),
-                    )
-                    .context("failed to get bunker url input from interactor")?;
-                match NostrConnectURI::parse(&input) {
                     Ok(url) => break url,
                     Err(e) => error = Some(e),
                 }
@@ -536,49 +499,152 @@ pub fn generate_nostr_connect_app(
     Ok((app_key, nostr_connect_url))
 }
 
-/// Print the QR code or nostrconnect URL to stderr.
+/// Print the QR code and the nostrconnect connection string to stderr.
 ///
-/// `choice` must be 0 (QR) or 1 (URL).  Output goes directly to stderr so it
-/// is visible before the relay-selection choice prompt that follows.
-fn display_nostr_connect(choice: usize, url: &NostrConnectURI) -> Result<()> {
+/// Output goes directly to stderr so it is visible before the relay-selection
+/// choice prompt that follows.  Both the QR code (to scan) and the connection
+/// string (to copy) are shown so the user can use whichever their signer app
+/// supports.
+fn display_nostr_connect(url: &NostrConnectURI) -> Result<()> {
     let dim = Style::new().for_stderr().color256(247);
-    let hint = dim.apply_to("(ctrl+c to change)");
     eprintln!(
         "{}",
         Style::new().for_stderr().bold().apply_to("nostr connect")
     );
-    if choice == 0 {
-        eprintln!(
-            "{}",
-            dim.apply_to("scan QR code in signer app (eg. Amber):")
-        );
-        for line in generate_qr(&url.to_string())? {
-            eprintln!("{line}");
-        }
-    } else {
-        eprintln!();
-        eprintln!(
-            "{}",
-            Style::new()
-                .for_stderr()
-                .bold()
-                .cyan()
-                .apply_to(url.to_string())
-        );
-        eprintln!();
+    eprintln!(
+        "{}",
+        dim.apply_to("scan QR code in signer app (eg. Amber):")
+    );
+    for line in generate_qr(&url.to_string())? {
+        eprintln!("{line}");
     }
+    eprintln!();
+    eprintln!(
+        "{}",
+        dim.apply_to("or copy this connection string into your signer:")
+    );
+    eprintln!(
+        "{}",
+        Style::new()
+            .for_stderr()
+            .bold()
+            .cyan()
+            .apply_to(url.to_string())
+    );
+    eprintln!();
     let relays = url
         .relays()
         .iter()
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
+    eprintln!("{}", dim.apply_to(format!("signer relays: {relays}")));
+    Ok(())
+}
+
+/// The manual options offered on the bunker connect screen while the app waits
+/// in the background for the signer to connect.
+enum ConnectMenuChoice {
+    EnterBunkerUri,
+    ChangeRelays,
+    Cancel,
+}
+
+/// Print the bunker connect screen menu options to stderr.
+///
+/// Printed in canonical (cooked) terminal mode before [`wait_for_signer_or_menu_choice`]
+/// switches to raw mode for key polling, so the line breaks render correctly.
+fn print_connect_menu_options() {
+    let bold = Style::new().for_stderr().bold();
+    let dim = Style::new().for_stderr().color256(247);
+    eprintln!();
     eprintln!(
         "{} {}",
-        dim.apply_to(format!("signer relays: {relays}")),
-        hint
+        bold.apply_to("waiting for signer to connect…"),
+        dim.apply_to("(scan the QR code or copy the connection string above)")
     );
-    Ok(())
+    eprintln!("{} manually enter bunker:// url", bold.apply_to("[1]"));
+    eprintln!("{} change signer relays", bold.apply_to("[2]"));
+    eprintln!("{} cancel", bold.apply_to("[3]"));
+}
+
+/// Block until either the signer connects (the `done` flag is set by the
+/// background listener) or the user picks one of the connect-screen options.
+///
+/// Returns `Ok(None)` when the listener finished (the caller should check its
+/// result); otherwise returns the chosen menu option.
+///
+/// Key input is polled with a timeout rather than read with a blocking call so
+/// the loop can notice `done` and return promptly — this is what lets the menu
+/// run concurrently with the background listener without leaving a thread stuck
+/// on a terminal read (which would hold the terminal in raw mode).
+fn wait_for_signer_or_menu_choice(done: &AtomicBool) -> Result<Option<ConnectMenuChoice>> {
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+        terminal::{disable_raw_mode, enable_raw_mode},
+    };
+
+    enable_raw_mode().context("failed to enable raw mode for connect menu")?;
+    let outcome = (|| -> Result<Option<ConnectMenuChoice>> {
+        loop {
+            if done.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            if event::poll(Duration::from_millis(150)).context("failed to poll for key input")? {
+                if let Event::Key(key) = event::read().context("failed to read key input")? {
+                    // ignore key-release / repeat events (Windows emits both)
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    // ctrl+c cancels, matching the rest of the CLI
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('c'))
+                    {
+                        return Ok(Some(ConnectMenuChoice::Cancel));
+                    }
+                    // Only digit shortcuts (and esc) are accepted — a stray
+                    // paste of a bunker:// / nostrconnect:// url at this screen
+                    // then gets harmlessly ignored rather than triggering an
+                    // option and corrupting a later input prompt.
+                    match key.code {
+                        KeyCode::Char('1') => {
+                            return Ok(Some(ConnectMenuChoice::EnterBunkerUri));
+                        }
+                        KeyCode::Char('2') => {
+                            return Ok(Some(ConnectMenuChoice::ChangeRelays));
+                        }
+                        KeyCode::Char('3') | KeyCode::Esc => {
+                            return Ok(Some(ConnectMenuChoice::Cancel));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })();
+    // Always restore the terminal, even if polling errored.
+    let _ = disable_raw_mode();
+    outcome
+}
+
+/// Prompt the user to paste a `bunker://` url, re-prompting until it parses.
+fn prompt_for_bunker_url() -> Result<NostrConnectURI> {
+    let mut error = None;
+    loop {
+        let input = Interactor::default()
+            .input(
+                PromptInputParms::default().with_prompt(if let Some(error) = error {
+                    format!("error: {error}. try again with bunker url")
+                } else {
+                    "bunker url".to_string()
+                }),
+            )
+            .context("failed to get bunker url input from interactor")?;
+        match NostrConnectURI::parse(&input) {
+            Ok(url) => return Ok(url),
+            Err(e) => error = Some(e),
+        }
+    }
 }
 
 /// Present the multiselect UI for choosing signer relays.
