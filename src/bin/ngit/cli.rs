@@ -141,6 +141,8 @@ pub enum Commands {
 pub enum AccountCommands {
     /// login with nsec or nostr connect
     Login(sub_commands::login::SubCommandArgs),
+    /// connect interactively (alias for `login -i`)
+    Connect(sub_commands::login::SubCommandArgs),
     /// remove nostr account details stored in git config
     Logout,
     /// export nostr keys to login to other nostr clients
