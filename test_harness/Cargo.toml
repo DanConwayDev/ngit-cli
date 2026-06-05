@@ -7,7 +7,7 @@ description = "Integration test harness for ngit."
 
 [dependencies]
 anyhow = "1.0.98"
-git2 = "0.20.4"
+git2 = "0.21.0"
 http-body-util = "0.1"
 hyper = { version = "1.4", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }

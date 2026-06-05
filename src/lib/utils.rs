@@ -62,22 +62,18 @@ pub fn get_short_git_server_name(url: &str) -> std::string::String {
 
 pub fn get_remote_name_by_url(git_repo: &Repository, url: &str) -> Result<String> {
     let remotes = git_repo.remotes()?;
-    Ok(remotes
+    remotes
         .iter()
-        .find(|r| {
-            if let Some(name) = r {
-                if let Some(remote_url) = git_repo.find_remote(name).unwrap().url() {
-                    url == remote_url
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
+        .filter_map(|r| r.ok().flatten())
+        .find(|name| {
+            git_repo
+                .find_remote(name)
+                .ok()
+                .and_then(|remote| remote.url().ok().map(str::to_string))
+                .is_some_and(|remote_url| url == remote_url)
         })
-        .context("could not find remote with matching url")?
-        .context("remote with matching url must be named")?
-        .to_string())
+        .map(str::to_string)
+        .context("could not find remote with matching url")
 }
 
 pub fn get_oids_from_fetch_batch(

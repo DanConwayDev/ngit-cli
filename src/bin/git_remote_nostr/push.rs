@@ -1698,7 +1698,11 @@ fn refspec_remote_ref_name(
     };
     Ok(format!(
         "refs/remotes/{}/{}",
-        nostr_remote.name().context("remote should have a name")?,
+        nostr_remote
+            .name()
+            .ok()
+            .flatten()
+            .context("remote should have a name")?,
         short_name,
     ))
 }
@@ -1717,7 +1721,7 @@ fn reference_to_ref_value(git_repo: &Repository, reference: &str) -> Result<Stri
     let reference_obj = git_repo
         .find_reference(reference)
         .context(format!("failed to find reference: {reference}"))?;
-    if let Some(symref) = reference_obj.symbolic_target() {
+    if let Ok(Some(symref)) = reference_obj.symbolic_target() {
         Ok(symref.to_string())
     } else {
         Ok(reference_obj

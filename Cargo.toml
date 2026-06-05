@@ -15,7 +15,7 @@ categories = ["command-line-utilities","development-tools"]
 anyhow = "1.0.98"
 async-trait = "0.1.88"
 async-wsocket = "0.13.1" # TEMPORARY: remove when transport.rs is deleted. See transport.rs header.
-auth-git2 = "0.5.8"
+auth-git2 = "0.6.0"
 chacha20poly1305 = "0.10.1"
 chrono = "0.4"
 clap = { version = "4.5.41", features = ["derive"] }
@@ -23,7 +23,7 @@ console = "0.16.0"
 dialoguer = "0.12.0"
 directories = "6.0.0"
 futures = "0.3.31"
-git2 = "0.20.4"
+git2 = "0.21.0"
 indicatif = "0.18.0"
 mailparse = "0.16.1"
 nostr = { version = "0.44.1", features = ["nip49"] }

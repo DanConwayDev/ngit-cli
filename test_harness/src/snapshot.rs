@@ -27,7 +27,7 @@ impl RepoSnapshot {
             .with_context(|| format!("failed to open repo at {}", dir.display()))?;
 
         let head = match repo.head() {
-            Ok(reference) => reference.name().map(|s| s.to_string()),
+            Ok(reference) => reference.name().ok().map(|s| s.to_string()),
             Err(e)
                 if e.code() == git2::ErrorCode::UnbornBranch
                     || e.code() == git2::ErrorCode::NotFound =>
@@ -42,7 +42,7 @@ impl RepoSnapshot {
             let r = entry.context("failed to read reference entry")?;
             // Symbolic refs (like HEAD itself) aren't useful here — we want
             // resolved OIDs only.
-            if let Some(name) = r.name() {
+            if let Ok(name) = r.name() {
                 if let Some(oid) = r.target() {
                     refs.insert(name.to_string(), oid.to_string());
                 }

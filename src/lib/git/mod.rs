@@ -978,8 +978,13 @@ impl RepoActions for Repo {
     async fn get_first_nostr_remote_when_in_ngit_binary(
         &self,
     ) -> Result<Option<(String, NostrUrlDecoded)>> {
-        for remote_name in self.git_repo.remotes()?.iter().flatten() {
-            if let Some(remote_url) = self.git_repo.find_remote(remote_name)?.url() {
+        for remote_name in self
+            .git_repo
+            .remotes()?
+            .iter()
+            .filter_map(|r| r.ok().flatten())
+        {
+            if let Ok(remote_url) = self.git_repo.find_remote(remote_name)?.url() {
                 if let Ok(nostr_url_decoded) =
                     NostrUrlDecoded::parse_and_resolve(remote_url, &Some(self)).await
                 {
@@ -1218,7 +1223,7 @@ pub fn get_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<Optio
     } else {
         Ok(
             match git2::Config::open_default()?.open_global()?.get_entry(item) {
-                Ok(item) => item.value().map(|v| v.to_string()),
+                Ok(item) => item.value().ok().map(str::to_string),
                 Err(_) => None,
             },
         )
@@ -1233,7 +1238,7 @@ pub fn get_git_config_item_system(item: &str) -> Result<Option<String>> {
     for level in [git2::ConfigLevel::System, git2::ConfigLevel::ProgramData] {
         if let Ok(level_config) = config.open_level(level) {
             match level_config.get_entry(item) {
-                Ok(entry) => return Ok(entry.value().map(|v| v.to_string())),
+                Ok(entry) => return Ok(entry.value().ok().map(str::to_string)),
                 Err(_) => continue,
             }
         }
@@ -1764,7 +1769,7 @@ index ce01362..a21e91c 100644\n\
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.9.2\n\
+                libgit2 1.9.4\n\
                 \n\
                 ",
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &None)?,
@@ -1800,7 +1805,7 @@ index ce01362..a21e91c 100644\n\
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.9.2\n\
+                libgit2 1.9.4\n\
                 \n\
                 ",
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &Some((3, 5)))?,

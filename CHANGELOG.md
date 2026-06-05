@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `cargo install ngit` was failing to build due to an upstream dependency picking up an incompatible `git2` version
+
 ## [2.5.0] - 2026-05-26
 
 ### Changed

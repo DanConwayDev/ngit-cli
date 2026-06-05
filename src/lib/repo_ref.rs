@@ -489,8 +489,13 @@ async fn get_repo_coordinates_from_nostr_remotes(
     git_repo: &Repo,
 ) -> Result<HashMap<String, Nip19Coordinate>> {
     let mut repo_coordinates = HashMap::new();
-    for remote_name in git_repo.git_repo.remotes()?.iter().flatten() {
-        if let Some(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
+    for remote_name in git_repo
+        .git_repo
+        .remotes()?
+        .iter()
+        .filter_map(|r| r.ok().flatten())
+    {
+        if let Ok(remote_url) = git_repo.git_repo.find_remote(remote_name)?.url() {
             if let Ok(nostr_url_decoded) =
                 NostrUrlDecoded::parse_and_resolve(remote_url, &Some(git_repo)).await
             {

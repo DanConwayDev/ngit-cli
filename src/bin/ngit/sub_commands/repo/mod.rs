@@ -142,7 +142,7 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                 .git_repo
                 .find_remote("origin")
                 .ok()
-                .and_then(|r| r.url().map(std::string::ToString::to_string))
+                .and_then(|r| r.url().ok().map(std::string::ToString::to_string))
                 .filter(|u| u.starts_with("nostr://"));
             println!(
                 "{}",
@@ -204,7 +204,7 @@ fn print_repo_info_json(
         .git_repo
         .find_remote("origin")
         .ok()
-        .and_then(|r| r.url().map(std::string::ToString::to_string))
+        .and_then(|r| r.url().ok().map(std::string::ToString::to_string))
         .filter(|u| u.starts_with("nostr://"));
 
     let grasp_servers: Vec<String> = repo_ref
