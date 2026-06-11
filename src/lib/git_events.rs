@@ -2,13 +2,17 @@ use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use nostr::{
+    hashes::sha1::Hash as Sha1Hash,
     event::UnsignedEvent,
-    nips::{nip01::Coordinate, nip10::Marker, nip19::Nip19},
+    nips::{
+        nip01::{Coordinate, Nip01Tag},
+        nip10::{Marker, Nip10Tag},
+        nip19::Nip19,
+        nip34::Nip34Tag,
+    },
+    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
 };
-use nostr_sdk::{
-    Event, EventBuilder, EventId, FromBech32, Kind, NostrSigner, PublicKey, Tag, TagKind,
-    TagStandard, hashes::sha1::Hash as Sha1Hash,
-};
+use nostr_sdk::NostrSigner;
 
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
@@ -41,7 +45,7 @@ pub fn tag_value(event: &Event, tag_name: &str) -> Result<String> {
 pub fn pr_event_clone_tag_urls(event: &Event) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for tag in event.tags.as_slice() {
-        if tag.kind().eq(&TagKind::Clone) {
+        if tag.kind() == "clone" {
             for clone_url in tag.as_slice().iter().skip(1) {
                 out.push(clone_url.clone());
             }
@@ -212,42 +216,41 @@ pub async fn generate_patch_event(
                 .maintainers
                 .iter()
                 .map(|m| {
-                    Tag::from_standardized(TagStandard::Coordinate {
+                    Tag::from(Nip01Tag::Coordinate {
                         coordinate: Coordinate {
                             kind: nostr::Kind::GitRepoAnnouncement,
                             public_key: *m,
                             identifier: repo_ref.identifier.to_string(),
                         },
-                        relay_url: repo_ref.relays.first().cloned(),
-                        uppercase: false,
+                        relay_hint: repo_ref.relays.first().cloned(),
                     })
                 })
                 .collect::<Vec<Tag>>(),
             vec![
-                Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
+                Tag::from(Nip34Tag::Reference(*root_commit)),
                 // commit id reference is a trade-off. its now
                 // unclear which one is the root commit id but it
                 // enables easier location of code comments againt
                 // code that makes it into the main branch, assuming
                 // the commit id is correct
-                Tag::from_standardized(TagStandard::Reference(commit.to_string())),
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                    vec![format!(
+                Tag::from(Nip34Tag::Reference(*commit)),
+                Tag::parse([
+                    "alt",
+                    &format!(
                         "git patch: {}",
                         git_repo
                             .get_commit_message_summary(commit)
                             .unwrap_or_default()
-                    )],
-                ),
+                    ),
+                ])
+                .expect("valid alt tag"),
             ],
             if let Some(thread_event_id) = thread_event_id {
-                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                    event_id: thread_event_id,
-                    relay_url: relay_hint.clone(),
+                vec![Tag::from(Nip10Tag::Event {
+                    id: thread_event_id,
+                    relay_hint: relay_hint.clone(),
                     marker: Some(Marker::Root),
                     public_key: None,
-                    uppercase: false,
                 })]
             } else if let Some(event_ref) = root_proposal_id.clone() {
                 vec![
@@ -267,12 +270,11 @@ pub async fn generate_patch_event(
             },
             mentions.to_vec(),
             if let Some(id) = parent_patch_event_id {
-                vec![Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                    event_id: id,
-                    relay_url: relay_hint.clone(),
+                vec![Tag::from(Nip10Tag::Event {
+                    id,
+                    relay_hint: relay_hint.clone(),
                     marker: Some(Marker::Reply),
                     public_key: None,
-                    uppercase: false,
                 })]
             } else {
                 vec![]
@@ -280,10 +282,9 @@ pub async fn generate_patch_event(
             // see comment on branch names in cover letter event creation
             if let Some(branch_name) = branch_name {
                 if thread_event_id.is_none() {
-                    vec![Tag::custom(
-                        TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
-                        vec![branch_name.chars().take(60).collect::<String>()],
-                    )]
+                    vec![Tag::from(Nip34Tag::BranchName(
+                        branch_name.chars().take(60).collect::<String>(),
+                    ))]
                 } else {
                     vec![]
                 }
@@ -303,38 +304,33 @@ pub async fn generate_patch_event(
                 .collect(),
             vec![
                 // a fallback is now in place to extract this from the patch
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
-                    vec![commit.to_string()],
-                ),
+                Tag::from(Nip34Tag::Commit(*commit)),
                 // this is required as patches cannot be relied upon to include the 'base
                 // commit'
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("parent-commit")),
-                    vec![commit_parent.to_string()],
-                ),
+                Tag::from(Nip34Tag::ParentCommit(commit_parent)),
                 // this is required to ensure the commit id matches
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("commit-pgp-sig")),
-                    vec![
-                        git_repo
-                            .extract_commit_pgp_signature(commit)
-                            .unwrap_or_default(),
-                    ],
-                ),
+                Tag::from(Nip34Tag::CommitPgpSig(
+                    git_repo
+                        .extract_commit_pgp_signature(commit)
+                        .unwrap_or_default(),
+                )),
                 // removing description tag will not cause anything to break
-                Tag::from_standardized(nostr_sdk::TagStandard::Description(
+                Tag::from(Nip34Tag::Description(
                     git_repo.get_commit_message(commit)?.to_string(),
                 )),
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("author")),
-                    git_repo.get_commit_author(commit)?,
-                ),
+                Tag::parse(
+                    [vec!["author".to_string()], git_repo.get_commit_author(commit)?].concat(),
+                )
+                .expect("valid author tag"),
                 // this is required to ensure the commit id matches
-                Tag::custom(
-                    TagKind::Custom(std::borrow::Cow::Borrowed("committer")),
-                    git_repo.get_commit_comitter(commit)?,
-                ),
+                Tag::parse(
+                    [
+                        vec!["committer".to_string()],
+                        git_repo.get_commit_comitter(commit)?,
+                    ]
+                    .concat(),
+                )
+                .expect("valid committer tag"),
             ],
             patch_content_tags,
         ]
@@ -390,41 +386,31 @@ pub fn event_tag_from_nip19_or_hex(
             match nip19 {
                 Nip19::Event(n) => {
                     if ref_type == EventRefType::Quote {
-                        break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Quote {
-                            event_id: n.event_id,
-                            relay_url: n.relays.first().cloned(),
-                            public_key: None,
-                        }));
+                        break Ok(Tag::parse(["q", &n.event_id.to_hex()])
+                            .expect("valid q tag"));
                     }
-                    break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                        event_id: n.event_id,
-                        relay_url: n.relays.first().cloned(),
+                    break Ok(Tag::from(Nip10Tag::Event {
+                        id: n.event_id,
+                        relay_hint: n.relays.first().cloned(),
                         marker,
                         public_key: None,
-                        uppercase: false,
                     }));
                 }
                 Nip19::EventId(id) => {
                     if ref_type == EventRefType::Quote {
-                        break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Quote {
-                            event_id: id,
-                            relay_url: None,
-                            public_key: None,
-                        }));
+                        break Ok(Tag::parse(["q", &id.to_hex()]).expect("valid q tag"));
                     }
-                    break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                        event_id: id,
-                        relay_url: None,
+                    break Ok(Tag::from(Nip10Tag::Event {
+                        id,
+                        relay_hint: None,
                         marker,
                         public_key: None,
-                        uppercase: false,
                     }));
                 }
                 Nip19::Coordinate(coordinate) => {
-                    break Ok(Tag::from_standardized(TagStandard::Coordinate {
+                    break Ok(Tag::from(Nip01Tag::Coordinate {
                         coordinate: coordinate.coordinate,
-                        relay_url: coordinate.relays.first().cloned(),
-                        uppercase: false,
+                        relay_hint: coordinate.relays.first().cloned(),
                     }));
                 }
                 Nip19::Profile(profile) => {
@@ -442,18 +428,13 @@ pub fn event_tag_from_nip19_or_hex(
         }
         if let Ok(id) = nostr::EventId::from_str(&bech32) {
             if ref_type == EventRefType::Quote {
-                break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Quote {
-                    event_id: id,
-                    relay_url: None,
-                    public_key: None,
-                }));
+                break Ok(Tag::parse(["q", &id.to_hex()]).expect("valid q tag"));
             }
-            break Ok(Tag::from_standardized(nostr_sdk::TagStandard::Event {
-                event_id: id,
-                relay_url: None,
+            break Ok(Tag::from(Nip10Tag::Event {
+                id,
+                relay_hint: None,
                 marker,
                 public_key: None,
-                uppercase: false,
             }));
         }
         if prompt_for_correction {
@@ -519,39 +500,25 @@ pub async fn generate_unsigned_pr_or_update_event(
 
     let pr_update_specific_tags = |root_proposal: &Event| {
         vec![
-            Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                vec![format!("git Pull Request Update")],
-            ),
-            Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("E")),
-                vec![root_proposal.id],
-            ),
-            Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("P")),
-                vec![root_proposal.pubkey],
-            ),
+            Tag::parse(["alt", "git Pull Request Update"]).expect("valid alt tag"),
+            Tag::parse(["E", &root_proposal.id.to_hex()]).expect("valid E tag"),
+            Tag::parse(["P", &root_proposal.pubkey.to_hex()]).expect("valid P tag"),
         ]
     };
     let pr_specific_tags = || {
         [
             vec![
-                Tag::from_standardized(TagStandard::Subject(title.clone())),
-                Tag::custom(
-                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                    vec![format!("git Pull Request: {}", title.clone())],
-                ),
+                Tag::from(Nip34Tag::Subject(title.clone())),
+                Tag::parse(["alt", &format!("git Pull Request: {}", title.clone())])
+                    .expect("valid alt tag"),
             ],
             if let Some(cl) = &root_patch_cover_letter {
                 vec![
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("e")),
-                        vec![root_proposal.unwrap().id],
-                    ),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
-                        vec![cl.branch_name_without_id_or_prefix.clone()],
-                    ),
+                    Tag::parse(["e", &root_proposal.unwrap().id.to_hex()])
+                        .expect("valid e tag"),
+                    Tag::from(Nip34Tag::BranchName(
+                        cl.branch_name_without_id_or_prefix.clone(),
+                    )),
                     Tag::public_key(root_proposal.unwrap().pubkey),
                 ]
             } else if let Some(branch_name_tag) =
@@ -566,10 +533,7 @@ pub async fn generate_unsigned_pr_or_update_event(
     };
 
     let merge_base_tag = if let Some(merge_base) = merge_base {
-        vec![Tag::custom(
-            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("merge-base")),
-            vec![format!("{merge_base}")],
-        )]
+        vec![Tag::from(Nip34Tag::MergeBase(*merge_base))]
     } else {
         vec![]
     };
@@ -589,14 +553,13 @@ pub async fn generate_unsigned_pr_or_update_event(
                 .maintainers
                 .iter()
                 .map(|m| {
-                    Tag::from_standardized(TagStandard::Coordinate {
+                    Tag::from(Nip01Tag::Coordinate {
                         coordinate: Coordinate {
                             kind: nostr::Kind::GitRepoAnnouncement,
                             public_key: *m,
                             identifier: repo_ref.identifier.to_string(),
                         },
-                        relay_url: repo_ref.relays.first().cloned(),
-                        uppercase: false,
+                        relay_hint: repo_ref.relays.first().cloned(),
                     })
                 })
                 .collect::<Vec<Tag>>(),
@@ -611,18 +574,19 @@ pub async fn generate_unsigned_pr_or_update_event(
                 pr_specific_tags()
             },
             vec![
-                Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
-                Tag::custom(
-                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
-                    vec![format!("{tip}")],
-                ),
-                Tag::custom(
-                    nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                    clone_url_hint
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<String>>(),
-                ),
+                Tag::from(Nip34Tag::Reference(root_commit)),
+                Tag::from(Nip34Tag::CurrentCommit(*tip)),
+                Tag::parse(
+                    [
+                        vec!["clone".to_string()],
+                        clone_url_hint
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<String>>(),
+                    ]
+                    .concat(),
+                )
+                .expect("valid clone tag"),
             ],
             merge_base_tag,
             repo_ref
@@ -651,19 +615,16 @@ fn make_branch_name_tag_from_check_out_branch(git_repo: &Repo) -> Option<Tag> {
             && !branch_name.eq("origin/main")
             && !branch_name.eq("origin/master")
         {
-            Some(Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("branch-name")),
-                vec![
-                    if let Some(branch_name) = branch_name.strip_prefix("pr/") {
-                        branch_name.to_string()
-                    } else {
-                        branch_name
-                    }
-                    .chars()
-                    .take(60)
-                    .collect::<String>(),
-                ],
-            ))
+            Some(Tag::from(Nip34Tag::BranchName(
+                if let Some(branch_name) = branch_name.strip_prefix("pr/") {
+                    branch_name.to_string()
+                } else {
+                    branch_name
+                }
+                .chars()
+                .take(60)
+                .collect::<String>(),
+            )))
         } else {
             None
         }
@@ -701,24 +662,21 @@ pub async fn generate_cover_letter_and_patch_events(
                     .maintainers
                     .iter()
                     .map(|m| {
-                        Tag::from_standardized(TagStandard::Coordinate {
+                        Tag::from(Nip01Tag::Coordinate {
                             coordinate: Coordinate {
                                 kind: nostr::Kind::GitRepoAnnouncement,
                                 public_key: *m,
                                 identifier: repo_ref.identifier.to_string(),
                             },
-                            relay_url: repo_ref.relays.first().cloned(),
-                            uppercase: false,
+                            relay_hint: repo_ref.relays.first().cloned(),
                         })
                     })
                     .collect::<Vec<Tag>>(),
                 vec![
-                    Tag::from_standardized(TagStandard::Reference(format!("{root_commit}"))),
+                    Tag::from(Nip34Tag::Reference(root_commit)),
                     Tag::hashtag("cover-letter"),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec![format!("git patch cover letter: {}", title.clone())],
-                    ),
+                    Tag::parse(["alt", &format!("git patch cover letter: {}", title.clone())])
+                        .expect("valid alt tag"),
                 ],
                 if let Some(event_ref) = root_proposal_id.clone() {
                     vec![
@@ -1309,7 +1267,7 @@ pub async fn identify_clone_urls_for_oids_from_pr_pr_update_events(
                 if let Ok(c) = tag_value(&event, "c") {
                     if oids.contains(&&c) {
                         for tag in event.tags.as_slice() {
-                            if tag.kind().eq(&nostr::event::TagKind::Clone) {
+                            if tag.kind() == "clone" {
                                 for clone_url in tag.as_slice().iter().skip(1) {
                                     map.entry(c.clone()).or_default().push(clone_url.clone());
                                 }
@@ -1336,32 +1294,23 @@ mod tests {
                 nostr::event::Kind::GitPatch,
                 format!("From {commit} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 1/1] test\n\n"),
             )
-            .tags([Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("commit")),
-                vec![commit.to_string()],
-            )])
-            .sign_with_keys(&nostr::Keys::generate())?)
+            .tags([Tag::parse(["commit", commit]).expect("valid commit tag")])
+            .finalize(&nostr::Keys::generate())?)
         }
 
         fn make_pr_event(tip_commit: &str) -> Result<nostr::Event> {
             Ok(
                 nostr::event::EventBuilder::new(KIND_PULL_REQUEST, "PR description")
-                    .tags([Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
-                        vec![tip_commit.to_string()],
-                    )])
-                    .sign_with_keys(&nostr::Keys::generate())?,
+                    .tags([Tag::parse(["c", tip_commit]).expect("valid c tag")])
+                    .finalize(&nostr::Keys::generate())?,
             )
         }
 
         fn make_pr_update_event(tip_commit: &str) -> Result<nostr::Event> {
             Ok(
                 nostr::event::EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
-                    .tags([Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("c")),
-                        vec![tip_commit.to_string()],
-                    )])
-                    .sign_with_keys(&nostr::Keys::generate())?,
+                    .tags([Tag::parse(["c", tip_commit]).expect("valid c tag")])
+                    .finalize(&nostr::Keys::generate())?,
             )
         }
 
@@ -1406,7 +1355,7 @@ mod tests {
                     Tag::hashtag("root"),
                 ],
             )
-            .sign_with_keys(&nostr::Keys::generate())?)
+            .finalize(&nostr::Keys::generate())?)
         }
 
         #[test]
