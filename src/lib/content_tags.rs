@@ -15,8 +15,7 @@
 use std::{collections::HashSet, path::Path};
 
 use anyhow::Result;
-use nostr::{FromBech32, Tag, nips::nip19::Nip19};
-use nostr::EventId;
+use nostr::{EventId, FromBech32, Tag, nips::nip19::Nip19};
 
 use crate::client::get_events_from_local_cache;
 

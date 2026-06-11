@@ -14,11 +14,10 @@ pub mod repo_state;
 pub mod signer;
 pub mod utils;
 
-pub use signer::NgitSigner;
-
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
 use nostr::Url;
+pub use signer::NgitSigner;
 
 pub fn get_dirs() -> Result<ProjectDirs> {
     ProjectDirs::from("", "", "ngit").ok_or(anyhow!(

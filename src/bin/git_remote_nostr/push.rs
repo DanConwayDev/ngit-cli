@@ -33,24 +33,24 @@ use ngit::{
         is_grasp_server_clone_url,
     },
     repo_state,
+    signer::NgitSigner,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
         get_short_git_server_name, read_line,
     },
 };
-use nostr::nips::{
-    nip01::Nip01Tag,
-    nip10::{Marker, Nip10Tag},
-    nip19::ToBech32,
-    nip22::{CommentTarget, extract_root},
-    nip34::Nip34Tag,
-};
-use nostr::event::tag::TagCodec;
 use nostr::{
     Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, Tag,
+    event::tag::TagCodec,
     hashes::sha1::Hash as Sha1Hash,
+    nips::{
+        nip01::Nip01Tag,
+        nip10::{Marker, Nip10Tag},
+        nip19::ToBech32,
+        nip22::{CommentTarget, extract_root},
+        nip34::Nip34Tag,
+    },
 };
-use ngit::signer::NgitSigner;
 use repo_ref::RepoRef;
 use repo_state::RepoState;
 
@@ -1444,8 +1444,7 @@ async fn create_merge_status(
         EventBuilder::new(nostr::event::Kind::GitStatusApplied, String::new()).tags(
             [
                 vec![
-                    Tag::parse(["alt", "git proposal merged / applied"])
-                        .expect("valid alt tag"),
+                    Tag::parse(["alt", "git proposal merged / applied"]).expect("valid alt tag"),
                     Tag::from(nostr::nips::nip10::Nip10Tag::Event {
                         id: proposal.id,
                         relay_hint: repo_ref.relays.first().cloned(),
@@ -1498,9 +1497,7 @@ async fn create_merge_status(
                 ],
                 merge_commits
                     .iter()
-                    .map(|merge_commit| {
-                        Tag::from(Nip34Tag::Reference(*merge_commit))
-                    })
+                    .map(|merge_commit| Tag::from(Nip34Tag::Reference(*merge_commit)))
                     .collect::<Vec<Tag>>(),
             ]
             .concat(),
@@ -1557,11 +1554,15 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
     } else {
         let proposal_or_revision_id = EventId::parse(
             &if let Some(t) = event.tags.iter().find(|t| {
-                Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_root())
+                Nip10Tag::parse(t.as_slice())
+                    .ok()
+                    .is_some_and(|n| n.is_root())
             }) {
                 t.clone()
             } else if let Some(t) = event.tags.iter().find(|t| {
-                Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_reply())
+                Nip10Tag::parse(t.as_slice())
+                    .ok()
+                    .is_some_and(|n| n.is_reply())
             }) {
                 t.clone()
             } else {
@@ -1599,7 +1600,11 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
                 &proposal_or_revision
                     .tags
                     .iter()
-                    .find(|t| Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_reply()))
+                    .find(|t| {
+                        Nip10Tag::parse(t.as_slice())
+                            .ok()
+                            .is_some_and(|n| n.is_reply())
+                    })
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "revision-root patch event {} missing reply tag",

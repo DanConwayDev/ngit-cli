@@ -9,8 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use git2::Repository;
-use nostr::nips::nip19::ToBech32;
-use nostr::{Event, EventId, Kind, PublicKey};
+use nostr::{Event, EventId, Kind, PublicKey, nips::nip19::ToBech32};
 
 use crate::{
     client::{

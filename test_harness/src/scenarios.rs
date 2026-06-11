@@ -1911,10 +1911,7 @@ impl Harness {
             // `["r", "<oid>", "euc"]` — the earliest-unique-commit
             // marker, 3-element so we can't use a standard reference tag
             // (which only allows one value).
-            Tag::custom(
-                "r",
-                vec![state_b.root_oid.clone(), "euc".to_string()],
-            ),
+            Tag::custom("r", vec![state_b.root_oid.clone(), "euc".to_string()]),
             Tag::custom("name", vec![existing_name.clone()]),
             Tag::custom("description", vec![existing_description.clone()]),
             // `clone` carries a deliberately unreachable URL — same
@@ -2246,25 +2243,13 @@ impl Harness {
             // Use the publisher's actual root oid so EUC resolution in
             // init.rs:979-990 produces a coherent value (matches the
             // realistic "two maintainers, one repo" case).
-            Tag::custom(
-                "r",
-                vec![state_a.root_oid.clone(), "euc".to_string()],
-            ),
+            Tag::custom("r", vec![state_a.root_oid.clone(), "euc".to_string()]),
             Tag::custom("name", vec![existing_name.clone()]),
             Tag::custom("description", vec![existing_description.clone()]),
-            Tag::custom(
-                "clone",
-                vec![existing_clone_url.clone()],
-            ),
+            Tag::custom("clone", vec![existing_clone_url.clone()]),
             Tag::custom("web", existing_web.clone()),
-            Tag::custom(
-                "relays",
-                vec![default_relay_url_str.clone()],
-            ),
-            Tag::custom(
-                "maintainers",
-                maintainers_hex.to_vec(),
-            ),
+            Tag::custom("relays", vec![default_relay_url_str.clone()]),
+            Tag::custom("maintainers", maintainers_hex.to_vec()),
         ];
         // Stable order to keep event ids deterministic per-fixture; not
         // strictly required but useful when chasing replay failures in a

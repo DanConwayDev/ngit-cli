@@ -9,11 +9,10 @@ use ngit::{
     },
 };
 use nostr::{
-    FromBech32, ToBech32,
+    FromBech32, Kind, RelayUrl, ToBech32,
     filter::{Alphabet, SingleLetterTag},
     nips::nip19::{Nip19, Nip19Event},
 };
-use nostr::{Kind, RelayUrl};
 
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},

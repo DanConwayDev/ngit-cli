@@ -212,8 +212,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
             "test repo for git push state assertions".to_string(),
         ])
         .unwrap(),
-        Tag::parse(["clone".to_string(), grasp1_clone_url.clone(), grasp2_clone_url.clone()])
-            .unwrap(),
+        Tag::parse([
+            "clone".to_string(),
+            grasp1_clone_url.clone(),
+            grasp2_clone_url.clone(),
+        ])
+        .unwrap(),
         Tag::parse(["web".to_string()]).unwrap(),
         Tag::parse([
             "relays".to_string(),

@@ -157,9 +157,9 @@ async fn launch_status(
                     .iter()
                     .map(|c| {
                         Tag::from(Nip01Tag::Coordinate {
-                                coordinate: c.coordinate.clone(),
-                                relay_hint: c.relays.first().cloned(),
-                            })
+                            coordinate: c.coordinate.clone(),
+                            relay_hint: c.relays.first().cloned(),
+                        })
                     })
                     .collect::<Vec<Tag>>(),
                 vec![Tag::parse(["r", &repo_ref.root_commit]).expect("valid r tag")],

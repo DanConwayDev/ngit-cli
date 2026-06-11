@@ -1276,6 +1276,7 @@ mod tests {
     use std::fs;
 
     use nostr::Tag;
+
     use super::*;
     use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event};
 
@@ -1638,10 +1639,10 @@ index ce01362..a21e91c 100644\n\
 
             fn test(time: git2::Time) -> Result<()> {
                 let data = extract_signature_data_from_tags(
-                &Tags::from_list(vec![Tag::parse(
-                    [vec!["author".to_string()], prep(&time)?].concat(),
-                )
-                .expect("valid author tag")]),
+                    &Tags::from_list(vec![
+                        Tag::parse([vec!["author".to_string()], prep(&time)?].concat())
+                            .expect("valid author tag"),
+                    ]),
                     "author",
                 )?;
                 let sig = data.to_signature()?;

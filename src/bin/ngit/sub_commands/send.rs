@@ -8,8 +8,12 @@ use ngit::{
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
     utils::proposal_tip_is_pr_or_pr_update,
 };
-use nostr::{ToBech32, event::Event, nips::{nip10::Nip10Tag, nip19::Nip19Event}};
-use nostr::hashes::sha1::Hash as Sha1Hash;
+use nostr::{
+    ToBech32,
+    event::Event,
+    hashes::sha1::Hash as Sha1Hash,
+    nips::{nip10::Nip10Tag, nip19::Nip19Event},
+};
 
 use crate::{
     cli::{Cli, extract_signer_cli_arguments},
@@ -638,11 +642,9 @@ async fn get_root_proposal_and_mentions_from_in_reply_to(
         let _root_tag =
             event_tag_from_nip19_or_hex(first, "in-reply-to", EventRefType::Root, true, false)?;
         if let Ok(Nip10Tag::Event { id: event_id, .. }) = Nip10Tag::try_from(_root_tag) {
-            let events = get_events_from_local_cache(
-                git_repo_path,
-                vec![nostr::Filter::new().id(event_id)],
-            )
-            .await?;
+            let events =
+                get_events_from_local_cache(git_repo_path, vec![nostr::Filter::new().id(event_id)])
+                    .await?;
 
             if let Some(first) = events.iter().find(|e| e.id.eq(&event_id)) {
                 if event_is_patch_set_root(first) || first.kind.eq(&KIND_PULL_REQUEST) {

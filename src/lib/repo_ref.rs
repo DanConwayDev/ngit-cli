@@ -239,18 +239,31 @@ impl RepoRef {
                         Tag::parse(["r", &self.root_commit, "euc"]).unwrap(),
                         Tag::parse(["name", &self.name]).unwrap(),
                         Tag::parse(["description", &self.description]).unwrap(),
+                        Tag::parse([vec!["clone".to_string()], self.git_server.clone()].concat())
+                            .unwrap(),
+                        Tag::parse([vec!["web".to_string()], self.web.clone()].concat()).unwrap(),
                         Tag::parse(
-                            [vec!["clone".to_string()], self.git_server.clone()].concat()
-                        ).unwrap(),
+                            [
+                                vec!["relays".to_string()],
+                                self.relays
+                                    .iter()
+                                    .map(|r| r.to_string())
+                                    .collect::<Vec<_>>(),
+                            ]
+                            .concat(),
+                        )
+                        .unwrap(),
                         Tag::parse(
-                            [vec!["web".to_string()], self.web.clone()].concat()
-                        ).unwrap(),
-                        Tag::parse(
-                            [vec!["relays".to_string()], self.relays.iter().map(|r| r.to_string()).collect::<Vec<_>>()].concat()
-                        ).unwrap(),
-                        Tag::parse(
-                            [vec!["maintainers".to_string()], self.maintainers.iter().map(|pk| pk.to_string()).collect::<Vec<_>>()].concat()
-                        ).unwrap(),
+                            [
+                                vec!["maintainers".to_string()],
+                                self.maintainers
+                                    .iter()
+                                    .map(|pk| pk.to_string())
+                                    .collect::<Vec<_>>(),
+                            ]
+                            .concat(),
+                        )
+                        .unwrap(),
                         Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
                     ],
                     self.hashtags
@@ -260,9 +273,19 @@ impl RepoRef {
                     if self.blossoms.is_empty() {
                         vec![]
                     } else {
-                        vec![Tag::parse(
-                            [vec!["blossoms".to_string()], self.blossoms.iter().map(|b| b.to_string_without_trailing_slash()).collect::<Vec<_>>()].concat()
-                        ).unwrap()]
+                        vec![
+                            Tag::parse(
+                                [
+                                    vec!["blossoms".to_string()],
+                                    self.blossoms
+                                        .iter()
+                                        .map(|b| b.to_string_without_trailing_slash())
+                                        .collect::<Vec<_>>(),
+                                ]
+                                .concat(),
+                            )
+                            .unwrap(),
+                        ]
                     },
                     // Unknown tags carried over verbatim from the source
                     // announcement. See [`RepoRef::extra_tags`] and
@@ -617,11 +640,9 @@ pub fn get_repo_config_from_yaml(git_repo: &Repo) -> Result<RepoConfigYaml> {
 pub fn extract_pks(pk_strings: Vec<String>) -> Result<Vec<PublicKey>> {
     let mut pks: Vec<PublicKey> = vec![];
     for s in pk_strings {
-        pks.push(
-            PublicKey::from_bech32(&s).context(format!(
-                "failed to convert {s} into a valid nostr public key"
-            ))?,
-        );
+        pks.push(PublicKey::from_bech32(&s).context(format!(
+            "failed to convert {s} into a valid nostr public key"
+        ))?);
     }
     Ok(pks)
 }
@@ -962,8 +983,11 @@ mod tests {
     static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
         Lazy::new(|| nostr::Keys::from_str(TEST_KEY_2_NSEC).unwrap());
 
-    static TEST_KEY_1_SIGNER: Lazy<Arc<crate::NgitSigner>> =
-        Lazy::new(|| Arc::new(crate::NgitSigner::Keys(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap())));
+    static TEST_KEY_1_SIGNER: Lazy<Arc<crate::NgitSigner>> = Lazy::new(|| {
+        Arc::new(crate::NgitSigner::Keys(
+            nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
+        ))
+    });
 
     async fn create() -> nostr::Event {
         RepoRef {

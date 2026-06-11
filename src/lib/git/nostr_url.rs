@@ -3,8 +3,10 @@ use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use directories::BaseDirs;
-use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
-use nostr::{FromBech32, PublicKey, RelayUrl, ToBech32, Url};
+use nostr::{
+    FromBech32, PublicKey, RelayUrl, ToBech32, Url,
+    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+};
 
 use super::{Repo, get_git_config_item, save_git_config_item};
 use crate::client::nip05_query;
@@ -977,8 +979,7 @@ mod tests {
         }
     }
     mod nostr_git_url_format {
-        use nostr::nips::nip19::Nip19Coordinate;
-        use nostr::PublicKey;
+        use nostr::{PublicKey, nips::nip19::Nip19Coordinate};
 
         use super::*;
         use crate::git::nostr_url::NostrUrlDecoded;

@@ -1,7 +1,9 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use nostr::{Alphabet, JsonUtil, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag};
+use nostr::{
+    Alphabet, JsonUtil, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag,
+};
 use serde::{self, Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -233,8 +235,7 @@ pub fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event
                 .iter()
                 .filter(|t| {
                     t.as_slice().len() > 1
-                        && t.single_letter_tag()
-                            == Some(SingleLetterTag::lowercase(Alphabet::R))
+                        && t.single_letter_tag() == Some(SingleLetterTag::lowercase(Alphabet::R))
                 })
                 .map(|t| UserRelayRef {
                     url: t.as_slice()[1].clone(),

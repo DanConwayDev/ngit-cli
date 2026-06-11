@@ -13,11 +13,10 @@ use std::{
 use anyhow::{Context, Result};
 use git2::{Branch, Oid, RepositoryInitOptions, Signature, Time};
 use nostr::{
-    Tag,
+    Kind, RelayUrl, Tag, ToBech32,
     event::FinalizeEvent,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr::{Kind, RelayUrl, ToBech32};
 use once_cell::sync::Lazy;
 
 /// Monotonic counter combined with the process id and a per-process random
@@ -46,8 +45,11 @@ static TEST_KEY_1_NSEC: &str = "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwam
 static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
 
-pub static TEST_KEY_1_SIGNER: Lazy<std::sync::Arc<crate::NgitSigner>> =
-    Lazy::new(|| std::sync::Arc::new(crate::NgitSigner::Keys(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap())));
+pub static TEST_KEY_1_SIGNER: Lazy<std::sync::Arc<crate::NgitSigner>> = Lazy::new(|| {
+    std::sync::Arc::new(crate::NgitSigner::Keys(
+        nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
+    ))
+});
 
 pub fn joe_signature() -> Signature<'static> {
     Signature::new("Joe Bloggs", "joe.bloggs@pm.me", &Time::new(0, 0)).unwrap()
@@ -69,7 +71,12 @@ pub fn generate_repo_ref_event() -> nostr::Event {
             Tag::parse(["name", "example name"]).unwrap(),
             Tag::parse(["description", "example description"]).unwrap(),
             Tag::parse(["clone", "git:://123.gitexample.com/test"]).unwrap(),
-            Tag::parse(["web", "https://exampleproject.xyz", "https://gitworkshop.dev/123"]).unwrap(),
+            Tag::parse([
+                "web",
+                "https://exampleproject.xyz",
+                "https://gitworkshop.dev/123",
+            ])
+            .unwrap(),
             Tag::parse(["relays", "ws://localhost:8055", "ws://localhost:8056"]).unwrap(),
             Tag::parse(["maintainers", &TEST_KEY_1_KEYS.public_key().to_string()]).unwrap(),
         ])

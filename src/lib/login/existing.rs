@@ -1,9 +1,8 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nostr::nips::nip46::NostrConnectUri;
+use nostr::{PublicKey, nips::nip46::NostrConnectUri};
 use nostr_connect::client::NostrConnect;
-use nostr::PublicKey;
 
 use super::{
     SignerInfo, SignerInfoSource,

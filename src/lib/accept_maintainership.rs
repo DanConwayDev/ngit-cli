@@ -23,10 +23,9 @@ use anyhow::{Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use nostr::{
-    PublicKey, ToBech32,
+    Kind, PublicKey, RelayUrl, ToBech32,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr::{Kind, RelayUrl};
 
 #[cfg(not(test))]
 use crate::client::Client;

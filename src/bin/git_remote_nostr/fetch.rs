@@ -13,8 +13,7 @@ use ngit::{
         get_open_or_draft_proposals,
     },
 };
-use nostr::nips::nip19;
-use nostr::{Event, ToBech32};
+use nostr::{Event, ToBech32, nips::nip19};
 
 pub async fn run_fetch(
     git_repo: &Repo,

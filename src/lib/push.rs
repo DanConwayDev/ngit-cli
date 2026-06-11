@@ -10,8 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use auth_git2::GitAuthenticator;
 use console::Term;
 use nostr::{
-    event::{Event, EventBuilder, Kind, Tag, UnsignedEvent},
-    event::tag::TagCodec,
+    event::{Event, EventBuilder, Kind, Tag, UnsignedEvent, tag::TagCodec},
     hashes::sha1::Hash as Sha1Hash,
     key::PublicKey,
 };

@@ -3,7 +3,10 @@ use ngit::{
     client::{Params, send_events, sign_event},
     content_tags::{dedup_tags, tags_from_content},
 };
-use nostr::{EventBuilder, Kind, Tag, ToBech32, nips::{nip01::Nip01Tag, nip19::Nip19Event}};
+use nostr::{
+    EventBuilder, Kind, Tag, ToBech32,
+    nips::{nip01::Nip01Tag, nip19::Nip19Event},
+};
 
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},

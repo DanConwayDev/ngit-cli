@@ -47,10 +47,8 @@ use nostr_lmdb::NostrLMDB;
 use nostr_sdk::{
     authenticator::SignerAuthenticator,
     client::ClientBuilder,
-    relay::{ReqExitPolicy, RelayLimits},
+    relay::{RelayLimits, ReqExitPolicy},
 };
-
-use crate::signer::NgitSigner;
 use serde_json::Value;
 
 use crate::{
@@ -64,6 +62,7 @@ use crate::{
     login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
     repo_ref::{RepoRef, normalize_grasp_server_url},
     repo_state::RepoState,
+    signer::NgitSigner,
 };
 
 pub fn is_verbose() -> bool {
@@ -232,10 +231,13 @@ impl Connect for Client {
             .await
             .context("failed to add relay")?;
 
-        let relay = self.client.relay(relay_url).await?
+        let relay = self
+            .client
+            .relay(relay_url)
+            .await?
             .ok_or_else(|| anyhow!("relay {} not found after add", relay_url))?;
 
-    if !relay.status().is_connected() {
+        if !relay.status().is_connected() {
             #[allow(clippy::large_futures)]
             relay
                 .try_connect()
@@ -276,7 +278,9 @@ impl Connect for Client {
         self.client.add_relay(url).await?;
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
-        self.client.relay(url).await?
+        self.client
+            .relay(url)
+            .await?
             .ok_or_else(|| anyhow!("relay not found: {url}"))?
             .send_event(&event)
             .await?;
@@ -842,7 +846,10 @@ impl Connect for Client {
             fresh_issue_roots = HashSet::new();
             fresh_profiles = HashSet::new();
 
-            let relay = self.client.relay(&relay_url).await?
+            let relay = self
+                .client
+                .relay(&relay_url)
+                .await?
                 .ok_or_else(|| anyhow!("relay not found: {relay_url}"))?;
             let events: Vec<nostr::Event> = get_events_of(&relay, filters.clone(), pb).await?;
             // TODO: try reconcile
@@ -1382,7 +1389,9 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
         get_dirs()?.cache_dir().join("nostr-cache.lmdb")
     };
 
-    NostrLMDB::open(path).await.context("failed to open ngit global nostr cache database")
+    NostrLMDB::open(path)
+        .await
+        .context("failed to open ngit global nostr cache database")
 }
 
 pub async fn get_events_from_local_cache(

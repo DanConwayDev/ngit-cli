@@ -3,8 +3,10 @@ use ngit::{
     client::{Params, get_issues_from_cache, get_proposals_and_revisions_from_cache, send_events},
     git_events::{KIND_LABEL, get_labels_and_subject},
 };
-use nostr::{EventBuilder, Tag, nips::{nip10::Nip10Tag, nip19::Nip19}};
-use nostr::{EventId, FromBech32};
+use nostr::{
+    EventBuilder, EventId, FromBech32, Tag,
+    nips::{nip10::Nip10Tag, nip19::Nip19},
+};
 
 use crate::{
     client::{

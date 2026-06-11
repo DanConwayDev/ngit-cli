@@ -3,8 +3,10 @@ use ngit::{
     client::{Params, get_issues_from_cache, get_proposals_and_revisions_from_cache, send_events},
     git_events::{KIND_LABEL, get_labels},
 };
-use nostr::{EventBuilder, Tag, nips::{nip10::Nip10Tag, nip19::Nip19}};
-use nostr::{EventId, FromBech32};
+use nostr::{
+    EventBuilder, EventId, FromBech32, Tag,
+    nips::{nip10::Nip10Tag, nip19::Nip19},
+};
 
 use crate::{
     client::{
@@ -155,7 +157,10 @@ async fn publish_label_event(
         .map(|l| format!("#{l}"))
         .collect::<Vec<_>>()
         .join(", ");
-    tags.push(Tag::parse(["alt", &format!("labelled {target_kind} with {label_list}")]).expect("valid alt tag"));
+    tags.push(
+        Tag::parse(["alt", &format!("labelled {target_kind} with {label_list}")])
+            .expect("valid alt tag"),
+    );
 
     let label_event = ngit::client::sign_event(
         EventBuilder::new(KIND_LABEL, "").tags(tags),

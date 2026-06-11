@@ -2,16 +2,17 @@ use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use nostr::{
-    hashes::sha1::Hash as Sha1Hash,
+    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
     event::{UnsignedEvent, tag::TagCodec, unsigned::FinalizeUnsignedEvent},
+    hashes::sha1::Hash as Sha1Hash,
     nips::{
         nip01::{Coordinate, Nip01Tag},
         nip10::{Marker, Nip10Tag},
         nip19::Nip19,
         nip34::Nip34Tag,
     },
-    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
 };
+
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::sign_event,
@@ -95,7 +96,11 @@ pub fn get_event_root(event: &nostr::Event) -> Result<EventId> {
         event
             .tags
             .iter()
-            .find(|t| Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_root()))
+            .find(|t| {
+                Nip10Tag::parse(t.as_slice())
+                    .ok()
+                    .is_some_and(|n| n.is_root())
+            })
             .context("no thread root in event")?
             .as_slice()
             .get(1)
@@ -317,7 +322,11 @@ pub async fn generate_patch_event(
                     git_repo.get_commit_message(commit)?.to_string(),
                 )),
                 Tag::parse(
-                    [vec!["author".to_string()], git_repo.get_commit_author(commit)?].concat(),
+                    [
+                        vec!["author".to_string()],
+                        git_repo.get_commit_author(commit)?,
+                    ]
+                    .concat(),
                 )
                 .expect("valid author tag"),
                 // this is required to ensure the commit id matches
@@ -384,8 +393,7 @@ pub fn event_tag_from_nip19_or_hex(
             match nip19 {
                 Nip19::Event(n) => {
                     if ref_type == EventRefType::Quote {
-                        break Ok(Tag::parse(["q", &n.event_id.to_hex()])
-                            .expect("valid q tag"));
+                        break Ok(Tag::parse(["q", &n.event_id.to_hex()]).expect("valid q tag"));
                     }
                     break Ok(Tag::from(Nip10Tag::Event {
                         id: n.event_id,
@@ -512,8 +520,7 @@ pub async fn generate_unsigned_pr_or_update_event(
             ],
             if let Some(cl) = &root_patch_cover_letter {
                 vec![
-                    Tag::parse(["e", &root_proposal.unwrap().id.to_hex()])
-                        .expect("valid e tag"),
+                    Tag::parse(["e", &root_proposal.unwrap().id.to_hex()]).expect("valid e tag"),
                     Tag::from(Nip34Tag::BranchName(
                         cl.branch_name_without_id_or_prefix.clone(),
                     )),
@@ -1283,6 +1290,7 @@ pub async fn identify_clone_urls_for_oids_from_pr_pr_update_events(
 #[cfg(test)]
 mod tests {
     use nostr::event::FinalizeEvent;
+
     use super::*;
 
     mod get_commit_id_from_patch {

@@ -4,10 +4,11 @@ use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use indicatif::{ProgressBar, ProgressStyle};
-use nostr::nips::nip46::NostrConnectUri;
+use nostr::{
+    EventBuilder, Keys, Metadata, PublicKey, RelayUrl, ToBech32, event::FinalizeEvent,
+    nips::nip46::NostrConnectUri,
+};
 use nostr_connect::client::NostrConnect;
-use nostr::{EventBuilder, Keys, Metadata, PublicKey, RelayUrl, ToBech32};
-use nostr::event::FinalizeEvent;
 use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
@@ -1041,7 +1042,12 @@ pub async fn signup_non_interactive(
         }
     }
 
-    Ok((Arc::new(crate::NgitSigner::Keys(keys.clone())), public_key, signer_info, keys))
+    Ok((
+        Arc::new(crate::NgitSigner::Keys(keys.clone())),
+        public_key,
+        signer_info,
+        keys,
+    ))
 }
 
 async fn signup(

@@ -16,11 +16,10 @@ use ngit::{
     repo_ref::RepoRef,
 };
 use nostr::{
-    FromBech32, ToBech32,
+    FromBech32, Kind, RelayUrl, ToBech32,
     filter::{Alphabet, SingleLetterTag},
     nips::nip19::{Nip19, Nip19Event},
 };
-use nostr::{Kind, RelayUrl};
 
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},

@@ -7,8 +7,7 @@ use ngit::{
     content_tags::{dedup_tags, tags_from_content},
     git_events::KIND_COMMENT,
 };
-use nostr::{EventBuilder, Tag, nips::nip19::Nip19};
-use nostr::{EventId, FromBech32, Kind, PublicKey};
+use nostr::{EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag, nips::nip19::Nip19};
 
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},

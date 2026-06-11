@@ -4,8 +4,10 @@ use ngit::{
     content_tags::{dedup_tags, tags_from_content},
     git_events::{KIND_COVER_NOTE, process_cover_note},
 };
-use nostr::{EventBuilder, Tag, nips::{nip10::Nip10Tag, nip19::Nip19}};
-use nostr::{EventId, FromBech32};
+use nostr::{
+    EventBuilder, EventId, FromBech32, Tag,
+    nips::{nip10::Nip10Tag, nip19::Nip19},
+};
 
 use crate::{
     client::{
@@ -152,7 +154,9 @@ async fn publish_set_cover_note_event(
     tags.push(Tag::public_key(target.pubkey));
 
     // Human-readable alt text.
-    tags.push(Tag::parse(["alt", &format!("cover note for {target_kind}")]).expect("valid alt tag"));
+    tags.push(
+        Tag::parse(["alt", &format!("cover note for {target_kind}")]).expect("valid alt tag"),
+    );
 
     // Process body for nostr: mentions → q and p tags (same as --body in issue
     // creation).

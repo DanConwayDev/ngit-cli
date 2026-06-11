@@ -3,11 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use nostr::{Event, EventBuilder, Keys, PublicKey, event::UnsignedEvent};
 use nostr_connect::client::NostrConnect;
-use nostr_sdk::{
-    authenticator::SignerAuthenticator,
-    client::ClientBuilder,
-    relay::RelayLimits,
-};
+use nostr_sdk::{authenticator::SignerAuthenticator, client::ClientBuilder, relay::RelayLimits};
 
 /// Signer abstraction covering both local keys and remote NIP-46 bunker.
 #[derive(Clone)]
@@ -47,7 +43,8 @@ impl NgitSigner {
         self.sign_event(unsigned).await
     }
 
-    /// True when this is a remote (NIP-46) signer — used to show progress messages.
+    /// True when this is a remote (NIP-46) signer — used to show progress
+    /// messages.
     pub fn is_remote(&self) -> bool {
         matches!(self, Self::Connect(_))
     }
@@ -78,7 +75,8 @@ impl std::fmt::Debug for NgitSigner {
     }
 }
 
-/// Wraps an `Arc<NgitSigner>` for use with `fetch_public_key` and similar helpers.
+/// Wraps an `Arc<NgitSigner>` for use with `fetch_public_key` and similar
+/// helpers.
 pub async fn fetch_public_key_from_signer(signer: &Arc<NgitSigner>) -> Result<PublicKey> {
     if signer.is_remote() {
         let term = console::Term::stderr();
