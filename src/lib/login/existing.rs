@@ -1,9 +1,9 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nostr::nips::nip46::NostrConnectURI;
+use nostr::nips::nip46::NostrConnectUri;
 use nostr_connect::client::NostrConnect;
-use nostr_sdk::{NostrSigner, PublicKey};
+use nostr::PublicKey;
 
 use super::{
     SignerInfo, SignerInfoSource,
@@ -38,7 +38,7 @@ pub async fn load_existing_login(
     silent: bool,
     prompt_for_password: bool,
     fetch_profile_updates: bool,
-) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let (signer_info, source) = get_signer_info(git_repo, signer_info, password, source)?;
 
     let (signer, public_key) = get_signer(&signer_info, prompt_for_password).await?;
@@ -193,7 +193,7 @@ pub fn get_signer_info(
 async fn get_signer(
     signer_info: &SignerInfo,
     prompt_for_ncryptsec_password: bool,
-) -> Result<(Arc<dyn NostrSigner>, PublicKey)> {
+) -> Result<(Arc<crate::NgitSigner>, PublicKey)> {
     match signer_info {
         SignerInfo::Nsec {
             nsec,
@@ -223,14 +223,14 @@ async fn get_signer(
                 nostr::Keys::from_str(nsec).context("invalid nsec parameter")?
             };
             let public_key = keys.public_key();
-            Ok((Arc::new(keys), public_key))
+            Ok((Arc::new(crate::NgitSigner::Keys(keys)), public_key))
         }
         SignerInfo::Bunker {
             bunker_uri,
             bunker_app_key,
             npub,
         } => {
-            let uri = NostrConnectURI::parse(bunker_uri)?;
+            let uri = NostrConnectUri::parse(bunker_uri)?;
             let s = NostrConnect::new(
                 uri,
                 nostr::Keys::from_str(bunker_app_key).context("invalid app key")?,
@@ -239,10 +239,10 @@ async fn get_signer(
             )?;
             if let Some(public_key) = npub.clone().and_then(|npub| PublicKey::parse(&npub).ok()) {
                 s.non_secure_set_user_public_key(public_key)?;
-                let signer: Arc<dyn NostrSigner> = Arc::new(s);
+                let signer = Arc::new(crate::NgitSigner::Connect(s));
                 Ok((signer, public_key))
             } else {
-                let signer: Arc<dyn NostrSigner> = Arc::new(s);
+                let signer = Arc::new(crate::NgitSigner::Connect(s));
                 let term = console::Term::stderr();
                 term.write_line("connecting to remote signer...")?;
                 let public_key = fetch_public_key(&signer).await?;

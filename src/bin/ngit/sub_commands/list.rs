@@ -20,7 +20,7 @@ use nostr::{
     filter::{Alphabet, SingleLetterTag},
     nips::nip19::{Nip19, Nip19Event},
 };
-use nostr_sdk::{Kind, RelayUrl};
+use nostr::{Kind, RelayUrl};
 
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},

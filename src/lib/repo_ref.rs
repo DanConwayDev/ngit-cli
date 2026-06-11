@@ -11,7 +11,6 @@ use console::Style;
 use nostr::{
     FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
-    signer::NostrSigner,
 };
 use serde::{Deserialize, Serialize};
 use urlencoding::encode as pct_encode;
@@ -214,7 +213,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
 }
 
 impl RepoRef {
-    pub async fn to_event(&self, signer: &Arc<dyn NostrSigner>) -> Result<nostr::Event> {
+    pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::Event> {
         sign_event(
             nostr::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
                 [
@@ -963,8 +962,8 @@ mod tests {
     static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
         Lazy::new(|| nostr::Keys::from_str(TEST_KEY_2_NSEC).unwrap());
 
-    static TEST_KEY_1_SIGNER: Lazy<Arc<dyn NostrSigner>> =
-        Lazy::new(|| Arc::new(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap()));
+    static TEST_KEY_1_SIGNER: Lazy<Arc<crate::NgitSigner>> =
+        Lazy::new(|| Arc::new(crate::NgitSigner::Keys(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap())));
 
     async fn create() -> nostr::Event {
         RepoRef {

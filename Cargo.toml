@@ -25,7 +25,7 @@ futures = "0.3.31"
 git2 = { version = "0.21.0", features = ["ssh", "https"] }
 indicatif = "0.18.0"
 mailparse = "0.16.1"
-nostr = "0.45.0-alpha.1"
+nostr = { version = "0.45.0-alpha.1", features = ["nip49"] }
 nostr-connect = "0.45.0-alpha.1"
 nostr-database = "0.45.0-alpha.1"
 nostr-lmdb = "0.45.0-alpha.1"

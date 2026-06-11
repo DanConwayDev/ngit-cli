@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use git2::Oid;
 use nostr::{
     event::{EventBuilder, Tag},
-    signer::NostrSigner,
 };
 
 use crate::client::{STATE_KIND, sign_event};
@@ -54,7 +53,7 @@ impl RepoState {
     pub async fn build(
         identifier: String,
         mut state: HashMap<String, String>,
-        signer: &Arc<dyn NostrSigner>,
+        signer: &Arc<crate::NgitSigner>,
     ) -> Result<Self> {
         add_head(&mut state);
         let mut tags = vec![Tag::identifier(identifier.clone())];

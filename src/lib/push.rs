@@ -14,7 +14,6 @@ use nostr::{
     event::tag::TagCodec,
     hashes::sha1::Hash as Sha1Hash,
     key::PublicKey,
-    signer::NostrSigner,
 };
 
 use crate::{
@@ -416,7 +415,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     user_ref: &UserRef,
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     term: &Term,
     git_server_push_options: &[&str],
     git_server: Option<&str>,
@@ -627,7 +626,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     title_description_overide: &Option<(String, String)>,
     servers: &[String],
     git_ref: Option<String>,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     term: &Term,
     git_server_push_options: &[&str],
 ) -> Result<(Option<Vec<Event>>, Vec<(String, Result<()>)>)> {
@@ -754,7 +753,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
 }
 
 async fn create_close_status_for_original_patch(
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
     proposal: &Event,
 ) -> Result<Event> {

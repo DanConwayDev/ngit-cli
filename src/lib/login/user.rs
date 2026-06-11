@@ -1,7 +1,7 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use nostr::{Alphabet, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag, signer::NostrSigner};
+use nostr::{Alphabet, JsonUtil, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag};
 use serde::{self, Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -58,7 +58,7 @@ pub struct UserGraspList {
 }
 
 impl UserGraspList {
-    pub async fn to_event(&mut self, signer: &Arc<dyn NostrSigner>) -> Result<nostr::Event> {
+    pub async fn to_event(&mut self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::Event> {
         let event = sign_event(
             nostr::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
                 self.urls

@@ -6,7 +6,7 @@ use ngit::{
         existing::{get_signer_info, load_existing_login},
     },
 };
-use nostr_sdk::ToBech32;
+use nostr::ToBech32;
 use serde::Serialize;
 
 use crate::{

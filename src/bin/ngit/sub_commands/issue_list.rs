@@ -13,7 +13,7 @@ use nostr::{
     filter::{Alphabet, SingleLetterTag},
     nips::nip19::{Nip19, Nip19Event},
 };
-use nostr_sdk::{Kind, RelayUrl};
+use nostr::{Kind, RelayUrl};
 
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},

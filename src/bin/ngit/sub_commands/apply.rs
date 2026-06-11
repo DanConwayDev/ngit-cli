@@ -12,7 +12,7 @@ use ngit::{
     repo_ref::RepoRef,
 };
 use nostr::nips::nip19::Nip19;
-use nostr_sdk::{EventId, FromBech32};
+use nostr::{EventId, FromBech32};
 
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},

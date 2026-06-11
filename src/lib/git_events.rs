@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 use anyhow::{Context, Result, bail};
 use nostr::{
     hashes::sha1::Hash as Sha1Hash,
-    event::UnsignedEvent,
+    event::{UnsignedEvent, tag::TagCodec, unsigned::FinalizeUnsignedEvent},
     nips::{
         nip01::{Coordinate, Nip01Tag},
         nip10::{Marker, Nip10Tag},
@@ -12,8 +12,6 @@ use nostr::{
     },
     Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
 };
-use nostr_sdk::NostrSigner;
-
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::sign_event,
@@ -97,7 +95,7 @@ pub fn get_event_root(event: &nostr::Event) -> Result<EventId> {
         event
             .tags
             .iter()
-            .find(|t| t.is_root())
+            .find(|t| Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_root()))
             .context("no thread root in event")?
             .as_slice()
             .get(1)
@@ -192,7 +190,7 @@ pub async fn generate_patch_event(
     root_commit: &Sha1Hash,
     commit: &Sha1Hash,
     thread_event_id: Option<nostr::EventId>,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
     parent_patch_event_id: Option<nostr::EventId>,
     series_count: Option<(u64, u64)>,
@@ -605,7 +603,7 @@ pub async fn generate_unsigned_pr_or_update_event(
         EventBuilder::new(KIND_PULL_REQUEST, description)
     }
     .tags(all_tags)
-    .build(*signing_public_key))
+    .finalize_unsigned(*signing_public_key))
 }
 
 fn make_branch_name_tag_from_check_out_branch(git_repo: &Repo) -> Option<Tag> {
@@ -638,7 +636,7 @@ pub async fn generate_cover_letter_and_patch_events(
     cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
     commits: &[Sha1Hash],
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
     root_proposal_id: &Option<String>,
     mentions: &[nostr::Tag],

@@ -4,7 +4,7 @@ use ngit::{
     git_events::{KIND_LABEL, get_labels},
 };
 use nostr::{EventBuilder, Tag, nips::{nip10::Nip10Tag, nip19::Nip19}};
-use nostr_sdk::{EventId, FromBech32};
+use nostr::{EventId, FromBech32};
 
 use crate::{
     client::{

@@ -40,11 +40,12 @@ use ngit::{
 };
 use nostr::nips::{
     nip01::Nip01Tag,
-    nip10::Marker,
+    nip10::{Marker, Nip10Tag},
     nip19::ToBech32,
     nip22::{CommentTarget, extract_root},
     nip34::Nip34Tag,
 };
+use nostr::event::tag::TagCodec;
 use nostr::{
     Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, Tag,
     hashes::sha1::Hash as Sha1Hash,
@@ -1555,9 +1556,13 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
         event.clone()
     } else {
         let proposal_or_revision_id = EventId::parse(
-            &if let Some(t) = event.tags.iter().find(|t| t.is_root()) {
+            &if let Some(t) = event.tags.iter().find(|t| {
+                Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_root())
+            }) {
                 t.clone()
-            } else if let Some(t) = event.tags.iter().find(|t| t.is_reply()) {
+            } else if let Some(t) = event.tags.iter().find(|t| {
+                Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_reply())
+            }) {
                 t.clone()
             } else {
                 Tag::event(event.id)
@@ -1594,7 +1599,7 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
                 &proposal_or_revision
                     .tags
                     .iter()
-                    .find(|t| t.is_reply())
+                    .find(|t| Nip10Tag::parse(t.as_slice()).ok().is_some_and(|n| n.is_reply()))
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "revision-root patch event {} missing reply tag",

@@ -14,7 +14,7 @@ use ngit::{
     },
 };
 use nostr::nips::nip19;
-use nostr_sdk::{Event, ToBech32};
+use nostr::{Event, ToBech32};
 
 pub async fn run_fetch(
     git_repo: &Repo,

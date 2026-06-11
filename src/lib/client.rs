@@ -33,23 +33,24 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 #[cfg(test)]
 use mockall::*;
 use nostr::{
-    Event,
+    Alphabet, Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
+    Url,
     event::UnsignedEvent,
-    filter::Alphabet,
     nips::{
         nip01::Coordinate,
         nip05::{Nip05Address, Nip05Profile},
         nip19::Nip19Coordinate,
     },
-    signer::SignerBackend,
 };
 use nostr_database::{NostrDatabase, SaveEventStatus};
 use nostr_lmdb::NostrLMDB;
-use nostr_relay_pool::relay::ReqExitPolicy;
 use nostr_sdk::{
-    ClientOptions, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, SingleLetterTag,
-    Timestamp, Url, prelude::RelayLimits,
+    authenticator::SignerAuthenticator,
+    client::ClientBuilder,
+    relay::{ReqExitPolicy, RelayLimits},
 };
+
+use crate::signer::NgitSigner;
 use serde_json::Value;
 
 use crate::{
@@ -117,7 +118,7 @@ fn finish_bar(bar: &ProgressBar, message: String, reveal_state: &Option<Arc<BarR
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
-    client: nostr_sdk::Client,
+    client: nostr_sdk::client::Client,
     relay_default_set: Vec<String>,
     blaster_relays: Vec<String>,
     fallback_signer_relays: Vec<String>,
@@ -152,7 +153,7 @@ impl Client {
 pub trait Connect {
     fn default() -> Self;
     fn new(opts: Params) -> Self;
-    async fn set_signer(&mut self, signer: Arc<dyn NostrSigner>);
+    async fn set_signer(&mut self, signer: Arc<NgitSigner>);
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()>;
     async fn disconnect(&self) -> Result<()>;
     fn get_relay_default_set(&self) -> &Vec<String>;
@@ -199,21 +200,15 @@ impl Connect for Client {
     fn new(opts: Params) -> Self {
         Client {
             client: if let Some(keys) = opts.keys {
-                nostr_sdk::ClientBuilder::new()
-                    .opts(
-                        ClientOptions::new()
-                            .relay_limits(RelayLimits::disable())
-                            .verify_subscriptions(true),
-                    )
-                    .signer(keys)
+                ClientBuilder::default()
+                    .relay_limits(RelayLimits::disable())
+                    .verify_subscriptions(true)
+                    .authenticator(SignerAuthenticator::new(keys))
                     .build()
             } else {
-                nostr_sdk::ClientBuilder::new()
-                    .opts(
-                        ClientOptions::new()
-                            .relay_limits(RelayLimits::disable())
-                            .verify_subscriptions(true),
-                    )
+                ClientBuilder::default()
+                    .relay_limits(RelayLimits::disable())
+                    .verify_subscriptions(true)
                     .build()
             },
             relay_default_set: opts.relay_default_set,
@@ -224,8 +219,8 @@ impl Connect for Client {
         }
     }
 
-    async fn set_signer(&mut self, signer: Arc<dyn NostrSigner>) {
-        self.client.set_signer(signer).await;
+    async fn set_signer(&mut self, signer: Arc<NgitSigner>) {
+        self.client = signer.build_client();
     }
 
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
@@ -237,12 +232,14 @@ impl Connect for Client {
             .await
             .context("failed to add relay")?;
 
-        let relay = self.client.relay(relay_url).await?;
+        let relay = self.client.relay(relay_url).await?
+            .ok_or_else(|| anyhow!("relay {} not found after add", relay_url))?;
 
-        if !relay.is_connected() {
+    if !relay.status().is_connected() {
             #[allow(clippy::large_futures)]
             relay
-                .try_connect(std::time::Duration::from_secs(long_timeout()))
+                .try_connect()
+                .timeout(std::time::Duration::from_secs(long_timeout()))
                 .await?;
         }
 
@@ -279,7 +276,10 @@ impl Connect for Client {
         self.client.add_relay(url).await?;
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
-        self.client.relay(url).await?.send_event(&event).await?;
+        self.client.relay(url).await?
+            .ok_or_else(|| anyhow!("relay not found: {url}"))?
+            .send_event(&event)
+            .await?;
         if let Some(git_repo_path) = git_repo_path {
             save_event_in_local_cache(git_repo_path, &event).await?;
         }
@@ -842,7 +842,8 @@ impl Connect for Client {
             fresh_issue_roots = HashSet::new();
             fresh_profiles = HashSet::new();
 
-            let relay = self.client.relay(&relay_url).await?;
+            let relay = self.client.relay(&relay_url).await?
+                .ok_or_else(|| anyhow!("relay not found: {relay_url}"))?;
             let events: Vec<nostr::Event> = get_events_of(&relay, filters.clone(), pb).await?;
             // TODO: try reconcile
 
@@ -932,7 +933,7 @@ fn short_timeout() -> u64 {
 }
 
 async fn get_events_of(
-    relay: &nostr_sdk::Relay,
+    relay: &nostr_sdk::relay::Relay,
     filters: Vec<nostr::Filter>,
     pb: &Option<ProgressBar>,
 ) -> Result<Vec<Event>> {
@@ -954,15 +955,16 @@ async fn get_events_of(
         );
         pb.set_message("connecting");
     }
-    while !relay.is_connected() {
+    while !relay.status().is_connected() {
         attempt_num += 1;
         #[allow(clippy::large_futures)]
         match relay
-            .try_connect(Duration::from_secs(short_timeout()))
+            .try_connect()
+            .timeout(Duration::from_secs(short_timeout()))
             .await
         {
             Ok(_) => {
-                if relay.is_connected() {
+                if relay.status().is_connected() {
                     break;
                 }
             }
@@ -1033,7 +1035,7 @@ async fn get_events_of(
         retry_delay = Duration::from_secs_f64(retry_delay.as_secs_f64() * 1.5);
     }
 
-    if !relay.is_connected() {
+    if !relay.status().is_connected() {
         if let Some(e) = last_error {
             bail!("connection timeout: {}", e);
         } else {
@@ -1051,12 +1053,10 @@ async fn get_events_of(
 
     let events_res = join_all(filters.into_iter().map(|filter| async {
         relay
-            .fetch_events(
-                filter,
-                // Use a very long timeout; actual timeout is controlled by outer tokio::select!
-                std::time::Duration::from_secs(long_timeout()),
-                ReqExitPolicy::ExitOnEOSE,
-            )
+            .fetch_events(filter)
+            // Use a very long timeout; actual timeout is controlled by outer tokio::select!
+            .timeout(std::time::Duration::from_secs(long_timeout()))
+            .policy(ReqExitPolicy::ExitOnEOSE)
             .await
     }))
     .await;
@@ -1220,23 +1220,23 @@ fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event>
 
 pub async fn sign_event(
     event_builder: EventBuilder,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     description: String,
 ) -> Result<nostr::Event> {
-    if signer.backend() == SignerBackend::NostrConnect {
+    if signer.is_remote() {
         let term = console::Term::stderr();
         term.write_line(&format!(
             "signing event ({description}) with remote signer..."
         ))?;
         let event = signer
-            .sign_event(event_builder.build(signer.get_public_key().await?))
+            .sign_event_builder(event_builder)
             .await
             .context("failed to sign event")?;
         term.clear_last_lines(1)?;
         Ok(event)
     } else {
         signer
-            .sign_event(event_builder.build(signer.get_public_key().await?))
+            .sign_event_builder(event_builder)
             .await
             .context("failed to sign event")
     }
@@ -1244,10 +1244,10 @@ pub async fn sign_event(
 
 pub async fn sign_draft_event(
     draft_event: UnsignedEvent,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     description: String,
 ) -> Result<nostr::Event> {
-    if signer.backend() == SignerBackend::NostrConnect {
+    if signer.is_remote() {
         let term = console::Term::stderr();
         term.write_line(&format!(
             "signing event ({description}) with remote signer..."
@@ -1266,8 +1266,8 @@ pub async fn sign_draft_event(
     }
 }
 
-pub async fn fetch_public_key(signer: &Arc<dyn NostrSigner>) -> Result<nostr::PublicKey> {
-    if signer.backend() == SignerBackend::NostrConnect {
+pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::PublicKey> {
+    if signer.is_remote() {
         let term = console::Term::stderr();
         term.write_line("fetching npub from remote signer...")?;
         let public_key = signer
@@ -1359,6 +1359,7 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
         .commondir()
         .to_path_buf();
     NostrLMDB::open(git_dir.join("nostr-cache.lmdb"))
+        .await
         .context("failed to open or create nostr cache database at <git-dir>/nostr-cache.lmdb")
 }
 
@@ -1381,7 +1382,7 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
         get_dirs()?.cache_dir().join("nostr-cache.lmdb")
     };
 
-    NostrLMDB::open(path).context("failed to open ngit global nostr cache database")
+    NostrLMDB::open(path).await.context("failed to open ngit global nostr cache database")
 }
 
 pub async fn get_events_from_local_cache(
@@ -1690,7 +1691,7 @@ async fn create_relays_request(
                     nostr::Filter::default()
                         .kinds(vec![Kind::GitPatch, KIND_PULL_REQUEST, Kind::GitIssue])
                         .custom_tags(
-                            SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                            SingleLetterTag::lowercase(Alphabet::A),
                             repo_coordinates_without_relays
                                 .iter()
                                 .map(|c| c.coordinate.to_string())
@@ -1936,7 +1937,7 @@ async fn process_fetched_events(
                     .iter()
                     .map(|(c, _)| c.clone())
                     .any(|c| {
-                        c.identifier.eq(event.tags.identifier().unwrap())
+                        c.identifier.eq(event.tags.identifier().unwrap().as_str())
                             && c.public_key.eq(&event.pubkey)
                     });
                 let update_to_existing = !new_coordinate
@@ -1944,7 +1945,7 @@ async fn process_fetched_events(
                         .repo_coordinates_without_relays
                         .iter()
                         .any(|(c, t)| {
-                            c.identifier.eq(event.tags.identifier().unwrap())
+                            c.identifier.eq(event.tags.identifier().unwrap().as_str())
                                 && c.public_key.eq(&event.pubkey)
                                 && if let Some(t) = t {
                                     event.created_at.gt(t)
@@ -2223,7 +2224,7 @@ pub fn get_fetch_filters(
                         Kind::GitIssue,
                     ])
                     .custom_tags(
-                        SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                        SingleLetterTag::lowercase(Alphabet::A),
                         repo_coordinates
                             .iter()
                             .map(|c| c.coordinate.to_string())
@@ -2650,7 +2651,7 @@ pub async fn get_issues_from_cache(
             nostr::Filter::default()
                 .kinds([nostr::Kind::GitIssue])
                 .custom_tags(
-                    nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                    nostr::SingleLetterTag::lowercase(Alphabet::A),
                     repo_coordinates
                         .iter()
                         .map(|c| c.coordinate.to_string())
@@ -2674,7 +2675,7 @@ pub async fn get_proposals_and_revisions_from_cache(
             nostr::Filter::default()
                 .kinds([nostr::Kind::GitPatch, KIND_PULL_REQUEST])
                 .custom_tags(
-                    nostr::SingleLetterTag::lowercase(nostr_sdk::Alphabet::A),
+                    nostr::SingleLetterTag::lowercase(Alphabet::A),
                     repo_coordinates
                         .iter()
                         .map(|c| c.coordinate.to_string())
