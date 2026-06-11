@@ -3,8 +3,15 @@ use ngit::{
     client::{Params, get_proposals_and_revisions_from_cache, send_events, sign_event},
     git_events::{get_status, status_kinds},
 };
-use nostr::{EventBuilder, Tag, TagStandard, ToBech32, nips::nip19::Nip19};
-use nostr_sdk::{EventId, FromBech32, Kind, nips::nip10::Marker};
+use nostr::{
+    EventBuilder, EventId, FromBech32, Kind, Tag, ToBech32,
+    nips::{
+        nip01::Nip01Tag,
+        nip10::{Marker, Nip10Tag},
+        nip19::Nip19,
+        nip34::Nip34Tag,
+    },
+};
 
 use crate::{
     client::{
@@ -136,16 +143,12 @@ async fn launch_status(
         EventBuilder::new(new_kind, content).tags(
             [
                 vec![
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec![alt_text.to_string()],
-                    ),
-                    Tag::from_standardized(TagStandard::Event {
-                        event_id: proposal.id,
-                        relay_url: repo_ref.relays.first().cloned(),
+                    Tag::parse(["alt", alt_text]).expect("valid alt tag"),
+                    Tag::from(Nip10Tag::Event {
+                        id: proposal.id,
+                        relay_hint: repo_ref.relays.first().cloned(),
                         marker: Some(Marker::Root),
                         public_key: None,
-                        uppercase: false,
                     }),
                 ],
                 public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
@@ -153,16 +156,13 @@ async fn launch_status(
                     .coordinates()
                     .iter()
                     .map(|c| {
-                        Tag::from_standardized(TagStandard::Coordinate {
-                            coordinate: c.coordinate.clone(),
-                            relay_url: c.relays.first().cloned(),
-                            uppercase: false,
-                        })
+                        Tag::from(Nip01Tag::Coordinate {
+                                coordinate: c.coordinate.clone(),
+                                relay_hint: c.relays.first().cloned(),
+                            })
                     })
                     .collect::<Vec<Tag>>(),
-                vec![Tag::from_standardized(nostr::TagStandard::Reference(
-                    repo_ref.root_commit.to_string(),
-                ))],
+                vec![Tag::parse(["r", &repo_ref.root_commit]).expect("valid r tag")],
             ]
             .concat(),
         ),

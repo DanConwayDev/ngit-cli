@@ -23,7 +23,7 @@ use ngit::{
     repo_state::RepoState,
     utils::{get_short_git_server_name, join_with_and},
 };
-use nostr_sdk::RelayUrl;
+use nostr::RelayUrl;
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {

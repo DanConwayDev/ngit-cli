@@ -9,8 +9,15 @@ use ngit::{
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
     },
 };
-use nostr::{EventBuilder, Tag, TagStandard, nips::nip19::Nip19};
-use nostr_sdk::{EventId, FromBech32, Kind, nips::nip10::Marker};
+use nostr::{
+    EventBuilder, EventId, FromBech32, Kind, Tag,
+    nips::{
+        nip01::Nip01Tag,
+        nip10::{Marker, Nip10Tag},
+        nip19::Nip19,
+        nip34::Nip34Tag,
+    },
+};
 
 use crate::{
     client::{
@@ -190,16 +197,12 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
         EventBuilder::new(Kind::GitStatusApplied, "").tags(
             [
                 vec![
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec!["PR merged".to_string()],
-                    ),
-                    Tag::from_standardized(TagStandard::Event {
-                        event_id: proposal.id,
-                        relay_url: repo_ref.relays.first().cloned(),
+                    Tag::parse(["alt", "PR merged"]).expect("valid alt tag"),
+                    Tag::from(Nip10Tag::Event {
+                        id: proposal.id,
+                        relay_hint: repo_ref.relays.first().cloned(),
                         marker: Some(Marker::Root),
                         public_key: None,
-                        uppercase: false,
                     }),
                 ],
                 public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
@@ -207,16 +210,13 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
                     .coordinates()
                     .iter()
                     .map(|c| {
-                        Tag::from_standardized(TagStandard::Coordinate {
-                            coordinate: c.coordinate.clone(),
-                            relay_url: c.relays.first().cloned(),
-                            uppercase: false,
-                        })
+                        Tag::from(Nip01Tag::Coordinate {
+                                coordinate: c.coordinate.clone(),
+                                relay_hint: c.relays.first().cloned(),
+                            })
                     })
                     .collect::<Vec<Tag>>(),
-                vec![Tag::from_standardized(nostr::TagStandard::Reference(
-                    repo_ref.root_commit.to_string(),
-                ))],
+                vec![Tag::parse(["r", &repo_ref.root_commit]).expect("valid r tag")],
             ]
             .concat(),
         ),

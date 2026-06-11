@@ -3,7 +3,7 @@ use ngit::{
     client::{Params, get_issues_from_cache, get_proposals_and_revisions_from_cache, send_events},
     git_events::{KIND_LABEL, get_labels_and_subject},
 };
-use nostr::{EventBuilder, Tag, TagStandard, nips::nip19::Nip19};
+use nostr::{EventBuilder, Tag, nips::{nip10::Nip10Tag, nip19::Nip19}};
 use nostr_sdk::{EventId, FromBech32};
 
 use crate::{
@@ -127,24 +127,17 @@ async fn publish_set_subject_event(
 
     let mut tags: Vec<Tag> = vec![
         // Namespace declaration
-        Tag::custom(
-            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("L")),
-            vec!["#subject".to_string()],
-        ),
+        Tag::parse(["L", "#subject"]).expect("valid L tag"),
         // Subject value
-        Tag::custom(
-            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("l")),
-            vec![subject.to_string(), "#subject".to_string()],
-        ),
+        Tag::parse(["l", subject, "#subject"]).expect("valid l tag"),
     ];
 
     // Reference the target event.
-    tags.push(Tag::from_standardized(TagStandard::Event {
-        event_id: target.id,
-        relay_url: relay_hint.clone(),
+    tags.push(Tag::from(Nip10Tag::Event {
+        id: target.id,
+        relay_hint: relay_hint.clone(),
         marker: None,
         public_key: None,
-        uppercase: false,
     }));
 
     // Notify the target event author.

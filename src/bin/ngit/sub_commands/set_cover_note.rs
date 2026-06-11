@@ -4,7 +4,7 @@ use ngit::{
     content_tags::{dedup_tags, tags_from_content},
     git_events::{KIND_COVER_NOTE, process_cover_note},
 };
-use nostr::{EventBuilder, Tag, TagStandard, nips::nip19::Nip19};
+use nostr::{EventBuilder, Tag, nips::{nip10::Nip10Tag, nip19::Nip19}};
 use nostr_sdk::{EventId, FromBech32};
 
 use crate::{
@@ -141,22 +141,18 @@ async fn publish_set_cover_note_event(
     let mut tags: Vec<Tag> = vec![];
 
     // Reference the target event (lowercase `e`).
-    tags.push(Tag::from_standardized(TagStandard::Event {
-        event_id: target.id,
-        relay_url: relay_hint.clone(),
+    tags.push(Tag::from(Nip10Tag::Event {
+        id: target.id,
+        relay_hint: relay_hint.clone(),
         marker: None,
         public_key: None,
-        uppercase: false,
     }));
 
     // Notify the target event author.
     tags.push(Tag::public_key(target.pubkey));
 
     // Human-readable alt text.
-    tags.push(Tag::custom(
-        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-        vec![format!("cover note for {target_kind}")],
-    ));
+    tags.push(Tag::parse(["alt", &format!("cover note for {target_kind}")]).expect("valid alt tag"));
 
     // Process body for nostr: mentions → q and p tags (same as --body in issue
     // creation).
