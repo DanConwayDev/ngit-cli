@@ -154,9 +154,10 @@ async fn publish_set_cover_note_event(
     tags.push(Tag::public_key(target.pubkey));
 
     // Human-readable alt text.
-    tags.push(
-        Tag::parse(["alt", &format!("cover note for {target_kind}")])?,
-    );
+    tags.push(Tag::parse([
+        "alt",
+        &format!("cover note for {target_kind}"),
+    ])?);
 
     // Process body for nostr: mentions → q and p tags (same as --body in issue
     // creation).

@@ -157,9 +157,10 @@ async fn publish_label_event(
         .map(|l| format!("#{l}"))
         .collect::<Vec<_>>()
         .join(", ");
-    tags.push(
-        Tag::parse(["alt", &format!("labelled {target_kind} with {label_list}")])?,
-    );
+    tags.push(Tag::parse([
+        "alt",
+        &format!("labelled {target_kind} with {label_list}"),
+    ])?);
 
     let label_event = ngit::client::sign_event(
         EventBuilder::new(KIND_LABEL, "").tags(tags),
