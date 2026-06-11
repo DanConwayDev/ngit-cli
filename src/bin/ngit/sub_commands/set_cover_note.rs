@@ -155,7 +155,7 @@ async fn publish_set_cover_note_event(
 
     // Human-readable alt text.
     tags.push(
-        Tag::parse(["alt", &format!("cover note for {target_kind}")]).expect("valid alt tag"),
+        Tag::parse(["alt", &format!("cover note for {target_kind}")])?,
     );
 
     // Process body for nostr: mentions → q and p tags (same as --body in issue

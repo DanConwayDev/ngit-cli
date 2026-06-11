@@ -65,7 +65,7 @@ impl UserGraspList {
             nostr::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
                 self.urls
                     .iter()
-                    .map(|url| Tag::parse(["g", &url.to_string()]).unwrap())
+                    .map(|url| Tag::parse(["g", url.as_ref()]).unwrap())
                     .collect::<Vec<_>>(),
             ),
             signer,

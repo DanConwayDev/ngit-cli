@@ -598,9 +598,10 @@ async fn publish_event_to_all(event: &Event, urls: &[&str]) -> Result<()> {
     }
     client.connect().await;
     let output = client
-        .send_event_to(urls.iter().copied(), event)
+        .send_event(event)
+        .to(urls.iter().copied())
         .await
-        .context("send_event_to fan-out")?;
+        .context("send_event fan-out")?;
     client.disconnect().await;
     if !output.failed.is_empty() {
         anyhow::bail!(

@@ -43,7 +43,7 @@ use nostr::{
     },
 };
 use nostr_database::{NostrDatabase, SaveEventStatus};
-use nostr_lmdb::NostrLMDB;
+use nostr_lmdb::NostrLmdb;
 use nostr_sdk::{
     authenticator::SignerAuthenticator,
     client::ClientBuilder,
@@ -1360,17 +1360,17 @@ fn pb_after_style(succeed: bool) -> indicatif::ProgressStyle {
     .unwrap()
 }
 
-async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLMDB> {
+async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLmdb> {
     let git_dir = git2::Repository::discover(git_repo_path)
         .context("failed to discover git repository")?
         .commondir()
         .to_path_buf();
-    NostrLMDB::open(git_dir.join("nostr-cache.lmdb"))
+    NostrLmdb::open(git_dir.join("nostr-cache.lmdb"))
         .await
         .context("failed to open or create nostr cache database at <git-dir>/nostr-cache.lmdb")
 }
 
-async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLMDB> {
+async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLmdb> {
     let path = if std::env::var("NGITTEST").is_ok() {
         if let Some(git_repo_path) = git_repo_path {
             let git_dir = git2::Repository::discover(git_repo_path)
@@ -1389,7 +1389,7 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
         get_dirs()?.cache_dir().join("nostr-cache.lmdb")
     };
 
-    NostrLMDB::open(path)
+    NostrLmdb::open(path)
         .await
         .context("failed to open ngit global nostr cache database")
 }

@@ -9,7 +9,6 @@ use nostr::{
         nip01::Nip01Tag,
         nip10::{Marker, Nip10Tag},
         nip19::Nip19,
-        nip34::Nip34Tag,
     },
 };
 
@@ -129,11 +128,13 @@ async fn launch_status(
 
     let content = reason.unwrap_or("").to_string();
 
+    let alt_tag = Tag::parse(["alt", alt_text])?;
+    let r_tag = Tag::parse(["r", &repo_ref.root_commit])?;
     let status_event = sign_event(
         EventBuilder::new(new_kind, content).tags(
             [
                 vec![
-                    Tag::parse(["alt", alt_text]).expect("valid alt tag"),
+                    alt_tag,
                     Tag::from(Nip10Tag::Event {
                         id: issue.id,
                         relay_hint: repo_ref.relays.first().cloned(),
@@ -152,7 +153,7 @@ async fn launch_status(
                         })
                     })
                     .collect::<Vec<Tag>>(),
-                vec![Tag::parse(["r", &repo_ref.root_commit]).expect("valid r tag")],
+                vec![r_tag],
             ]
             .concat(),
         ),

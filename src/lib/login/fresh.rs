@@ -348,7 +348,7 @@ pub async fn get_fresh_nip46_signer(
                     Duration::from_secs(10 * 60),
                     None,
                 )?);
-                let signer_arc = Arc::new(crate::NgitSigner::Connect((*nostr_connect).clone()));
+                let signer_arc = Arc::new(crate::NgitSigner::Connect(Box::new((*nostr_connect).clone())));
                 let pubkey_handle = tokio::spawn(async move { signer_arc.get_public_key().await });
 
                 // Show a spinner while waiting; Ctrl+C lets the user change
@@ -397,7 +397,7 @@ pub async fn get_fresh_nip46_signer(
                         npub: Some(public_key.to_bech32()?),
                     };
                     return Ok(Some((
-                        Arc::new(crate::NgitSigner::Connect((*nostr_connect).clone())),
+                        Arc::new(crate::NgitSigner::Connect(Box::new((*nostr_connect).clone()))),
                         public_key,
                         signer_info,
                         SignerInfoSource::GitGlobal,
@@ -653,7 +653,7 @@ pub async fn listen_for_remote_signer(
         Duration::from_secs(10 * 60),
         None,
     )?);
-    let signer = Arc::new(crate::NgitSigner::Connect((*nostr_connect).clone()));
+    let signer = Arc::new(crate::NgitSigner::Connect(Box::new((*nostr_connect).clone())));
     let pubkey_future = signer.get_public_key();
 
     // wait for signer response or ctrl + c

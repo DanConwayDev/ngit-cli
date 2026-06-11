@@ -9,7 +9,7 @@ use nostr_sdk::{authenticator::SignerAuthenticator, client::ClientBuilder, relay
 #[derive(Clone)]
 pub enum NgitSigner {
     Keys(Keys),
-    Connect(NostrConnect),
+    Connect(Box<NostrConnect>),
 }
 
 impl NgitSigner {
@@ -60,7 +60,7 @@ impl NgitSigner {
             Self::Connect(c) => ClientBuilder::default()
                 .relay_limits(RelayLimits::disable())
                 .verify_subscriptions(true)
-                .authenticator(SignerAuthenticator::new(c.clone()))
+                .authenticator(SignerAuthenticator::new(c.as_ref().clone()))
                 .build(),
         }
     }

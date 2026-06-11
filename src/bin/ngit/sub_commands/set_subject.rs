@@ -129,9 +129,9 @@ async fn publish_set_subject_event(
 
     let mut tags: Vec<Tag> = vec![
         // Namespace declaration
-        Tag::parse(["L", "#subject"]).expect("valid L tag"),
+        Tag::parse(["L", "#subject"])?,
         // Subject value
-        Tag::parse(["l", subject, "#subject"]).expect("valid l tag"),
+        Tag::parse(["l", subject, "#subject"])?,
     ];
 
     // Reference the target event.

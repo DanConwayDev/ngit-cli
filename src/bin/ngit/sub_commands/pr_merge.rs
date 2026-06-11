@@ -15,7 +15,6 @@ use nostr::{
         nip01::Nip01Tag,
         nip10::{Marker, Nip10Tag},
         nip19::Nip19,
-        nip34::Nip34Tag,
     },
 };
 
@@ -193,11 +192,13 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
         repo_ref.maintainers.iter().copied().collect();
     public_keys.insert(proposal.pubkey);
 
+    let alt_tag = Tag::parse(["alt", "PR merged"])?;
+    let r_tag = Tag::parse(["r", &repo_ref.root_commit])?;
     let applied_event = sign_event(
         EventBuilder::new(Kind::GitStatusApplied, "").tags(
             [
                 vec![
-                    Tag::parse(["alt", "PR merged"]).expect("valid alt tag"),
+                    alt_tag,
                     Tag::from(Nip10Tag::Event {
                         id: proposal.id,
                         relay_hint: repo_ref.relays.first().cloned(),
@@ -216,7 +217,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
                         })
                     })
                     .collect::<Vec<Tag>>(),
-                vec![Tag::parse(["r", &repo_ref.root_commit]).expect("valid r tag")],
+                vec![r_tag],
             ]
             .concat(),
         ),

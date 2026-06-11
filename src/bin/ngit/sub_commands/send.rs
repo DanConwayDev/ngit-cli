@@ -639,9 +639,9 @@ async fn get_root_proposal_and_mentions_from_in_reply_to(
     in_reply_to: &[String],
 ) -> Result<(Option<Event>, Vec<nostr::Tag>)> {
     let root_proposal = if let Some(first) = in_reply_to.first() {
-        let _root_tag =
+        let root_tag =
             event_tag_from_nip19_or_hex(first, "in-reply-to", EventRefType::Root, true, false)?;
-        if let Ok(Nip10Tag::Event { id: event_id, .. }) = Nip10Tag::try_from(_root_tag) {
+        if let Ok(Nip10Tag::Event { id: event_id, .. }) = Nip10Tag::try_from(root_tag) {
             let events =
                 get_events_from_local_cache(git_repo_path, vec![nostr::Filter::new().id(event_id)])
                     .await?;

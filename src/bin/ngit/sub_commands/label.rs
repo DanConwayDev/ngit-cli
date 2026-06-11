@@ -132,12 +132,12 @@ async fn publish_label_event(
 
     let mut tags: Vec<Tag> = vec![
         // Namespace declaration
-        Tag::parse(["L", "#t"]).expect("valid L tag"),
+        Tag::parse(["L", "#t"])?,
     ];
 
     // One ["l", value, "#t"] tag per label.
     for label in &new_labels {
-        tags.push(Tag::parse(["l", label.as_str(), "#t"]).expect("valid l tag"));
+        tags.push(Tag::parse(["l", label.as_str(), "#t"])?);
     }
 
     // Reference the target event.
@@ -158,8 +158,7 @@ async fn publish_label_event(
         .collect::<Vec<_>>()
         .join(", ");
     tags.push(
-        Tag::parse(["alt", &format!("labelled {target_kind} with {label_list}")])
-            .expect("valid alt tag"),
+        Tag::parse(["alt", &format!("labelled {target_kind} with {label_list}")])?,
     );
 
     let label_event = ngit::client::sign_event(

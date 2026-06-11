@@ -68,7 +68,7 @@ pub async fn launch(
     }
 
     // Alt text
-    tags.push(Tag::parse(["alt", &format!("git issue: {title}")]).expect("valid alt tag"));
+    tags.push(Tag::parse(["alt", &format!("git issue: {title}")])?);
 
     // Maintainer p-tags (so they get notified)
     for pk in &repo_ref.maintainers {
