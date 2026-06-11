@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use nostr_relay_builder::{Error as RelayBuilderError, LocalRelay, RelayBuilder};
+use nostr_relay_builder::{Error as RelayBuilderError, LocalRelay};
 use nostr_sdk::prelude::*;
 
 use crate::{
@@ -80,13 +80,13 @@ impl VanillaRelay {
             // `reserve_port` calls in this process cannot have been handed
             // this port number while we held the reservation.
             let port = reservation.release();
-            let builder = RelayBuilder::default()
+            let relay = LocalRelay::builder()
                 .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
-                .port(port);
-            let relay = LocalRelay::new(builder);
+                .port(port)
+                .build();
             match relay.run().await {
                 Ok(()) => {
-                    let url = format!("ws://127.0.0.1:{port}");
+                    let url = relay.url().await.to_string();
                     return Ok(Self { role, url, relay });
                 }
                 Err(e) if is_addr_in_use(&e) && attempt < MAX_BIND_ATTEMPTS => {
