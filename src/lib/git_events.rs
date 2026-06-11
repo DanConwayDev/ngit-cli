@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 use anyhow::{Context, Result, bail};
 use nostr::{
     hashes::sha1::Hash as Sha1Hash,
-    event::{UnsignedEvent, FinalizeEvent, tag::TagCodec, unsigned::FinalizeUnsignedEvent},
+    event::{UnsignedEvent, tag::TagCodec, unsigned::FinalizeUnsignedEvent},
     nips::{
         nip01::{Coordinate, Nip01Tag},
         nip10::{Marker, Nip10Tag},
@@ -1282,6 +1282,7 @@ pub async fn identify_clone_urls_for_oids_from_pr_pr_update_events(
 
 #[cfg(test)]
 mod tests {
+    use nostr::event::FinalizeEvent;
     use super::*;
 
     mod get_commit_id_from_patch {

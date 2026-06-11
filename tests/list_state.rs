@@ -265,12 +265,12 @@ async fn wait_for_state_event_covering(
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    let kind = nostr_sdk::Kind::Custom(30618);
+    let kind = nostr::Kind::Custom(30618);
     loop {
         let events = harness
             .grasp("repo")
             .events(
-                nostr_sdk::Filter::new()
+                nostr::Filter::new()
                     .kind(kind)
                     .author(repo.maintainer_keys.public_key()),
             )

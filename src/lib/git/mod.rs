@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use git2::{DiffOptions, Oid, Revwalk};
 pub use identify_ahead_behind::identify_ahead_behind;
 use nostr::{
-    Tag, Tags,
+    Tags,
     hashes::{Hash, sha1::Hash as Sha1Hash},
 };
 use nostr_url::NostrUrlDecoded;
@@ -1275,6 +1275,7 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
 mod tests {
     use std::fs;
 
+    use nostr::Tag;
     use super::*;
     use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event};
 
