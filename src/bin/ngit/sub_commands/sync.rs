@@ -885,6 +885,7 @@ mod tests {
     use ngit::{client::STATE_KIND, git::Repo};
     use nostr::{
         Kind,
+        event::FinalizeEvent,
         nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     };
     use test_helpers::GitTestRepo;
@@ -1025,7 +1026,7 @@ mod tests {
         let keys = nostr::Keys::generate();
         let event = nostr::event::EventBuilder::new(STATE_KIND, "")
             .tags(vec![nostr::Tag::identifier("test")])
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .unwrap();
         RepoState {
             identifier: "test".to_string(),

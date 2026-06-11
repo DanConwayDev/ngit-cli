@@ -1142,7 +1142,7 @@ mod tests {
                     "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                 )
                 .unwrap(),
-                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                kind: nostr::Kind::GitRepoAnnouncement,
             },
             relays: if relays {
                 vec![RelayUrl::parse("wss://nos.lol").unwrap()]

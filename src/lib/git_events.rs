@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 use anyhow::{Context, Result, bail};
 use nostr::{
     hashes::sha1::Hash as Sha1Hash,
-    event::{UnsignedEvent, tag::TagCodec, unsigned::FinalizeUnsignedEvent},
+    event::{UnsignedEvent, FinalizeEvent, tag::TagCodec, unsigned::FinalizeUnsignedEvent},
     nips::{
         nip01::{Coordinate, Nip01Tag},
         nip10::{Marker, Nip10Tag},

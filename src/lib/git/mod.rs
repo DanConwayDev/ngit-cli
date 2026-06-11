@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use git2::{DiffOptions, Oid, Revwalk};
 pub use identify_ahead_behind::identify_ahead_behind;
 use nostr::{
-    Tags,
+    Tag, Tags,
     hashes::{Hash, sha1::Hash as Sha1Hash},
 };
 use nostr_url::NostrUrlDecoded;
@@ -1637,10 +1637,10 @@ index ce01362..a21e91c 100644\n\
 
             fn test(time: git2::Time) -> Result<()> {
                 let data = extract_signature_data_from_tags(
-                    &Tags::from_list(vec![nostr::Tag::custom(
-                        nostr::TagKind::Custom("author".to_string().into()),
-                        prep(&time)?,
-                    )]),
+                &Tags::from_list(vec![Tag::parse(
+                    [vec!["author".to_string()], prep(&time)?].concat(),
+                )
+                .expect("valid author tag")]),
                     "author",
                 )?;
                 let sig = data.to_signature()?;

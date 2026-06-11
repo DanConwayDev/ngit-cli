@@ -1250,7 +1250,7 @@ mod tests {
     /// `tests/init_preserves_unknown_tags.rs`. These tests pin only the
     /// library-level invariant the CLI relies on.
     mod extra_tags_round_trip {
-        use nostr::EventBuilder;
+        use nostr::{EventBuilder, event::FinalizeEvent};
 
         use super::*;
 
@@ -1265,7 +1265,7 @@ mod tests {
             tags.extend(extra);
             EventBuilder::new(base.kind, base.content)
                 .tags(tags)
-                .sign_with_keys(&TEST_KEY_1_KEYS)
+                .finalize(&*TEST_KEY_1_KEYS)
                 .unwrap()
         }
 
