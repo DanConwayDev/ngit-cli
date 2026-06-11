@@ -134,16 +134,16 @@ pub async fn get_open_or_draft_proposals(
     repo_ref: &RepoRef,
 ) -> Result<HashMap<EventId, (Event, Vec<Event>, Option<Event>)>> {
     let git_repo_path = git_repo.get_path()?;
-    let proposals: Vec<nostr::Event> =
-        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
-            .await?
-            .iter()
-            .filter(|e|
-                // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
-                // e.kind.eq(&KIND_PULL_REQUEST) ||
-                !event_is_revision_root(e))
-            .cloned()
-            .collect();
+    let proposals_and_revisions: Vec<nostr::Event> =
+        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
+    let proposals: Vec<nostr::Event> = proposals_and_revisions
+        .iter()
+        .filter(|e|
+            // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
+            // e.kind.eq(&KIND_PULL_REQUEST) ||
+            !event_is_revision_root(e))
+        .cloned()
+        .collect();
 
     let statuses: Vec<nostr::Event> = {
         let mut statuses = get_events_from_local_cache(
@@ -151,7 +151,7 @@ pub async fn get_open_or_draft_proposals(
             vec![
                 nostr::Filter::default()
                     .kinds(status_kinds().clone())
-                    .events(proposals.iter().map(|e| e.id)),
+                    .events(proposals_and_revisions.iter().map(|e| e.id)),
             ],
         )
         .await?;
@@ -162,7 +162,10 @@ pub async fn get_open_or_draft_proposals(
     let mut open_or_draft_proposals = HashMap::new();
 
     for proposal in &proposals {
-        let status = get_status(proposal, repo_ref, &statuses, &proposals);
+        // Pass the unfiltered list (including PR revision-roots) so `get_status`
+        // can recover the open/draft status of a patch that was closed because
+        // it was upgraded to a PR (the PR revision-root carries the live status).
+        let status = get_status(proposal, repo_ref, &statuses, &proposals_and_revisions);
         if [Kind::GitStatusOpen, Kind::GitStatusDraft].contains(&status) {
             if let Ok(commits_events) = get_all_proposal_patch_pr_pr_update_events_from_cache(
                 git_repo_path,
