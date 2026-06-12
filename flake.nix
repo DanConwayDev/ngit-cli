@@ -7,6 +7,14 @@
     # ngit-grasp provides the GRASP server binary used by the integration
     # test harness. Pinned to a specific rev so CI is reproducible — bump
     # it intentionally rather than tracking a moving target.
+    #
+    # When bumping: a stale local Nix git cache can write a narHash that
+    # doesn't match a fresh fetch, passing locally but breaking CI with a
+    # "NAR hash mismatch" on this input. If that happens, clear the fetch
+    # caches and regenerate the lock from scratch:
+    #   rm -rf ~/.cache/nix/{gitv3,fetcher-cache-v4.sqlite*,tarball-cache,eval-cache-v6}
+    #   rm flake.lock && nix flake lock
+    # then verify `nix develop` still builds before committing flake.lock.
     ngit-grasp = {
       url = "git+https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git";
       inputs.nixpkgs.follows = "nixpkgs";
