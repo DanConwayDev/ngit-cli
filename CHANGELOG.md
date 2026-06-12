@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ngit account connect` as an alias for `ngit account login -i` (interactive nostr connect login)
+- `ngit account connect` as an alias for `ngit account login -i` (interactive nostr connect login) [hzd149]
 
 ### Changed
 
-- The interactive remote-signer login menu now has a single "bunker" option that shows the QR code and the nostrconnect:// connection string together while it waits for the signer to connect, and concurrently offers options to manually paste a `bunker://` url, change the signer relays, or cancel; previously these were separate menu entries gated behind ctrl+c
+- The interactive remote-signer login menu now has a single "bunker" option that shows the QR code and the nostrconnect:// connection string together while it waits for the signer to connect, and concurrently offers options to manually paste a `bunker://` url, change the signer relays, or cancel; previously these were separate menu entries gated behind ctrl+c [hzd149]
 
 ### Removed
 
