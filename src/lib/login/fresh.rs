@@ -367,6 +367,21 @@ pub async fn get_fresh_nip46_signer(
                 // Signer connected (or the listener finished) on its own.
                 None => match pubkey_handle.await {
                     Ok(Ok(public_key)) => {
+                        // The QR code / connection string can be taller than the
+                        // terminal window, so its top scrolls into the scrollback
+                        // buffer that ANSI line-clearing can't reach — attempting
+                        // to clear it leaves a confusing half-erased QR.  Instead
+                        // leave it in place (the user may still be mid-scan) and
+                        // print a clear green marker so it's obvious we've moved
+                        // on to a connected signer.
+                        eprintln!(
+                            "{}",
+                            Style::new()
+                                .for_stderr()
+                                .bold()
+                                .green()
+                                .apply_to("✓ signer connection established")
+                        );
                         let bunker_url = nostr_connect
                             .bunker_uri()
                             .await
@@ -467,10 +482,14 @@ pub fn generate_nostr_connect_app(
 
 /// Print the QR code and the nostrconnect connection string to stderr.
 ///
-/// Output goes directly to stderr so it is visible before the relay-selection
-/// choice prompt that follows.  Both the QR code (to scan) and the connection
-/// string (to copy) are shown so the user can use whichever their signer app
-/// supports.
+/// Output goes directly to stderr with bare `eprintln!` (rather than via the
+/// [`Printer`]) because the QR is frequently taller than the terminal window:
+/// its top scrolls into the scrollback buffer, which ANSI line-clearing can't
+/// reach, so there's no point tracking the lines for a later clear — see the
+/// connect branch in [`get_fresh_nip46_signer`].
+///
+/// Both the QR code (to scan) and the connection string (to copy) are shown so
+/// the user can use whichever their signer app supports.
 fn display_nostr_connect(url: &NostrConnectURI) -> Result<()> {
     let dim = Style::new().for_stderr().color256(247);
     eprintln!(
