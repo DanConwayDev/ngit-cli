@@ -15,4 +15,4 @@ nostr = "0.45.0-alpha.1"
 nostr-relay-builder = "0.45.0-alpha.1"
 nostr-sdk = "0.45.0-alpha.1"
 tempfile = "3.10"
-tokio = { version = "1.46.1", features = ["full"] }
+tokio = { version = "1.52.3", features = ["full"] }
