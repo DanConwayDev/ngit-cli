@@ -261,6 +261,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         false
     } else if args.force_pr {
         true
+    } else if args.no_cover_letter && !existing_thread_is_pr {
+        // --no-cover-letter on a new proposal explicitly opts out of the PR
+        // path (which requires a cover letter); send as patch events instead
+        false
     } else {
         should_be_pr
     };
