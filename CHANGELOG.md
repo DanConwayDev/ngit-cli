@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Bump dependencies: updated to rust-nostr v0.45.0-alpha.1 (required significant internal refactoring); semver-compatible lockfile updates across the board; dev-dependencies rstest 0.23 → 0.26 and mockall 0.13 → 0.14
+
 ### Fixed
 
 - `cargo install ngit` was failing to build due to an upstream dependency picking up an incompatible `git2` version
