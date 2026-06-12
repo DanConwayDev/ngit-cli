@@ -33,7 +33,7 @@ use crate::{
         PromptInputParms, PromptPasswordParms, multi_select_with_custom_value,
         show_multi_input_prompt_success,
     },
-    client::{Connect, nip05_query, save_event_in_global_cache, send_events},
+    client::{Connect, save_event_in_global_cache, send_events},
     git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
 };
 
@@ -323,126 +323,92 @@ pub async fn get_fresh_nip46_signer(
 > {
     let (app_key, nostr_connect_url) = generate_nostr_connect_app(client, signer_relays)?;
     let printer = Arc::new(Mutex::new(Printer::default()));
-    let signer_choice = Interactor::default().choice(
-        PromptChoiceParms::default()
-            .with_prompt("login to nostr with remote signer")
-            .with_default(0)
-            .with_choices(vec![
-                "bunker (scan QR code, copy connection string, or paste bunker:// url)"
-                    .to_string(),
-                "use NIP-05 address to connect to signer".to_string(),
-                "back".to_string(),
-            ])
-            .dont_report(),
-    )?;
-    let url = match signer_choice {
-        0 => {
-            // Unified bunker flow: show the QR code and connection string and
-            // listen for the signer to connect in the background, while a menu
-            // concurrently offers to paste a bunker:// url, change relays, or
-            // cancel.  Loop so the user can change relays and see a refreshed
-            // QR/URL.
-            let mut current_url = nostr_connect_url;
-            loop {
-                // Display QR code and connection string with the current relay
-                // list, followed by the menu options.
-                display_nostr_connect(&current_url)?;
-                print_connect_menu_options();
+    // Unified bunker flow: show the QR code and connection string and listen
+    // for the signer to connect in the background, while a menu concurrently
+    // offers to paste a bunker:// url, change relays, or cancel.  Loop so the
+    // user can change relays and see a refreshed QR/URL.
+    let url = {
+        let mut current_url = nostr_connect_url;
+        loop {
+            // Display QR code and connection string with the current relay
+            // list, followed by the menu options.
+            display_nostr_connect(&current_url)?;
+            print_connect_menu_options();
 
-                // Start listening for the signer immediately after displaying
-                // the QR/URL — don't wait for the user to press anything.  The
-                // `done` flag lets the (blocking) menu poll loop notice when the
-                // listener has finished so it can return without leaving a
-                // thread blocked on a terminal read.
-                let nostr_connect = Arc::new(NostrConnect::new(
-                    current_url.clone(),
-                    app_key.clone(),
-                    Duration::from_secs(10 * 60),
-                    None,
-                )?);
-                let signer_arc: Arc<dyn NostrSigner> = nostr_connect.clone();
-                let done = Arc::new(AtomicBool::new(false));
-                let done_listener = Arc::clone(&done);
-                let pubkey_handle = tokio::spawn(async move {
-                    let res = signer_arc.get_public_key().await;
-                    done_listener.store(true, Ordering::Relaxed);
-                    res
-                });
+            // Start listening for the signer immediately after displaying
+            // the QR/URL — don't wait for the user to press anything.  The
+            // `done` flag lets the (blocking) menu poll loop notice when the
+            // listener has finished so it can return without leaving a
+            // thread blocked on a terminal read.
+            let nostr_connect = Arc::new(NostrConnect::new(
+                current_url.clone(),
+                app_key.clone(),
+                Duration::from_secs(10 * 60),
+                None,
+            )?);
+            let signer_arc: Arc<dyn NostrSigner> = nostr_connect.clone();
+            let done = Arc::new(AtomicBool::new(false));
+            let done_listener = Arc::clone(&done);
+            let pubkey_handle = tokio::spawn(async move {
+                let res = signer_arc.get_public_key().await;
+                done_listener.store(true, Ordering::Relaxed);
+                res
+            });
 
-                // Wait (on a blocking thread so it doesn't stall the listener)
-                // for either the signer to connect or the user to pick an option.
-                let done_menu = Arc::clone(&done);
-                let choice =
-                    tokio::task::spawn_blocking(move || wait_for_signer_or_menu_choice(&done_menu))
-                        .await
-                        .context("connect menu task panicked")??;
+            // Wait (on a blocking thread so it doesn't stall the listener)
+            // for either the signer to connect or the user to pick an option.
+            let done_menu = Arc::clone(&done);
+            let choice =
+                tokio::task::spawn_blocking(move || wait_for_signer_or_menu_choice(&done_menu))
+                    .await
+                    .context("connect menu task panicked")??;
 
-                match choice {
-                    // Signer connected (or the listener finished) on its own.
-                    None => match pubkey_handle.await {
-                        Ok(Ok(public_key)) => {
-                            let bunker_url = nostr_connect
-                                .bunker_uri()
-                                .await
-                                .context("failed to get bunker URI from NostrConnect client")?;
-                            let signer_info = SignerInfo::Bunker {
-                                bunker_uri: bunker_url.to_string(),
-                                bunker_app_key: app_key.secret_key().to_secret_hex(),
-                                npub: Some(public_key.to_bech32()?),
-                            };
-                            return Ok(Some((
-                                nostr_connect as Arc<dyn NostrSigner>,
-                                public_key,
-                                signer_info,
-                                SignerInfoSource::GitGlobal,
-                            )));
-                        }
-                        _ => {
-                            // Connection failed — redisplay and listen again.
-                            eprintln!("failed to connect to signer, trying again...");
-                            continue;
-                        }
-                    },
-                    Some(ConnectMenuChoice::EnterBunkerUri) => {
-                        pubkey_handle.abort();
-                        break prompt_for_bunker_url()?;
+            match choice {
+                // Signer connected (or the listener finished) on its own.
+                None => match pubkey_handle.await {
+                    Ok(Ok(public_key)) => {
+                        let bunker_url = nostr_connect
+                            .bunker_uri()
+                            .await
+                            .context("failed to get bunker URI from NostrConnect client")?;
+                        let signer_info = SignerInfo::Bunker {
+                            bunker_uri: bunker_url.to_string(),
+                            bunker_app_key: app_key.secret_key().to_secret_hex(),
+                            npub: Some(public_key.to_bech32()?),
+                        };
+                        return Ok(Some((
+                            nostr_connect as Arc<dyn NostrSigner>,
+                            public_key,
+                            signer_info,
+                            SignerInfoSource::GitGlobal,
+                        )));
                     }
-                    Some(ConnectMenuChoice::ChangeRelays) => {
-                        pubkey_handle.abort();
-                        let selected = select_signer_relays(&current_url)?;
-                        if !selected.is_empty() {
-                            let new_relays: Vec<RelayUrl> =
-                                selected.iter().flat_map(|s| RelayUrl::parse(s)).collect();
-                            current_url =
-                                NostrConnectURI::client(app_key.public_key(), new_relays, "ngit");
-                        }
+                    _ => {
+                        // Connection failed — redisplay and listen again.
+                        eprintln!("failed to connect to signer, trying again...");
+                        continue;
                     }
-                    Some(ConnectMenuChoice::Cancel) => {
-                        pubkey_handle.abort();
-                        return Ok(None);
+                },
+                Some(ConnectMenuChoice::EnterBunkerUri) => {
+                    pubkey_handle.abort();
+                    break prompt_for_bunker_url()?;
+                }
+                Some(ConnectMenuChoice::ChangeRelays) => {
+                    pubkey_handle.abort();
+                    let selected = select_signer_relays(&current_url)?;
+                    if !selected.is_empty() {
+                        let new_relays: Vec<RelayUrl> =
+                            selected.iter().flat_map(|s| RelayUrl::parse(s)).collect();
+                        current_url =
+                            NostrConnectURI::client(app_key.public_key(), new_relays, "ngit");
                     }
+                }
+                Some(ConnectMenuChoice::Cancel) => {
+                    pubkey_handle.abort();
+                    return Ok(None);
                 }
             }
         }
-        1 => {
-            let mut error = None;
-            loop {
-                let input = Interactor::default()
-                    .input(
-                        PromptInputParms::default().with_prompt(if let Some(error) = error {
-                            format!("error: {error}. try again with NIP-05 address")
-                        } else {
-                            "NIP-05 address".to_string()
-                        }),
-                    )
-                    .context("failed to get NIP-05 address input from interactor")?;
-                match fetch_nip46_uri_from_nip05(&input).await {
-                    Ok(url) => break url,
-                    Err(e) => error = Some(e),
-                }
-            }
-        }
-        _ => return Ok(None),
     };
 
     {
@@ -552,8 +518,9 @@ enum ConnectMenuChoice {
 
 /// Print the bunker connect screen menu options to stderr.
 ///
-/// Printed in canonical (cooked) terminal mode before [`wait_for_signer_or_menu_choice`]
-/// switches to raw mode for key polling, so the line breaks render correctly.
+/// Printed in canonical (cooked) terminal mode before
+/// [`wait_for_signer_or_menu_choice`] switches to raw mode for key polling, so
+/// the line breaks render correctly.
 fn print_connect_menu_options() {
     let bold = Style::new().for_stderr().bold();
     let dim = Style::new().for_stderr().color256(247);
@@ -677,30 +644,6 @@ fn select_signer_relays(nostr_connect_url: &NostrConnectURI) -> Result<Vec<Strin
     )?;
     show_multi_input_prompt_success("signer relays", &selected);
     Ok(selected)
-}
-
-pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
-    let term = console::Term::stderr();
-    term.write_line("contacting login service provider...")?;
-    let res = nip05_query(nip05).await;
-    term.clear_last_lines(1)?;
-    match res {
-        Ok(profile) => {
-            if profile.nip46.is_empty() {
-                eprintln!("nip05 provider isn't configured for remote login");
-                bail!("nip05 provider isn't configured for remote login")
-            }
-            Ok(NostrConnectURI::Bunker {
-                remote_signer_public_key: profile.public_key,
-                relays: profile.nip46,
-                secret: None,
-            })
-        }
-        Err(error) => {
-            eprintln!("error contacting login service provider: {error}");
-            Err(error).context("error contacting login service provider")
-        }
-    }
 }
 
 pub async fn listen_for_remote_signer(

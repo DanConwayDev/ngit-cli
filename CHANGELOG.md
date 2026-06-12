@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The interactive remote-signer login menu now has a single "bunker" option that shows the QR code and the nostrconnect:// connection string together while it waits for the signer to connect, and concurrently offers options to manually paste a `bunker://` url, change the signer relays, or cancel; previously these were separate menu entries gated behind ctrl+c
 
+### Removed
+
+- NIP-05 signer-URL lookup removed from the remote-signer login flow; it was unused and added an extra step before reaching the bunker / QR-code screen
+
 ## [2.5.0] - 2026-05-26
 
 ### Changed
