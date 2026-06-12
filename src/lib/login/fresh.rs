@@ -351,11 +351,12 @@ pub async fn get_fresh_nip46_signer(
             let done = Arc::new(AtomicBool::new(false));
             let done_listener = Arc::clone(&done);
             // Bootstrap on the *same* NostrConnect instance we later call
-            // `bunker_uri()` on (via an `Arc` clone, which shares the
-            // allocation). NostrConnect caches the discovered remote-signer
-            // pubkey in an internal `OnceCell`; cloning the client *before*
-            // bootstrap gives the clone an independent, empty cache, so a
-            // later `bunker_uri()` on a different instance re-runs the connect
+            // `bunker_uri()` on, and hand the same `Arc` to the returned
+            // `NgitSigner` (all via `Arc` clones that share the allocation).
+            // NostrConnect caches the discovered remote-signer pubkey in an
+            // internal `OnceCell`; cloning the client *before* bootstrap gives
+            // the clone an independent, empty cache, so a later `bunker_uri()`
+            // (or signing) on a different instance re-runs the connect
             // handshake and hangs waiting for a second connect message that
             // never arrives. See the pre-0.45 regression where login froze
             // after "signer connection established".
@@ -407,9 +408,7 @@ pub async fn get_fresh_nip46_signer(
                             npub: Some(public_key.to_bech32()?),
                         };
                         return Ok(Some((
-                            Arc::new(crate::NgitSigner::Connect(Box::new(
-                                (*nostr_connect).clone(),
-                            ))),
+                            Arc::new(crate::NgitSigner::Connect(Arc::clone(&nostr_connect))),
                             public_key,
                             signer_info,
                             SignerInfoSource::GitGlobal,
@@ -698,10 +697,10 @@ pub async fn listen_for_remote_signer(
     )?);
     // Bootstrap on this exact instance so the remote-signer pubkey discovered
     // during the connect handshake is cached in its `OnceCell`. We then call
-    // `bunker_uri()` (which reads that cache) and only clone the client for the
-    // returned signer *after* bootstrap, so the clone copies the populated
-    // cache rather than re-running the handshake. Cloning before bootstrap
-    // would leave a separate empty cache and hang on `bunker_uri()`.
+    // `bunker_uri()` (which reads that cache) and hand the same `Arc` to the
+    // returned signer, so signing reuses the bootstrapped instance rather than
+    // re-running the handshake. Cloning the client before bootstrap would
+    // leave a separate empty cache and hang on `bunker_uri()`.
     let pubkey_future = {
         let nc = Arc::clone(&nostr_connect);
         async move {
@@ -737,9 +736,7 @@ pub async fn listen_for_remote_signer(
             .await
             .context("failed to get bunker URI from NostrConnect client")?;
 
-        let signer = Arc::new(crate::NgitSigner::Connect(Box::new(
-            (*nostr_connect).clone(),
-        )));
+        let signer = Arc::new(crate::NgitSigner::Connect(Arc::clone(&nostr_connect)));
         Ok((signer, public_key, bunker_url))
     } else {
         bail!("failed to get signer")

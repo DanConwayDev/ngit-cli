@@ -238,10 +238,10 @@ async fn get_signer(
             )?;
             if let Some(public_key) = npub.clone().and_then(|npub| PublicKey::parse(&npub).ok()) {
                 s.non_secure_set_user_public_key(public_key)?;
-                let signer = Arc::new(crate::NgitSigner::Connect(Box::new(s)));
+                let signer = Arc::new(crate::NgitSigner::Connect(Arc::new(s)));
                 Ok((signer, public_key))
             } else {
-                let signer = Arc::new(crate::NgitSigner::Connect(Box::new(s)));
+                let signer = Arc::new(crate::NgitSigner::Connect(Arc::new(s)));
                 let term = console::Term::stderr();
                 term.write_line("connecting to remote signer...")?;
                 let public_key = fetch_public_key(&signer).await?;

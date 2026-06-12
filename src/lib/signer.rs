@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use nostr::{Event, EventBuilder, Keys, PublicKey, event::UnsignedEvent};
+use nostr::{
+    Event, EventBuilder, Keys, PublicKey,
+    event::UnsignedEvent,
+    signer::{AsyncGetPublicKey, AsyncSignEvent, SignerError},
+    util::BoxedFuture,
+};
 use nostr_connect::client::NostrConnect;
 use nostr_sdk::{authenticator::SignerAuthenticator, client::ClientBuilder, relay::RelayLimits};
 
@@ -9,17 +14,43 @@ use nostr_sdk::{authenticator::SignerAuthenticator, client::ClientBuilder, relay
 #[derive(Clone)]
 pub enum NgitSigner {
     Keys(Keys),
-    Connect(Box<NostrConnect>),
+    Connect(Arc<NostrConnect>),
+}
+
+/// Authenticator-facing handle that shares a single bootstrapped
+/// [`NostrConnect`] instance via an [`Arc`].
+///
+/// The NIP-42 [`SignerAuthenticator`] takes its signer by value, so we can't
+/// hand it a borrow. Cloning the underlying `NostrConnect` would give the
+/// authenticator an independent, empty connect cache (`OnceCell`), forcing a
+/// second connect handshake to the bunker the first time it signs an AUTH
+/// event. Wrapping the shared `Arc` lets the authenticator reuse the
+/// already-bootstrapped instance (and its live relay connection) instead.
+#[derive(Debug, Clone)]
+struct SharedConnect(Arc<NostrConnect>);
+
+impl AsyncGetPublicKey for SharedConnect {
+    #[inline]
+    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, SignerError>> {
+        self.0.get_public_key_async()
+    }
+}
+
+impl AsyncSignEvent for SharedConnect {
+    #[inline]
+    fn sign_event_async(
+        &self,
+        unsigned: UnsignedEvent,
+    ) -> BoxedFuture<'_, Result<Event, SignerError>> {
+        self.0.sign_event_async(unsigned)
+    }
 }
 
 impl NgitSigner {
     pub async fn get_public_key(&self) -> Result<PublicKey> {
         match self {
             Self::Keys(k) => Ok(k.public_key()),
-            Self::Connect(c) => {
-                use nostr::signer::AsyncGetPublicKey;
-                c.get_public_key_async().await.map_err(|e| anyhow!(e))
-            }
+            Self::Connect(c) => c.get_public_key_async().await.map_err(|e| anyhow!(e)),
         }
     }
 
@@ -29,10 +60,7 @@ impl NgitSigner {
                 use nostr::signer::SignEvent;
                 k.sign_event(unsigned).map_err(|e| anyhow!(e))
             }
-            Self::Connect(c) => {
-                use nostr::signer::AsyncSignEvent;
-                c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e))
-            }
+            Self::Connect(c) => c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e)),
         }
     }
 
@@ -60,7 +88,7 @@ impl NgitSigner {
             Self::Connect(c) => ClientBuilder::default()
                 .relay_limits(RelayLimits::disable())
                 .verify_subscriptions(true)
-                .authenticator(SignerAuthenticator::new(c.as_ref().clone()))
+                .authenticator(SignerAuthenticator::new(SharedConnect(Arc::clone(c))))
                 .build(),
         }
     }
