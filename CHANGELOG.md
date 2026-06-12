@@ -7,13 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ngit account connect` as an alias for `ngit account login -i` (interactive nostr connect login) [hzd149]
+
 ### Changed
 
 - Bump dependencies: updated to rust-nostr v0.45.0-alpha.1 (required significant internal refactoring); semver-compatible lockfile updates across the board; dev-dependencies rstest 0.23 → 0.26 and mockall 0.13 → 0.14
+- The interactive remote-signer login menu now has a single "bunker" option that shows the QR code and the nostrconnect:// connection string together while it waits for the signer to connect, and concurrently offers options to manually paste a `bunker://` url, change the signer relays, or cancel; previously these were separate menu entries gated behind ctrl+c [hzd149]
 
 ### Fixed
 
 - `cargo install ngit` was failing to build due to an upstream dependency picking up an incompatible `git2` version
+
+### Removed
+
+- NIP-05 signer-URL lookup removed from the remote-signer login flow; it was unused and added an extra step before reaching the bunker / QR-code screen
 
 ## [2.5.0] - 2026-05-26
 

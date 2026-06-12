@@ -43,6 +43,11 @@ async fn main() {
                 AccountCommands::Login(sub_args) => {
                     sub_commands::login::launch(&cli, sub_args).await
                 }
+                AccountCommands::Connect(sub_args) => {
+                    // `connect` is an alias for `login -i`: always interactive
+                    std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
+                    sub_commands::login::launch(&cli, sub_args).await
+                }
                 AccountCommands::Logout => sub_commands::logout::launch().await,
                 AccountCommands::ExportKeys => sub_commands::export_keys::launch().await,
                 AccountCommands::Create(sub_args) => {
