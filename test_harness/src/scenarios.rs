@@ -751,10 +751,7 @@ impl Harness {
         // are oid hex. The caller decides which is which — `list.rs` only
         // round-trips the values verbatim.
         for (name, value) in &opts.state {
-            tags.push(Tag::custom(
-                TagKind::Custom(name.clone().into()),
-                vec![value.clone()],
-            ));
+            tags.push(Tag::custom(name.clone(), vec![value.clone()]));
         }
 
         // Tick *before* building the event so this kind-30618's
@@ -784,7 +781,7 @@ impl Harness {
             builder = builder.custom_created_at(ts);
         }
         let event = builder
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .context("failed to sign fabricated state event")?;
 
         let relay_url = match opts.target {
@@ -804,7 +801,8 @@ impl Harness {
         // the publish didn't land — bail explicitly rather than silently
         // returning a never-stored event.
         let output = client
-            .send_event_to([relay_url.as_str()], &event)
+            .send_event(&event)
+            .to([relay_url.as_str()])
             .await
             .with_context(|| format!("failed to publish state event to {relay_url}"))?;
         client.disconnect().await;
@@ -850,7 +848,7 @@ impl Harness {
             .iter()
             .map(|role| {
                 let ws_url = self.grasp(role).relay_url();
-                Tag::custom(TagKind::Custom("g".into()), vec![ws_url])
+                Tag::custom("g", vec![ws_url])
             })
             .collect();
 
@@ -858,7 +856,7 @@ impl Harness {
 
         let event = EventBuilder::new(KIND_USER_GRASP_LIST, "")
             .tags(tags)
-            .sign_with_keys(user_keys)
+            .finalize(user_keys)
             .context("failed to sign user grasp list event")?;
 
         let relay_url = self.relay("default").url().to_string();
@@ -868,7 +866,8 @@ impl Harness {
         })?;
         client.connect().await;
         let output = client
-            .send_event_to([relay_url.as_str()], &event)
+            .send_event(&event)
+            .to([relay_url.as_str()])
             .await
             .with_context(|| format!("failed to publish user grasp list to {relay_url}"))?;
         client.disconnect().await;
@@ -1910,14 +1909,11 @@ impl Harness {
         let mut tags: Vec<Tag> = vec![
             Tag::identifier(state_b.coordinate_identifier.clone()),
             // `["r", "<oid>", "euc"]` — the earliest-unique-commit
-            // marker, 3-element so we can't use TagStandard::Reference
+            // marker, 3-element so we can't use a standard reference tag
             // (which only allows one value).
-            Tag::custom(
-                TagKind::Custom("r".into()),
-                vec![state_b.root_oid.clone(), "euc".to_string()],
-            ),
-            Tag::from_standardized(TagStandard::Name(existing_name.clone())),
-            Tag::from_standardized(TagStandard::Description(existing_description.clone())),
+            Tag::custom("r", vec![state_b.root_oid.clone(), "euc".to_string()]),
+            Tag::custom("name", vec![existing_name.clone()]),
+            Tag::custom("description", vec![existing_description.clone()]),
             // `clone` carries a deliberately unreachable URL — same
             // shape as the legacy fixture's `git:://123.gitexample.com/test`
             // — because the State C arrange doesn't drive any git
@@ -1925,11 +1921,11 @@ impl Harness {
             // init.rs:1195 suppresses the post-republish push that
             // would have hit it.
             Tag::custom(
-                TagKind::Custom("clone".into()),
+                "clone",
                 vec!["https://ngit-test-clone.invalid/repo.git".to_string()],
             ),
-            Tag::custom(TagKind::Custom("relays".into()), existing_relays.clone()),
-            Tag::custom(TagKind::Custom("maintainers".into()), maintainers),
+            Tag::custom("relays", existing_relays.clone()),
+            Tag::custom("maintainers", maintainers),
         ];
         // Extras land *after* the ngit-known tags so that any "last wins"
         // dedup on repeated known names (e.g. an extras-provided `name`)
@@ -1949,7 +1945,7 @@ impl Harness {
         let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
             .tags(tags)
             .custom_created_at(created_at)
-            .sign_with_keys(&state_b.keys)
+            .finalize(&state_b.keys)
             .context("failed to sign fabricated state-C announcement")?;
 
         let client = Client::default();
@@ -1961,7 +1957,8 @@ impl Harness {
             })?;
         client.connect().await;
         let output = client
-            .send_event_to([default_relay_url.as_str()], &event)
+            .send_event(&event)
+            .to([default_relay_url.as_str()])
             .await
             .with_context(|| {
                 format!(
@@ -2246,25 +2243,13 @@ impl Harness {
             // Use the publisher's actual root oid so EUC resolution in
             // init.rs:979-990 produces a coherent value (matches the
             // realistic "two maintainers, one repo" case).
-            Tag::custom(
-                TagKind::Custom("r".into()),
-                vec![state_a.root_oid.clone(), "euc".to_string()],
-            ),
-            Tag::from_standardized(TagStandard::Name(existing_name.clone())),
-            Tag::from_standardized(TagStandard::Description(existing_description.clone())),
-            Tag::custom(
-                TagKind::Custom("clone".into()),
-                vec![existing_clone_url.clone()],
-            ),
-            Tag::custom(TagKind::Custom("web".into()), existing_web.clone()),
-            Tag::custom(
-                TagKind::Custom("relays".into()),
-                vec![default_relay_url_str.clone()],
-            ),
-            Tag::custom(
-                TagKind::Custom("maintainers".into()),
-                maintainers_hex.to_vec(),
-            ),
+            Tag::custom("r", vec![state_a.root_oid.clone(), "euc".to_string()]),
+            Tag::custom("name", vec![existing_name.clone()]),
+            Tag::custom("description", vec![existing_description.clone()]),
+            Tag::custom("clone", vec![existing_clone_url.clone()]),
+            Tag::custom("web", existing_web.clone()),
+            Tag::custom("relays", vec![default_relay_url_str.clone()]),
+            Tag::custom("maintainers", maintainers_hex.to_vec()),
         ];
         // Stable order to keep event ids deterministic per-fixture; not
         // strictly required but useful when chasing replay failures in a
@@ -2281,7 +2266,7 @@ impl Harness {
         let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
             .tags(tags)
             .custom_created_at(created_at)
-            .sign_with_keys(trusted)
+            .finalize(trusted)
             .context("failed to sign fabricated other-maintainer announcement")?;
 
         let client = Client::default();
@@ -2293,7 +2278,8 @@ impl Harness {
             })?;
         client.connect().await;
         let output = client
-            .send_event_to([default_relay_url_str.as_str()], &event)
+            .send_event(&event)
+            .to([default_relay_url_str.as_str()])
             .await
             .with_context(|| {
                 format!(

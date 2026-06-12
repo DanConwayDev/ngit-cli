@@ -13,10 +13,10 @@ use std::{
 use anyhow::{Context, Result};
 use git2::{Branch, Oid, RepositoryInitOptions, Signature, Time};
 use nostr::{
-    Tag, TagStandard,
+    Kind, RelayUrl, Tag, ToBech32,
+    event::FinalizeEvent,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr_sdk::{Kind, RelayUrl, ToBech32};
 use once_cell::sync::Lazy;
 
 /// Monotonic counter combined with the process id and a per-process random
@@ -45,8 +45,11 @@ static TEST_KEY_1_NSEC: &str = "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwam
 static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
     Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
 
-pub static TEST_KEY_1_SIGNER: Lazy<std::sync::Arc<dyn nostr_sdk::NostrSigner>> =
-    Lazy::new(|| std::sync::Arc::new(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap()));
+pub static TEST_KEY_1_SIGNER: Lazy<std::sync::Arc<crate::NgitSigner>> = Lazy::new(|| {
+    std::sync::Arc::new(crate::NgitSigner::Keys(
+        nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
+    ))
+});
 
 pub fn joe_signature() -> Signature<'static> {
     Signature::new("Joe Bloggs", "joe.bloggs@pm.me", &Time::new(0, 0)).unwrap()
@@ -64,33 +67,20 @@ pub fn generate_repo_ref_event() -> nostr::Event {
     nostr::event::EventBuilder::new(nostr::Kind::GitRepoAnnouncement, "")
         .tags([
             Tag::identifier(format!("{root_commit}-consider-it-random")),
-            Tag::from_standardized(TagStandard::Reference(root_commit.to_string())),
-            Tag::from_standardized(TagStandard::Name("example name".into())),
-            Tag::from_standardized(TagStandard::Description("example description".into())),
-            Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                vec!["git:://123.gitexample.com/test".to_string()],
-            ),
-            Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
-                vec![
-                    "https://exampleproject.xyz".to_string(),
-                    "https://gitworkshop.dev/123".to_string(),
-                ],
-            ),
-            Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
-                vec![
-                    "ws://localhost:8055".to_string(),
-                    "ws://localhost:8056".to_string(),
-                ],
-            ),
-            Tag::custom(
-                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
-                vec![TEST_KEY_1_KEYS.public_key().to_string()],
-            ),
+            Tag::parse(["r", root_commit]).unwrap(),
+            Tag::parse(["name", "example name"]).unwrap(),
+            Tag::parse(["description", "example description"]).unwrap(),
+            Tag::parse(["clone", "git:://123.gitexample.com/test"]).unwrap(),
+            Tag::parse([
+                "web",
+                "https://exampleproject.xyz",
+                "https://gitworkshop.dev/123",
+            ])
+            .unwrap(),
+            Tag::parse(["relays", "ws://localhost:8055", "ws://localhost:8056"]).unwrap(),
+            Tag::parse(["maintainers", &TEST_KEY_1_KEYS.public_key().to_string()]).unwrap(),
         ])
-        .sign_with_keys(&TEST_KEY_1_KEYS)
+        .finalize(&*TEST_KEY_1_KEYS)
         .unwrap()
 }
 

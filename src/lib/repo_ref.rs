@@ -9,10 +9,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use console::Style;
 use nostr::{
-    FromBech32, PublicKey, Tag, TagStandard, ToBech32,
+    FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr_sdk::{Kind, NostrSigner, RelayUrl, Timestamp, Url};
 use serde::{Deserialize, Serialize};
 use urlencoding::encode as pct_encode;
 
@@ -168,7 +167,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                     }
                     for pk in maintainers {
                         r.maintainers.push(
-                            nostr_sdk::prelude::PublicKey::from_str(pk)
+                            PublicKey::from_str(pk)
                                 .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
                                 .context("invalid repository event")?,
                         );
@@ -214,9 +213,9 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
 }
 
 impl RepoRef {
-    pub async fn to_event(&self, signer: &Arc<dyn NostrSigner>) -> Result<nostr::Event> {
+    pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::Event> {
         sign_event(
-            nostr_sdk::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
+            nostr::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
                 [
                     vec![
                         Tag::identifier(if self.identifier.to_string().is_empty() {
@@ -237,54 +236,56 @@ impl RepoRef {
                         } else {
                             self.identifier.to_string()
                         }),
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("r")),
-                            vec![self.root_commit.to_string(), "euc".to_string()],
-                        ),
-                        Tag::from_standardized(TagStandard::Name(self.name.clone())),
-                        Tag::from_standardized(TagStandard::Description(self.description.clone())),
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("clone")),
-                            self.git_server.clone(),
-                        ),
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("web")),
-                            self.web.clone(),
-                        ),
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("relays")),
-                            self.relays.iter().map(|r| r.to_string()),
-                        ),
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("maintainers")),
-                            self.maintainers
-                                .iter()
-                                .map(std::string::ToString::to_string)
-                                .collect::<Vec<String>>(),
-                        ),
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                            vec![format!("git repository: {}", self.name.clone())],
-                        ),
+                        Tag::parse(["r", &self.root_commit, "euc"]).unwrap(),
+                        Tag::parse(["name", &self.name]).unwrap(),
+                        Tag::parse(["description", &self.description]).unwrap(),
+                        Tag::parse([vec!["clone".to_string()], self.git_server.clone()].concat())
+                            .unwrap(),
+                        Tag::parse([vec!["web".to_string()], self.web.clone()].concat()).unwrap(),
+                        Tag::parse(
+                            [
+                                vec!["relays".to_string()],
+                                self.relays
+                                    .iter()
+                                    .map(|r| r.to_string())
+                                    .collect::<Vec<_>>(),
+                            ]
+                            .concat(),
+                        )
+                        .unwrap(),
+                        Tag::parse(
+                            [
+                                vec!["maintainers".to_string()],
+                                self.maintainers
+                                    .iter()
+                                    .map(|pk| pk.to_string())
+                                    .collect::<Vec<_>>(),
+                            ]
+                            .concat(),
+                        )
+                        .unwrap(),
+                        Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
                     ],
                     self.hashtags
                         .iter()
-                        .map(|h| {
-                            Tag::custom(
-                                nostr::TagKind::Custom(std::borrow::Cow::Borrowed("t")),
-                                vec![h.clone()],
-                            )
-                        })
+                        .map(|h| Tag::parse(["t", h]).unwrap())
                         .collect(),
                     if self.blossoms.is_empty() {
                         vec![]
                     } else {
-                        vec![Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("blossoms")),
-                            self.blossoms
-                                .iter()
-                                .map(|r| r.to_string_without_trailing_slash()),
-                        )]
+                        vec![
+                            Tag::parse(
+                                [
+                                    vec!["blossoms".to_string()],
+                                    self.blossoms
+                                        .iter()
+                                        .map(|b| b.to_string_without_trailing_slash())
+                                        .collect::<Vec<_>>(),
+                                ]
+                                .concat(),
+                            )
+                            .unwrap(),
+                        ]
                     },
                     // Unknown tags carried over verbatim from the source
                     // announcement. See [`RepoRef::extra_tags`] and
@@ -639,11 +640,9 @@ pub fn get_repo_config_from_yaml(git_repo: &Repo) -> Result<RepoConfigYaml> {
 pub fn extract_pks(pk_strings: Vec<String>) -> Result<Vec<PublicKey>> {
     let mut pks: Vec<PublicKey> = vec![];
     for s in pk_strings {
-        pks.push(
-            nostr_sdk::prelude::PublicKey::from_bech32(&s).context(format!(
-                "failed to convert {s} into a valid nostr public key"
-            ))?,
-        );
+        pks.push(PublicKey::from_bech32(&s).context(format!(
+            "failed to convert {s} into a valid nostr public key"
+        ))?);
     }
     Ok(pks)
 }
@@ -984,8 +983,11 @@ mod tests {
     static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
         Lazy::new(|| nostr::Keys::from_str(TEST_KEY_2_NSEC).unwrap());
 
-    static TEST_KEY_1_SIGNER: Lazy<Arc<dyn NostrSigner>> =
-        Lazy::new(|| Arc::new(nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap()));
+    static TEST_KEY_1_SIGNER: Lazy<Arc<crate::NgitSigner>> = Lazy::new(|| {
+        Arc::new(crate::NgitSigner::Keys(
+            nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
+        ))
+    });
 
     async fn create() -> nostr::Event {
         RepoRef {
@@ -1272,7 +1274,7 @@ mod tests {
     /// `tests/init_preserves_unknown_tags.rs`. These tests pin only the
     /// library-level invariant the CLI relies on.
     mod extra_tags_round_trip {
-        use nostr::EventBuilder;
+        use nostr::{EventBuilder, event::FinalizeEvent};
 
         use super::*;
 
@@ -1287,7 +1289,7 @@ mod tests {
             tags.extend(extra);
             EventBuilder::new(base.kind, base.content)
                 .tags(tags)
-                .sign_with_keys(&TEST_KEY_1_KEYS)
+                .finalize(&*TEST_KEY_1_KEYS)
                 .unwrap()
         }
 
@@ -1318,10 +1320,7 @@ mod tests {
         /// parse → re-emit verbatim.
         #[tokio::test]
         async fn preserves_single_value_unknown_tag() {
-            let extras = vec![Tag::custom(
-                nostr::TagKind::Custom("example".into()),
-                vec!["value".to_string()],
-            )];
+            let extras = vec![Tag::parse(["example", "value"]).unwrap()];
             let event = create_with_extra_tags(extras).await;
             let parsed = RepoRef::try_from((event, None)).unwrap();
             let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
@@ -1342,10 +1341,7 @@ mod tests {
         /// one tag with both values, not split or truncated.
         #[tokio::test]
         async fn preserves_multi_value_unknown_tag() {
-            let extras = vec![Tag::custom(
-                nostr::TagKind::Custom("multi".into()),
-                vec!["v1".to_string(), "v2".to_string()],
-            )];
+            let extras = vec![Tag::parse(["multi", "v1", "v2"]).unwrap()];
             let event = create_with_extra_tags(extras).await;
             let parsed = RepoRef::try_from((event, None)).unwrap();
             let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
@@ -1368,14 +1364,8 @@ mod tests {
         #[tokio::test]
         async fn preserves_repeated_unknown_tag_name() {
             let extras = vec![
-                Tag::custom(
-                    nostr::TagKind::Custom("repeat".into()),
-                    vec!["v1".to_string()],
-                ),
-                Tag::custom(
-                    nostr::TagKind::Custom("repeat".into()),
-                    vec!["v2".to_string()],
-                ),
+                Tag::parse(["repeat", "v1"]).unwrap(),
+                Tag::parse(["repeat", "v2"]).unwrap(),
             ];
             let event = create_with_extra_tags(extras).await;
             let parsed = RepoRef::try_from((event, None)).unwrap();
@@ -1401,10 +1391,7 @@ mod tests {
         /// typed field is the single source of truth for known names.
         #[tokio::test]
         async fn drops_duplicate_known_name_tag_from_extras() {
-            let extras = vec![Tag::custom(
-                nostr::TagKind::Custom("name".into()),
-                vec!["smuggled".to_string()],
-            )];
+            let extras = vec![Tag::parse(["name", "smuggled"]).unwrap()];
             let event = create_with_extra_tags(extras).await;
             let parsed = RepoRef::try_from((event, None)).unwrap();
             assert!(

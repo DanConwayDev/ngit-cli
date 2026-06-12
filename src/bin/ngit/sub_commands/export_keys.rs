@@ -9,7 +9,7 @@ use ngit::{
         fresh::generate_qr,
     },
 };
-use nostr_sdk::ToBech32;
+use nostr::ToBech32;
 
 use crate::git::Repo;
 

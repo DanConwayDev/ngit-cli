@@ -2,8 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use fresh::fresh_login_or_signup;
-use nostr::PublicKey;
-use nostr_sdk::{NostrSigner, Timestamp, ToBech32};
+use nostr::{PublicKey, Timestamp, ToBech32};
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -28,7 +27,7 @@ pub async fn login_or_signup(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     fetch_profile_updates: bool,
-) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let res = load_existing_login(
         git_repo,
         signer_info,

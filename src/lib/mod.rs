@@ -11,14 +11,13 @@ pub mod mbox_parser;
 pub mod push;
 pub mod repo_ref;
 pub mod repo_state;
-// TEMPORARY: Remove when async-wsocket includes Happy Eyeballs support.
-// See src/lib/transport.rs header for full removal instructions.
-pub mod transport;
+pub mod signer;
 pub mod utils;
 
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
-use nostr_sdk::Url;
+use nostr::Url;
+pub use signer::NgitSigner;
 
 pub fn get_dirs() -> Result<ProjectDirs> {
     ProjectDirs::from("", "", "ngit").ok_or(anyhow!(

@@ -27,10 +27,9 @@ use ngit::{
     repo_state::RepoState,
 };
 use nostr::{
-    FromBech32, PublicKey, ToBech32,
+    FromBech32, Kind, PublicKey, RelayUrl, ToBech32, Url,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr_sdk::{Kind, RelayUrl, Url};
 
 use crate::{
     cli::{Cli, extract_signer_cli_arguments},
@@ -1178,7 +1177,7 @@ fn prompt_git_servers(
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn publish_and_finalize(
     fields: ResolvedFields,
-    signer: Arc<dyn nostr::prelude::NostrSigner>,
+    signer: Arc<ngit::signer::NgitSigner>,
     user_ref: &ngit::login::user::UserRef,
     client: &mut Client,
     cli: &Cli,

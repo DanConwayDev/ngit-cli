@@ -4,3 +4,5 @@ tmpgit-*
 test-utils/tmpgit-*
 tmp
 test-cli-expect-output.txt
+/event-shapes.md
+/event-shapes.ndjson

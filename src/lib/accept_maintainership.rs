@@ -23,10 +23,9 @@ use anyhow::{Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use nostr::{
-    PublicKey, ToBech32,
+    Kind, PublicKey, RelayUrl, ToBech32,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr_sdk::{Kind, NostrSigner, RelayUrl};
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -59,7 +58,7 @@ pub async fn accept_maintainership_with_defaults(
     user_ref: &UserRef,
     #[cfg(test)] client: &mut MockConnect,
     #[cfg(not(test))] client: &mut Client,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::signer::NgitSigner>,
 ) -> Result<()> {
     let my_pubkey = &user_ref.public_key;
     let identifier = &repo_ref.identifier;

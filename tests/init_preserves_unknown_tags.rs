@@ -82,25 +82,16 @@ use tokio::sync::OnceCell;
 /// the test breakage signal points straight back at the requirement.
 fn fixture_extra_tags() -> Vec<Tag> {
     vec![
-        Tag::custom(TagKind::Custom("example".into()), vec!["value".to_string()]),
-        Tag::custom(
-            TagKind::Custom("multi-example".into()),
-            vec!["value1".to_string(), "value2".to_string()],
-        ),
-        Tag::custom(
-            TagKind::Custom("multi-example-style-2".into()),
-            vec!["value1".to_string()],
-        ),
-        Tag::custom(
-            TagKind::Custom("multi-example-style-2".into()),
-            vec!["value2".to_string()],
-        ),
+        Tag::parse(["example", "value"]).unwrap(),
+        Tag::parse(["multi-example", "value1", "value2"]).unwrap(),
+        Tag::parse(["multi-example-style-2", "value1"]).unwrap(),
+        Tag::parse(["multi-example-style-2", "value2"]).unwrap(),
         // Repeated *known* tag names. ngit's typed `name` field is the
         // single source of truth: the republished event should carry
         // exactly one `name` tag, not three (one from the typed field,
         // two passed-through). Asserted by `preserve_dedupes_name_tag`.
-        Tag::custom(TagKind::Custom("name".into()), vec!["name1".to_string()]),
-        Tag::custom(TagKind::Custom("name".into()), vec!["name2".to_string()]),
+        Tag::parse(["name", "name1"]).unwrap(),
+        Tag::parse(["name", "name2"]).unwrap(),
     ]
 }
 
@@ -448,7 +439,7 @@ fn tags_with_name<'a>(event: &'a Event, key: &str) -> Vec<&'a [String]> {
     event
         .tags
         .iter()
-        .map(nostr_sdk::Tag::as_slice)
+        .map(Tag::as_slice)
         .filter(|s| s.first().map(String::as_str) == Some(key))
         .collect()
 }

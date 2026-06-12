@@ -33,19 +33,23 @@ use ngit::{
         is_grasp_server_clone_url,
     },
     repo_state,
+    signer::NgitSigner,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
         get_short_git_server_name, read_line,
     },
 };
-use nostr::nips::{
-    nip10::Marker,
-    nip19::ToBech32,
-    nip22::{CommentTarget, extract_root},
-};
-use nostr_sdk::{
-    Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, RelayUrl, Tag, TagStandard,
+use nostr::{
+    Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, Tag,
+    event::tag::TagCodec,
     hashes::sha1::Hash as Sha1Hash,
+    nips::{
+        nip01::Nip01Tag,
+        nip10::{Marker, Nip10Tag},
+        nip19::ToBech32,
+        nip22::{CommentTarget, extract_root},
+        nip34::Nip34Tag,
+    },
 };
 use repo_ref::RepoRef;
 use repo_state::RepoState;
@@ -450,7 +454,7 @@ async fn process_proposal_refspecs(
     repo_ref: &RepoRef,
     proposal_refspecs: &Vec<String>,
     user_ref: &mut UserRef,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
@@ -642,7 +646,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     ahead: &[Sha1Hash],
     user_ref: &mut UserRef,
     root_proposal: Option<&Event>,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
@@ -1069,7 +1073,7 @@ async fn get_maintainers_yaml_update(
     decoded_nostr_url: &NostrUrlDecoded,
     repo_ref: &RepoRef,
     git_repo: &Repo,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     refspecs_to_git_server: &Vec<String>,
 ) -> Result<Option<Event>> {
     for refspec in refspecs_to_git_server {
@@ -1138,7 +1142,7 @@ async fn get_merged_status_events(
     decoded_nostr_url: &NostrUrlDecoded,
     repo_ref: &RepoRef,
     git_repo: &Repo,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     refspecs_to_git_server: &Vec<String>,
 ) -> Result<Vec<Event>> {
     let mut events = vec![];
@@ -1321,7 +1325,7 @@ async fn create_merge_events(
     term: &console::Term,
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     merged_proposals_info: &MergedProposalsInfo,
 ) -> Result<Vec<Event>> {
     let mut events = vec![];
@@ -1419,7 +1423,7 @@ enum MergedPRCommitType {
 }
 
 async fn create_merge_status(
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     repo_ref: &RepoRef,
     proposal: &Event,
     revision: Option<&Event>,
@@ -1436,40 +1440,41 @@ async fn create_merge_status(
     if let Some(revision) = revision {
         public_keys.insert(revision.pubkey);
     }
+    let alt_tag = Tag::parse(["alt", "git proposal merged / applied"])?;
+    let q_tags = merged_patches
+        .iter()
+        .map(|merged_patch| Tag::parse(["q", &merged_patch.to_hex()]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let r_tag = Tag::parse(["r", &repo_ref.root_commit])?;
+    let kind_str = if applied {
+        "applied-as-commits"
+    } else {
+        "merge-commit-id"
+    };
+    let commit_strs: Vec<String> = merge_commits.iter().map(ToString::to_string).collect();
+    let mut parts: Vec<&str> = vec![kind_str];
+    parts.extend(commit_strs.iter().map(String::as_str));
+    let kind_tag = Tag::parse(parts)?;
     sign_event(
         EventBuilder::new(nostr::event::Kind::GitStatusApplied, String::new()).tags(
             [
                 vec![
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec!["git proposal merged / applied".to_string()],
-                    ),
-                    Tag::from_standardized(nostr::TagStandard::Event {
-                        event_id: proposal.id,
-                        relay_url: repo_ref.relays.first().cloned(),
+                    alt_tag,
+                    Tag::from(nostr::nips::nip10::Nip10Tag::Event {
+                        id: proposal.id,
+                        relay_hint: repo_ref.relays.first().cloned(),
                         marker: Some(Marker::Root),
                         public_key: None,
-                        uppercase: false,
                     }),
                 ],
                 // Tags for merged patches
-                merged_patches
-                    .iter()
-                    .map(|merged_patch| {
-                        Tag::from_standardized(nostr::TagStandard::Quote {
-                            event_id: *merged_patch,
-                            relay_url: repo_ref.relays.first().cloned(),
-                            public_key: None,
-                        })
-                    })
-                    .collect::<Vec<Tag>>(),
+                q_tags,
                 if let Some(revision) = revision {
-                    vec![Tag::from_standardized(nostr::TagStandard::Event {
-                        event_id: revision.id,
-                        relay_url: repo_ref.relays.first().cloned(),
+                    vec![Tag::from(nostr::nips::nip10::Nip10Tag::Event {
+                        id: revision.id,
+                        relay_hint: repo_ref.relays.first().cloned(),
                         marker: Some(Marker::Root),
                         public_key: None,
-                        uppercase: false,
                     })]
                 } else {
                     vec![]
@@ -1479,36 +1484,16 @@ async fn create_merge_status(
                     .coordinates()
                     .iter()
                     .map(|c| {
-                        Tag::from_standardized(TagStandard::Coordinate {
+                        Tag::from(Nip01Tag::Coordinate {
                             coordinate: c.coordinate.clone(),
-                            relay_url: c.relays.first().cloned(),
-                            uppercase: false,
+                            relay_hint: c.relays.first().cloned(),
                         })
                     })
                     .collect::<Vec<Tag>>(),
-                vec![
-                    Tag::from_standardized(nostr::TagStandard::Reference(
-                        repo_ref.root_commit.to_string(),
-                    )),
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed(if applied {
-                            "applied-as-commits"
-                        } else {
-                            "merge-commit-id"
-                        })),
-                        merge_commits
-                            .iter()
-                            .map(|merge_commit| format!("{merge_commit}"))
-                            .collect::<Vec<String>>(),
-                    ),
-                ],
+                vec![r_tag, kind_tag],
                 merge_commits
                     .iter()
-                    .map(|merge_commit| {
-                        Tag::from_standardized(nostr::TagStandard::Reference(format!(
-                            "{merge_commit}"
-                        )))
-                    })
+                    .map(|merge_commit| Tag::from(Nip34Tag::Reference(*merge_commit)))
                     .collect::<Vec<Tag>>(),
             ]
             .concat(),
@@ -1556,39 +1541,7 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
         );
     }
 
-    let proposal_or_revision = if event
-        .tags
-        .iter()
-        .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("root"))
-    {
-        event.clone()
-    } else {
-        let proposal_or_revision_id = EventId::parse(
-            &if let Some(t) = event.tags.iter().find(|t| t.is_root()) {
-                t.clone()
-            } else if let Some(t) = event.tags.iter().find(|t| t.is_reply()) {
-                t.clone()
-            } else {
-                Tag::event(event.id)
-            }
-            .as_slice()[1]
-                .clone(),
-        )?;
-
-        let cached = get_events_from_local_cache(
-            git_repo.get_path()?,
-            vec![nostr::Filter::default().id(proposal_or_revision_id)],
-        )
-        .await?;
-        cached
-            .first()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "proposal or revision root event {proposal_or_revision_id} not found in local cache",
-                )
-            })?
-            .clone()
-    };
+    let proposal_or_revision = get_proposal_or_revision_event(git_repo, event).await?;
 
     if !proposal_or_revision.kind.eq(&Kind::GitPatch) {
         bail!("thread root is not a git patch");
@@ -1603,7 +1556,11 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
                 &proposal_or_revision
                     .tags
                     .iter()
-                    .find(|t| t.is_reply())
+                    .find(|t| {
+                        Nip10Tag::parse(t.as_slice())
+                            .ok()
+                            .is_some_and(|n| n.is_reply())
+                    })
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "revision-root patch event {} missing reply tag",
@@ -1617,6 +1574,48 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
     } else {
         Ok((proposal_or_revision.id, None))
     }
+}
+
+async fn get_proposal_or_revision_event(git_repo: &Repo, event: &Event) -> Result<Event> {
+    if event
+        .tags
+        .iter()
+        .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("root"))
+    {
+        return Ok(event.clone());
+    }
+    let proposal_or_revision_id = EventId::parse(
+        &if let Some(t) = event.tags.iter().find(|t| {
+            Nip10Tag::parse(t.as_slice())
+                .ok()
+                .is_some_and(|n| n.is_root())
+        }) {
+            t.clone()
+        } else if let Some(t) = event.tags.iter().find(|t| {
+            Nip10Tag::parse(t.as_slice())
+                .ok()
+                .is_some_and(|n| n.is_reply())
+        }) {
+            t.clone()
+        } else {
+            Tag::event(event.id)
+        }
+        .as_slice()[1]
+            .clone(),
+    )?;
+    let cached = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![nostr::Filter::default().id(proposal_or_revision_id)],
+    )
+    .await?;
+    cached
+        .first()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "proposal or revision root event {proposal_or_revision_id} not found in local cache",
+            )
+        })
+        .cloned()
 }
 
 fn update_remote_refs_pushed(

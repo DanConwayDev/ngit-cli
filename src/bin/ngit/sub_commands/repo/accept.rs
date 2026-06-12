@@ -6,12 +6,12 @@ use ngit::{
     cli_interactor::cli_error,
     client::{Params, fetching_with_report, get_repo_ref_from_cache, send_events},
     repo_ref::{RepoRef, apply_grasp_infrastructure, latest_event_repo_ref},
+    signer::NgitSigner,
 };
 use nostr::{
-    ToBech32,
+    Kind, RelayUrl, ToBech32,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr_sdk::{Kind, NostrSigner, RelayUrl};
 
 use crate::{
     cli::{Cli, extract_signer_cli_arguments},
@@ -139,7 +139,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 async fn accept_with_grasp_servers(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<NgitSigner>,
     user_ref: &ngit::login::user::UserRef,
     client: &mut Client,
     grasp_servers: &[String],

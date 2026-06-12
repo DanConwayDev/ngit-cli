@@ -4,9 +4,11 @@ use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use indicatif::{ProgressBar, ProgressStyle};
-use nostr::nips::nip46::NostrConnectURI;
+use nostr::{
+    EventBuilder, Keys, Metadata, PublicKey, RelayUrl, ToBech32, event::FinalizeEvent,
+    nips::nip46::NostrConnectUri,
+};
 use nostr_connect::client::NostrConnect;
-use nostr_sdk::{EventBuilder, Keys, Metadata, NostrSigner, PublicKey, RelayUrl, ToBech32};
 use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
@@ -38,7 +40,7 @@ pub async fn fresh_login_or_signup(
     signer_info: Option<SignerInfo>,
     save_local: bool,
     signer_relays: &[String],
-) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let (signer, public_key, signer_info, source) = loop {
         if let Some(signer_info) = signer_info {
             let (signer, user_ref, source) = load_existing_login(
@@ -124,8 +126,8 @@ pub async fn login_with_bunker_url(
     bunker_url: &str,
     save_local: bool,
     signer_relays: &[String],
-) -> Result<(Arc<dyn NostrSigner>, UserRef, SignerInfoSource)> {
-    let url = NostrConnectURI::parse(bunker_url)
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
+    let url = NostrConnectUri::parse(bunker_url)
         .context("invalid bunker:// URL - must be a valid bunker:// URI")?;
 
     let (app_key, _) = generate_nostr_connect_app(client, signer_relays)?;
@@ -171,7 +173,7 @@ pub async fn login_with_bunker_url(
 
 pub async fn get_fresh_nsec_signer() -> Result<
     Option<(
-        Arc<dyn NostrSigner>,
+        Arc<crate::NgitSigner>,
         PublicKey,
         SignerInfo,
         SignerInfoSource,
@@ -260,7 +262,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
         let public_key = keys.public_key();
 
         break Ok(Some((
-            Arc::new(keys),
+            Arc::new(crate::NgitSigner::Keys(keys)),
             public_key,
             signer_info,
             // TODO factor in source
@@ -309,7 +311,7 @@ pub async fn get_fresh_nip46_signer(
     signer_relays: &[String],
 ) -> Result<
     Option<(
-        Arc<dyn NostrSigner>,
+        Arc<crate::NgitSigner>,
         PublicKey,
         SignerInfo,
         SignerInfoSource,
@@ -346,7 +348,9 @@ pub async fn get_fresh_nip46_signer(
                     Duration::from_secs(10 * 60),
                     None,
                 )?);
-                let signer_arc: Arc<dyn NostrSigner> = nostr_connect.clone();
+                let signer_arc = Arc::new(crate::NgitSigner::Connect(Box::new(
+                    (*nostr_connect).clone(),
+                )));
                 let pubkey_handle = tokio::spawn(async move { signer_arc.get_public_key().await });
 
                 // Show a spinner while waiting; Ctrl+C lets the user change
@@ -395,7 +399,9 @@ pub async fn get_fresh_nip46_signer(
                         npub: Some(public_key.to_bech32()?),
                     };
                     return Ok(Some((
-                        nostr_connect as Arc<dyn NostrSigner>,
+                        Arc::new(crate::NgitSigner::Connect(Box::new(
+                            (*nostr_connect).clone(),
+                        ))),
                         public_key,
                         signer_info,
                         SignerInfoSource::GitGlobal,
@@ -436,7 +442,7 @@ pub async fn get_fresh_nip46_signer(
                             let new_relays: Vec<RelayUrl> =
                                 selected.iter().flat_map(|s| RelayUrl::parse(s)).collect();
                             current_url =
-                                NostrConnectURI::client(app_key.public_key(), new_relays, "ngit");
+                                NostrConnectUri::client(app_key.public_key(), new_relays, "ngit");
                         }
                     }
                     _ => return Ok(None),
@@ -473,7 +479,7 @@ pub async fn get_fresh_nip46_signer(
                         }),
                     )
                     .context("failed to get bunker url input from interactor")?;
-                match NostrConnectURI::parse(&input) {
+                match NostrConnectUri::parse(&input) {
                     Ok(url) => break url,
                     Err(e) => error = Some(e),
                 }
@@ -509,7 +515,7 @@ pub fn generate_nostr_connect_app(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     signer_relays: &[String],
-) -> Result<(Keys, NostrConnectURI)> {
+) -> Result<(Keys, NostrConnectUri)> {
     let app_key = Keys::generate();
     let relays = if !signer_relays.is_empty() {
         signer_relays
@@ -532,7 +538,7 @@ pub fn generate_nostr_connect_app(
     } else {
         vec![]
     };
-    let nostr_connect_url = NostrConnectURI::client(app_key.public_key(), relays.clone(), "ngit");
+    let nostr_connect_url = NostrConnectUri::client(app_key.public_key(), relays.clone(), "ngit");
     Ok((app_key, nostr_connect_url))
 }
 
@@ -540,7 +546,7 @@ pub fn generate_nostr_connect_app(
 ///
 /// `choice` must be 0 (QR) or 1 (URL).  Output goes directly to stderr so it
 /// is visible before the relay-selection choice prompt that follows.
-fn display_nostr_connect(choice: usize, url: &NostrConnectURI) -> Result<()> {
+fn display_nostr_connect(choice: usize, url: &NostrConnectUri) -> Result<()> {
     let dim = Style::new().for_stderr().color256(247);
     let hint = dim.apply_to("(ctrl+c to change)");
     eprintln!(
@@ -585,7 +591,7 @@ fn display_nostr_connect(choice: usize, url: &NostrConnectURI) -> Result<()> {
 ///
 /// Returns the selected relay list as strings.  An empty return means the user
 /// submitted without selecting anything (caller should keep the existing URL).
-fn select_signer_relays(nostr_connect_url: &NostrConnectURI) -> Result<Vec<String>> {
+fn select_signer_relays(nostr_connect_url: &NostrConnectUri) -> Result<Vec<String>> {
     let current_relays: Vec<String> = nostr_connect_url
         .relays()
         .iter()
@@ -613,7 +619,7 @@ fn select_signer_relays(nostr_connect_url: &NostrConnectURI) -> Result<Vec<Strin
     Ok(selected)
 }
 
-pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> {
+pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectUri> {
     let term = console::Term::stderr();
     term.write_line("contacting login service provider...")?;
     let res = nip05_query(nip05).await;
@@ -624,7 +630,7 @@ pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> 
                 eprintln!("nip05 provider isn't configured for remote login");
                 bail!("nip05 provider isn't configured for remote login")
             }
-            Ok(NostrConnectURI::Bunker {
+            Ok(NostrConnectUri::Bunker {
                 remote_signer_public_key: profile.public_key,
                 relays: profile.nip46,
                 secret: None,
@@ -639,9 +645,9 @@ pub async fn fetch_nip46_uri_from_nip05(nip05: &str) -> Result<NostrConnectURI> 
 
 pub async fn listen_for_remote_signer(
     app_key: &Keys,
-    nostr_connect_url: &NostrConnectURI,
+    nostr_connect_url: &NostrConnectUri,
     printer: Arc<Mutex<Printer>>,
-) -> Result<(Arc<dyn NostrSigner>, PublicKey, NostrConnectURI)> {
+) -> Result<(Arc<crate::NgitSigner>, PublicKey, NostrConnectUri)> {
     let app_key = app_key.clone();
     let nostr_connect_url_clone = nostr_connect_url.clone();
 
@@ -651,7 +657,9 @@ pub async fn listen_for_remote_signer(
         Duration::from_secs(10 * 60),
         None,
     )?);
-    let signer: Arc<dyn NostrSigner> = nostr_connect.clone();
+    let signer = Arc::new(crate::NgitSigner::Connect(Box::new(
+        (*nostr_connect).clone(),
+    )));
     let pubkey_future = signer.get_public_key();
 
     // wait for signer response or ctrl + c
@@ -948,7 +956,7 @@ pub async fn signup_non_interactive(
     save_local: bool,
     publish: bool,
     relay_urls: Vec<String>,
-) -> Result<(Arc<dyn NostrSigner>, PublicKey, SignerInfo, Keys)> {
+) -> Result<(Arc<crate::NgitSigner>, PublicKey, SignerInfo, Keys)> {
     // Generate new keypair
     let keys = nostr::Keys::generate();
     let nsec = keys.secret_key().to_bech32()?;
@@ -1014,13 +1022,13 @@ pub async fn signup_non_interactive(
 
     // Build events, save to cache, and optionally publish to relays
     if let Some(client) = client {
-        let profile = EventBuilder::metadata(&Metadata::new().name(name)).sign_with_keys(&keys)?;
+        let profile = EventBuilder::metadata(&Metadata::new().name(name)).finalize(&keys)?;
         let relay_list = EventBuilder::relay_list(
             relay_urls
                 .iter()
                 .filter_map(|s| RelayUrl::parse(s).ok().map(|url| (url, None))),
         )
-        .sign_with_keys(&keys)?;
+        .finalize(&keys)?;
 
         // Save to global cache so subsequent commands don't need to fetch
         save_event_in_global_cache(git_repo_path, &profile).await?;
@@ -1040,7 +1048,12 @@ pub async fn signup_non_interactive(
         }
     }
 
-    Ok((Arc::new(keys.clone()), public_key, signer_info, keys))
+    Ok((
+        Arc::new(crate::NgitSigner::Keys(keys.clone())),
+        public_key,
+        signer_info,
+        keys,
+    ))
 }
 
 async fn signup(
@@ -1048,7 +1061,7 @@ async fn signup(
     #[cfg(not(test))] client: Option<&Client>,
 ) -> Result<
     Option<(
-        Arc<dyn NostrSigner>,
+        Arc<crate::NgitSigner>,
         PublicKey,
         SignerInfo,
         SignerInfoSource,

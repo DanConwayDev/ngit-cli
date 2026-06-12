@@ -1,8 +1,9 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use nostr::{PublicKey, Url, event::Tag, signer::NostrSigner};
-use nostr_sdk::{Alphabet, JsonUtil, Kind, SingleLetterTag, Timestamp, ToBech32};
+use nostr::{
+    Alphabet, JsonUtil, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag,
+};
 use serde::{self, Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -59,17 +60,12 @@ pub struct UserGraspList {
 }
 
 impl UserGraspList {
-    pub async fn to_event(&mut self, signer: &Arc<dyn NostrSigner>) -> Result<nostr::Event> {
+    pub async fn to_event(&mut self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::Event> {
         let event = sign_event(
-            nostr_sdk::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
+            nostr::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
                 self.urls
                     .iter()
-                    .map(|url| {
-                        Tag::custom(
-                            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("g")),
-                            vec![url.to_string()],
-                        )
-                    })
+                    .map(|url| Tag::parse(["g", url.as_ref()]).unwrap())
                     .collect::<Vec<_>>(),
             ),
             signer,
@@ -239,10 +235,7 @@ pub fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event
                 .iter()
                 .filter(|t| {
                     t.as_slice().len() > 1
-                        && t.kind()
-                            .eq(&nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(
-                                Alphabet::R,
-                            )))
+                        && t.single_letter_tag() == Some(SingleLetterTag::lowercase(Alphabet::R))
                 })
                 .map(|t| UserRelayRef {
                     url: t.as_slice()[1].clone(),

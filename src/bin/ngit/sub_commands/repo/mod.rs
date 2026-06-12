@@ -13,7 +13,10 @@ use ngit::{
     },
     utils::get_short_git_server_name,
 };
-use nostr::{FromBech32, PublicKey, TagStandard, ToBech32, nips::nip19::Nip19Coordinate};
+use nostr::{
+    FromBech32, PublicKey, ToBech32,
+    nips::{nip01::Nip01Tag, nip19::Nip19Coordinate},
+};
 use serde::Serialize;
 
 use crate::{
@@ -575,8 +578,7 @@ async fn display_name_for(
 /// Returns `None` if listed directly by the trusted maintainer,
 /// or `Some(lister_pubkey_hex)` if listed by a co-maintainer.
 fn find_lister(repo_ref: &RepoRef, target: &PublicKey, trusted: &PublicKey) -> Option<String> {
-    use nostr::nips::nip01::Coordinate;
-    use nostr_sdk::Kind;
+    use nostr::{Kind, nips::nip01::Coordinate};
 
     let trusted_coord = nostr::nips::nip19::Nip19Coordinate {
         coordinate: Coordinate {
@@ -591,8 +593,8 @@ fn find_lister(repo_ref: &RepoRef, target: &PublicKey, trusted: &PublicKey) -> O
             .tags
             .iter()
             .filter_map(|t| {
-                if let Some(TagStandard::PublicKey { public_key, .. }) = t.as_standardized() {
-                    Some(*public_key)
+                if let Ok(Nip01Tag::PublicKey { public_key, .. }) = Nip01Tag::try_from(t.clone()) {
+                    Some(public_key)
                 } else {
                     None
                 }
@@ -612,8 +614,8 @@ fn find_lister(repo_ref: &RepoRef, target: &PublicKey, trusted: &PublicKey) -> O
             .tags
             .iter()
             .filter_map(|t| {
-                if let Some(TagStandard::PublicKey { public_key, .. }) = t.as_standardized() {
-                    Some(*public_key)
+                if let Ok(Nip01Tag::PublicKey { public_key, .. }) = Nip01Tag::try_from(t.clone()) {
+                    Some(public_key)
                 } else {
                     None
                 }

@@ -3,8 +3,10 @@ use ngit::{
     client::{Params, get_issues_from_cache, get_proposals_and_revisions_from_cache, send_events},
     git_events::{KIND_LABEL, get_labels},
 };
-use nostr::{EventBuilder, Tag, TagStandard, nips::nip19::Nip19};
-use nostr_sdk::{EventId, FromBech32};
+use nostr::{
+    EventBuilder, EventId, FromBech32, Tag,
+    nips::{nip10::Nip10Tag, nip19::Nip19},
+};
 
 use crate::{
     client::{
@@ -130,27 +132,20 @@ async fn publish_label_event(
 
     let mut tags: Vec<Tag> = vec![
         // Namespace declaration
-        Tag::custom(
-            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("L")),
-            vec!["#t".to_string()],
-        ),
+        Tag::parse(["L", "#t"])?,
     ];
 
     // One ["l", value, "#t"] tag per label.
     for label in &new_labels {
-        tags.push(Tag::custom(
-            nostr::TagKind::Custom(std::borrow::Cow::Borrowed("l")),
-            vec![label.clone(), "#t".to_string()],
-        ));
+        tags.push(Tag::parse(["l", label.as_str(), "#t"])?);
     }
 
     // Reference the target event.
-    tags.push(Tag::from_standardized(TagStandard::Event {
-        event_id: target.id,
-        relay_url: relay_hint.clone(),
+    tags.push(Tag::from(Nip10Tag::Event {
+        id: target.id,
+        relay_hint: relay_hint.clone(),
         marker: None,
         public_key: None,
-        uppercase: false,
     }));
 
     // Notify the target event author.
@@ -162,10 +157,10 @@ async fn publish_label_event(
         .map(|l| format!("#{l}"))
         .collect::<Vec<_>>()
         .join(", ");
-    tags.push(Tag::custom(
-        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-        vec![format!("labelled {target_kind} with {label_list}")],
-    ));
+    tags.push(Tag::parse([
+        "alt",
+        &format!("labelled {target_kind} with {label_list}"),
+    ])?);
 
     let label_event = ngit::client::sign_event(
         EventBuilder::new(KIND_LABEL, "").tags(tags),

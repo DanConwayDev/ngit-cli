@@ -3,8 +3,10 @@ use ngit::{
     client::{Params, send_events, sign_event},
     content_tags::{dedup_tags, tags_from_content},
 };
-use nostr::{EventBuilder, Tag, TagStandard, ToBech32, nips::nip19::Nip19Event};
-use nostr_sdk::Kind;
+use nostr::{
+    EventBuilder, Kind, Tag, ToBech32,
+    nips::{nip01::Nip01Tag, nip19::Nip19Event},
+};
 
 use crate::{
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
@@ -51,10 +53,9 @@ pub async fn launch(
 
     // Repo coordinate tags (one per maintainer)
     for coord in repo_ref.coordinates() {
-        tags.push(Tag::from_standardized(TagStandard::Coordinate {
+        tags.push(Tag::from(Nip01Tag::Coordinate {
             coordinate: coord.coordinate.clone(),
-            relay_url: coord.relays.first().cloned(),
-            uppercase: false,
+            relay_hint: coord.relays.first().cloned(),
         }));
     }
 
@@ -67,10 +68,7 @@ pub async fn launch(
     }
 
     // Alt text
-    tags.push(Tag::custom(
-        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-        vec![format!("git issue: {title}")],
-    ));
+    tags.push(Tag::parse(["alt", &format!("git issue: {title}")])?);
 
     // Maintainer p-tags (so they get notified)
     for pk in &repo_ref.maintainers {

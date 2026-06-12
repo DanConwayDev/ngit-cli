@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use git2::{DiffOptions, Oid, Revwalk};
 pub use identify_ahead_behind::identify_ahead_behind;
-use nostr_sdk::{
+use nostr::{
     Tags,
     hashes::{Hash, sha1::Hash as Sha1Hash},
 };
@@ -1275,6 +1275,8 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
 mod tests {
     use std::fs;
 
+    use nostr::Tag;
+
     use super::*;
     use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event};
 
@@ -1637,10 +1639,10 @@ index ce01362..a21e91c 100644\n\
 
             fn test(time: git2::Time) -> Result<()> {
                 let data = extract_signature_data_from_tags(
-                    &Tags::from_list(vec![nostr::Tag::custom(
-                        nostr::TagKind::Custom("author".to_string().into()),
-                        prep(&time)?,
-                    )]),
+                    &Tags::from_list(vec![
+                        Tag::parse([vec!["author".to_string()], prep(&time)?].concat())
+                            .expect("valid author tag"),
+                    ]),
                     "author",
                 )?;
                 let sig = data.to_signature()?;

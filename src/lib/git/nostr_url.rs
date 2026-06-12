@@ -3,8 +3,10 @@ use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use directories::BaseDirs;
-use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
-use nostr_sdk::{FromBech32, PublicKey, RelayUrl, ToBech32, Url};
+use nostr::{
+    FromBech32, PublicKey, RelayUrl, ToBech32, Url,
+    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+};
 
 use super::{Repo, get_git_config_item, save_git_config_item};
 use crate::client::nip05_query;
@@ -169,7 +171,7 @@ impl NostrUrlDecoded {
         let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
         // naddr used
         let coordinate = if let Ok(coordinate) = Nip19Coordinate::from_bech32(part) {
-            if coordinate.kind.eq(&nostr_sdk::Kind::GitRepoAnnouncement) {
+            if coordinate.kind.eq(&nostr::Kind::GitRepoAnnouncement) {
                 coordinate
             } else {
                 bail!("naddr doesnt point to a git repository announcement");
@@ -232,7 +234,7 @@ impl NostrUrlDecoded {
                 coordinate: Coordinate {
                     identifier,
                     public_key,
-                    kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                    kind: nostr::Kind::GitRepoAnnouncement,
                 },
                 relays,
             }
@@ -977,8 +979,7 @@ mod tests {
         }
     }
     mod nostr_git_url_format {
-        use nostr::nips::nip19::Nip19Coordinate;
-        use nostr_sdk::PublicKey;
+        use nostr::{PublicKey, nips::nip19::Nip19Coordinate};
 
         use super::*;
         use crate::git::nostr_url::NostrUrlDecoded;
@@ -995,7 +996,7 @@ mod tests {
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                             )
                             .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            kind: nostr::Kind::GitRepoAnnouncement,
                         },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
@@ -1020,7 +1021,7 @@ mod tests {
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                             )
                             .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            kind: nostr::Kind::GitRepoAnnouncement,
                         },
                         relays: vec![],
                     },
@@ -1045,7 +1046,7 @@ mod tests {
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                             )
                             .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            kind: nostr::Kind::GitRepoAnnouncement,
                         },
                         relays: vec![RelayUrl::parse("wss://nos.lol/outbox").unwrap()],
                     },
@@ -1070,7 +1071,7 @@ mod tests {
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                             )
                             .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            kind: nostr::Kind::GitRepoAnnouncement,
                         },
                         relays: vec![],
                     },
@@ -1095,7 +1096,7 @@ mod tests {
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                             )
                             .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            kind: nostr::Kind::GitRepoAnnouncement,
                         },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
@@ -1120,7 +1121,7 @@ mod tests {
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                             )
                             .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            kind: nostr::Kind::GitRepoAnnouncement,
                         },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()],
                     },
@@ -1142,7 +1143,7 @@ mod tests {
                     "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                 )
                 .unwrap(),
-                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                kind: nostr::Kind::GitRepoAnnouncement,
             },
             relays: if relays {
                 vec![RelayUrl::parse("wss://nos.lol").unwrap()]
@@ -1169,7 +1170,7 @@ mod tests {
                                 "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                             )
                             .unwrap(),
-                            kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                            kind: nostr::Kind::GitRepoAnnouncement,
                         },
                         relays: vec![RelayUrl::parse("wss://nos.lol").unwrap()], /* wont add the
                                                                                   * slash */
@@ -1259,7 +1260,7 @@ mod tests {
                                     "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                                 )
                                 .unwrap(),
-                                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                                kind: nostr::Kind::GitRepoAnnouncement,
                             },
                             relays: vec![
                                 RelayUrl::parse("wss://nos.lol/").unwrap(),
@@ -1363,7 +1364,7 @@ mod tests {
                                     "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                                 )
                                 .unwrap(),
-                                kind: nostr_sdk::Kind::GitRepoAnnouncement,
+                                kind: nostr::Kind::GitRepoAnnouncement,
                             },
                             relays: vec![
                                 RelayUrl::parse("wss://nos.lol/").unwrap(),

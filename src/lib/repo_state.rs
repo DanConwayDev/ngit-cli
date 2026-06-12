@@ -2,10 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use git2::Oid;
-use nostr::{
-    event::{EventBuilder, Tag},
-    signer::NostrSigner,
-};
+use nostr::event::{EventBuilder, Tag};
 
 use crate::client::{STATE_KIND, sign_event};
 
@@ -54,15 +51,12 @@ impl RepoState {
     pub async fn build(
         identifier: String,
         mut state: HashMap<String, String>,
-        signer: &Arc<dyn NostrSigner>,
+        signer: &Arc<crate::NgitSigner>,
     ) -> Result<Self> {
         add_head(&mut state);
         let mut tags = vec![Tag::identifier(identifier.clone())];
         for (name, value) in &state {
-            tags.push(Tag::custom(
-                nostr_sdk::TagKind::Custom(name.into()),
-                vec![value.clone()],
-            ));
+            tags.push(Tag::parse([name.as_str(), value.as_str()]).unwrap());
         }
         let event = sign_event(
             EventBuilder::new(STATE_KIND, "").tags(tags),

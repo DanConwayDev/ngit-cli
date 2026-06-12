@@ -10,11 +10,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use auth_git2::GitAuthenticator;
 use console::Term;
 use nostr::{
-    event::{Event, EventBuilder, Kind, Tag, TagStandard, UnsignedEvent},
+    event::{Event, EventBuilder, Kind, Tag, UnsignedEvent, tag::TagCodec},
     hashes::sha1::Hash as Sha1Hash,
     key::PublicKey,
-    nips::nip10::Marker,
-    signer::NostrSigner,
 };
 
 use crate::{
@@ -416,7 +414,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     user_ref: &UserRef,
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     term: &Term,
     git_server_push_options: &[&str],
     git_server: Option<&str>,
@@ -627,7 +625,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     title_description_overide: &Option<(String, String)>,
     servers: &[String],
     git_ref: Option<String>,
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     term: &Term,
     git_server_push_options: &[&str],
 ) -> Result<(Option<Vec<Event>>, Vec<(String, Result<()>)>)> {
@@ -754,7 +752,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
 }
 
 async fn create_close_status_for_original_patch(
-    signer: &Arc<dyn NostrSigner>,
+    signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
     proposal: &Event,
 ) -> Result<Event> {
@@ -769,37 +767,26 @@ async fn create_close_status_for_original_patch(
         EventBuilder::new(nostr::event::Kind::GitStatusClosed, String::new()).tags(
             [
                 vec![
-                    Tag::custom(
-                        nostr::TagKind::Custom(std::borrow::Cow::Borrowed("alt")),
-                        vec![
-                            "Git patch closed as forthcoming update is too large. Replacing with Pull Request"
-                                .to_string(),
-                        ],
-                    ),
-                    Tag::from_standardized(nostr::TagStandard::Event {
-                        event_id: proposal.id,
-                        relay_url: repo_ref.relays.first().cloned(),
-                        marker: Some(Marker::Root),
+                    Tag::parse(["alt", "Git patch closed as forthcoming update is too large. Replacing with Pull Request"]).unwrap(),
+                    nostr::nips::nip01::Nip01Tag::Event {
+                        id: proposal.id,
+                        relay_hint: repo_ref.relays.first().cloned(),
                         public_key: None,
-                        uppercase: false,
-                    }),
+                    }.to_tag(),
                 ],
                 public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
                 repo_ref
                     .coordinates()
                     .iter()
                     .map(|c| {
-                        Tag::from_standardized(TagStandard::Coordinate {
+                        nostr::nips::nip01::Nip01Tag::Coordinate {
                             coordinate: c.coordinate.clone(),
-                            relay_url: c.relays.first().cloned(),
-                            uppercase: false,
-                        })
+                            relay_hint: c.relays.first().cloned(),
+                        }.to_tag()
                     })
                     .collect::<Vec<Tag>>(),
                 vec![
-                    Tag::from_standardized(nostr::TagStandard::Reference(
-                        repo_ref.root_commit.to_string(),
-                    )),
+                    Tag::parse(["r", &repo_ref.root_commit.to_string()]).unwrap(),
                 ],
             ]
             .concat(),

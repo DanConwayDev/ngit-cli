@@ -23,7 +23,7 @@ use ngit::{
     repo_state::RepoState,
     utils::{get_short_git_server_name, join_with_and},
 };
-use nostr_sdk::RelayUrl;
+use nostr::RelayUrl;
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
@@ -885,6 +885,7 @@ mod tests {
     use ngit::{client::STATE_KIND, git::Repo};
     use nostr::{
         Kind,
+        event::FinalizeEvent,
         nips::{nip01::Coordinate, nip19::Nip19Coordinate},
     };
     use test_helpers::GitTestRepo;
@@ -1025,7 +1026,7 @@ mod tests {
         let keys = nostr::Keys::generate();
         let event = nostr::event::EventBuilder::new(STATE_KIND, "")
             .tags(vec![nostr::Tag::identifier("test")])
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .unwrap();
         RepoState {
             identifier: "test".to_string(),

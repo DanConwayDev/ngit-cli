@@ -37,6 +37,7 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use nostr::event::FinalizeEvent;
 use nostr_sdk::prelude::*;
 use rstest::*;
 use test_harness::{Harness, RepoSnapshot};
@@ -209,44 +210,34 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     let announcement_tags: Vec<Tag> = vec![
         Tag::identifier(identifier.to_string()),
-        Tag::custom(
-            TagKind::Custom("r".into()),
-            vec![main_oid.clone(), "euc".to_string()],
-        ),
-        Tag::custom(
-            TagKind::Custom("name".into()),
-            vec![display_name.to_string()],
-        ),
-        Tag::custom(
-            TagKind::Custom("description".into()),
-            vec!["test repo for git push delete-branch assertions".to_string()],
-        ),
-        Tag::custom(
-            TagKind::Custom("clone".into()),
-            vec![grasp1_clone_url.clone(), grasp2_clone_url.clone()],
-        ),
-        Tag::custom(TagKind::Custom("web".into()), Vec::<String>::new()),
-        Tag::custom(
-            TagKind::Custom("relays".into()),
-            vec![
-                standard_relay_url.clone(),
-                grasp1_relay_url.clone(),
-                grasp2_relay_url.clone(),
-            ],
-        ),
-        Tag::custom(
-            TagKind::Custom("maintainers".into()),
-            vec![pubkey.to_string()],
-        ),
-        Tag::custom(
-            TagKind::Custom("alt".into()),
-            vec![format!("git repository: {display_name}")],
-        ),
+        Tag::parse(["r".to_string(), main_oid.clone(), "euc".to_string()]).unwrap(),
+        Tag::parse(["name".to_string(), display_name.to_string()]).unwrap(),
+        Tag::parse([
+            "description".to_string(),
+            "test repo for git push delete-branch assertions".to_string(),
+        ])
+        .unwrap(),
+        Tag::parse([
+            "clone".to_string(),
+            grasp1_clone_url.clone(),
+            grasp2_clone_url.clone(),
+        ])
+        .unwrap(),
+        Tag::parse(["web".to_string()]).unwrap(),
+        Tag::parse([
+            "relays".to_string(),
+            standard_relay_url.clone(),
+            grasp1_relay_url.clone(),
+            grasp2_relay_url.clone(),
+        ])
+        .unwrap(),
+        Tag::parse(["maintainers".to_string(), pubkey.to_string()]).unwrap(),
+        Tag::parse(["alt".to_string(), format!("git repository: {display_name}")]).unwrap(),
     ];
 
     let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
         .tags(announcement_tags)
-        .sign_with_keys(&keys)
+        .finalize(&keys)
         .context("failed to sign repo announcement")?;
 
     publish_event_to_all(
@@ -902,9 +893,10 @@ async fn publish_event_to_all(event: &Event, urls: &[&str]) -> Result<()> {
     }
     client.connect().await;
     let output = client
-        .send_event_to(urls.iter().copied(), event)
+        .send_event(event)
+        .to(urls.iter().copied())
         .await
-        .context("send_event_to fan-out")?;
+        .context("send_event fan-out")?;
     client.disconnect().await;
     if !output.failed.is_empty() {
         anyhow::bail!(

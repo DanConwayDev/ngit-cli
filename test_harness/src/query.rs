@@ -27,7 +27,8 @@ pub(crate) async fn fetch_events(relay_url: &str, filter: Filter) -> Result<Vec<
         .with_context(|| format!("failed to add relay {relay_url}"))?;
     client.connect().await;
     let events = client
-        .fetch_events(filter, QUERY_TIMEOUT)
+        .fetch_events(filter)
+        .timeout(QUERY_TIMEOUT)
         .await
         .with_context(|| format!("failed to fetch events from {relay_url}"))?;
     client.disconnect().await;
