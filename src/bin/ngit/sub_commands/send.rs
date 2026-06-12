@@ -615,7 +615,7 @@ fn choose_commits(git_repo: &Repo, proposed_commits: Vec<Sha1Hash>) -> Result<Ve
 fn summarise_commit_for_selection(git_repo: &Repo, commit: &Sha1Hash) -> Result<String> {
     let references = git_repo.get_refs(commit)?;
     let dim = Style::new().color256(247);
-    let prefix = format!("({})", git_repo.get_commit_author(commit)?[0],);
+    let prefix = format!("({})", git_repo.get_commit_author(commit)?[0]);
     let references_string = if references.is_empty() {
         String::new()
     } else {

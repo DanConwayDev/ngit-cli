@@ -127,7 +127,7 @@ pub async fn run_push(
     )?;
 
     git_state_refspecs.retain(|refspec| {
-        if let Some(rejected) = rejected_refspecs.get(&refspec.to_string()) {
+        if let Some(rejected) = rejected_refspecs.get(&refspec.clone()) {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
             println!("error {to} {} out of sync with nostr", rejected.join(" "));
             false
@@ -594,14 +594,14 @@ async fn process_proposal_refspecs(
                         println!(
                             "error {to} failed to fastforward as newer patches found on proposal"
                         );
-                        rejected_proposal_refspecs.push(refspec.to_string());
+                        rejected_proposal_refspecs.push(refspec.clone());
                     }
                 }
             } else {
                 println!(
                     "error {to} permission denied. you are not the proposal author or a repo maintainer"
                 );
-                rejected_proposal_refspecs.push(refspec.to_string());
+                rejected_proposal_refspecs.push(refspec.clone());
             }
         } else {
             // TODO new proposal / couldn't find exisiting proposal
@@ -767,9 +767,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                     } else {
                         // reject
                         rejected_refspecs
-                            .entry(refspec.to_string())
-                            .and_modify(|a| a.push(url.to_string()))
-                            .or_insert(vec![url.to_string()]);
+                            .entry(refspec.clone())
+                            .and_modify(|a| a.push(url.clone()))
+                            .or_insert(vec![url.clone()]);
                         // TODO should we reject or or just warn?
                         term.write_line(
                             format!(
@@ -795,9 +795,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                             refspecs_for_remote.push(refspec.clone());
                         } else {
                             rejected_refspecs
-                                .entry(refspec.to_string())
-                                .and_modify(|a| a.push(url.to_string()))
-                                .or_insert(vec![url.to_string()]);
+                                .entry(refspec.clone())
+                                .and_modify(|a| a.push(url.clone()))
+                                .or_insert(vec![url.clone()]);
                             term.write_line(
                                 format!(
                                 "ERROR: {short_name} {to} exists with a different reference. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
@@ -861,9 +861,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                                 refspecs_for_remote.push(ensure_force_push_refspec(refspec));
                             } else {
                                 rejected_refspecs
-                                    .entry(refspec.to_string())
-                                    .and_modify(|a| a.push(url.to_string()))
-                                    .or_insert(vec![url.to_string()]);
+                                    .entry(refspec.clone())
+                                    .and_modify(|a| a.push(url.clone()))
+                                    .or_insert(vec![url.clone()]);
                                 term.write_line(
                                     format!(
                                         "ERROR: {short_name} {to} conflicts with nostr ({} ahead {} behind) and local ({} ahead {} behind). someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
@@ -883,9 +883,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
 
                         // cant soft push
                         rejected_refspecs
-                            .entry(refspec.to_string())
-                            .and_modify(|a| a.push(url.to_string()))
-                            .or_insert(vec![url.to_string()]);
+                            .entry(refspec.clone())
+                            .and_modify(|a| a.push(url.clone()))
+                            .or_insert(vec![url.clone()]);
                         term.write_line(
                             format!("ERROR: {short_name} {to} conflicts with nostr and is not an ancestor of local branch. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again").as_str(),
                         )?;
@@ -915,9 +915,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                     } else {
                         // cant soft push
                         rejected_refspecs
-                            .entry(refspec.to_string())
-                            .and_modify(|a| a.push(url.to_string()))
-                            .or_insert(vec![url.to_string()]);
+                            .entry(refspec.clone())
+                            .and_modify(|a| a.push(url.clone()))
+                            .or_insert(vec![url.clone()]);
                         term.write_line(
                                     format!(
                                         "ERROR: {short_name} already contains {to} {} ahead and {} behind local branch. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
@@ -933,9 +933,9 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                     // TODO fetch oid from remote
                     // cant soft push
                     rejected_refspecs
-                        .entry(refspec.to_string())
-                        .and_modify(|a| a.push(url.to_string()))
-                        .or_insert(vec![url.to_string()]);
+                        .entry(refspec.clone())
+                        .and_modify(|a| a.push(url.clone()))
+                        .or_insert(vec![url.clone()]);
                     term.write_line(
                         format!("ERROR: {short_name} already contains {to} at {remote_value} which is not an ancestor of local branch. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again").as_str(),
                     )?;
@@ -946,7 +946,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
             }
         }
         if !refspecs_for_remote.is_empty() {
-            refspecs_for_remotes.insert(url.to_string(), refspecs_for_remote);
+            refspecs_for_remotes.insert(url.clone(), refspecs_for_remote);
         }
     }
 
@@ -954,7 +954,7 @@ fn create_rejected_refspecs_and_remotes_refspecs(
     let mut remotes_refspecs_without_rejected = HashMap::new();
     for (url, value) in &refspecs_for_remotes {
         remotes_refspecs_without_rejected.insert(
-            url.to_string(),
+            url.clone(),
             value
                 .iter()
                 .filter(|refspec| !rejected_refspecs.contains_key(*refspec))
@@ -1309,10 +1309,10 @@ fn get_patch_author(event: &Event) -> Result<Vec<String>> {
         match t.as_slice() {
             [tag, name, email, unixtime, offset] if tag == "author" => {
                 return Ok(vec![
-                    name.to_string(),
-                    email.to_string(),
-                    unixtime.to_string(),
-                    offset.to_string(),
+                    name.clone(),
+                    email.clone(),
+                    unixtime.clone(),
+                    offset.clone(),
                 ]);
             }
             _ => (),

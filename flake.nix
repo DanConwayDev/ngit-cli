@@ -37,7 +37,7 @@
             # ideally this wouldn't be pinned to a specific nightly version but
             # selectLatestNightlyWith isn't support with mixed toolchains
             # https://github.com/oxalica/rust-overlay/issues/136
-            (lib.hiPrio rust-bin.nightly."2025-10-16".rustfmt)
+            (lib.hiPrio rust-bin.nightly."2026-06-11".rustfmt)
             # (rust-bin.stable.latest.override { extensions = [ "rust-analyzer" ]; })
             rust-bin.stable.latest.default
           ];

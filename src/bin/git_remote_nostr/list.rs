@@ -281,7 +281,7 @@ async fn get_open_and_draft_proposals_state(
                                     || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
                                 {
                                     term.write_line(
-                                        format!("WARNING (only shown to maintainers or author): failed to fetch branch {branch_name}, error: {error}",)
+                                        format!("WARNING (only shown to maintainers or author): failed to fetch branch {branch_name}, error: {error}")
                                             .as_str(),
                                     )?;
                                 }

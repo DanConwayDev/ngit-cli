@@ -246,9 +246,7 @@ async fn get_comments_for_proposal(
             let s = t.as_slice();
             s.len() >= 2
                 && s[0].eq("E")
-                && nostr::EventId::parse(&s[1])
-                    .map(|id| id == *proposal_id)
-                    .unwrap_or(false)
+                && nostr::EventId::parse(&s[1]).is_ok_and(|id| id == *proposal_id)
         })
     });
     // Oldest first
@@ -960,8 +958,7 @@ async fn launch_interactive() -> Result<()> {
         let proposal_behind_main_len = if let Some(ref base_commit) = proposal_base_commit {
             git_repo
                 .get_commits_ahead_behind(&master_tip, base_commit)
-                .map(|(_, behind)| behind.len())
-                .unwrap_or(0)
+                .map_or(0, |(_, behind)| behind.len())
         } else {
             0
         };

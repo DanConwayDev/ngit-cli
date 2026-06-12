@@ -87,7 +87,7 @@ Other config settings are applied to the local repository but just for effiency 
 pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
     if let Some(nsec) = &args.nsec {
         Ok(Some(SignerInfo::Nsec {
-            nsec: nsec.to_string(),
+            nsec: nsec.clone(),
             password: None,
             npub: None,
         }))

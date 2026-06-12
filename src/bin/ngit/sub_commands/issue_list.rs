@@ -120,9 +120,7 @@ async fn get_comments_for_issue(
             let s = t.as_slice();
             s.len() >= 2
                 && s[0].eq("E")
-                && nostr::EventId::parse(&s[1])
-                    .map(|id| id == *issue_id)
-                    .unwrap_or(false)
+                && nostr::EventId::parse(&s[1]).is_ok_and(|id| id == *issue_id)
         })
     });
     comments.sort_by_key(|e| e.created_at);

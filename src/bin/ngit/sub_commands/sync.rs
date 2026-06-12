@@ -686,7 +686,7 @@ fn find_ahead_and_diverging_refs(
             let check = get_ahead_behind(git_repo, nostr_oid, remote_oid).or_else(|_| {
                 let _ = fetch_from_git_server(
                     git_repo,
-                    &[remote_oid.to_string()],
+                    std::slice::from_ref(remote_oid),
                     url,
                     decoded_nostr_url,
                     term,
@@ -725,7 +725,7 @@ fn find_ahead_and_diverging_refs(
         }
 
         // Sort descending by commits_ahead so candidates[0] is furthest ahead.
-        candidates.sort_by(|a, b| b.2.cmp(&a.2));
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
 
         let (best_oid, best_url, best_count) = &candidates[0];
 
@@ -794,7 +794,7 @@ fn identify_missing_refs(git_repo: &Repo, state: &HashMap<String, String>) -> Ve
             });
 
             if !exist && !oid_exists_as_tag {
-                missing_oids.push(tip.to_string());
+                missing_oids.push(tip.clone());
             }
         }
     }
@@ -824,7 +824,7 @@ fn fetch_missing_refs(
                 for oid in &required_oids {
                     if state.values().any(|v| v.eq(oid)) {
                         oids_on_remote
-                            .entry(url.to_string())
+                            .entry(url.clone())
                             .or_default()
                             .push(oid.clone());
                     }

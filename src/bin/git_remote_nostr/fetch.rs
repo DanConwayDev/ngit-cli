@@ -159,7 +159,7 @@ async fn fetch_open_or_draft_proposals_from_patches(
                             || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
                         {
                             term.write_line(
-                                format!("WARNING (only shown to maintainers or author): failed to create branch for {refstr}, error: {error}",)
+                                format!("WARNING (only shown to maintainers or author): failed to create branch for {refstr}, error: {error}")
                                     .as_str(),
                             )?;
                         }

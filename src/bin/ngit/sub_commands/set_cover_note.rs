@@ -190,7 +190,7 @@ async fn publish_set_cover_note_event(
     )
     .await?;
 
-    println!("{} {} cover note set", target_kind, &event_id.to_hex()[..8],);
+    println!("{} {} cover note set", target_kind, &event_id.to_hex()[..8]);
     Ok(())
 }
 
