@@ -19,7 +19,10 @@ use crate::{
         utils::check_ssh_keys,
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
-    utils::{Direction, get_read_protocols_to_try, join_with_and, set_protocol_preference},
+    utils::{
+        Direction, get_read_protocols_to_try, join_with_and, onion_proxy_options_for_url,
+        set_protocol_preference,
+    },
 };
 
 /// Ensure a single commit OID is present locally, fetching from git servers
@@ -303,6 +306,9 @@ fn fetch_from_git_server_url(
         }
     };
     let mut fetch_options = git2::FetchOptions::new();
+    if let Some(proxy) = onion_proxy_options_for_url(git_server_url) {
+        fetch_options.proxy_options(proxy);
+    }
     let mut remote_callbacks = git2::RemoteCallbacks::new();
     let fetch_reporter = Arc::new(Mutex::new(FetchReporter::new(term)));
     remote_callbacks.sideband_progress({

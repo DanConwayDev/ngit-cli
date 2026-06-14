@@ -1335,6 +1335,11 @@ pub fn format_grasp_server_url_as_relay_url(url: &str) -> Result<String> {
     if grasp_server_url.contains("http://") {
         return Ok(grasp_server_url.replace("http://", "ws://"));
     }
+    // .onion hosts cannot terminate TLS, default to ws:// so the relay
+    // can be reached over Tor.
+    if crate::git::nostr_url::host_is_onion(&grasp_server_url) {
+        return Ok(format!("ws://{grasp_server_url}"));
+    }
     Ok(format!("wss://{grasp_server_url}"))
 }
 
@@ -1369,6 +1374,10 @@ pub fn format_grasp_server_url_as_clone_url(
 
     let prefix = if grasp_server_url.contains("http://") {
         ""
+    } else if crate::git::nostr_url::host_is_onion(&grasp_server_url) {
+        // .onion hosts cannot terminate TLS, default to http:// so the
+        // clone URL can be reached over Tor.
+        "http://"
     } else {
         "https://"
     };
@@ -1396,6 +1405,10 @@ pub fn format_grasp_server_url_as_grasp06_prs_url(
 
     let prefix = if grasp_server_url.contains("http://") {
         ""
+    } else if crate::git::nostr_url::host_is_onion(&grasp_server_url) {
+        // .onion hosts cannot terminate TLS, default to http:// so the
+        // clone URL can be reached over Tor.
+        "http://"
     } else {
         "https://"
     };
@@ -2369,6 +2382,85 @@ mod tests {
             assert_eq!(
                 url,
                 format!("https://relay.ngit.dev/prs/{npub}/my%20repo.git")
+            );
+        }
+
+        #[test]
+        fn onion_host_maps_to_http() {
+            // bare .onion host → http:// (Tor doesn't terminate TLS).
+            let url = format_grasp_server_url_as_grasp06_prs_url(
+                "nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion",
+                &test_pk(),
+                "my-repo",
+            )
+            .unwrap();
+            let npub = test_pk().to_bech32().unwrap();
+            assert_eq!(
+                url,
+                format!(
+                    "http://nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion/prs/{npub}/my-repo.git"
+                )
+            );
+        }
+    }
+
+    mod format_grasp_server_url_as_relay_url {
+        use super::*;
+
+        #[test]
+        fn bare_host_maps_to_wss() {
+            assert_eq!(
+                format_grasp_server_url_as_relay_url("relay.ngit.dev").unwrap(),
+                "wss://relay.ngit.dev".to_string(),
+            );
+        }
+
+        #[test]
+        fn http_scheme_maps_to_ws() {
+            assert_eq!(
+                format_grasp_server_url_as_relay_url("http://127.0.0.1:8080").unwrap(),
+                "ws://127.0.0.1:8080".to_string(),
+            );
+        }
+
+        #[test]
+        fn onion_host_maps_to_ws() {
+            // .onion hosts can't terminate TLS — must default to ws://.
+            assert_eq!(
+                format_grasp_server_url_as_relay_url(
+                    "nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion"
+                )
+                .unwrap(),
+                "ws://nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion".to_string(),
+            );
+        }
+    }
+
+    mod format_grasp_server_url_as_clone_url {
+        use nostr::key::Keys;
+
+        use super::*;
+
+        fn test_pk() -> PublicKey {
+            Keys::parse("nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq")
+                .unwrap()
+                .public_key()
+        }
+
+        #[test]
+        fn onion_host_maps_to_http() {
+            let url = format_grasp_server_url_as_clone_url(
+                "nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion",
+                &test_pk(),
+                "my-repo",
+            )
+            .unwrap();
+            let npub = test_pk().to_bech32().unwrap();
+            assert_eq!(
+                url,
+                format!(
+                    "http://nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion/{npub}/my-repo.git"
+                )
             );
         }
     }

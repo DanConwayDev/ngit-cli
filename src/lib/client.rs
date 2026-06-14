@@ -47,6 +47,7 @@ use nostr_sdk::{
     authenticator::SignerAuthenticator,
     client::ClientBuilder,
     error::{Error as NostrSdkError, ErrorKind as NostrSdkErrorKind},
+    proxy::Proxy,
     relay::{RelayLimits, ReqExitPolicy},
 };
 use serde_json::Value;
@@ -68,6 +69,44 @@ use crate::{
 
 pub fn is_verbose() -> bool {
     std::env::var("NGIT_VERBOSE").is_ok()
+}
+
+/// Default SOCKS5 proxy used to reach `.onion` relays and clone URLs.
+///
+/// Override with `NGIT_TOR_PROXY=host:port`. Set to `none` (or empty) to
+/// disable routing `.onion` traffic through a SOCKS5 proxy, in which case
+/// `.onion` relays / clone URLs will be unreachable on hosts without their
+/// own transparent Tor proxy.
+pub const DEFAULT_TOR_SOCKS5_PROXY: &str = "127.0.0.1:9050";
+
+/// Return the SOCKS5 proxy address to use for `.onion` traffic, or `None`
+/// if onion-via-SOCKS5 routing is explicitly disabled.
+///
+/// Reads `NGIT_TOR_PROXY`:
+///   - unset → [`DEFAULT_TOR_SOCKS5_PROXY`]
+///   - `""` / `none` / `off` / `disable` → `None`
+///   - `host:port` → parsed [`SocketAddr`]
+pub fn tor_socks5_proxy_addr() -> Option<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let raw =
+        std::env::var("NGIT_TOR_PROXY").unwrap_or_else(|_| DEFAULT_TOR_SOCKS5_PROXY.to_string());
+    let trimmed = raw.trim();
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "" | "none" | "off" | "disable" | "disabled"
+    ) {
+        return None;
+    }
+    trimmed.to_socket_addrs().ok().and_then(|mut it| it.next())
+}
+
+/// Wire up nostr-sdk's per-relay SOCKS5 proxy so `.onion` relays go through
+/// the configured Tor proxy and clearnet relays stay direct.
+fn apply_onion_proxy(builder: ClientBuilder) -> ClientBuilder {
+    match tor_socks5_proxy_addr() {
+        Some(addr) => builder.proxy(Proxy::onion(addr)),
+        None => builder,
+    }
 }
 
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
@@ -207,16 +246,20 @@ impl Connect for Client {
     fn new(opts: Params) -> Self {
         Client {
             client: if let Some(keys) = opts.keys {
-                ClientBuilder::default()
-                    .relay_limits(RelayLimits::disable())
-                    .verify_subscriptions(true)
-                    .authenticator(SignerAuthenticator::new(keys))
-                    .build()
+                apply_onion_proxy(
+                    ClientBuilder::default()
+                        .relay_limits(RelayLimits::disable())
+                        .verify_subscriptions(true)
+                        .authenticator(SignerAuthenticator::new(keys)),
+                )
+                .build()
             } else {
-                ClientBuilder::default()
-                    .relay_limits(RelayLimits::disable())
-                    .verify_subscriptions(true)
-                    .build()
+                apply_onion_proxy(
+                    ClientBuilder::default()
+                        .relay_limits(RelayLimits::disable())
+                        .verify_subscriptions(true),
+                )
+                .build()
             },
             relay_default_set: opts.relay_default_set,
             announcement_indexer_relays: opts.announcement_indexer_relays,

@@ -119,7 +119,10 @@ impl NostrUrlDecoded {
                     .context("could not parse relays in nostr git url")?
                     .to_string();
                 if !decoded.starts_with("ws://") && !decoded.starts_with("wss://") {
-                    decoded = format!("wss://{decoded}");
+                    // .onion hosts can't terminate TLS, default to ws://
+                    // so the relay can be reached over Tor.
+                    let scheme = if host_is_onion(&decoded) { "ws" } else { "wss" };
+                    decoded = format!("{scheme}://{decoded}");
                 }
                 let url =
                     RelayUrl::parse(&decoded).context("could not parse relays in nostr git url")?;
@@ -192,7 +195,10 @@ impl NostrUrlDecoded {
                     .context("could not parse relays in nostr git url")?
                     .to_string();
                 if !decoded.starts_with("ws://") && !decoded.starts_with("wss://") {
-                    decoded = format!("wss://{decoded}");
+                    // .onion hosts can't terminate TLS, default to ws://
+                    // so the relay can be reached over Tor.
+                    let scheme = if host_is_onion(&decoded) { "ws" } else { "wss" };
+                    decoded = format!("{scheme}://{decoded}");
                 }
                 let url =
                     RelayUrl::parse(&decoded).context("could not parse relays in nostr git url")?;
@@ -321,6 +327,33 @@ fn load_nip_cache(git_repo: &Option<&Repo>) -> Result<HashMap<String, PublicKey>
         }
     }
     Ok(h)
+}
+
+/// Return true if the given string contains a host that ends in `.onion`.
+///
+/// Accepts either a bare host (`example.onion`), a host with port
+/// (`example.onion:80`), or a URL with scheme (`http://example.onion/path`,
+/// `ws://example.onion`). Case-insensitive.
+pub fn host_is_onion(s: &str) -> bool {
+    let host_with_port = if let Some(after_scheme) = s.split_once("://") {
+        after_scheme.1
+    } else {
+        s
+    };
+    let host_with_port = host_with_port
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .split('#')
+        .next()
+        .unwrap_or("");
+    let host = host_with_port
+        .rsplit_once(':')
+        .map_or(host_with_port, |(h, _)| h);
+    host.to_ascii_lowercase().ends_with(".onion")
 }
 
 fn is_absoute_or_relative_path(input: &str) -> bool {
@@ -1330,6 +1363,51 @@ mod tests {
                 }
 
                 #[tokio::test]
+                async fn with_onion_relay_defaults_to_ws() -> Result<()> {
+                    // .onion hosts can't terminate TLS — the parser must default
+                    // them to `ws://` so the relay is reachable over Tor.
+                    let url = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion/ngit".to_string();
+                    let decoded = NostrUrlDecoded::parse_and_resolve(&url, &None).await?;
+                    let relay = decoded
+                        .coordinate
+                        .relays
+                        .first()
+                        .map(|r| r.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        relay.starts_with(
+                            "ws://nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion"
+                        ),
+                        "expected ws:// onion relay, got: {relay}"
+                    );
+                    Ok(())
+                }
+
+                #[tokio::test]
+                async fn with_onion_relay_via_query_param_defaults_to_ws() -> Result<()> {
+                    let url = format!(
+                        "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit?relay={}",
+                        urlencoding::encode(
+                            "nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion"
+                        ),
+                    );
+                    let decoded = NostrUrlDecoded::parse_and_resolve(&url, &None).await?;
+                    let relay = decoded
+                        .coordinate
+                        .relays
+                        .first()
+                        .map(|r| r.to_string())
+                        .unwrap_or_default();
+                    assert!(
+                        relay.starts_with(
+                            "ws://nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion"
+                        ),
+                        "expected ws:// onion relay, got: {relay}"
+                    );
+                    Ok(())
+                }
+
+                #[tokio::test]
                 async fn with_encoded_relay() -> Result<()> {
                     let url = format!(
                         "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/{}/ngit",
@@ -1473,6 +1551,57 @@ mod tests {
                 Some("~/other/fred".to_string())
             );
             Ok(())
+        }
+    }
+
+    mod host_is_onion {
+        use super::*;
+
+        #[test]
+        fn bare_host() {
+            assert!(host_is_onion(
+                "nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion"
+            ));
+        }
+
+        #[test]
+        fn host_with_port() {
+            assert!(host_is_onion(
+                "nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion:8334"
+            ));
+        }
+
+        #[test]
+        fn with_http_scheme_and_path() {
+            assert!(host_is_onion(
+                "http://nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion/npub.../id.git"
+            ));
+        }
+
+        #[test]
+        fn with_ws_scheme() {
+            assert!(host_is_onion(
+                "ws://nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion"
+            ));
+        }
+
+        #[test]
+        fn case_insensitive() {
+            assert!(host_is_onion("WSS://EXAMPLE.ONION/Path"));
+        }
+
+        #[test]
+        fn clearnet_host_is_not_onion() {
+            assert!(!host_is_onion("nos.lol"));
+            assert!(!host_is_onion("https://nos.lol/some.onion-shaped-path"));
+            assert!(!host_is_onion("https://example.com"));
+        }
+
+        #[test]
+        fn onion_substring_in_path_is_not_onion_host() {
+            // .onion must be the host suffix — a path that happens to contain
+            // `.onion` doesn't count.
+            assert!(!host_is_onion("https://example.com/x.onion"));
         }
     }
 }
