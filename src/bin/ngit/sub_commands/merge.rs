@@ -21,7 +21,7 @@ use crate::{
     client::{
         Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
     },
-    git::{Repo, RepoActions},
+    git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
@@ -103,7 +103,21 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         .iter()
         .any(|n| n.eq(&branch_name));
 
-    if !local_branch_exists {
+    if local_branch_exists {
+        // The local PR branch already exists. The merge commit message we
+        // autogenerate (subject, nevent, author, cover note) describes the
+        // *published* PR state, and other maintainers can only reproduce a
+        // merge of the published tip. If the local branch tip has drifted from
+        // the published tip, merging would produce a commit that misrepresents
+        // — or simply cannot be reproduced from — what is on the relays. Refuse
+        // and tell the user how to reconcile.
+        ensure_local_branch_matches_published_tip(
+            &git_repo,
+            &branch_name,
+            &tip_commit_str,
+            &event_id,
+        )?;
+    } else {
         // For PR-kind proposals the tip commit lives on a git server, so try
         // to fetch it. (Patch-kind proposals reconstruct the tip from patch
         // events via `ngit pr checkout`, which we don't replicate here.)
@@ -350,6 +364,88 @@ fn resolve_event_id_from_current_branch(
         }
         _ => bail!(
             "branch '{branch}' matches more than one of your PRs; specify the PR event-id or nevent"
+        ),
+    }
+}
+
+/// Refuse to merge when the local `pr/...` branch tip has drifted from the
+/// published PR tip.
+///
+/// `ngit merge` autogenerates the merge commit message — subject, nevent,
+/// `PR-Author:` trailer and cover note — to describe the *published* state of
+/// the PR, and other maintainers can only reproduce the merge against the tip
+/// recorded on the relays. If the local branch points somewhere else we must
+/// not merge:
+///
+/// * **local ahead** — the user has commits that are not yet published; merging
+///   would bake unpublished work into the default branch and produce a merge no
+///   one else can reproduce. They should push first so the PR tip is updated.
+/// * **local behind** — the local branch is stale; merging would land an older
+///   revision than what is published. They should fast-forward to the published
+///   tip first.
+/// * **diverged** — both, or histories that share no relationship.
+///
+/// When the local tip already equals the published tip this is a no-op.
+fn ensure_local_branch_matches_published_tip(
+    git_repo: &Repo,
+    branch_name: &str,
+    tip_commit_str: &str,
+    event_id: &EventId,
+) -> Result<()> {
+    let local_tip = git_repo.get_tip_of_branch(branch_name).context(format!(
+        "failed to read local tip of branch '{branch_name}'"
+    ))?;
+
+    let published_tip =
+        str_to_sha1(tip_commit_str).context("PR event recorded an invalid tip commit id")?;
+
+    if local_tip.eq(&published_tip) {
+        return Ok(());
+    }
+
+    // If the published tip is not in the local object database we cannot
+    // classify the drift; report the mismatch plainly.
+    if !git_repo.does_commit_exist(tip_commit_str)? {
+        bail!(
+            "local branch '{branch_name}' (at {local_tip}) does not match the published PR tip {tip_commit_str}, which is not present locally. Reconcile the branch with the published PR before merging (e.g. fetch, then `ngit pr checkout {}`).",
+            event_id.to_hex()
+        );
+    }
+
+    // Both commits are present locally: classify the drift to give precise
+    // guidance. `get_commits_ahead_behind(base, latest)` returns
+    // `(ahead, behind)` relative to `latest`: `ahead` = commits on the local
+    // branch missing from the published tip, `behind` = commits on the
+    // published tip missing locally. It errors when the two share no common
+    // ancestor at all, which we surface as an unrelated-histories mismatch.
+    let Ok((ahead, behind)) = git_repo.get_commits_ahead_behind(&published_tip, &local_tip) else {
+        bail!(
+            "local branch '{branch_name}' (at {local_tip}) shares no history with the published PR tip {tip_commit_str}. Reconcile the branch with the published PR before merging (e.g. `ngit pr checkout {}`).",
+            event_id.to_hex()
+        )
+    };
+
+    match (ahead.is_empty(), behind.is_empty()) {
+        // ahead only: unpublished local commits.
+        (false, true) => bail!(
+            "local branch '{branch_name}' is {} commit(s) ahead of the published PR tip {tip_commit_str}. Push your changes so the PR is updated before merging, e.g. `git push <remote> {branch_name}`.",
+            ahead.len()
+        ),
+        // behind only: stale local branch.
+        (true, false) => bail!(
+            "local branch '{branch_name}' is {} commit(s) behind the published PR tip {tip_commit_str}. Fast-forward it to the published tip before merging, e.g. `git checkout {branch_name} && git merge --ff-only {tip_commit_str}`.",
+            behind.len()
+        ),
+        // diverged: both ahead and behind.
+        (false, false) => bail!(
+            "local branch '{branch_name}' has diverged from the published PR tip {tip_commit_str} ({} ahead, {} behind). Reconcile it with the published PR (push your changes or reset to the published tip) before merging.",
+            ahead.len(),
+            behind.len()
+        ),
+        // equal commit lists but differing tips is unreachable (we returned
+        // early on equality) — treat defensively as a plain mismatch.
+        (true, true) => bail!(
+            "local branch '{branch_name}' (at {local_tip}) does not match the published PR tip {tip_commit_str}. Reconcile the branch with the published PR before merging."
         ),
     }
 }
