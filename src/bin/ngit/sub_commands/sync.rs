@@ -105,6 +105,26 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     let mut nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
 
+    // Self-heal: an earlier ngit version cached tag tracking refs under
+    // `refs/remotes/<nostr_remote>/<tagname>` — git's remote-tracking branch
+    // namespace — so pushed tags showed up as remote branches in
+    // `git branch -r`, IDEs, etc.  Tags are now sourced directly from the
+    // nostr state event oid when building push refspecs, so any such entries
+    // are stray.  Delete them on every sync so affected repos clean up
+    // without manual intervention.
+    for nostr_ref_name in nostr_state.state.keys() {
+        if !nostr_ref_name.starts_with("refs/tags/") || nostr_ref_name.ends_with("^{}") {
+            continue;
+        }
+        let Some(short) = nostr_ref_name.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let legacy = format!("refs/remotes/{nostr_remote_name}/{short}");
+        if let Ok(mut r) = git_repo.git_repo.find_reference(&legacy) {
+            let _ = r.delete();
+        }
+    }
+
     // When --force is given, rebuild and republish the state event even if
     // nothing has changed.  This lets users repair repos whose state event is
     // missing ^{} peeled refs for annotated tags (or any other corruption)
@@ -331,11 +351,18 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                             // Update the nostr-remote tracking refs so the
                             // push loop below can push the new commits to all
                             // other servers using normal fast-forward refspecs.
+                            //
+                            // Tags are excluded: they're not tracked per-remote
+                            // (that namespace collides with remote-tracking
+                            // branches — see the `<oid>:refs/tags/<name>` path
+                            // in the push refspec builder below).
                             for r in &refs_to_trust {
+                                if r.ref_name.starts_with("refs/tags/") {
+                                    continue;
+                                }
                                 let tracking_name = r
                                     .ref_name
                                     .strip_prefix("refs/heads/")
-                                    .or_else(|| r.ref_name.strip_prefix("refs/tags/"))
                                     .unwrap_or(&r.ref_name);
                                 let tracking_refname =
                                     format!("refs/remotes/{nostr_remote_name}/{tracking_name}");
@@ -481,6 +508,32 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 .strip_prefix("refs/heads/")
                 .or_else(|| nostr_ref_name.strip_prefix("refs/tags/"))
                 .unwrap_or(nostr_ref_name.as_str());
+            // For tags, push the oid named by the nostr state event directly
+            // (`<oid>:refs/tags/<name>`) rather than via a per-remote tracking
+            // ref under `refs/remotes/<remote>/...`.  That namespace is git's
+            // remote-tracking branch namespace; writing tag tracking refs there
+            // makes pushed tags appear as remote branches in `git branch -r`.
+            // Tags are global in git's data model — nothing locally needs a
+            // per-remote tag cache, and the state event already encodes the
+            // authoritative oid.
+            let is_tag = nostr_ref_name.starts_with("refs/tags/");
+            let nostr_oid_for_tag = if is_tag {
+                nostr_state.state.get(nostr_ref_name).cloned()
+            } else {
+                None
+            };
+            let build_refspec = |force: bool| -> Option<String> {
+                let prefix = if force { "+" } else { "" };
+                if is_tag {
+                    nostr_oid_for_tag
+                        .as_ref()
+                        .map(|oid| format!("{prefix}{oid}:{nostr_ref_name}"))
+                } else {
+                    Some(format!(
+                        "{prefix}refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
+                    ))
+                }
+            };
             if invalid_nostr_state_ref(nostr_ref_name) {
                 // ensure nostr_state only supports refs/heads and refs/tags/
                 // and not refs/heads/prs/*
@@ -505,21 +558,21 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 {
                     // dont try and sync push symbolic refs
                 } else if !force_required {
-                    refspecs.push(format!(
-                        "refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
-                    ));
+                    if let Some(rs) = build_refspec(false) {
+                        refspecs.push(rs);
+                    }
                 } else if *is_grasp_server || args.force {
-                    refspecs.push(format!(
-                        "+refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
-                    ));
+                    if let Some(rs) = build_refspec(true) {
+                        refspecs.push(rs);
+                    }
                 } else {
                     not_updated.push(nostr_ref_name);
                 }
             } else {
                 // add missing refs
-                refspecs.push(format!(
-                    "refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
-                ));
+                if let Some(rs) = build_refspec(false) {
+                    refspecs.push(rs);
+                }
             }
         }
 

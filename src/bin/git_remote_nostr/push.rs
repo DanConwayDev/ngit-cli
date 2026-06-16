@@ -1638,6 +1638,24 @@ fn update_remote_refs_pushed(
 ) -> Result<()> {
     let (from, to) = refspec_to_from_to(refspec)?;
 
+    // Tags are not tracked per-remote in git's data model: the local
+    // `refs/tags/<name>` is the single source of truth and `ngit sync`
+    // sources its push refspecs directly from the nostr state event oid
+    // (`<oid>:refs/tags/<name>`), so no per-remote tracking ref is required.
+    //
+    // Self-heal: an earlier version of ngit wrote tag tracking refs to
+    // `refs/remotes/<nostr>/<tagname>` — the same namespace git uses for
+    // remote-tracking branches — making pushed tags appear as remote
+    // branches in `git branch -r`, IDEs, etc.  Delete any such legacy
+    // entry for this tag so the next `git branch -r` is clean.
+    if to.starts_with("refs/tags/") {
+        let legacy_ref_name = refspec_remote_ref_name(git_repo, refspec, nostr_remote_url)?;
+        if let Ok(mut legacy_ref) = git_repo.find_reference(&legacy_ref_name) {
+            let _ = legacy_ref.delete();
+        }
+        return Ok(());
+    }
+
     let target_ref_name = refspec_remote_ref_name(git_repo, refspec, nostr_remote_url)?;
 
     if from.is_empty() {
@@ -1645,24 +1663,8 @@ fn update_remote_refs_pushed(
             remote_ref.delete()?;
         }
     } else {
-        // For annotated tags, store the tag object OID (not the peeled commit)
-        // to match what generate_updated_state puts in the nostr state event.
-        // For branches and lightweight tags, store the commit OID as before.
-        let oid = if to.starts_with("refs/tags/") {
-            if let Ok(tag_obj) = git_repo
-                .find_reference(from)
-                .context(format!("failed to find reference: {from}"))?
-                .peel(git2::ObjectType::Tag)
-            {
-                tag_obj.id()
-            } else {
-                reference_to_commit(git_repo, from)
-                    .context(format!("failed to get commit of reference {from}"))?
-            }
-        } else {
-            reference_to_commit(git_repo, from)
-                .context(format!("failed to get commit of reference {from}"))?
-        };
+        let oid = reference_to_commit(git_repo, from)
+            .context(format!("failed to get commit of reference {from}"))?;
         if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
             remote_ref.set_target(oid, "updated by nostr remote helper")?;
         } else {
