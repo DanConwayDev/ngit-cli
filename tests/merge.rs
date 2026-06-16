@@ -637,3 +637,100 @@ async fn local_branch_ahead_of_published_tip_aborts_merge() -> Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// 8. a *bare* self-submitted `pr/<name>` branch (no shorthand) that has
+//    drifted ahead of the published PR tip (unpushed local commits) also
+//    aborts the merge. Previously the bare-branch path created a fresh
+//    `pr/<name>(<shorthand>)` branch at the published tip and merged that,
+//    silently bypassing the author's unpushed local work; the merge must now
+//    detect the drift on the bare branch and abort.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn self_submitted_bare_branch_ahead_of_published_tip_aborts_merge() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("merge maintainer".into()),
+            identifier: Some("merge-bare-drift-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    // The PR author clones, logs in as their own account, and submits a PR via
+    // a plain pushed `pr/<name>` branch (no shorthand), as in test 6.
+    let author = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "self merging drifting contributor".into(),
+            },
+        )
+        .await?;
+
+    let branch = "pr/bare-drift-feature";
+    author
+        .git_ok(
+            ["checkout", "-b", branch],
+            "git checkout -b pr/bare-drift-feature",
+        )
+        .await?;
+    std::fs::write(author.dir().join("feat.md"), "some content\n").context("write feat.md")?;
+    author.git_ok(["add", "feat.md"], "git add feat.md").await?;
+    author
+        .git_ok(
+            ["commit", "-m", "add feat.md", "--no-gpg-sign"],
+            "git commit feat.md",
+        )
+        .await?;
+
+    // Publish this tip as the PR (still on the bare branch, no shorthand).
+    author
+        .nostr_push(["-u", "origin", branch])
+        .await
+        .context("git push -u origin pr/bare-drift-feature (PR creation) failed")?;
+    assert_eq!(current_branch(&author).await?, branch);
+
+    // Add a *local* commit on top of the bare branch WITHOUT pushing it. The
+    // bare branch tip is now ahead of the published PR tip.
+    std::fs::write(author.dir().join("more.md"), "unpushed\n").context("write more.md")?;
+    author.git_ok(["add", "more.md"], "git add more.md").await?;
+    author
+        .git_ok(
+            ["commit", "-m", "add more.md (unpushed)", "--no-gpg-sign"],
+            "git commit more.md",
+        )
+        .await?;
+
+    let main_before = rev_parse(&author, "main").await?;
+
+    // Merge with no id — must refuse because the bare branch is ahead of the
+    // published PR tip, rather than silently merging the published tip and
+    // bypassing the unpushed local work.
+    let out = run_merge(&author, &[]).await?;
+    assert!(
+        !out.status.success(),
+        "ngit merge must abort when the bare self-submitted pr/ branch is ahead of the published tip\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // main must not have advanced.
+    assert_eq!(
+        rev_parse(&author, "main").await?,
+        main_before,
+        "main must not advance when the merge is aborted",
+    );
+
+    Ok(())
+}
+

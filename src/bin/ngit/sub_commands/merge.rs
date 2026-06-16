@@ -71,7 +71,14 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         .clone();
 
     let cover_letter = event_to_cover_letter(&proposal).context("failed to extract PR details")?;
+    // Canonical branch name created by `ngit pr checkout`:
+    // `pr/<name>(<8-hex-of-event-id>)`.
     let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
+    // Bare branch name a self-submitting author pushes by hand
+    // (`git push -u origin pr/<name>`); it carries no shorthand. The same
+    // mapping `git-remote-nostr` and `resolve_event_id_from_current_branch`
+    // use to link such a branch back to its published PR.
+    let bare_branch_name = format!("pr/{}", cover_letter.branch_name_without_id_or_prefix);
 
     // Find the PR tip commit.
     let commits_events = get_all_proposal_patch_pr_pr_update_events_from_cache(
@@ -96,14 +103,28 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
             .context("failed to get commit id from patch")?
     };
 
-    // Ensure the PR branch exists locally at the published tip.
-    let local_branch_exists = git_repo
+    // Determine which local branch represents this PR. `ngit pr checkout`
+    // creates the canonical `pr/<name>(<shorthand>)` form, but a self-
+    // submitting author who pushed `pr/<name>` by hand has only the bare form
+    // checked out. Either may carry unpublished local commits, so we must run
+    // the drift check against whichever one actually exists locally.
+    let local_branch_names = git_repo
         .get_local_branch_names()
-        .context("failed to get local branch names")?
-        .iter()
-        .any(|n| n.eq(&branch_name));
+        .context("failed to get local branch names")?;
+    let canonical_exists = local_branch_names.iter().any(|n| n.eq(&branch_name));
+    let bare_exists = local_branch_names.iter().any(|n| n.eq(&bare_branch_name));
 
-    if local_branch_exists {
+    // The branch we will actually merge. The bare self-submitted form is used
+    // only when it exists and the canonical form does not; otherwise the
+    // canonical (shorthand) form is used — created below at the published tip
+    // when neither exists.
+    let merge_branch = if !canonical_exists && bare_exists {
+        bare_branch_name.clone()
+    } else {
+        branch_name.clone()
+    };
+
+    if canonical_exists || bare_exists {
         // The local PR branch already exists. The merge commit message we
         // autogenerate (subject, nevent, author, cover note) describes the
         // *published* PR state, and other maintainers can only reproduce a
@@ -113,7 +134,7 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         // and tell the user how to reconcile.
         ensure_local_branch_matches_published_tip(
             &git_repo,
-            &branch_name,
+            &merge_branch,
             &tip_commit_str,
             &event_id,
         )?;
@@ -227,7 +248,7 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
 
     let output = std::process::Command::new("git")
         .current_dir(git_repo_path)
-        .args(["merge", "--no-ff", "-m", &message, &branch_name])
+        .args(["merge", "--no-ff", "-m", &message, &merge_branch])
         .output()
         .context("failed to run git merge")?;
 
