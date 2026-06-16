@@ -60,6 +60,7 @@
 //! pinpoint-named in `cargo test` output.
 
 mod ff_update;
+mod force_update_stale_origin_main;
 mod new_pr;
 mod new_pr_custom_subject_desc;
 mod patch_kind_when_no_grasp;

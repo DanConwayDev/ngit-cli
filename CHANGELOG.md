@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Better merge-base detection when force-pushing PRs
 - `cargo install ngit` was failing to build due to an upstream dependency picking up an incompatible `git2` version
 
 ### Removed

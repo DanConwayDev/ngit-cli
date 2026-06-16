@@ -48,6 +48,24 @@ pub trait RepoActions {
     fn get_origin_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_local_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
+    /// Collect the tip commit of every candidate default branch
+    /// (`main`/`master`) visible in the repository: the local default branch
+    /// plus the default branch of every remote (`<remote>/main`,
+    /// `<remote>/master`). Deduplicated. Used to identify the fork point of a
+    /// proposal regardless of which remote has the most advanced view of the
+    /// default branch.
+    fn get_default_branch_tips(&self) -> Result<Vec<Sha1Hash>>;
+    /// Given a proposal tip, choose the merge-base against the most advanced
+    /// default branch tip (the one that excludes the most commits from the
+    /// proposal). Returns `None` if no default branch is visible.
+    fn get_most_advanced_merge_base_with_default(&self, tip: &Sha1Hash)
+    -> Result<Option<Sha1Hash>>;
+    /// Commits in `tip` that are not reachable from any visible default branch
+    /// (local or any remote). Returns the commits oldest-first (already
+    /// reversed) and a human label for the default branch used as the base.
+    /// Falls back to `get_main_or_master_branch` when no default branch is
+    /// found.
+    fn get_commits_ahead_of_default(&self, tip: &Sha1Hash) -> Result<(Vec<Sha1Hash>, String)>;
     fn get_checked_out_branch_name(&self) -> Result<String>;
     fn get_tip_of_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
     fn get_commit_or_tip_of_reference(&self, reference: &str) -> Result<Sha1Hash>;
@@ -180,6 +198,95 @@ impl RepoActions for Repo {
         } else {
             self.get_local_main_or_master_branch()
                 .context("the default branches (main or master) do not exist")
+        }
+    }
+
+    fn get_default_branch_tips(&self) -> Result<Vec<Sha1Hash>> {
+        let mut branch_names: Vec<String> = vec![];
+
+        // local default branch
+        if let Ok(local) = self.get_local_branch_names() {
+            if local.contains(&"main".to_string()) {
+                branch_names.push("main".to_string());
+            } else if local.contains(&"master".to_string()) {
+                branch_names.push("master".to_string());
+            }
+        }
+
+        // every remote's default branch (e.g. origin/main, gitlab/main, ...)
+        if let Ok(remote) = self.get_remote_branch_names() {
+            for name in &remote {
+                if name.ends_with("/main") || name.ends_with("/master") {
+                    branch_names.push(name.clone());
+                }
+            }
+        }
+
+        let mut tips: Vec<Sha1Hash> = vec![];
+        for name in branch_names {
+            if let Ok(tip) = self.get_tip_of_branch(&name) {
+                if !tips.contains(&tip) {
+                    tips.push(tip);
+                }
+            }
+        }
+        Ok(tips)
+    }
+
+    fn get_most_advanced_merge_base_with_default(
+        &self,
+        tip: &Sha1Hash,
+    ) -> Result<Option<Sha1Hash>> {
+        // For each candidate default branch tip, the merge-base with `tip` is
+        // the fork point relative to that branch. The *most advanced* fork
+        // point is the one that is a descendant of (or equal to) all the
+        // others: it excludes the most commits from the proposal. This means a
+        // default branch that has advanced on any remote (or locally) is
+        // respected even when another remote's view of the default branch is
+        // stale.
+        let candidate_bases: Vec<Sha1Hash> = self
+            .get_default_branch_tips()?
+            .iter()
+            .filter_map(|default_tip| self.get_merge_base(tip, default_tip).ok())
+            .collect();
+
+        let mut best: Option<Sha1Hash> = None;
+        for base in candidate_bases {
+            best = match best {
+                None => Some(base),
+                Some(current) => {
+                    if base == current {
+                        Some(current)
+                    } else if self.ancestor_of(&base, &current).unwrap_or(false) {
+                        // base is further along than current
+                        Some(base)
+                    } else {
+                        // current is further along (or unrelated); keep current
+                        Some(current)
+                    }
+                }
+            };
+        }
+        Ok(best)
+    }
+
+    fn get_commits_ahead_of_default(&self, tip: &Sha1Hash) -> Result<(Vec<Sha1Hash>, String)> {
+        // The fork point is the merge-base against the most advanced default
+        // branch visible (local + every remote). Computing `ahead` against that
+        // fork point means commits already merged into the default branch via
+        // *any* remote are excluded from the proposal — they are not part of
+        // the contributor's change.
+        if let Some(base) = self.get_most_advanced_merge_base_with_default(tip)? {
+            let (mut ahead, _) = self.get_commits_ahead_behind(&base, tip)?;
+            ahead.reverse();
+            Ok((ahead, "the default branch".to_string()))
+        } else {
+            // No default branch visible anywhere; fall back to the legacy
+            // single-branch behaviour.
+            let (name, main_tip) = self.get_main_or_master_branch()?;
+            let (mut ahead, _) = self.get_commits_ahead_behind(&main_tip, tip)?;
+            ahead.reverse();
+            Ok((ahead, name.to_string()))
         }
     }
 
@@ -3011,6 +3118,87 @@ index ce01362..a21e91c 100644\n\
             assert_eq!(
                 git_repo.get_path()?.canonicalize()?,
                 worktree_repo.dir.canonicalize()?,
+            );
+            Ok(())
+        }
+    }
+
+    mod most_advanced_merge_base_with_default {
+        use super::*;
+
+        /// When the local default branch has advanced past the stale
+        /// `origin/main` remote-tracking ref, the merge-base of a feature
+        /// branch forked off the advanced local main must equal the advanced
+        /// main tip, not the stale origin tip. This is the unit-level guard for
+        /// the multi-remote stale-origin bug.
+        #[test]
+        fn prefers_advanced_local_main_over_stale_origin() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            // initial commit on main = the stale baseline.
+            let stale = test_repo.populate()?;
+
+            // Fabricate a stale `origin/main` remote-tracking ref at the
+            // baseline commit.
+            test_repo.git_repo.reference(
+                "refs/remotes/origin/main",
+                stale,
+                true,
+                "stale origin/main",
+            )?;
+
+            // Advance local main one commit (simulating a pull from another
+            // remote). origin/main stays at `stale`.
+            fs::write(test_repo.dir.join("main-advance.md"), "content")?;
+            let advanced = test_repo.stage_and_commit("advance main")?;
+
+            // Feature branch one commit off the advanced main tip.
+            test_repo.create_branch("feature")?;
+            test_repo.checkout("feature")?;
+            fs::write(test_repo.dir.join("feature.md"), "content")?;
+            let tip = test_repo.stage_and_commit("feature commit")?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            let base = git_repo
+                .get_most_advanced_merge_base_with_default(&oid_to_sha1(&tip))?
+                .expect("a default branch is visible");
+
+            assert_eq!(
+                base,
+                oid_to_sha1(&advanced),
+                "merge-base should be the advanced local main, not the stale origin/main",
+            );
+            assert_ne!(
+                base,
+                oid_to_sha1(&stale),
+                "merge-base must not be the stale origin/main baseline",
+            );
+            Ok(())
+        }
+
+        /// `get_default_branch_tips` collects both the local default branch and
+        /// every remote default branch, deduplicating identical tips.
+        #[test]
+        fn default_branch_tips_include_local_and_remotes() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            let baseline = test_repo.populate()?;
+
+            // A remote-tracking ref at the baseline (same tip as local main).
+            test_repo.git_repo.reference(
+                "refs/remotes/gitlab/main",
+                baseline,
+                true,
+                "gitlab/main",
+            )?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            let tips = git_repo.get_default_branch_tips()?;
+
+            // local main and gitlab/main share the baseline tip; dedup → 1.
+            assert_eq!(
+                tips,
+                vec![oid_to_sha1(&baseline)],
+                "identical default-branch tips should be deduplicated",
             );
             Ok(())
         }

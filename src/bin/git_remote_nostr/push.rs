@@ -488,13 +488,11 @@ async fn process_proposal_refspecs(
             {
                 if refspec.starts_with('+') {
                     // force push
-                    let (main_branch_name, main_tip) = git_repo.get_main_or_master_branch()?;
-                    let (mut ahead, _) =
-                        git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
-                    ahead.reverse();
+                    let (ahead, default_label) =
+                        git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch)?;
                     if ahead.is_empty() {
                         bail!(
-                            "cannot push '{from}' as proposal as branch isn't ahead of '{main_branch_name}'"
+                            "cannot push '{from}' as proposal as branch isn't ahead of {default_label}"
                         );
                     }
                     for patch in generate_patches_or_pr_event_or_pr_updates(
@@ -605,14 +603,10 @@ async fn process_proposal_refspecs(
             }
         } else {
             // TODO new proposal / couldn't find exisiting proposal
-            let (main_branch_name, main_tip) = git_repo.get_main_or_master_branch()?;
-            let (mut ahead, _) =
-                git_repo.get_commits_ahead_behind(&main_tip, &tip_of_pushed_branch)?;
-            ahead.reverse();
+            let (ahead, default_label) =
+                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch)?;
             if ahead.is_empty() {
-                bail!(
-                    "cannot push '{from}' as proposal as branch isn't ahead of '{main_branch_name}'"
-                );
+                bail!("cannot push '{from}' as proposal as branch isn't ahead of {default_label}");
             }
             for event in generate_patches_or_pr_event_or_pr_updates(
                 client,
@@ -666,21 +660,29 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         let first_commit = ahead.first().context("no commits")?;
         let push_options_refs: Vec<&str> =
             git_server_push_options.iter().map(String::as_str).collect();
-        // Always compute the merge-base from the actual git topology: the
-        // point where this branch diverges from the default remote branch.
+        // Compute the merge-base (fork point) from the actual git topology: the
+        // point where this branch diverges from the default branch. Crucially
+        // we compare against the *most advanced* default branch visible — the
+        // local default branch and every remote's default branch — not just
+        // `origin` (the nostr remote), whose view of the default branch can be
+        // stale in a multi-remote workflow (e.g. the canonical default branch
+        // lives on a gitlab/github remote and the nostr remote lags). Using the
+        // stale origin tip produced a fork point that didn't reflect that the
+        // default branch had advanced.
+        //
         // This is correct for all push types:
-        //   - new PR: first_commit's parent == merge-base (ahead is vs main)
-        //   - FF push on existing PR: merge-base(tip, main) == original fork point (not
-        //     the previous PR tip, which get_commit_parent(first) would give — the
-        //     840c581 bug)
-        //   - force push after rebase: merge-base(tip, main) == new fork point (not the
-        //     stale value from the original PR event tag)
+        //   - new PR: merge-base(tip, default) == first commit's parent
+        //   - FF push on existing PR: merge-base(tip, default) == original fork point
+        //     (not the previous PR tip, which parent(ahead.first()) would give for the
+        //     truncated FF `ahead` set — the 840c581 bug)
+        //   - force push after rebase: merge-base(tip, default) == new fork point (not
+        //     the stale value from the original PR event tag)
         // Using the git DAG directly means no stored event values can ever
         // propagate a stale or incorrect fork point.
         let merge_base: Option<Sha1Hash> = git_repo
-            .get_main_or_master_branch()
+            .get_most_advanced_merge_base_with_default(tip)
             .ok()
-            .and_then(|(_, main_tip)| git_repo.get_merge_base(tip, &main_tip).ok());
+            .flatten();
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
             git_repo,
