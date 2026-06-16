@@ -7,10 +7,10 @@ use ngit::{
     fetch::ensure_commit_local,
     git_events::{
         KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, pr_event_clone_tag_urls,
-        process_cover_note, process_subject, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, is_event_proposal_root_for_branch,
+        pr_event_clone_tag_urls, process_cover_note, process_subject, tag_value,
     },
-    login::user::extract_user_metadata,
+    login::{get_curent_user, user::extract_user_metadata},
 };
 use nostr::{
     EventId, FromBech32, PublicKey, RelayUrl, ToBech32,
@@ -277,9 +277,19 @@ fn parse_event_id(id: &str) -> Result<EventId> {
     bail!("invalid event-id or nevent: {id}")
 }
 
-/// When invoked without an id, infer the PR from the checked-out branch. PR
-/// branches are named `pr/<name>(<first-8-hex-of-event-id>)`; we extract the
-/// shorthand and match it against the known proposals.
+/// When invoked without an id, infer the PR from the checked-out branch.
+///
+/// Two branch-naming conventions are recognised:
+///
+/// 1. Branches created by `ngit pr checkout` are named
+///    `pr/<name>(<first-8-hex-of-event-id>)`; the shorthand is extracted and
+///    matched against the known proposals.
+///
+/// 2. Branches the current user authored and published themselves with a plain
+///    `git push <remote> -u pr/<name>` carry no shorthand. These are linked to
+///    a published PR by matching the bare `pr/<name>` against proposals
+///    authored by the logged-in user — the same mapping `git-remote-nostr` uses
+///    on push (`is_event_proposal_root_for_branch`).
 fn resolve_event_id_from_current_branch(
     git_repo: &Repo,
     proposals_and_revisions: &[nostr::Event],
@@ -292,25 +302,54 @@ fn resolve_event_id_from_current_branch(
         bail!("not on a `pr/` branch; specify a PR event-id or nevent, e.g. `ngit merge <id>`");
     }
 
-    let shorthand = branch
+    // Convention 1: `pr/<name>(<8-hex>)` created by `ngit pr checkout`.
+    if let Some(shorthand) = branch
         .rsplit_once('(')
         .and_then(|(_, rest)| rest.strip_suffix(')'))
-        .context(format!(
-            "branch '{branch}' does not encode a PR id; specify a PR event-id or nevent"
-        ))?;
+    {
+        let matches: Vec<&nostr::Event> = proposals_and_revisions
+            .iter()
+            .filter(|e| e.id.to_hex().starts_with(shorthand))
+            .collect();
+
+        return match matches.as_slice() {
+            [] => bail!(
+                "no known PR matches branch '{branch}' (shorthand {shorthand}); specify a PR event-id or nevent"
+            ),
+            [only] => Ok(only.id),
+            _ => bail!(
+                "branch shorthand {shorthand} is ambiguous; specify the full PR event-id or nevent"
+            ),
+        };
+    }
+
+    // Convention 2: a plain `pr/<name>` the current user pushed themselves
+    // (`git push <remote> -u pr/<name>`). Link it to a published PR the
+    // logged-in user authored, mirroring the push-side mapping.
+    let current_user =
+        get_curent_user(git_repo).context("failed to read the logged-in user from git config")?;
 
     let matches: Vec<&nostr::Event> = proposals_and_revisions
         .iter()
-        .filter(|e| e.id.to_hex().starts_with(shorthand))
+        .filter(|e| {
+            is_event_proposal_root_for_branch(e, &branch, current_user.as_ref()).unwrap_or(false)
+        })
         .collect();
 
     match matches.as_slice() {
-        [] => bail!(
-            "no known PR matches branch '{branch}' (shorthand {shorthand}); specify a PR event-id or nevent"
-        ),
         [only] => Ok(only.id),
+        [] => {
+            if current_user.is_none() {
+                bail!(
+                    "branch '{branch}' does not encode a PR id and no logged-in user is configured to link it to a published PR; specify a PR event-id or nevent, or run `ngit login`"
+                );
+            }
+            bail!(
+                "branch '{branch}' does not encode a PR id and no PR you authored matches it; specify a PR event-id or nevent"
+            )
+        }
         _ => bail!(
-            "branch shorthand {shorthand} is ambiguous; specify the full PR event-id or nevent"
+            "branch '{branch}' matches more than one of your PRs; specify the PR event-id or nevent"
         ),
     }
 }

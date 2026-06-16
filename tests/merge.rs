@@ -22,7 +22,7 @@
 
 use anyhow::{Context, Result};
 use nostr::nips::nip19::ToBech32;
-use test_harness::{Harness, PublishRepoOpts, PublishedPr, PublishedRepo, Repo};
+use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedPr, PublishedRepo, Repo};
 
 struct Setup {
     harness: Harness,
@@ -461,6 +461,107 @@ async fn merge_without_id_off_pr_branch_fails() -> Result<()> {
     assert!(
         !out.status.success(),
         "ngit merge with no id off a pr/ branch should fail",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 6. merge without id on a *bare* `pr/<name>` branch the current user pushed
+//    themselves (via `git push -u origin pr/<name>`, which has no `(<id>)`
+//    shorthand) infers the PR.
+//
+//    This is the "user submitted their own PR with plain git" workflow: the
+//    local branch carries no event-id shorthand, but it is linked to the
+//    published PR because the logged-in user authored it. `ngit merge` with no
+//    id must resolve it the same way `git-remote-nostr` maps the branch on
+//    push (`is_event_proposal_root_for_branch`).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_without_id_infers_self_submitted_bare_pr_branch() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("merge maintainer".into()),
+            identifier: Some("merge-bare-branch-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    // The PR author clones and logs in as their own (fresh) account. They are
+    // both the author of the PR and the one running `ngit merge` — the only
+    // configuration in which a bare `pr/<name>` branch can be linked back to a
+    // published PR.
+    let author = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "self merging contributor".into(),
+            },
+        )
+        .await?;
+
+    // Submit the PR exactly as a user would: a plain `pr/<name>` branch pushed
+    // with `git push -u origin pr/<name>`. `git-remote-nostr` turns this into
+    // a KIND_PULL_REQUEST. No `ngit send`, no `(<id>)` shorthand.
+    let branch = "pr/my-feature";
+    author
+        .git_ok(["checkout", "-b", branch], "git checkout -b pr/my-feature")
+        .await?;
+    std::fs::write(author.dir().join("feat.md"), "some content\n").context("write feat.md")?;
+    author.git_ok(["add", "feat.md"], "git add feat.md").await?;
+    author
+        .git_ok(
+            ["commit", "-m", "add feat.md", "--no-gpg-sign"],
+            "git commit feat.md",
+        )
+        .await?;
+
+    let pr_tip = rev_parse(&author, "HEAD").await?;
+
+    author
+        .nostr_push(["-u", "origin", branch])
+        .await
+        .context("git push -u origin pr/my-feature (PR creation) failed")?;
+
+    // Still on the bare `pr/my-feature` branch with no `(<id>)` shorthand.
+    assert_eq!(current_branch(&author).await?, branch);
+
+    // Merge with no id — must infer the PR from the self-submitted bare branch.
+    let out = run_merge(&author, &[]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge (no id) on a self-submitted bare pr/ branch exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(
+        current_branch(&author).await?,
+        "main",
+        "should be left on the default branch after merge",
+    );
+    assert_eq!(
+        parent_count(&author, "main").await?,
+        2,
+        "no-ff merge should produce a 2-parent merge commit",
+    );
+
+    // the pushed PR tip is a parent of the merge commit (it was merged in)
+    let merged_in = rev_parse(&author, "main^2").await?;
+    assert_eq!(
+        merged_in, pr_tip,
+        "the merge commit's second parent should be the pushed PR tip",
     );
 
     Ok(())
