@@ -393,6 +393,11 @@ async fn create_and_publish_events_and_proposals(
         }
     }
 
+    // The nostr repo-state event's HEAD tag is the maintainer-declared default
+    // branch — the most authoritative source for default-branch identification
+    // when scoping a proposal's fork point.
+    let declared_default_branch = repo_state::default_branch_from_state(&existing_state);
+
     let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
         client,
         git_repo,
@@ -404,6 +409,7 @@ async fn create_and_publish_events_and_proposals(
         title_description,
         git_server_push_options,
         git_server,
+        declared_default_branch.as_deref(),
     )
     .await?;
     for e in proposal_events {
@@ -459,6 +465,7 @@ async fn process_proposal_refspecs(
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
     git_server: Option<&str>,
+    default_branch: Option<&str>,
 ) -> Result<(Vec<Event>, Vec<String>)> {
     let mut events = vec![];
     let mut rejected_proposal_refspecs = vec![];
@@ -488,8 +495,8 @@ async fn process_proposal_refspecs(
             {
                 if refspec.starts_with('+') {
                     // force push
-                    let (ahead, default_label) =
-                        git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch)?;
+                    let (ahead, default_label) = git_repo
+                        .get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?;
                     if ahead.is_empty() {
                         bail!(
                             "cannot push '{from}' as proposal as branch isn't ahead of {default_label}"
@@ -507,6 +514,7 @@ async fn process_proposal_refspecs(
                         title_description,
                         git_server_push_options,
                         git_server,
+                        default_branch,
                     )
                     .await?
                     {
@@ -551,6 +559,7 @@ async fn process_proposal_refspecs(
                                 title_description,
                                 git_server_push_options,
                                 git_server,
+                                default_branch,
                             )
                             .await?
                             {
@@ -604,7 +613,7 @@ async fn process_proposal_refspecs(
         } else {
             // TODO new proposal / couldn't find exisiting proposal
             let (ahead, default_label) =
-                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch)?;
+                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?;
             if ahead.is_empty() {
                 bail!("cannot push '{from}' as proposal as branch isn't ahead of {default_label}");
             }
@@ -620,6 +629,7 @@ async fn process_proposal_refspecs(
                 title_description,
                 git_server_push_options,
                 git_server,
+                default_branch,
             )
             .await?
             {
@@ -645,6 +655,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
     git_server: Option<&str>,
+    default_branch: Option<&str>,
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
     let commits_too_big = git_repo.are_commits_too_big_for_patches(ahead);
@@ -680,7 +691,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         // Using the git DAG directly means no stored event values can ever
         // propagate a stale or incorrect fork point.
         let merge_base: Option<Sha1Hash> = git_repo
-            .get_most_advanced_merge_base_with_default(tip)
+            .get_most_advanced_merge_base_with_default(tip, default_branch)
             .ok()
             .flatten();
         select_servers_push_refs_and_generate_pr_or_pr_update_event(

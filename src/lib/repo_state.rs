@@ -85,3 +85,52 @@ fn add_head(state: &mut HashMap<String, String>) {
         }
     }
 }
+
+/// Extract the repository's default branch short name (e.g. `main`) from a
+/// nostr repo-state map's `HEAD` tag (`"ref: refs/heads/<branch>"`). This is
+/// the maintainer-declared default branch and the most authoritative source
+/// for default-branch identification. Returns `None` when no resolvable HEAD
+/// symref is present.
+#[must_use]
+pub fn default_branch_from_state(state: &HashMap<String, String>) -> Option<String> {
+    state
+        .get("HEAD")
+        .and_then(|v| v.strip_prefix("ref: refs/heads/"))
+        .map(ToString::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod default_branch_from_state {
+        use super::*;
+
+        #[test]
+        fn extracts_non_main_branch_name() {
+            let mut state = HashMap::new();
+            state.insert("HEAD".to_string(), "ref: refs/heads/develop".to_string());
+            assert_eq!(
+                default_branch_from_state(&state),
+                Some("develop".to_string())
+            );
+        }
+
+        #[test]
+        fn none_when_no_head_tag() {
+            let state = HashMap::new();
+            assert_eq!(default_branch_from_state(&state), None);
+        }
+
+        #[test]
+        fn none_when_head_is_not_a_heads_symref() {
+            let mut state = HashMap::new();
+            // a detached/oid HEAD value is not a branch symref.
+            state.insert(
+                "HEAD".to_string(),
+                "0000000000000000000000000000000000000000".to_string(),
+            );
+            assert_eq!(default_branch_from_state(&state), None);
+        }
+    }
+}

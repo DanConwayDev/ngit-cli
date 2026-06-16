@@ -48,24 +48,49 @@ pub trait RepoActions {
     fn get_origin_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_local_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
     fn get_main_or_master_branch(&self) -> Result<(&str, Sha1Hash)>;
-    /// Collect the tip commit of every candidate default branch
-    /// (`main`/`master`) visible in the repository: the local default branch
-    /// plus the default branch of every remote (`<remote>/main`,
-    /// `<remote>/master`). Deduplicated. Used to identify the fork point of a
-    /// proposal regardless of which remote has the most advanced view of the
+    /// Read the target branch (short name, e.g. `main`) that a remote's HEAD
+    /// symref (`refs/remotes/<remote>/HEAD`) points at, if recorded. Returns
+    /// `None` when the remote has no recorded HEAD symref.
+    fn get_remote_head_branch_name(&self, remote: &str) -> Result<Option<String>>;
+    /// Read the local HEAD symref target branch (short name, e.g. `main`),
+    /// if HEAD is a symbolic ref to a `refs/heads/*` branch.
+    fn get_local_head_branch_name(&self) -> Result<Option<String>>;
+    /// Resolve the repository's default branch short name (e.g. `main`,
+    /// `master`, `develop`). Resolution hierarchy, most-to-least authoritative:
+    ///   1. `declared` — the name declared by the nostr repo-state event's
+    ///      `HEAD` tag (when the named branch exists locally or on a remote).
+    ///   2. any remote's HEAD symref (`refs/remotes/<remote>/HEAD`).
+    ///   3. the local HEAD symref / `init.defaultBranch`.
+    ///   4. the `main`/`master` name guess.
+    ///
+    /// Returns `None` when nothing resolves.
+    fn get_default_branch_name(&self, declared: Option<&str>) -> Result<Option<String>>;
+    /// Collect the tip commit of every visible copy of the default branch: the
+    /// local branch plus every remote's copy (`<remote>/<default>`).
+    /// Deduplicated. `declared` is the optional nostr-declared default branch
+    /// name (see `get_default_branch_name`). Used to identify the fork point of
+    /// a proposal regardless of which remote has the most advanced view of the
     /// default branch.
-    fn get_default_branch_tips(&self) -> Result<Vec<Sha1Hash>>;
+    fn get_default_branch_tips(&self, declared: Option<&str>) -> Result<Vec<Sha1Hash>>;
     /// Given a proposal tip, choose the merge-base against the most advanced
     /// default branch tip (the one that excludes the most commits from the
-    /// proposal). Returns `None` if no default branch is visible.
-    fn get_most_advanced_merge_base_with_default(&self, tip: &Sha1Hash)
-    -> Result<Option<Sha1Hash>>;
+    /// proposal). Returns `None` if no default branch is visible. `declared` is
+    /// the optional nostr-declared default branch name.
+    fn get_most_advanced_merge_base_with_default(
+        &self,
+        tip: &Sha1Hash,
+        declared: Option<&str>,
+    ) -> Result<Option<Sha1Hash>>;
     /// Commits in `tip` that are not reachable from any visible default branch
     /// (local or any remote). Returns the commits oldest-first (already
     /// reversed) and a human label for the default branch used as the base.
-    /// Falls back to `get_main_or_master_branch` when no default branch is
-    /// found.
-    fn get_commits_ahead_of_default(&self, tip: &Sha1Hash) -> Result<(Vec<Sha1Hash>, String)>;
+    /// `declared` is the optional nostr-declared default branch name. Falls
+    /// back to `get_main_or_master_branch` when no default branch is found.
+    fn get_commits_ahead_of_default(
+        &self,
+        tip: &Sha1Hash,
+        declared: Option<&str>,
+    ) -> Result<(Vec<Sha1Hash>, String)>;
     fn get_checked_out_branch_name(&self) -> Result<String>;
     fn get_tip_of_branch(&self, branch_name: &str) -> Result<Sha1Hash>;
     fn get_commit_or_tip_of_reference(&self, reference: &str) -> Result<Sha1Hash>;
@@ -201,22 +226,111 @@ impl RepoActions for Repo {
         }
     }
 
-    fn get_default_branch_tips(&self) -> Result<Vec<Sha1Hash>> {
-        let mut branch_names: Vec<String> = vec![];
+    fn get_remote_head_branch_name(&self, remote: &str) -> Result<Option<String>> {
+        // git records a remote's default branch as a symbolic ref
+        // `refs/remotes/<remote>/HEAD` -> `refs/remotes/<remote>/<branch>`.
+        let symref = format!("refs/remotes/{remote}/HEAD");
+        let Ok(reference) = self.git_repo.find_reference(&symref) else {
+            return Ok(None);
+        };
+        // Only honour an actual symbolic ref; a direct ref carries no branch
+        // name we can resolve back to a short name.
+        let target = match reference.symbolic_target() {
+            Ok(Some(t)) => t,
+            _ => return Ok(None),
+        };
+        // target looks like `refs/remotes/<remote>/<branch>`; strip the prefix
+        // to recover the short branch name.
+        let prefix = format!("refs/remotes/{remote}/");
+        Ok(target.strip_prefix(&prefix).map(ToString::to_string))
+    }
 
-        // local default branch
-        if let Ok(local) = self.get_local_branch_names() {
-            if local.contains(&"main".to_string()) {
-                branch_names.push("main".to_string());
-            } else if local.contains(&"master".to_string()) {
-                branch_names.push("master".to_string());
+    fn get_local_head_branch_name(&self) -> Result<Option<String>> {
+        let Ok(head) = self.git_repo.find_reference("HEAD") else {
+            return Ok(None);
+        };
+        let target = match head.symbolic_target() {
+            Ok(Some(t)) => t,
+            _ => return Ok(None),
+        };
+        Ok(target.strip_prefix("refs/heads/").map(ToString::to_string))
+    }
+
+    fn get_default_branch_name(&self, declared: Option<&str>) -> Result<Option<String>> {
+        let local = self.get_local_branch_names().unwrap_or_default();
+        let remotes = self.get_remote_branch_names().unwrap_or_default();
+        // a branch name is usable if a copy of it exists locally or on any
+        // remote (`<remote>/<name>`).
+        let exists = |name: &str| -> bool {
+            let suffix = format!("/{name}");
+            local.iter().any(|b| b == name) || remotes.iter().any(|b| b.ends_with(&suffix))
+        };
+
+        // 1. the nostr-declared default branch, when it actually exists.
+        if let Some(name) = declared {
+            if !name.is_empty() && exists(name) {
+                return Ok(Some(name.to_string()));
             }
         }
 
-        // every remote's default branch (e.g. origin/main, gitlab/main, ...)
+        // 2. any remote's recorded HEAD symref.
+        if let Ok(remote_names) = self.git_repo.remotes() {
+            for remote in remote_names.iter().flatten().flatten() {
+                if let Ok(Some(name)) = self.get_remote_head_branch_name(remote) {
+                    if exists(&name) {
+                        return Ok(Some(name));
+                    }
+                }
+            }
+        }
+
+        // 3. the local HEAD symref, but ONLY when the branch is unborn — i.e. HEAD
+        //    points at a `refs/heads/<name>` that has no commit yet. On a fresh repo
+        //    this reflects `init.defaultBranch`. On a born repo HEAD is merely the
+        //    checked-out branch (often a feature branch), which is not a default-branch
+        //    signal, so it must not be trusted here.
+        if let Ok(Some(name)) = self.get_local_head_branch_name() {
+            let unborn = self
+                .git_repo
+                .find_branch(&name, git2::BranchType::Local)
+                .is_err();
+            if unborn && exists(&name) {
+                return Ok(Some(name));
+            }
+        }
+
+        // 4. last-resort name guess.
+        if exists("main") {
+            Ok(Some("main".to_string()))
+        } else if exists("master") {
+            Ok(Some("master".to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_default_branch_tips(&self, declared: Option<&str>) -> Result<Vec<Sha1Hash>> {
+        let Some(default) = self.get_default_branch_name(declared)? else {
+            return Ok(vec![]);
+        };
+
+        let mut branch_names: Vec<String> = vec![];
+
+        // local copy of the default branch.
+        if self
+            .get_local_branch_names()
+            .unwrap_or_default()
+            .iter()
+            .any(|b| b == &default)
+        {
+            branch_names.push(default.clone());
+        }
+
+        // every remote's copy of the default branch (origin/<d>, gitlab/<d>...)
+        let suffix = format!("/{default}");
         if let Ok(remote) = self.get_remote_branch_names() {
             for name in &remote {
-                if name.ends_with("/main") || name.ends_with("/master") {
+                if name.ends_with(&suffix) {
                     branch_names.push(name.clone());
                 }
             }
@@ -236,6 +350,7 @@ impl RepoActions for Repo {
     fn get_most_advanced_merge_base_with_default(
         &self,
         tip: &Sha1Hash,
+        declared: Option<&str>,
     ) -> Result<Option<Sha1Hash>> {
         // For each candidate default branch tip, the merge-base with `tip` is
         // the fork point relative to that branch. The *most advanced* fork
@@ -245,7 +360,7 @@ impl RepoActions for Repo {
         // respected even when another remote's view of the default branch is
         // stale.
         let candidate_bases: Vec<Sha1Hash> = self
-            .get_default_branch_tips()?
+            .get_default_branch_tips(declared)?
             .iter()
             .filter_map(|default_tip| self.get_merge_base(tip, default_tip).ok())
             .collect();
@@ -270,16 +385,25 @@ impl RepoActions for Repo {
         Ok(best)
     }
 
-    fn get_commits_ahead_of_default(&self, tip: &Sha1Hash) -> Result<(Vec<Sha1Hash>, String)> {
+    fn get_commits_ahead_of_default(
+        &self,
+        tip: &Sha1Hash,
+        declared: Option<&str>,
+    ) -> Result<(Vec<Sha1Hash>, String)> {
         // The fork point is the merge-base against the most advanced default
         // branch visible (local + every remote). Computing `ahead` against that
         // fork point means commits already merged into the default branch via
         // *any* remote are excluded from the proposal — they are not part of
         // the contributor's change.
-        if let Some(base) = self.get_most_advanced_merge_base_with_default(tip)? {
+        if let Some(base) = self.get_most_advanced_merge_base_with_default(tip, declared)? {
             let (mut ahead, _) = self.get_commits_ahead_behind(&base, tip)?;
             ahead.reverse();
-            Ok((ahead, "the default branch".to_string()))
+            let label = self
+                .get_default_branch_name(declared)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "the default branch".to_string());
+            Ok((ahead, label))
         } else {
             // No default branch visible anywhere; fall back to the legacy
             // single-branch behaviour.
@@ -3160,7 +3284,7 @@ index ce01362..a21e91c 100644\n\
             let git_repo = Repo::from_path(&test_repo.dir)?;
 
             let base = git_repo
-                .get_most_advanced_merge_base_with_default(&oid_to_sha1(&tip))?
+                .get_most_advanced_merge_base_with_default(&oid_to_sha1(&tip), None)?
                 .expect("a default branch is visible");
 
             assert_eq!(
@@ -3192,13 +3316,84 @@ index ce01362..a21e91c 100644\n\
             )?;
 
             let git_repo = Repo::from_path(&test_repo.dir)?;
-            let tips = git_repo.get_default_branch_tips()?;
+            let tips = git_repo.get_default_branch_tips(None)?;
 
             // local main and gitlab/main share the baseline tip; dedup → 1.
             assert_eq!(
                 tips,
                 vec![oid_to_sha1(&baseline)],
                 "identical default-branch tips should be deduplicated",
+            );
+            Ok(())
+        }
+
+        /// A repository whose default branch is neither `main` nor `master`
+        /// (e.g. `develop`) is resolved via the nostr-declared name, and its
+        /// tip is collected — the name guess alone would miss it entirely.
+        #[test]
+        fn declared_non_main_default_branch_is_resolved() -> Result<()> {
+            let test_repo = GitTestRepo::new("develop")?;
+            let baseline = test_repo.populate()?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert_eq!(
+                git_repo.get_default_branch_name(Some("develop"))?,
+                Some("develop".to_string()),
+                "declared `develop` should resolve when the branch exists",
+            );
+            assert_eq!(
+                git_repo.get_default_branch_tips(Some("develop"))?,
+                vec![oid_to_sha1(&baseline)],
+                "the declared default branch tip should be collected",
+            );
+            // without the declaration the name guess finds neither main nor
+            // master, so nothing resolves.
+            assert_eq!(
+                git_repo.get_default_branch_name(None)?,
+                None,
+                "name guess should not invent a default branch",
+            );
+            Ok(())
+        }
+
+        /// A declared name that does not exist anywhere is ignored and
+        /// resolution falls through to the remote HEAD symref.
+        #[test]
+        fn remote_head_symref_resolves_default_branch() -> Result<()> {
+            let test_repo = GitTestRepo::new("develop")?;
+            let develop_tip = test_repo.populate()?;
+
+            // a configured remote named origin so it is enumerated by
+            // git_repo.remotes(), plus a remote copy of develop and a HEAD
+            // symref pointing at it.
+            test_repo
+                .git_repo
+                .remote("origin", "https://example.com/repo.git")?;
+            test_repo.git_repo.reference(
+                "refs/remotes/origin/develop",
+                develop_tip,
+                true,
+                "origin/develop",
+            )?;
+            test_repo.git_repo.reference_symbolic(
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/develop",
+                true,
+                "origin/HEAD",
+            )?;
+
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            // declared name doesn't exist → fall through to remote HEAD.
+            assert_eq!(
+                git_repo.get_default_branch_name(Some("nonexistent"))?,
+                Some("develop".to_string()),
+                "should fall through to the remote HEAD symref",
+            );
+            assert_eq!(
+                git_repo.get_remote_head_branch_name("origin")?,
+                Some("develop".to_string()),
             );
             Ok(())
         }
