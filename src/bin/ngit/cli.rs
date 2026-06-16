@@ -128,6 +128,12 @@ pub enum Commands {
         long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`"
     )]
     Pr(PrSubCommandArgs),
+    /// merge a PR into the default branch as a no-ff merge commit (does not
+    /// push)
+    #[command(
+        long_about = "merge a PR into the default branch as a no-ff merge commit\n\ncreates the merge commit locally on the default branch (e.g. main) and leaves it checked out; it does not push. The PR's nevent and description are recorded in the merge commit body.\n\nRun without an ID while on a `pr/` branch to merge that PR; or pass a PR event-id (hex) or nevent."
+    )]
+    Merge(MergeSubCommandArgs),
     /// work with issues
     Issue(IssueSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
@@ -180,6 +186,21 @@ pub struct RepoSubCommandArgs {
 pub struct PrSubCommandArgs {
     #[command(subcommand)]
     pub pr_command: PrCommands,
+}
+
+// ---------------------------------------------------------------------------
+// Merge command
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+pub struct MergeSubCommandArgs {
+    /// PR event-id (hex) or nevent; omit when on a `pr/` branch to merge that
+    /// PR
+    #[arg(value_name = "ID|nevent")]
+    pub id: Option<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Subcommand)]
