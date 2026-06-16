@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit merge` merges a PR into the default branch as a no-ff merge commit (recording the PR nevent and author in the commit message) without pushing
 - `ngit account connect` as an alias for `ngit account login -i` (interactive nostr connect login) [hzd149]
 
 ### Changed

@@ -131,7 +131,7 @@ pub enum Commands {
     /// merge a PR into the default branch as a no-ff merge commit (does not
     /// push)
     #[command(
-        long_about = "merge a PR into the default branch as a no-ff merge commit\n\ncreates the merge commit locally on the default branch (e.g. main) and leaves it checked out; it does not push.\n\nthe merge commit subject is `Merge #<id>: <title>` (latest edited title), the body records the PR's nevent and, unless --exclude-description is set, the latest cover note or the PR description.\n\nRun without an ID while on a `pr/` branch to merge that PR; or pass a PR event-id (hex) or nevent."
+        long_about = "merge a PR into the default branch as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
     )]
     Merge(MergeSubCommandArgs),
     /// work with issues
