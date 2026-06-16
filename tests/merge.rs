@@ -2,10 +2,11 @@
 //!
 //! `ngit merge` creates a no-ff merge commit of a PR branch onto the
 //! repository's default branch with a `Merge #<id>: <title>` subject, records
-//! the PR's nevent and (unless `--exclude-description`) the latest cover note
-//! or PR description in the merge-commit body, leaves the default branch
-//! checked out, and does **not** push anything (neither git data nor a nostr
-//! status event).
+//! the PR's nevent and a `PR-Author:` trailer (npub always; display name only
+//! when the author's kind-0 metadata is cached), plus (unless
+//! `--exclude-description`) the latest cover note or PR description in the
+//! merge-commit body, leaves the default branch checked out, and does **not**
+//! push anything (neither git data nor a nostr status event).
 //!
 //! ## Scenario shape (shared by every test)
 //!
@@ -20,6 +21,7 @@
 //! status), never on literal stdout, per the harness boundary rules.
 
 use anyhow::{Context, Result};
+use nostr::nips::nip19::ToBech32;
 use test_harness::{Harness, PublishRepoOpts, PublishedPr, PublishedRepo, Repo};
 
 struct Setup {
@@ -236,6 +238,23 @@ async fn merge_by_id_creates_no_ff_merge_on_default_branch() -> Result<()> {
         "merge commit body should contain the PR description header, got:\n{msg}",
     );
 
+    // the PR author is attributed: a `PR-Author:` trailer carrying the
+    // author's npub on its own bare `nostr:` URI line. The display name is
+    // best-effort (only when kind-0 metadata is in cache) so it is not
+    // asserted here; see `author_trailer_carries_author_npub`.
+    let author_npub = pr
+        .author_pubkey
+        .to_bech32()
+        .context("failed to bech32-encode PR author pubkey")?;
+    assert!(
+        msg.contains("PR-Author:"),
+        "merge commit body should contain a PR-Author trailer, got:\n{msg}",
+    );
+    assert!(
+        msg.contains(&format!("nostr:{author_npub}")),
+        "merge commit body should attribute the author by npub, got:\n{msg}",
+    );
+
     Ok(())
 }
 
@@ -369,6 +388,55 @@ async fn exclude_description_omits_body_footer() -> Result<()> {
     assert!(
         !msg.contains("PR description:") && !msg.contains("CoverNote:"),
         "description footer should be omitted with --exclude-description, got:\n{msg}",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 5b. the `PR-Author:` trailer attributes the author by npub and survives
+//     --exclude-description (attribution is not free-form description prose).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn author_trailer_carries_author_npub() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let out = run_merge(
+        &publisher,
+        &[&pr.event_id.to_hex(), "--exclude-description"],
+    )
+    .await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge --exclude-description exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let msg = commit_message(&publisher, "main").await?;
+    let author_npub = pr
+        .author_pubkey
+        .to_bech32()
+        .context("failed to bech32-encode PR author pubkey")?;
+
+    // The `PR-Author:` label and the author's npub (as a bare `nostr:` URI on
+    // its own line) are always present, even with --exclude-description: the
+    // attribution is metadata, not the suppressible description prose.
+    assert!(
+        msg.contains("PR-Author:"),
+        "PR-Author trailer should survive --exclude-description, got:\n{msg}",
+    );
+    assert!(
+        msg.contains(&format!("\nnostr:{author_npub}")),
+        "author npub should be on its own bare nostr: URI line, got:\n{msg}",
     );
 
     Ok(())

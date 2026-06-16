@@ -10,9 +10,10 @@ use ngit::{
         get_pr_tip_event_or_most_recent_patch_with_ancestors, pr_event_clone_tag_urls,
         process_cover_note, process_subject, tag_value,
     },
+    login::user::extract_user_metadata,
 };
 use nostr::{
-    EventId, FromBech32, RelayUrl, ToBech32,
+    EventId, FromBech32, PublicKey, RelayUrl, ToBech32,
     nips::nip19::{Nip19, Nip19Event},
 };
 
@@ -174,6 +175,12 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
     message.push_str("\n\nnostr:");
     message.push_str(&nevent);
 
+    // Attribute the PR's author with a `PR-Author:` trailer. The display name
+    // is only emitted when kind-0 metadata for the author is found in the
+    // cache; the npub is always emitted as a bare `nostr:` URI line so it is
+    // recognised as a nostr URI and exempt from body line-length linting.
+    message.push_str(&author_trailer(&proposal.pubkey, git_repo_path).await);
+
     // Append the cover note (latest authorised kind-1624) when present,
     // otherwise the PR description. Suppressed by --exclude-description.
     if !exclude_description {
@@ -306,6 +313,46 @@ fn resolve_event_id_from_current_branch(
             "branch shorthand {shorthand} is ambiguous; specify the full PR event-id or nevent"
         ),
     }
+}
+
+/// Build the `PR-Author:` trailer attributing the PR's author.
+///
+/// The trailer always carries the author's npub on its own line as a bare
+/// `nostr:` URI (so git/gitlint treats it as a nostr URI exempt from body
+/// line-length linting). When kind-0 metadata for the author is found in the
+/// local cache, the resolved display name is emitted on the `PR-Author:` line;
+/// otherwise that line carries only the label.
+///
+/// The lookup reads the **local** cache because that is where
+/// `fetching_with_report` lands contributor profiles (kind-0) for proposal
+/// authors — see `get_repo_coordinates`'s profile back-fill in client.rs.
+async fn author_trailer(author: &PublicKey, git_repo_path: &std::path::Path) -> String {
+    let npub = author.to_bech32().unwrap_or_else(|_| author.to_hex());
+
+    // Only surface a display name when kind-0 metadata is actually present in
+    // the cache. `extract_user_metadata` falls back to the npub when no
+    // human-readable name is set, so treat that fallback as "no name".
+    let metadata_events = get_events_from_local_cache(
+        git_repo_path,
+        vec![
+            nostr::Filter::default()
+                .author(*author)
+                .kind(nostr::Kind::Metadata),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+
+    let display_name = extract_user_metadata(author, &metadata_events)
+        .ok()
+        .map(|m| m.name.trim().to_string())
+        .filter(|name| !name.is_empty() && *name != npub);
+
+    let label = match display_name {
+        Some(name) => format!("\n\nPR-Author: {name}"),
+        None => "\n\nPR-Author:".to_string(),
+    };
+    format!("{label}\nnostr:{npub}")
 }
 
 fn event_id_to_nevent(event_id: EventId, relay: Option<&RelayUrl>) -> String {
