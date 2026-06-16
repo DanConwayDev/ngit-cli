@@ -6,8 +6,9 @@ use ngit::{
     },
     fetch::ensure_commit_local,
     git_events::{
-        KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, pr_event_clone_tag_urls, tag_value,
+        KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, pr_event_clone_tag_urls,
+        process_cover_note, process_subject, tag_value,
     },
 };
 use nostr::{
@@ -16,14 +17,16 @@ use nostr::{
 };
 
 use crate::{
-    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
+    client::{
+        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
+    },
     git::{Repo, RepoActions},
     git_events::event_to_cover_letter,
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(id: Option<&str>, offline: bool) -> Result<()> {
+pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -141,15 +144,64 @@ pub async fn launch(id: Option<&str>, offline: bool) -> Result<()> {
         "failed to check out default branch '{default_branch}'"
     ))?;
 
-    // Compose the merge commit message: a summary line, the PR nevent and the
-    // PR description in the body.
+    // Resolve the effective (latest edited) title via the #subject label
+    // override, falling back to the root proposal's title.
+    let label_events = get_events_from_local_cache(
+        git_repo_path,
+        vec![nostr::Filter::default().event(proposal.id).kind(KIND_LABEL)],
+    )
+    .await
+    .unwrap_or_default();
+    let title = process_subject(&proposal, &repo_ref, &label_events)
+        .unwrap_or_else(|| cover_letter.title.clone());
+
+    // Compose the merge commit subject: `Merge #<hex8>: <title>`, truncated so
+    // it fits within git/gitlint's 72-char subject limit. When the title is
+    // truncated the full title is preserved on the first body line so nothing
+    // is lost in `git log` (it also remains available via the nevent below).
     let relay_hint = repo_ref.relays.first();
     let nevent = event_id_to_nevent(event_id, relay_hint);
-    let mut message = format!("Merge PR: {}\n\n{nevent}", cover_letter.title);
-    let description = cover_letter.description.trim();
-    if !description.is_empty() {
+    let (subject, truncated) = build_subject(&event_id.to_hex(), &title);
+
+    let mut message = subject;
+    if truncated {
         message.push_str("\n\n");
-        message.push_str(description);
+        message.push_str(title.trim());
+    }
+
+    // The nevent is emitted as a bare `nostr:` URI line so it is recognised as
+    // a nostr URI and is exempt from body line-length linting (see .gitlint).
+    message.push_str("\n\nnostr:");
+    message.push_str(&nevent);
+
+    // Append the cover note (latest authorised kind-1624) when present,
+    // otherwise the PR description. Suppressed by --exclude-description.
+    if !exclude_description {
+        let cover_note_events = get_events_from_local_cache(
+            git_repo_path,
+            vec![
+                nostr::Filter::default()
+                    .event(proposal.id)
+                    .kind(KIND_COVER_NOTE),
+            ],
+        )
+        .await
+        .unwrap_or_default();
+
+        if let Some((cover_note, _)) = process_cover_note(&proposal, &repo_ref, &cover_note_events)
+        {
+            let body = cover_note.content.trim();
+            if !body.is_empty() {
+                message.push_str("\n\nCoverNote:\n\n");
+                message.push_str(body);
+            }
+        } else {
+            let description = cover_letter.description.trim();
+            if !description.is_empty() {
+                message.push_str("\n\nPR description:\n\n");
+                message.push_str(description);
+            }
+        }
     }
 
     let output = std::process::Command::new("git")
@@ -173,6 +225,35 @@ pub async fn launch(id: Option<&str>, offline: bool) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Build the merge commit subject `Merge #<hex8>: <title>`, truncating the
+/// title with an ellipsis so the whole line stays within git/gitlint's 72-char
+/// subject limit. The first 8 hex chars of the event id mirror the web UI's
+/// `#e2df2001` shorthand.
+///
+/// Returns `(subject, truncated)` where `truncated` is `true` when the title
+/// did not fit and was shortened — the caller then preserves the full title on
+/// the first body line so it is not lost.
+fn build_subject(event_id_hex: &str, title: &str) -> (String, bool) {
+    const MAX_SUBJECT_LEN: usize = 72;
+    let shorthand = &event_id_hex[..8.min(event_id_hex.len())];
+    let prefix = format!("Merge #{shorthand}: ");
+    let title = title.trim();
+
+    // Characters available for the title after the prefix.
+    let budget = MAX_SUBJECT_LEN.saturating_sub(prefix.chars().count());
+    let title_chars = title.chars().count();
+
+    if title_chars <= budget {
+        return (format!("{prefix}{title}"), false);
+    }
+
+    // Truncate to budget, reserving one char for the ellipsis. Iterate over
+    // chars (not bytes) to avoid splitting multi-byte UTF-8.
+    let keep = budget.saturating_sub(1);
+    let truncated: String = title.chars().take(keep).collect();
+    (format!("{prefix}{}\u{2026}", truncated.trim_end()), true)
 }
 
 fn parse_event_id(id: &str) -> Result<EventId> {
@@ -237,4 +318,48 @@ fn event_id_to_nevent(event_id: EventId, relay: Option<&RelayUrl>) -> String {
     }
     .to_bech32()
     .unwrap_or_else(|_| event_id.to_hex())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_subject;
+
+    const ID: &str = "e2df2001abcdef0123456789abcdef0123456789abcdef0123456789abcdef01";
+
+    #[test]
+    fn short_title_is_not_truncated() {
+        let (subject, truncated) = build_subject(ID, "fix the thing");
+        assert_eq!(subject, "Merge #e2df2001: fix the thing");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn long_title_is_truncated_within_72_chars_and_flagged() {
+        let title = "a really long pull request title that goes well beyond the subject limit";
+        let (subject, truncated) = build_subject(ID, title);
+        assert!(
+            truncated,
+            "an over-length title must be flagged as truncated"
+        );
+        assert!(
+            subject.chars().count() <= 72,
+            "subject must fit within 72 chars, got {}: {subject}",
+            subject.chars().count(),
+        );
+        assert!(subject.starts_with("Merge #e2df2001: "));
+        assert!(
+            subject.ends_with('\u{2026}'),
+            "truncated subject ends with an ellipsis"
+        );
+    }
+
+    #[test]
+    fn truncation_does_not_split_multibyte_chars() {
+        // 70 multibyte chars guarantees truncation; the result must remain
+        // valid UTF-8 (no panic from slicing mid-codepoint).
+        let title = "é".repeat(70);
+        let (subject, truncated) = build_subject(ID, &title);
+        assert!(truncated);
+        assert!(subject.chars().count() <= 72);
+    }
 }

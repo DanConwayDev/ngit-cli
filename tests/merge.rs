@@ -1,9 +1,11 @@
 //! End-to-end coverage of the top-level `ngit merge` command.
 //!
 //! `ngit merge` creates a no-ff merge commit of a PR branch onto the
-//! repository's default branch, records the PR's nevent and description in
-//! the merge-commit body, leaves the default branch checked out, and does
-//! **not** push anything (neither git data nor a nostr status event).
+//! repository's default branch with a `Merge #<id>: <title>` subject, records
+//! the PR's nevent and (unless `--exclude-description`) the latest cover note
+//! or PR description in the merge-commit body, leaves the default branch
+//! checked out, and does **not** push anything (neither git data nor a nostr
+//! status event).
 //!
 //! ## Scenario shape (shared by every test)
 //!
@@ -213,11 +215,25 @@ async fn merge_by_id_creates_no_ff_merge_on_default_branch() -> Result<()> {
         "local pr branch should sit at the published tip"
     );
 
-    // commit body records the PR title and nevent
+    // commit subject is `Merge #<hex8>: <title>`; body records the nevent (as
+    // a bare `nostr:` URI) and the PR description under a header.
     let msg = commit_message(&publisher, "main").await?;
+    let shorthand = &pr.event_id.to_hex()[..8];
+    let expected_subject = format!("Merge #{shorthand}: proposal");
     assert!(
-        msg.contains("nevent1"),
-        "merge commit body should contain the PR nevent, got:\n{msg}",
+        msg.lines()
+            .next()
+            .unwrap_or_default()
+            .starts_with(&expected_subject),
+        "merge commit subject should start with '{expected_subject}', got:\n{msg}",
+    );
+    assert!(
+        msg.contains("nostr:nevent1"),
+        "merge commit body should contain the PR nevent as a nostr: URI, got:\n{msg}",
+    );
+    assert!(
+        msg.contains("PR description:"),
+        "merge commit body should contain the PR description header, got:\n{msg}",
     );
 
     Ok(())
@@ -313,7 +329,52 @@ async fn dirty_working_tree_aborts_merge() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// 4. merge without id while not on a pr/ branch fails clearly.
+// 4. --exclude-description omits the PR description footer but keeps the
+//    subject and the nevent reference.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn exclude_description_omits_body_footer() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let out = run_merge(
+        &publisher,
+        &[&pr.event_id.to_hex(), "--exclude-description"],
+    )
+    .await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge --exclude-description exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let msg = commit_message(&publisher, "main").await?;
+    let shorthand = &pr.event_id.to_hex()[..8];
+    assert!(
+        msg.starts_with(&format!("Merge #{shorthand}: ")),
+        "subject should still be present, got:\n{msg}",
+    );
+    assert!(
+        msg.contains("nostr:nevent1"),
+        "nevent reference should still be present, got:\n{msg}",
+    );
+    assert!(
+        !msg.contains("PR description:") && !msg.contains("CoverNote:"),
+        "description footer should be omitted with --exclude-description, got:\n{msg}",
+    );
+
+    Ok(())
+}
+// ---------------------------------------------------------------------------
+// 5. merge without id while not on a pr/ branch fails clearly.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
