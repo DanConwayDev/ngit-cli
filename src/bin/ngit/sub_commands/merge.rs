@@ -253,6 +253,36 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         .context("failed to run git merge")?;
 
     if !output.status.success() {
+        // A `git merge` that stops on conflicts leaves the merge in progress:
+        // `.git/MERGE_HEAD` is written, the index carries the unmerged stages
+        // and the working tree has conflict markers. Git does *not* honour the
+        // `-m` message in this case — it writes its own generic MERGE_MSG that
+        // the user's eventual `git commit` would pick up, silently discarding
+        // the nostr provenance ngit composed (subject, nevent, PR-Author
+        // trailer, cover note). When we detect the conflict path we therefore
+        // overwrite MERGE_MSG with our message and hand the resolution back to
+        // the user rather than treating it as a hard error.
+        if git_repo.merge_in_progress()? {
+            write_prepared_merge_message(&git_repo, &message)
+                .context("failed to record the prepared merge commit message")?;
+
+            println!(
+                "{}",
+                console::style(format!(
+                    "the merge has conflicts that must be resolved manually on {default_branch}."
+                ))
+                .yellow()
+            );
+            println!(
+                "resolve the conflicts (see `git status`), `git add` the resolved files, then run `git commit` to complete the merge."
+            );
+            println!(
+                "the merge commit message describing the PR has been prepared for you, so leave it unchanged when `git commit` opens your editor."
+            );
+            println!("to abandon the merge, run `git merge --abort`.");
+            return Ok(());
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         bail!("git merge failed:\n{stdout}{stderr}");
@@ -266,6 +296,43 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         .green()
     );
 
+    Ok(())
+}
+
+/// Overwrite the in-progress merge's prepared commit message
+/// (`.git/MERGE_MSG`) with `message`.
+///
+/// When `git merge` stops on conflicts it writes its own generic `MERGE_MSG`,
+/// ignoring the `-m` we passed. The user's eventual `git commit` reads that
+/// file, so to preserve ngit's composed message — subject, `nostr:` nevent,
+/// `PR-Author:` trailer and cover note — we replace it here once the conflict
+/// is detected.
+///
+/// The path is resolved with `git rev-parse --git-path MERGE_MSG` so it is
+/// correct regardless of worktree layout or a separated git dir, rather than
+/// assuming `.git/MERGE_MSG` under the working tree.
+fn write_prepared_merge_message(git_repo: &Repo, message: &str) -> Result<()> {
+    let git_repo_path = git_repo.get_path()?;
+    let output = std::process::Command::new("git")
+        .current_dir(git_repo_path)
+        .args(["rev-parse", "--git-path", "MERGE_MSG"])
+        .output()
+        .context("failed to locate MERGE_MSG via git rev-parse")?;
+    if !output.status.success() {
+        bail!(
+            "git rev-parse --git-path MERGE_MSG failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let rel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // `--git-path` yields a path relative to the working directory we invoked
+    // git in (or already absolute); resolve it against that same directory.
+    let path = git_repo_path.join(rel);
+    // Preserve a trailing newline so the message matches git's own formatting.
+    std::fs::write(&path, format!("{}\n", message.trim_end())).context(format!(
+        "failed to write merge message to {}",
+        path.display()
+    ))?;
     Ok(())
 }
 

@@ -568,6 +568,144 @@ async fn merge_without_id_infers_self_submitted_bare_pr_branch() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// 6b. a merge that conflicts is left in progress for manual resolution rather
+//     than aborted as a hard error. `ngit merge` exits 0, the repository is
+//     left mid-merge (MERGE_HEAD present) on the default branch, and the
+//     prepared MERGE_MSG carries ngit's composed message (subject + nevent +
+//     PR-Author trailer) so the user's eventual `git commit` keeps the nostr
+//     provenance rather than git's generic conflict message.
+// ---------------------------------------------------------------------------
+
+/// Read the contents of a git-relative path (e.g. `MERGE_HEAD`, `MERGE_MSG`)
+/// via `git rev-parse --git-path`, returning `None` when the file is absent.
+async fn read_git_path(repo: &Repo, name: &str) -> Result<Option<String>> {
+    let out = repo
+        .git(["rev-parse", "--git-path", name])
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn git rev-parse --git-path {name}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git rev-parse --git-path {name} exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let rel = String::from_utf8(out.stdout)
+        .context("git rev-parse stdout not utf-8")?
+        .trim()
+        .to_string();
+    let path = repo.dir().join(rel);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("failed to read {path:?}")),
+    }
+}
+
+#[tokio::test]
+async fn conflicting_merge_is_left_in_progress_for_manual_resolution() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    // The first proposal (prefix "a") adds `a3.md`. Create a *conflicting*
+    // `a3.md` on main so the no-ff merge of the PR cannot apply cleanly.
+    std::fs::write(publisher.dir().join("a3.md"), "main side content\n")
+        .context("write conflicting a3.md on main")?;
+    publisher.git_ok(["add", "a3.md"], "git add a3.md").await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "add a3.md (main side)", "--no-gpg-sign"],
+            "git commit a3.md on main",
+        )
+        .await?;
+
+    let main_before = rev_parse(&publisher, "main").await?;
+
+    // The merge conflicts. ngit must NOT treat this as a hard failure: it
+    // hands the in-progress merge back to the user, exiting 0.
+    let out = run_merge(&publisher, &[&pr.event_id.to_hex()]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge should exit 0 and leave the conflicted merge in progress, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Still on the default branch.
+    assert_eq!(
+        current_branch(&publisher).await?,
+        "main",
+        "should be left on the default branch with the merge in progress",
+    );
+
+    // main has NOT advanced — the merge commit is not yet created.
+    assert_eq!(
+        rev_parse(&publisher, "main").await?,
+        main_before,
+        "main must not advance until the user resolves and commits",
+    );
+
+    // A merge is in progress: MERGE_HEAD is present.
+    assert!(
+        read_git_path(&publisher, "MERGE_HEAD").await?.is_some(),
+        "MERGE_HEAD should be present (merge in progress)",
+    );
+
+    // The prepared MERGE_MSG carries ngit's composed message, not git's
+    // generic "Merge branch ... / Conflicts:" default — so the user's eventual
+    // `git commit` keeps the nostr provenance.
+    let merge_msg = read_git_path(&publisher, "MERGE_MSG")
+        .await?
+        .context("MERGE_MSG should be present (prepared by ngit)")?;
+    let shorthand = &pr.event_id.to_hex()[..8];
+    assert!(
+        merge_msg.contains(&format!("Merge #{shorthand}: ")),
+        "prepared MERGE_MSG should carry ngit's subject, got:\n{merge_msg}",
+    );
+    assert!(
+        merge_msg.contains("nostr:nevent1"),
+        "prepared MERGE_MSG should carry the PR nevent, got:\n{merge_msg}",
+    );
+    assert!(
+        merge_msg.contains("PR-Author:"),
+        "prepared MERGE_MSG should carry the PR-Author trailer, got:\n{merge_msg}",
+    );
+
+    // Completing the merge the normal way (resolve + add + commit) produces the
+    // 2-parent merge commit carrying ngit's prepared message.
+    std::fs::write(publisher.dir().join("a3.md"), "resolved content\n")
+        .context("write resolved a3.md")?;
+    publisher
+        .git_ok(["add", "a3.md"], "git add resolved a3.md")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "--no-edit", "--no-gpg-sign"],
+            "git commit to finish the merge",
+        )
+        .await?;
+
+    assert_eq!(
+        parent_count(&publisher, "main").await?,
+        2,
+        "completing the resolved merge should produce a 2-parent merge commit",
+    );
+    let msg = commit_message(&publisher, "main").await?;
+    assert!(
+        msg.contains(&format!("Merge #{shorthand}: ")) && msg.contains("nostr:nevent1"),
+        "the completed merge commit should carry ngit's prepared message, got:\n{msg}",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // 7. a local pr/ branch that has drifted ahead of the published PR tip
 //    (unpushed local commits) aborts the merge. The autogenerated merge message
 //    describes the *published* PR state and other maintainers can only
@@ -639,9 +777,9 @@ async fn local_branch_ahead_of_published_tip_aborts_merge() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// 8. a *bare* self-submitted `pr/<name>` branch (no shorthand) that has
-//    drifted ahead of the published PR tip (unpushed local commits) also
-//    aborts the merge. Previously the bare-branch path created a fresh
+// 8. a *bare* self-submitted `pr/<name>` branch (no shorthand) that has drifted
+//    ahead of the published PR tip (unpushed local commits) also aborts the
+//    merge. Previously the bare-branch path created a fresh
 //    `pr/<name>(<shorthand>)` branch at the published tip and merged that,
 //    silently bypassing the author's unpushed local work; the merge must now
 //    detect the drift on the bare branch and abort.
@@ -733,4 +871,3 @@ async fn self_submitted_bare_branch_ahead_of_published_tip_aborts_merge() -> Res
 
     Ok(())
 }
-
