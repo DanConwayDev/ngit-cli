@@ -33,12 +33,21 @@
 //!   state event (annotated tags as a tag object with the `^{}` peel;
 //!   lightweight tags as a bare commit oid). Regression cover for `fix: tag
 //!   pushed via nostr remote appeared as remote branch`.
+//! - [`clone_interact_tag`] — a fresh user clones over `nostr://` *after* the
+//!   tags were pushed, then exercises them end-to-end: `git fetch --tags
+//!   --prune` keeps both tags, `git cat-file -t` confirms the annotated tag is
+//!   a real tag object that peels to the seed commit, and a maintainer pushes a
+//!   brand-new tag back from the fresh checkout (reaching the state event and
+//!   the grasp's bare repo without a stray remote-tracking ref). The tight pin
+//!   on the annotated tag's `^{}` peel lives in [`push_tag`]; this scenario
+//!   covers the cloner-consumes-and-pushes side.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
 //! pinpoint-named in `cargo test` output.
 
 mod add_branch;
+mod clone_interact_tag;
 mod delete_branch;
 mod fresh_repo;
 mod push_tag;
