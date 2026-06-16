@@ -24,6 +24,15 @@
 //!   `main`, the deleted branch disappears from every observable surface
 //!   (publisher remote-tracking, both clones, both grasps, state event), and
 //!   the local branch + its upstream config are not collateral damage.
+//! - [`push_tag`] — pushes a lightweight *and* an annotated tag through the
+//!   nostr remote. Asserts (negatively) that no `refs/remotes/origin/<tag>` ref
+//!   is written on the publisher or a fresh nostr clone — git's remote-tracking
+//!   *branch* namespace, where a stray tag entry shows up as a remote branch in
+//!   `git branch -r` — and (positively) that both tags reach the publisher's
+//!   `refs/tags/*`, both grasps' bare repos, a nostr clone, and the kind-30618
+//!   state event (annotated tags as a tag object with the `^{}` peel;
+//!   lightweight tags as a bare commit oid). Regression cover for `fix: tag
+//!   pushed via nostr remote appeared as remote branch`.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -32,3 +41,4 @@
 mod add_branch;
 mod delete_branch;
 mod fresh_repo;
+mod push_tag;
