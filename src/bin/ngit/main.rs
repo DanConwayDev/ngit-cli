@@ -267,6 +267,14 @@ async fn main() {
                 }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
+            Commands::Merge(args) => {
+                sub_commands::merge::launch(
+                    args.id.as_deref(),
+                    args.offline,
+                    args.exclude_description,
+                )
+                .await
+            }
         }
     } else {
         // Show help when no command is provided

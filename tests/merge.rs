@@ -1,0 +1,873 @@
+//! End-to-end coverage of the top-level `ngit merge` command.
+//!
+//! `ngit merge` creates a no-ff merge commit of a PR branch onto the
+//! repository's default branch with a `Merge #<id>: <title>` subject, records
+//! the PR's nevent and a `PR-Author:` trailer (npub always; display name only
+//! when the author's kind-0 metadata is cached), plus (unless
+//! `--exclude-description`) the latest cover note or PR description in the
+//! merge-commit body, leaves the default branch checked out, and does **not**
+//! push anything (neither git data nor a nostr status event).
+//!
+//! ## Scenario shape (shared by every test)
+//!
+//! - One vanilla relay (`"default"`) + one GRASP (`"repo"`).
+//! - Maintainer publishes the repo via `harness.publish_repo`.
+//! - A fresh contributor publishes three PR-kind proposals via
+//!   `harness.publish_three_open_proposals`.
+//! - The maintainer clone (`publisher`) is where the merge happens — it is on
+//!   `main` with an `origin` remote, matching what a maintainer does.
+//!
+//! Assertions are on observable side-effects (refs/commits on disk, exit
+//! status), never on literal stdout, per the harness boundary rules.
+
+use anyhow::{Context, Result};
+use nostr::nips::nip19::ToBech32;
+use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedPr, PublishedRepo, Repo};
+
+struct Setup {
+    harness: Harness,
+    _published: PublishedRepo,
+    prs: [PublishedPr; 3],
+    publisher: Repo,
+}
+
+async fn setup() -> Result<Setup> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("merge maintainer".into()),
+            identifier: Some("merge-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    let prs = harness.publish_three_open_proposals(&published).await?;
+
+    Ok(Setup {
+        harness,
+        _published: published,
+        prs,
+        publisher,
+    })
+}
+
+/// Long-form `pr/<branch>(<root-event-id-shorthand>)` branch name —
+/// matches `CoverLetter::get_branch_name_with_pr_prefix_and_shorthand_id`.
+fn expected_branch_name(pr: &PublishedPr) -> String {
+    let hex = pr.event_id.to_hex();
+    format!("pr/{}({})", pr.branch_name, &hex[..8])
+}
+
+async fn git_ok<I, S>(repo: &Repo, args: I, label: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let out = repo
+        .git(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn {label}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{label} exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(())
+}
+
+async fn rev_parse(repo: &Repo, rev: &str) -> Result<String> {
+    let out = repo
+        .git(["rev-parse", rev])
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn git rev-parse {rev}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git rev-parse {rev} exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(String::from_utf8(out.stdout)
+        .context("git rev-parse stdout not utf-8")?
+        .trim()
+        .to_string())
+}
+
+async fn current_branch(repo: &Repo) -> Result<String> {
+    let out = repo
+        .git(["symbolic-ref", "--short", "HEAD"])
+        .output()
+        .await
+        .context("failed to spawn git symbolic-ref HEAD")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git symbolic-ref --short HEAD exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(String::from_utf8(out.stdout)
+        .context("git symbolic-ref stdout not utf-8")?
+        .trim()
+        .to_string())
+}
+
+/// Full commit message (subject + body) of `<rev>`.
+async fn commit_message(repo: &Repo, rev: &str) -> Result<String> {
+    let out = repo
+        .git(["log", "-1", "--format=%B", rev])
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn git log {rev}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git log {rev} exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(String::from_utf8(out.stdout)
+        .context("git log stdout not utf-8")?
+        .to_string())
+}
+
+/// Number of parents of `<rev>` — a no-ff merge commit has 2.
+async fn parent_count(repo: &Repo, rev: &str) -> Result<usize> {
+    let out = repo
+        .git(["rev-list", "--parents", "-n", "1", rev])
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn git rev-list {rev}"))?;
+    anyhow::ensure!(out.status.success(), "git rev-list {rev} failed");
+    let line = String::from_utf8(out.stdout).context("git rev-list stdout not utf-8")?;
+    // line = "<commit> <parent1> <parent2> ..."
+    Ok(line.split_whitespace().count().saturating_sub(1))
+}
+
+async fn run_merge(repo: &Repo, args: &[&str]) -> Result<std::process::Output> {
+    let mut argv = vec!["merge"];
+    argv.extend_from_slice(args);
+    repo.ngit(argv)
+        .output()
+        .await
+        .context("failed to spawn ngit merge")
+}
+
+// ---------------------------------------------------------------------------
+// 1. `ngit merge <hex>` from main creates a no-ff merge commit on the default
+//    branch, leaves it checked out, records the PR in the body, no push.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_by_id_creates_no_ff_merge_on_default_branch() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let main_before = rev_parse(&publisher, "main").await?;
+
+    let out = run_merge(&publisher, &[&pr.event_id.to_hex()]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // left checked out on the default branch
+    assert_eq!(
+        current_branch(&publisher).await?,
+        "main",
+        "should be left on the default branch after merge",
+    );
+
+    // a new commit advanced main
+    let main_after = rev_parse(&publisher, "main").await?;
+    assert_ne!(
+        main_after, main_before,
+        "main should have a new merge commit"
+    );
+
+    // it is a real merge commit (2 parents)
+    assert_eq!(
+        parent_count(&publisher, "main").await?,
+        2,
+        "no-ff merge should produce a 2-parent merge commit",
+    );
+
+    // the PR tip is an ancestor of the merge commit (it was merged in)
+    let branch = expected_branch_name(pr);
+    let pr_tip = rev_parse(&publisher, &branch).await?;
+    assert_eq!(
+        pr_tip, pr.tip,
+        "local pr branch should sit at the published tip"
+    );
+
+    // commit subject is `Merge #<hex8>: <title>`; body records the nevent (as
+    // a bare `nostr:` URI) and the PR description under a header.
+    let msg = commit_message(&publisher, "main").await?;
+    let shorthand = &pr.event_id.to_hex()[..8];
+    let expected_subject = format!("Merge #{shorthand}: proposal");
+    assert!(
+        msg.lines()
+            .next()
+            .unwrap_or_default()
+            .starts_with(&expected_subject),
+        "merge commit subject should start with '{expected_subject}', got:\n{msg}",
+    );
+    assert!(
+        msg.contains("nostr:nevent1"),
+        "merge commit body should contain the PR nevent as a nostr: URI, got:\n{msg}",
+    );
+    assert!(
+        msg.contains("PR description:"),
+        "merge commit body should contain the PR description header, got:\n{msg}",
+    );
+
+    // the PR author is attributed: a `PR-Author:` trailer carrying the
+    // author's npub on its own bare `nostr:` URI line. The display name is
+    // best-effort (only when kind-0 metadata is in cache) so it is not
+    // asserted here; see `author_trailer_carries_author_npub`.
+    let author_npub = pr
+        .author_pubkey
+        .to_bech32()
+        .context("failed to bech32-encode PR author pubkey")?;
+    assert!(
+        msg.contains("PR-Author:"),
+        "merge commit body should contain a PR-Author trailer, got:\n{msg}",
+    );
+    assert!(
+        msg.contains(&format!("nostr:{author_npub}")),
+        "merge commit body should attribute the author by npub, got:\n{msg}",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 2. `ngit merge` without id while on the pr/ branch infers the PR.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_without_id_infers_pr_from_current_branch() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    // check out the PR branch first
+    let out = publisher
+        .ngit(["pr", "checkout", &pr.event_id.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let branch = expected_branch_name(pr);
+    assert_eq!(current_branch(&publisher).await?, branch);
+
+    // merge with no id — should infer the PR from the checked-out branch
+    let out = run_merge(&publisher, &[]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge (no id) exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(
+        current_branch(&publisher).await?,
+        "main",
+        "should be left on the default branch after merge",
+    );
+    assert_eq!(
+        parent_count(&publisher, "main").await?,
+        2,
+        "no-ff merge should produce a 2-parent merge commit",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 3. dirty working tree aborts the merge.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dirty_working_tree_aborts_merge() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let main_before = rev_parse(&publisher, "main").await?;
+
+    // create an untracked file so the tree is dirty
+    std::fs::write(publisher.dir().join("dirty.md"), "uncommitted\n").context("write dirty.md")?;
+
+    let out = run_merge(&publisher, &[&pr.event_id.to_hex()]).await?;
+    assert!(
+        !out.status.success(),
+        "ngit merge should abort when the working tree is dirty",
+    );
+
+    // main untouched
+    assert_eq!(
+        rev_parse(&publisher, "main").await?,
+        main_before,
+        "main must not advance when the merge is aborted",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 4. --exclude-description omits the PR description footer but keeps the
+//    subject and the nevent reference.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn exclude_description_omits_body_footer() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let out = run_merge(
+        &publisher,
+        &[&pr.event_id.to_hex(), "--exclude-description"],
+    )
+    .await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge --exclude-description exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let msg = commit_message(&publisher, "main").await?;
+    let shorthand = &pr.event_id.to_hex()[..8];
+    assert!(
+        msg.starts_with(&format!("Merge #{shorthand}: ")),
+        "subject should still be present, got:\n{msg}",
+    );
+    assert!(
+        msg.contains("nostr:nevent1"),
+        "nevent reference should still be present, got:\n{msg}",
+    );
+    assert!(
+        !msg.contains("PR description:") && !msg.contains("CoverNote:"),
+        "description footer should be omitted with --exclude-description, got:\n{msg}",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 5b. the `PR-Author:` trailer attributes the author by npub and survives
+//     --exclude-description (attribution is not free-form description prose).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn author_trailer_carries_author_npub() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let out = run_merge(
+        &publisher,
+        &[&pr.event_id.to_hex(), "--exclude-description"],
+    )
+    .await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge --exclude-description exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let msg = commit_message(&publisher, "main").await?;
+    let author_npub = pr
+        .author_pubkey
+        .to_bech32()
+        .context("failed to bech32-encode PR author pubkey")?;
+
+    // The `PR-Author:` label and the author's npub (as a bare `nostr:` URI on
+    // its own line) are always present, even with --exclude-description: the
+    // attribution is metadata, not the suppressible description prose.
+    assert!(
+        msg.contains("PR-Author:"),
+        "PR-Author trailer should survive --exclude-description, got:\n{msg}",
+    );
+    assert!(
+        msg.contains(&format!("\nnostr:{author_npub}")),
+        "author npub should be on its own bare nostr: URI line, got:\n{msg}",
+    );
+
+    Ok(())
+}
+// ---------------------------------------------------------------------------
+// 5. merge without id while not on a pr/ branch fails clearly.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_without_id_off_pr_branch_fails() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs: _,
+        publisher,
+    } = setup().await?;
+
+    // on main, not a pr/ branch
+    git_ok(&publisher, ["checkout", "main"], "git checkout main").await?;
+
+    let out = run_merge(&publisher, &[]).await?;
+    assert!(
+        !out.status.success(),
+        "ngit merge with no id off a pr/ branch should fail",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 6. merge without id on a *bare* `pr/<name>` branch the current user pushed
+//    themselves (via `git push -u origin pr/<name>`, which has no `(<id>)`
+//    shorthand) infers the PR.
+//
+//    This is the "user submitted their own PR with plain git" workflow: the
+//    local branch carries no event-id shorthand, but it is linked to the
+//    published PR because the logged-in user authored it. `ngit merge` with no
+//    id must resolve it the same way `git-remote-nostr` maps the branch on
+//    push (`is_event_proposal_root_for_branch`).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_without_id_infers_self_submitted_bare_pr_branch() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("merge maintainer".into()),
+            identifier: Some("merge-bare-branch-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    // The PR author clones and logs in as their own (fresh) account. They are
+    // both the author of the PR and the one running `ngit merge` — the only
+    // configuration in which a bare `pr/<name>` branch can be linked back to a
+    // published PR.
+    let author = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "self merging contributor".into(),
+            },
+        )
+        .await?;
+
+    // Submit the PR exactly as a user would: a plain `pr/<name>` branch pushed
+    // with `git push -u origin pr/<name>`. `git-remote-nostr` turns this into
+    // a KIND_PULL_REQUEST. No `ngit send`, no `(<id>)` shorthand.
+    let branch = "pr/my-feature";
+    author
+        .git_ok(["checkout", "-b", branch], "git checkout -b pr/my-feature")
+        .await?;
+    std::fs::write(author.dir().join("feat.md"), "some content\n").context("write feat.md")?;
+    author.git_ok(["add", "feat.md"], "git add feat.md").await?;
+    author
+        .git_ok(
+            ["commit", "-m", "add feat.md", "--no-gpg-sign"],
+            "git commit feat.md",
+        )
+        .await?;
+
+    let pr_tip = rev_parse(&author, "HEAD").await?;
+
+    author
+        .nostr_push(["-u", "origin", branch])
+        .await
+        .context("git push -u origin pr/my-feature (PR creation) failed")?;
+
+    // Still on the bare `pr/my-feature` branch with no `(<id>)` shorthand.
+    assert_eq!(current_branch(&author).await?, branch);
+
+    // Merge with no id — must infer the PR from the self-submitted bare branch.
+    let out = run_merge(&author, &[]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge (no id) on a self-submitted bare pr/ branch exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(
+        current_branch(&author).await?,
+        "main",
+        "should be left on the default branch after merge",
+    );
+    assert_eq!(
+        parent_count(&author, "main").await?,
+        2,
+        "no-ff merge should produce a 2-parent merge commit",
+    );
+
+    // the pushed PR tip is a parent of the merge commit (it was merged in)
+    let merged_in = rev_parse(&author, "main^2").await?;
+    assert_eq!(
+        merged_in, pr_tip,
+        "the merge commit's second parent should be the pushed PR tip",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 6b. a merge that conflicts is left in progress for manual resolution rather
+//     than aborted as a hard error. `ngit merge` exits 0, the repository is
+//     left mid-merge (MERGE_HEAD present) on the default branch, and the
+//     prepared MERGE_MSG carries ngit's composed message (subject + nevent +
+//     PR-Author trailer) so the user's eventual `git commit` keeps the nostr
+//     provenance rather than git's generic conflict message.
+// ---------------------------------------------------------------------------
+
+/// Read the contents of a git-relative path (e.g. `MERGE_HEAD`, `MERGE_MSG`)
+/// via `git rev-parse --git-path`, returning `None` when the file is absent.
+async fn read_git_path(repo: &Repo, name: &str) -> Result<Option<String>> {
+    let out = repo
+        .git(["rev-parse", "--git-path", name])
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn git rev-parse --git-path {name}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git rev-parse --git-path {name} exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let rel = String::from_utf8(out.stdout)
+        .context("git rev-parse stdout not utf-8")?
+        .trim()
+        .to_string();
+    let path = repo.dir().join(rel);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("failed to read {path:?}")),
+    }
+}
+
+#[tokio::test]
+async fn conflicting_merge_is_left_in_progress_for_manual_resolution() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    // The first proposal (prefix "a") adds `a3.md`. Create a *conflicting*
+    // `a3.md` on main so the no-ff merge of the PR cannot apply cleanly.
+    std::fs::write(publisher.dir().join("a3.md"), "main side content\n")
+        .context("write conflicting a3.md on main")?;
+    publisher.git_ok(["add", "a3.md"], "git add a3.md").await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "add a3.md (main side)", "--no-gpg-sign"],
+            "git commit a3.md on main",
+        )
+        .await?;
+
+    let main_before = rev_parse(&publisher, "main").await?;
+
+    // The merge conflicts. ngit must NOT treat this as a hard failure: it
+    // hands the in-progress merge back to the user, exiting 0.
+    let out = run_merge(&publisher, &[&pr.event_id.to_hex()]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge should exit 0 and leave the conflicted merge in progress, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Still on the default branch.
+    assert_eq!(
+        current_branch(&publisher).await?,
+        "main",
+        "should be left on the default branch with the merge in progress",
+    );
+
+    // main has NOT advanced — the merge commit is not yet created.
+    assert_eq!(
+        rev_parse(&publisher, "main").await?,
+        main_before,
+        "main must not advance until the user resolves and commits",
+    );
+
+    // A merge is in progress: MERGE_HEAD is present.
+    assert!(
+        read_git_path(&publisher, "MERGE_HEAD").await?.is_some(),
+        "MERGE_HEAD should be present (merge in progress)",
+    );
+
+    // The prepared MERGE_MSG carries ngit's composed message, not git's
+    // generic "Merge branch ... / Conflicts:" default — so the user's eventual
+    // `git commit` keeps the nostr provenance.
+    let merge_msg = read_git_path(&publisher, "MERGE_MSG")
+        .await?
+        .context("MERGE_MSG should be present (prepared by ngit)")?;
+    let shorthand = &pr.event_id.to_hex()[..8];
+    assert!(
+        merge_msg.contains(&format!("Merge #{shorthand}: ")),
+        "prepared MERGE_MSG should carry ngit's subject, got:\n{merge_msg}",
+    );
+    assert!(
+        merge_msg.contains("nostr:nevent1"),
+        "prepared MERGE_MSG should carry the PR nevent, got:\n{merge_msg}",
+    );
+    assert!(
+        merge_msg.contains("PR-Author:"),
+        "prepared MERGE_MSG should carry the PR-Author trailer, got:\n{merge_msg}",
+    );
+
+    // Completing the merge the normal way (resolve + add + commit) produces the
+    // 2-parent merge commit carrying ngit's prepared message.
+    std::fs::write(publisher.dir().join("a3.md"), "resolved content\n")
+        .context("write resolved a3.md")?;
+    publisher
+        .git_ok(["add", "a3.md"], "git add resolved a3.md")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "--no-edit", "--no-gpg-sign"],
+            "git commit to finish the merge",
+        )
+        .await?;
+
+    assert_eq!(
+        parent_count(&publisher, "main").await?,
+        2,
+        "completing the resolved merge should produce a 2-parent merge commit",
+    );
+    let msg = commit_message(&publisher, "main").await?;
+    assert!(
+        msg.contains(&format!("Merge #{shorthand}: ")) && msg.contains("nostr:nevent1"),
+        "the completed merge commit should carry ngit's prepared message, got:\n{msg}",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 7. a local pr/ branch that has drifted ahead of the published PR tip
+//    (unpushed local commits) aborts the merge. The autogenerated merge message
+//    describes the *published* PR state and other maintainers can only
+//    reproduce a merge of the published tip, so merging an un-published local
+//    tip is refused: push first.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn local_branch_ahead_of_published_tip_aborts_merge() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    // Check out the PR branch the normal way: this creates a local
+    // `pr/<name>(<shorthand>)` branch at the published tip, which is the
+    // branch `ngit merge` resolves and merges.
+    let out = publisher
+        .ngit(["pr", "checkout", &pr.event_id.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let branch = expected_branch_name(pr);
+    assert_eq!(current_branch(&publisher).await?, branch);
+
+    // Add a *local* commit on top of the PR branch WITHOUT pushing/publishing
+    // it. The local branch tip is now ahead of the published PR tip.
+    std::fs::write(publisher.dir().join("more.md"), "unpushed\n").context("write more.md")?;
+    publisher
+        .git_ok(["add", "more.md"], "git add more.md")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "add more.md (unpushed)", "--no-gpg-sign"],
+            "git commit more.md",
+        )
+        .await?;
+
+    let main_before = rev_parse(&publisher, "main").await?;
+
+    // Merge with no id — must refuse because the local tip is ahead of the
+    // published PR tip (unpushed local work).
+    let out = run_merge(&publisher, &[]).await?;
+    assert!(
+        !out.status.success(),
+        "ngit merge must abort when the local pr/ branch is ahead of the published tip\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // main must not have advanced.
+    assert_eq!(
+        rev_parse(&publisher, "main").await?,
+        main_before,
+        "main must not advance when the merge is aborted",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 8. a *bare* self-submitted `pr/<name>` branch (no shorthand) that has drifted
+//    ahead of the published PR tip (unpushed local commits) also aborts the
+//    merge. Previously the bare-branch path created a fresh
+//    `pr/<name>(<shorthand>)` branch at the published tip and merged that,
+//    silently bypassing the author's unpushed local work; the merge must now
+//    detect the drift on the bare branch and abort.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn self_submitted_bare_branch_ahead_of_published_tip_aborts_merge() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("merge maintainer".into()),
+            identifier: Some("merge-bare-drift-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    // The PR author clones, logs in as their own account, and submits a PR via
+    // a plain pushed `pr/<name>` branch (no shorthand), as in test 6.
+    let author = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "self merging drifting contributor".into(),
+            },
+        )
+        .await?;
+
+    let branch = "pr/bare-drift-feature";
+    author
+        .git_ok(
+            ["checkout", "-b", branch],
+            "git checkout -b pr/bare-drift-feature",
+        )
+        .await?;
+    std::fs::write(author.dir().join("feat.md"), "some content\n").context("write feat.md")?;
+    author.git_ok(["add", "feat.md"], "git add feat.md").await?;
+    author
+        .git_ok(
+            ["commit", "-m", "add feat.md", "--no-gpg-sign"],
+            "git commit feat.md",
+        )
+        .await?;
+
+    // Publish this tip as the PR (still on the bare branch, no shorthand).
+    author
+        .nostr_push(["-u", "origin", branch])
+        .await
+        .context("git push -u origin pr/bare-drift-feature (PR creation) failed")?;
+    assert_eq!(current_branch(&author).await?, branch);
+
+    // Add a *local* commit on top of the bare branch WITHOUT pushing it. The
+    // bare branch tip is now ahead of the published PR tip.
+    std::fs::write(author.dir().join("more.md"), "unpushed\n").context("write more.md")?;
+    author.git_ok(["add", "more.md"], "git add more.md").await?;
+    author
+        .git_ok(
+            ["commit", "-m", "add more.md (unpushed)", "--no-gpg-sign"],
+            "git commit more.md",
+        )
+        .await?;
+
+    let main_before = rev_parse(&author, "main").await?;
+
+    // Merge with no id — must refuse because the bare branch is ahead of the
+    // published PR tip, rather than silently merging the published tip and
+    // bypassing the unpushed local work.
+    let out = run_merge(&author, &[]).await?;
+    assert!(
+        !out.status.success(),
+        "ngit merge must abort when the bare self-submitted pr/ branch is ahead of the published tip\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // main must not have advanced.
+    assert_eq!(
+        rev_parse(&author, "main").await?,
+        main_before,
+        "main must not advance when the merge is aborted",
+    );
+
+    Ok(())
+}

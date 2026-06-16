@@ -119,6 +119,9 @@ pub trait RepoActions {
     fn get_refs(&self, commit: &Sha1Hash) -> Result<Vec<String>>;
     // including (un)staged changes and (un)tracked files
     fn has_outstanding_changes(&self) -> Result<bool>;
+    // true when a merge is in progress (e.g. `git merge` stopped on conflicts
+    // and left MERGE_HEAD behind, awaiting resolution and `git commit`)
+    fn merge_in_progress(&self) -> Result<bool>;
     fn make_patch_from_commit(
         &self,
         commit: &Sha1Hash,
@@ -724,6 +727,13 @@ impl RepoActions for Repo {
         )?;
 
         Ok(diff.deltas().len().gt(&0))
+    }
+
+    fn merge_in_progress(&self) -> Result<bool> {
+        // libgit2 reports `RepositoryState::Merge` while a merge is in
+        // progress, which is exactly the state `git merge` leaves behind when
+        // it stops on conflicts (MERGE_HEAD present, awaiting resolution).
+        Ok(self.git_repo.state() == git2::RepositoryState::Merge)
     }
 
     // youngest first

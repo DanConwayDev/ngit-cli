@@ -11,6 +11,7 @@ pub mod label;
 pub mod list;
 pub mod login;
 pub mod logout;
+pub mod merge;
 pub mod pr_merge;
 pub mod pr_status;
 pub mod repo;
