@@ -537,6 +537,41 @@ async fn apply_pr_with_ngit_apply(repo: &Repo, proposal: &MergedProposal) -> Res
     Ok(applied)
 }
 
+/// Run `ngit issue create --subject <title> --body <body>` from a logged-in
+/// repo and parse the created issue event id from stdout.
+async fn ngit_issue_create(repo: &Repo, title: &str, body: &str) -> Result<EventId> {
+    let out = repo
+        .ngit(["issue", "create", "--subject", title, "--body", body])
+        .output()
+        .await
+        .context("failed to spawn `ngit issue create`")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`ngit issue create` exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    parse_issue_event_id(&stdout).context(format!(
+        "no `issue created:` line found in stdout; full stdout:\n{stdout}"
+    ))
+}
+
+fn parse_issue_event_id(stdout: &str) -> Option<EventId> {
+    for line in stdout.lines() {
+        let lower = line.to_ascii_lowercase();
+        if let Some(idx) = lower.find("issue created:") {
+            let rest = line[idx + "issue created:".len()..].trim();
+            if let Ok(id) = EventId::from_hex(rest) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Status-event lookup / tag accessors
 // ---------------------------------------------------------------------------
@@ -573,6 +608,38 @@ async fn find_merge_status_event(
             "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for \
              proposal.root_event_id={}; found {}",
             proposal.root_event_id,
+            matches.len(),
+        ),
+    }
+}
+
+/// Find the single `Kind::GitStatusApplied` event signed by `signer_pubkey`
+/// whose root `e` tag points at the given issue id.
+async fn find_issue_resolved_status_event(
+    harness: &Harness,
+    issue_id: EventId,
+    signer_pubkey: PublicKey,
+) -> Result<Event> {
+    let events = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .author(signer_pubkey)
+                .kind(Kind::GitStatusApplied),
+        )
+        .await?;
+    let mut matches: Vec<Event> = events
+        .into_iter()
+        .filter(|e| event_root_e_tag(e) == Some(issue_id))
+        .collect();
+
+    match matches.len() {
+        1 => Ok(matches.pop().unwrap()),
+        0 => anyhow::bail!(
+            "no Kind::GitStatusApplied event from {signer_pubkey} found for issue {issue_id}"
+        ),
+        _ => anyhow::bail!(
+            "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for issue {issue_id}; found {}",
             matches.len(),
         ),
     }
@@ -968,6 +1035,108 @@ async fn apply_as_commits_with_patch_kind_proposal_publishes_status_event() -> R
             proposal.expected_q_event_ids,
         );
     }
+
+    Ok(())
+}
+
+/// Commit-message issue references should auto-resolve the issue when the
+/// commit reaches the default branch, preserving the original wording in the
+/// status content and tagging both source + merge commits as `r` tags.
+#[tokio::test]
+async fn merge_commit_with_implements_keyword_resolves_issue() -> Result<()> {
+    let harness = build_harness().await?;
+    let (maintainer_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("issue-resolution maintainer".into()),
+            identifier: Some("issue-resolution-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    let issue_id = ngit_issue_create(
+        &maintainer_repo,
+        "offline queue",
+        "track offline queue persistence",
+    )
+    .await?;
+    let issue_short = &issue_id.to_hex()[..8];
+
+    git_ok(
+        &maintainer_repo,
+        ["checkout", "-b", "fix-offline-queue"],
+        "git checkout -b fix-offline-queue",
+    )
+    .await?;
+    std::fs::write(maintainer_repo.dir().join("offline.md"), "offline queue\n")
+        .context("failed to write offline.md")?;
+    git_ok(
+        &maintainer_repo,
+        ["add", "offline.md"],
+        "git add offline.md",
+    )
+    .await?;
+    let commit_subject = format!("implements #{issue_short} offline queue");
+    git_ok(
+        &maintainer_repo,
+        ["commit", "-m", &commit_subject, "--no-gpg-sign"],
+        "git commit issue-fix branch",
+    )
+    .await?;
+    let source_commit = rev_parse(&maintainer_repo, "HEAD").await?;
+
+    git_ok(&maintainer_repo, ["checkout", "main"], "git checkout main").await?;
+    git_ok(
+        &maintainer_repo,
+        [
+            "merge",
+            "--no-ff",
+            "--no-gpg-sign",
+            "-m",
+            "Merge fix-offline-queue",
+            "fix-offline-queue",
+        ],
+        "git merge --no-ff fix-offline-queue",
+    )
+    .await?;
+    let merge_commit = rev_parse(&maintainer_repo, "HEAD").await?;
+
+    maintainer_repo
+        .nostr_push(["origin", "main"])
+        .await
+        .context("git push origin main after issue-fix merge")?;
+
+    let event = find_issue_resolved_status_event(
+        &harness,
+        issue_id,
+        published.maintainer_keys.public_key(),
+    )
+    .await?;
+
+    assert_eq!(
+        tag_first_value(&event, "alt"),
+        Some("issue resolved from commit message"),
+        "issue resolution status should carry canonical alt tag",
+    );
+    assert!(
+        has_r_tag(&event, &source_commit),
+        "issue resolution status should carry an `r` tag for source commit {source_commit}",
+    );
+    assert!(
+        has_r_tag(&event, &merge_commit),
+        "issue resolution status should carry an `r` tag for merge commit {merge_commit}",
+    );
+    assert!(
+        event.content.contains(&commit_subject),
+        "issue resolution content should preserve commit wording; got:\n{}",
+        event.content,
+    );
+    assert!(
+        event.content.contains(&format!(
+            "resolved by commit {source_commit}, when merged in commit {merge_commit}"
+        )),
+        "issue resolution content should include source+merge commit details; got:\n{}",
+        event.content,
+    );
 
     Ok(())
 }
