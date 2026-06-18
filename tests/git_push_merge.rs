@@ -1141,6 +1141,106 @@ async fn merge_commit_with_implements_keyword_resolves_issue() -> Result<()> {
     Ok(())
 }
 
+/// A no-ff merge can carry both a PR merge status and an issue-resolution
+/// status when the merge commit message includes a resolution keyword.
+#[tokio::test]
+async fn merge_commit_can_publish_pr_and_issue_status_events_together() -> Result<()> {
+    let harness = build_harness().await?;
+    let (maintainer_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("dual-status maintainer".into()),
+            identifier: Some("dual-status-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    let issue_id = ngit_issue_create(
+        &maintainer_repo,
+        "queue sync",
+        "track queue sync completion",
+    )
+    .await?;
+    let issue_nevent = Nip19Event {
+        event_id: issue_id,
+        relays: vec![],
+        author: None,
+        kind: None,
+    }
+    .to_bech32()
+    .context("failed to encode issue nevent")?;
+
+    let pr = harness
+        .publish_pr(
+            &published,
+            PublishPrOpts {
+                branch: Some("feature".into()),
+                commits: vec![
+                    ("a.md".to_string(), "alpha\n".to_string()),
+                    ("b.md".to_string(), "beta\n".to_string()),
+                ],
+                title: "merge me".into(),
+                description: "please merge".into(),
+                in_reply_to: vec![],
+            },
+        )
+        .await?;
+
+    let proposal = MergedProposal::from_pr(&pr);
+    let merge_oid = merge_pr_with_merge_commit(&maintainer_repo, &proposal)
+        .await
+        .context("failed to create merge commit for proposal")?;
+    let merge_subject = format!("Merge {}", long_branch(&proposal));
+    let merge_body = format!("closes nostr:{issue_nevent}");
+    git_ok(
+        &maintainer_repo,
+        [
+            "commit",
+            "--amend",
+            "--no-gpg-sign",
+            "-m",
+            &merge_subject,
+            "-m",
+            &merge_body,
+        ],
+        "git commit --amend merge message with issue keyword",
+    )
+    .await?;
+
+    let amended_merge_oid = rev_parse(&maintainer_repo, "HEAD").await?;
+    anyhow::ensure!(
+        merge_oid != amended_merge_oid,
+        "expected amended merge commit id to change when adding issue keyword",
+    );
+
+    maintainer_repo
+        .nostr_push(["origin", "main"])
+        .await
+        .context("git push origin main after combined-status merge")?;
+
+    let merge_status =
+        find_merge_status_event(&harness, &proposal, published.maintainer_keys.public_key())
+            .await?;
+    assert_eq!(
+        tag_first_value(&merge_status, "alt"),
+        Some("git proposal merged / applied"),
+        "merge status event should keep canonical alt text",
+    );
+
+    let issue_status = find_issue_resolved_status_event(
+        &harness,
+        issue_id,
+        published.maintainer_keys.public_key(),
+    )
+    .await?;
+    assert_eq!(
+        tag_first_value(&issue_status, "alt"),
+        Some("issue resolved from commit message"),
+        "issue status event should keep canonical alt text",
+    );
+
+    Ok(())
+}
+
 /// When a single push contains two no-ff merges, each issue-resolution status
 /// event should point to the merge commit that actually introduced its source
 /// commit (not just the youngest merge commit in the push batch).

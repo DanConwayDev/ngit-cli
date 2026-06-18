@@ -370,7 +370,7 @@ async fn create_and_publish_events_and_proposals(
             events.push(new_repo_state.event);
         }
 
-        if let Ok(merged_status_events) = get_merged_status_events(
+        match get_merged_status_events(
             term,
             &repo_ref.to_nostr_git_url(&None),
             repo_ref,
@@ -381,8 +381,16 @@ async fn create_and_publish_events_and_proposals(
         )
         .await
         {
-            for event in merged_status_events {
-                events.push(event);
+            Ok(merged_status_events) => {
+                for event in merged_status_events {
+                    events.push(event);
+                }
+            }
+            Err(err) => {
+                term.write_line(
+                    format!("warning: unable to build proposal merge status events: {err:#}")
+                        .as_str(),
+                )?;
             }
         }
 
