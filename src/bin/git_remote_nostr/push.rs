@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use client::{
-    delete_event_from_local_cache, get_events_from_local_cache, get_state_from_cache, send_events,
-    sign_event,
+    delete_event_from_local_cache, get_events_from_local_cache, get_issues_from_cache,
+    get_state_from_cache, send_events, sign_event,
 };
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
@@ -24,6 +24,7 @@ use ngit::{
     git::{self, nostr_url::NostrUrlDecoded},
     git_events::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
+        get_status, status_kinds,
     },
     list::list_from_remotes,
     login::{existing::load_existing_login, user::UserRef},
@@ -40,13 +41,13 @@ use ngit::{
     },
 };
 use nostr::{
-    Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, Tag,
+    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, RelayUrl, Tag,
     event::tag::TagCodec,
     hashes::sha1::Hash as Sha1Hash,
     nips::{
         nip01::Nip01Tag,
         nip10::{Marker, Nip10Tag},
-        nip19::ToBech32,
+        nip19::{Nip19, ToBech32},
         nip22::{CommentTarget, extract_root},
         nip34::Nip34Tag,
     },
@@ -333,6 +334,11 @@ async fn create_and_publish_events_and_proposals(
     let mut events = vec![];
     let mut old_state_event: Option<Event> = None;
     let mut new_state_event_id: Option<EventId> = None;
+    // The nostr repo-state event's HEAD tag is the maintainer-declared default
+    // branch — the most authoritative source for default-branch
+    // identification when deciding whether commit-message issue keywords
+    // should auto-resolve issues and when scoping proposal fork points.
+    let declared_default_branch = repo_state::default_branch_from_state(&existing_state);
 
     if !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, git_server_refspecs)?;
@@ -371,10 +377,27 @@ async fn create_and_publish_events_and_proposals(
             git_repo,
             &signer,
             git_server_refspecs,
+            declared_default_branch.as_deref(),
         )
         .await
         {
             for event in merged_status_events {
+                events.push(event);
+            }
+        }
+
+        if let Ok(issue_resolution_events) = get_issue_resolution_status_events(
+            term,
+            &repo_ref.to_nostr_git_url(&None),
+            repo_ref,
+            git_repo,
+            &signer,
+            git_server_refspecs,
+            declared_default_branch.as_deref(),
+        )
+        .await
+        {
+            for event in issue_resolution_events {
                 events.push(event);
             }
         }
@@ -392,11 +415,6 @@ async fn create_and_publish_events_and_proposals(
             events.push(repo_ref_event);
         }
     }
-
-    // The nostr repo-state event's HEAD tag is the maintainer-declared default
-    // branch — the most authoritative source for default-branch identification
-    // when scoping a proposal's fork point.
-    let declared_default_branch = repo_state::default_branch_from_state(&existing_state);
 
     let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
         client,
@@ -1157,11 +1175,12 @@ async fn get_merged_status_events(
     git_repo: &Repo,
     signer: &Arc<NgitSigner>,
     refspecs_to_git_server: &Vec<String>,
+    declared_default_branch: Option<&str>,
 ) -> Result<Vec<Event>> {
     let mut events = vec![];
     for refspec in refspecs_to_git_server {
         let (from, to) = refspec_to_from_to(refspec)?;
-        if to.eq("refs/heads/main") || to.eq("refs/heads/master") {
+        if is_default_branch_ref(to, declared_default_branch) {
             let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
             let Ok(tip_of_remote_branch) =
                 git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
@@ -1199,6 +1218,472 @@ async fn get_merged_status_events(
         }
     }
     Ok(events)
+}
+
+fn is_default_branch_ref(to_ref: &str, declared_default_branch: Option<&str>) -> bool {
+    if let Some(default_branch) = declared_default_branch {
+        return to_ref == format!("refs/heads/{default_branch}");
+    }
+    to_ref.eq("refs/heads/main") || to_ref.eq("refs/heads/master")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum IssueReferenceToken {
+    Full(EventId),
+    Shorthand8(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IssueResolutionMention {
+    verb: String,
+    phrase: String,
+    references: Vec<IssueReferenceToken>,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn get_issue_resolution_status_events(
+    term: &console::Term,
+    decoded_nostr_url: &NostrUrlDecoded,
+    repo_ref: &RepoRef,
+    git_repo: &Repo,
+    signer: &Arc<NgitSigner>,
+    refspecs_to_git_server: &Vec<String>,
+    declared_default_branch: Option<&str>,
+) -> Result<Vec<Event>> {
+    let issues = get_issues_from_cache(git_repo.get_path()?, repo_ref.coordinates()).await?;
+    if issues.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let issue_status_filters = vec![
+        nostr::Filter::default()
+            .kinds(status_kinds().clone())
+            .events(issues.iter().map(|e| e.id)),
+        nostr::Filter::default()
+            .custom_tags(
+                nostr::filter::SingleLetterTag::uppercase(nostr::filter::Alphabet::E),
+                issues.iter().map(|e| e.id),
+            )
+            .kinds(status_kinds().clone()),
+    ];
+
+    let mut statuses =
+        get_events_from_local_cache(git_repo.get_path()?, issue_status_filters).await?;
+    statuses.sort_by_key(|e| e.created_at);
+    statuses.reverse();
+
+    let signer_pubkey = signer.get_public_key().await?;
+    let empty_pr_roots: Vec<Event> = vec![];
+    let mut events = vec![];
+    let mut queued_issue_ids: HashSet<EventId> = HashSet::new();
+
+    for refspec in refspecs_to_git_server {
+        let (from, to) = refspec_to_from_to(refspec)?;
+        if !is_default_branch_ref(to, declared_default_branch) {
+            continue;
+        }
+
+        let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
+        let Ok(tip_of_remote_branch) =
+            git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
+                &git_repo.git_repo,
+                refspec,
+                &decoded_nostr_url.original_string,
+            )?)
+        else {
+            // branch not on remote
+            continue;
+        };
+
+        let (ahead, _) =
+            git_repo.get_commits_ahead_behind(&tip_of_remote_branch, &tip_of_pushed_branch)?;
+
+        // Track all merge commits introduced by this push so each referenced
+        // source commit can be attributed to the merge commit that actually
+        // landed it. `ahead` is youngest-first.
+        let merge_commits_in_push = ahead
+            .iter()
+            .filter_map(|hash| {
+                git_repo
+                    .git_repo
+                    .find_commit(sha1_to_oid(hash).ok()?)
+                    .ok()
+                    .filter(|c| c.parent_count() > 1)
+                    .map(|_| *hash)
+            })
+            .collect::<Vec<_>>();
+
+        for commit_hash in ahead {
+            let commit_message = git_repo
+                .get_commit_message(&commit_hash)
+                .unwrap_or_default();
+            let mentions = extract_issue_resolution_mentions(&commit_message);
+            if mentions.is_empty() {
+                continue;
+            }
+
+            for mention in mentions {
+                for reference in &mention.references {
+                    let issue = match resolve_issue_reference(reference, &issues) {
+                        IssueReferenceResolution::Found(issue) => issue,
+                        IssueReferenceResolution::Ambiguous => {
+                            term.write_line(
+                                format!(
+                                    "commit {}: {} reference is ambiguous in this repo, skipping",
+                                    short_sha1(&commit_hash),
+                                    issue_reference_to_string(reference)
+                                )
+                                .as_str(),
+                            )?;
+                            continue;
+                        }
+                        IssueReferenceResolution::NotFound => continue,
+                    };
+
+                    if queued_issue_ids.contains(&issue.id) {
+                        continue;
+                    }
+
+                    // Match command-level permissions: only issue author or
+                    // repository maintainers can change issue status.
+                    if issue.pubkey != signer_pubkey
+                        && !repo_ref.maintainers.contains(&signer_pubkey)
+                    {
+                        term.write_line(
+                            format!(
+                                "commit {} references issue {}, but signer is not authorized to resolve it",
+                                short_sha1(&commit_hash),
+                                &issue.id.to_hex()[..8]
+                            )
+                            .as_str(),
+                        )?;
+                        continue;
+                    }
+
+                    let current_status = get_status(&issue, repo_ref, &statuses, &empty_pr_roots);
+                    if current_status == Kind::GitStatusApplied
+                        || current_status == Kind::GitStatusClosed
+                    {
+                        continue;
+                    }
+
+                    let merge_commit = find_issue_merge_commit_for_source_commit(
+                        git_repo,
+                        &merge_commits_in_push,
+                        commit_hash,
+                    )
+                    .filter(|merge| *merge != commit_hash);
+                    let status_event = create_issue_resolution_status_event(
+                        signer,
+                        repo_ref,
+                        &issue,
+                        &mention,
+                        commit_hash,
+                        merge_commit,
+                    )
+                    .await?;
+
+                    term.write_line(
+                        format!(
+                            "commit {}: create issue status resolved event for {}",
+                            short_sha1(&commit_hash),
+                            &issue.id.to_hex()[..8]
+                        )
+                        .as_str(),
+                    )?;
+
+                    queued_issue_ids.insert(issue.id);
+                    statuses.push(status_event.clone());
+                    events.push(status_event);
+                }
+            }
+        }
+    }
+
+    Ok(events)
+}
+
+fn create_issue_resolution_content(
+    mention: &IssueResolutionMention,
+    source_commit: &Sha1Hash,
+    merge_commit: Option<Sha1Hash>,
+) -> String {
+    let base_phrase = mention.phrase.trim();
+    let mut details = if base_phrase.is_empty() {
+        mention.verb.clone()
+    } else {
+        base_phrase.to_string()
+    };
+
+    let suffix = if let Some(merge_commit) = merge_commit {
+        format!("resolved by commit {source_commit}, when merged in commit {merge_commit}")
+    } else {
+        format!("resolved by commit {source_commit}")
+    };
+
+    if details.is_empty() {
+        suffix
+    } else {
+        details.push_str("\n\n");
+        details.push_str(&suffix);
+        details
+    }
+}
+
+async fn create_issue_resolution_status_event(
+    signer: &Arc<NgitSigner>,
+    repo_ref: &RepoRef,
+    issue: &Event,
+    mention: &IssueResolutionMention,
+    source_commit: Sha1Hash,
+    merge_commit: Option<Sha1Hash>,
+) -> Result<Event> {
+    let mut public_keys = repo_ref
+        .maintainers
+        .iter()
+        .copied()
+        .collect::<HashSet<PublicKey>>();
+    public_keys.insert(issue.pubkey);
+
+    let alt_tag = Tag::parse(["alt", "issue resolved from commit message"])?;
+    let r_tag = Tag::parse(["r", &repo_ref.root_commit])?;
+    let mut commit_refs = vec![Tag::from(Nip34Tag::Reference(source_commit))];
+    if let Some(merge_commit) = merge_commit {
+        commit_refs.push(Tag::from(Nip34Tag::Reference(merge_commit)));
+    }
+
+    let content = create_issue_resolution_content(mention, &source_commit, merge_commit);
+
+    sign_event(
+        EventBuilder::new(Kind::GitStatusApplied, content).tags(
+            [
+                vec![
+                    alt_tag,
+                    Tag::from(Nip10Tag::Event {
+                        id: issue.id,
+                        relay_hint: repo_ref.relays.first().cloned(),
+                        marker: Some(Marker::Root),
+                        public_key: None,
+                    }),
+                ],
+                public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
+                repo_ref
+                    .coordinates()
+                    .iter()
+                    .map(|c| {
+                        Tag::from(Nip01Tag::Coordinate {
+                            coordinate: c.coordinate.clone(),
+                            relay_hint: c.relays.first().cloned(),
+                        })
+                    })
+                    .collect::<Vec<Tag>>(),
+                vec![r_tag],
+                commit_refs,
+            ]
+            .concat(),
+        ),
+        signer,
+        "issue resolved from commit".to_string(),
+    )
+    .await
+}
+
+fn short_sha1(hash: &Sha1Hash) -> String {
+    let s = hash.to_string();
+    s[..s.len().min(7)].to_string()
+}
+
+fn issue_reference_to_string(reference: &IssueReferenceToken) -> String {
+    match reference {
+        IssueReferenceToken::Full(id) => id.to_hex(),
+        IssueReferenceToken::Shorthand8(prefix) => format!("#{prefix}"),
+    }
+}
+
+enum IssueReferenceResolution {
+    Found(Box<Event>),
+    NotFound,
+    Ambiguous,
+}
+
+fn resolve_issue_reference(
+    reference: &IssueReferenceToken,
+    issues: &[Event],
+) -> IssueReferenceResolution {
+    match reference {
+        IssueReferenceToken::Full(id) => issues
+            .iter()
+            .find(|e| e.id == *id)
+            .cloned()
+            .map_or(IssueReferenceResolution::NotFound, |e| {
+                IssueReferenceResolution::Found(Box::new(e))
+            }),
+        IssueReferenceToken::Shorthand8(prefix) => {
+            let matches = issues
+                .iter()
+                .filter(|e| e.id.to_hex().starts_with(prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [single] => IssueReferenceResolution::Found(Box::new(single.clone())),
+                [] => IssueReferenceResolution::NotFound,
+                _ => IssueReferenceResolution::Ambiguous,
+            }
+        }
+    }
+}
+
+fn extract_issue_resolution_mentions(commit_message: &str) -> Vec<IssueResolutionMention> {
+    let mut mentions = vec![];
+
+    for line in commit_message.lines() {
+        let trimmed_line = line.trim();
+        if trimmed_line.is_empty() {
+            continue;
+        }
+
+        let words: Vec<&str> = trimmed_line.split_whitespace().collect();
+        for idx in 0..words.len() {
+            let Some(verb) = normalized_resolution_verb(words[idx]) else {
+                continue;
+            };
+            let references = parse_issue_reference_tokens(&words[idx + 1..]);
+            if references.is_empty() {
+                continue;
+            }
+            mentions.push(IssueResolutionMention {
+                verb,
+                phrase: trimmed_line.to_string(),
+                references,
+            });
+        }
+    }
+
+    mentions
+}
+
+fn normalized_resolution_verb(word: &str) -> Option<String> {
+    let normalized = word
+        .trim_matches(|c: char| {
+            c.is_ascii_whitespace()
+                || matches!(
+                    c,
+                    ',' | '.' | ';' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
+                )
+        })
+        .trim_end_matches(':')
+        .to_ascii_lowercase();
+
+    if [
+        "close",
+        "closes",
+        "closed",
+        "closing",
+        "fix",
+        "fixes",
+        "fixed",
+        "fixing",
+        "resolve",
+        "resolves",
+        "resolved",
+        "resolving",
+        "implement",
+        "implements",
+        "implemented",
+        "implementing",
+    ]
+    .contains(&normalized.as_str())
+    {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn parse_issue_reference_tokens(words: &[&str]) -> Vec<IssueReferenceToken> {
+    let mut refs = vec![];
+    let mut seen_full = HashSet::new();
+    let mut seen_short = HashSet::new();
+
+    for raw in words {
+        let token = raw.trim_matches(|c: char| {
+            c.is_ascii_whitespace()
+                || matches!(
+                    c,
+                    ',' | '.'
+                        | ':'
+                        | ';'
+                        | '!'
+                        | '?'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '<'
+                        | '>'
+                        | '"'
+                        | '\''
+                )
+        });
+        if token.is_empty() {
+            continue;
+        }
+
+        if let Some(short) = token.strip_prefix('#') {
+            if short.len() == 8 && short.chars().all(|c| c.is_ascii_hexdigit()) {
+                let lowered = short.to_ascii_lowercase();
+                if seen_short.insert(lowered.clone()) {
+                    refs.push(IssueReferenceToken::Shorthand8(lowered));
+                }
+                continue;
+            }
+        }
+
+        let candidate = token.strip_prefix("nostr:").unwrap_or(token);
+        if let Some(event_id) = parse_event_id_token(candidate) {
+            if seen_full.insert(event_id) {
+                refs.push(IssueReferenceToken::Full(event_id));
+            }
+        }
+    }
+
+    refs
+}
+
+fn parse_event_id_token(token: &str) -> Option<EventId> {
+    if let Ok(nip19) = Nip19::from_bech32(token) {
+        match nip19 {
+            Nip19::Event(e) => return Some(e.event_id),
+            Nip19::EventId(id) => return Some(id),
+            _ => {}
+        }
+    }
+
+    EventId::from_hex(token).ok()
+}
+
+fn find_issue_merge_commit_for_source_commit(
+    git_repo: &Repo,
+    merge_commits_in_push: &[Sha1Hash],
+    source_commit: Sha1Hash,
+) -> Option<Sha1Hash> {
+    let source_oid = sha1_to_oid(&source_commit).ok()?;
+
+    // `merge_commits_in_push` is in youngest-first order. If multiple merge
+    // commits are descendants of `source_commit` in one push, we want the
+    // merge that *introduced* it, i.e. the oldest matching descendant in this
+    // push batch.
+    merge_commits_in_push.iter().copied().rfind(|merge| {
+        let Ok(merge_oid) = sha1_to_oid(merge) else {
+            return false;
+        };
+        git_repo
+            .git_repo
+            .graph_descendant_of(merge_oid, source_oid)
+            .unwrap_or(false)
+    })
 }
 
 /// (`proposal_id`, `revision_id`)
@@ -1766,6 +2251,8 @@ fn get_refspecs_from_push_batch(stdin: &Stdin, initial_refspec: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use nostr::nips::nip19::Nip19Event;
+
     use super::*;
 
     mod refspec_to_from_to {
@@ -1775,6 +2262,128 @@ mod tests {
         fn trailing_plus_stripped() {
             let (from, _) = refspec_to_from_to("+testing:testingb").unwrap();
             assert_eq!(from, "testing");
+        }
+    }
+
+    mod issue_resolution_mentions {
+        use super::*;
+
+        #[test]
+        fn parses_implement_with_shorthand_issue_reference() {
+            let mentions =
+                extract_issue_resolution_mentions("implement #0afd5344 offline queue syncing");
+
+            assert_eq!(mentions.len(), 1);
+            assert_eq!(mentions[0].verb, "implement");
+            assert!(
+                mentions[0]
+                    .references
+                    .contains(&IssueReferenceToken::Shorthand8("0afd5344".to_string()))
+            );
+        }
+
+        #[test]
+        fn parses_full_hex_nevent_and_nostr_nevent() {
+            let id = EventId::from_hex(
+                "0afd5344c3345f0603bc5f5e81c8c62b963cefc1cb178c6ba603bb85a0821ef0",
+            )
+            .unwrap();
+            let nevent = Nip19Event {
+                event_id: id,
+                relays: vec![],
+                author: None,
+                kind: None,
+            }
+            .to_bech32()
+            .unwrap();
+            let content = format!(
+                "fixed <{}> and resolves {} and closes nostr:{}",
+                id.to_hex(),
+                nevent,
+                nevent
+            );
+
+            let mentions = extract_issue_resolution_mentions(&content);
+
+            assert!(
+                mentions
+                    .iter()
+                    .any(|m| m.references.contains(&IssueReferenceToken::Full(id)))
+            );
+        }
+
+        #[test]
+        fn resolution_content_includes_phrase_and_merge_context() {
+            let mention = IssueResolutionMention {
+                verb: "fixes".to_string(),
+                phrase: "fixes #0afd5344 offline queue".to_string(),
+                references: vec![IssueReferenceToken::Shorthand8("0afd5344".to_string())],
+            };
+            let source = "1111111111111111111111111111111111111111"
+                .parse::<Sha1Hash>()
+                .unwrap();
+            let merge = "2222222222222222222222222222222222222222"
+                .parse::<Sha1Hash>()
+                .unwrap();
+
+            let content = create_issue_resolution_content(&mention, &source, Some(merge));
+
+            assert!(content.contains("fixes #0afd5344 offline queue"));
+            assert!(content.contains(&format!(
+                "resolved by commit {source}, when merged in commit {merge}"
+            )));
+        }
+
+        #[test]
+        fn does_not_parse_shorthand_without_hash_prefix() {
+            let mentions =
+                extract_issue_resolution_mentions("fixes 0afd5344 offline queue syncing");
+
+            assert!(
+                mentions.is_empty(),
+                "8-char shorthand without # prefix should not be interpreted as an issue ref"
+            );
+        }
+
+        #[test]
+        fn does_not_parse_invalid_shorthand_lengths_or_chars() {
+            let mentions = extract_issue_resolution_mentions(
+                "fixes #0afd534 and fixes #0afd5344zz and fixes #0afd53444",
+            );
+
+            assert!(
+                mentions.is_empty(),
+                "invalid shorthand tokens should not be interpreted as issue refs"
+            );
+        }
+
+        #[test]
+        fn does_not_parse_non_event_bech32_as_issue_reference() {
+            let mentions = extract_issue_resolution_mentions(
+                "fixes nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6",
+            );
+
+            assert!(
+                mentions.is_empty(),
+                "npub/nprofile tokens should not be interpreted as issue refs"
+            );
+        }
+
+        #[test]
+        fn does_not_parse_event_reference_without_resolution_verb() {
+            let id = EventId::from_hex(
+                "0afd5344c3345f0603bc5f5e81c8c62b963cefc1cb178c6ba603bb85a0821ef0",
+            )
+            .unwrap();
+            let mentions = extract_issue_resolution_mentions(&format!(
+                "offline queue touches {} but no status keyword present",
+                id.to_hex()
+            ));
+
+            assert!(
+                mentions.is_empty(),
+                "event refs should only trigger when preceded by a recognized resolution verb"
+            );
         }
     }
 }
