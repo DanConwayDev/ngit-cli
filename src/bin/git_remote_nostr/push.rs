@@ -2302,5 +2302,57 @@ mod tests {
                 "resolved by commit {source}, when merged in commit {merge}"
             )));
         }
+
+        #[test]
+        fn does_not_parse_shorthand_without_hash_prefix() {
+            let mentions =
+                extract_issue_resolution_mentions("fixes 0afd5344 offline queue syncing");
+
+            assert!(
+                mentions.is_empty(),
+                "8-char shorthand without # prefix should not be interpreted as an issue ref"
+            );
+        }
+
+        #[test]
+        fn does_not_parse_invalid_shorthand_lengths_or_chars() {
+            let mentions = extract_issue_resolution_mentions(
+                "fixes #0afd534 and fixes #0afd5344zz and fixes #0afd53444",
+            );
+
+            assert!(
+                mentions.is_empty(),
+                "invalid shorthand tokens should not be interpreted as issue refs"
+            );
+        }
+
+        #[test]
+        fn does_not_parse_non_event_bech32_as_issue_reference() {
+            let mentions = extract_issue_resolution_mentions(
+                "fixes nostr:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6",
+            );
+
+            assert!(
+                mentions.is_empty(),
+                "npub/nprofile tokens should not be interpreted as issue refs"
+            );
+        }
+
+        #[test]
+        fn does_not_parse_event_reference_without_resolution_verb() {
+            let id = EventId::from_hex(
+                "0afd5344c3345f0603bc5f5e81c8c62b963cefc1cb178c6ba603bb85a0821ef0",
+            )
+            .unwrap();
+            let mentions = extract_issue_resolution_mentions(&format!(
+                "offline queue touches {} but no status keyword present",
+                id.to_hex()
+            ));
+
+            assert!(
+                mentions.is_empty(),
+                "event refs should only trigger when preceded by a recognized resolution verb"
+            );
+        }
     }
 }
