@@ -1141,6 +1141,150 @@ async fn merge_commit_with_implements_keyword_resolves_issue() -> Result<()> {
     Ok(())
 }
 
+/// When a single push contains two no-ff merges, each issue-resolution status
+/// event should point to the merge commit that actually introduced its source
+/// commit (not just the youngest merge commit in the push batch).
+#[tokio::test]
+async fn two_no_ff_merges_in_one_push_attribute_each_issue_to_correct_merge_commit() -> Result<()> {
+    let harness = build_harness().await?;
+    let (maintainer_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("multi-merge issue-resolution maintainer".into()),
+            identifier: Some("multi-merge-issue-resolution-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    let issue_one = ngit_issue_create(&maintainer_repo, "issue one", "first issue").await?;
+    let issue_two = ngit_issue_create(&maintainer_repo, "issue two", "second issue").await?;
+    let issue_one_short = &issue_one.to_hex()[..8];
+    let issue_two_short = &issue_two.to_hex()[..8];
+
+    // Branch 1 -> issue one.
+    git_ok(
+        &maintainer_repo,
+        ["checkout", "-b", "fix-issue-one"],
+        "git checkout -b fix-issue-one",
+    )
+    .await?;
+    std::fs::write(maintainer_repo.dir().join("one.md"), "one\n")
+        .context("failed to write one.md")?;
+    git_ok(&maintainer_repo, ["add", "one.md"], "git add one.md").await?;
+    let issue_one_subject = format!("implements #{issue_one_short} first fix");
+    git_ok(
+        &maintainer_repo,
+        ["commit", "-m", &issue_one_subject, "--no-gpg-sign"],
+        "git commit issue one",
+    )
+    .await?;
+    let source_one = rev_parse(&maintainer_repo, "HEAD").await?;
+
+    // Branch 2 -> issue two.
+    git_ok(&maintainer_repo, ["checkout", "main"], "git checkout main").await?;
+    git_ok(
+        &maintainer_repo,
+        ["checkout", "-b", "fix-issue-two"],
+        "git checkout -b fix-issue-two",
+    )
+    .await?;
+    std::fs::write(maintainer_repo.dir().join("two.md"), "two\n")
+        .context("failed to write two.md")?;
+    git_ok(&maintainer_repo, ["add", "two.md"], "git add two.md").await?;
+    let issue_two_subject = format!("implements #{issue_two_short} second fix");
+    git_ok(
+        &maintainer_repo,
+        ["commit", "-m", &issue_two_subject, "--no-gpg-sign"],
+        "git commit issue two",
+    )
+    .await?;
+    let source_two = rev_parse(&maintainer_repo, "HEAD").await?;
+
+    // Merge both branches into main before a single push.
+    git_ok(&maintainer_repo, ["checkout", "main"], "git checkout main").await?;
+    git_ok(
+        &maintainer_repo,
+        [
+            "merge",
+            "--no-ff",
+            "--no-gpg-sign",
+            "-m",
+            "Merge fix-issue-one",
+            "fix-issue-one",
+        ],
+        "git merge --no-ff fix-issue-one",
+    )
+    .await?;
+    let merge_one = rev_parse(&maintainer_repo, "HEAD").await?;
+
+    git_ok(
+        &maintainer_repo,
+        [
+            "merge",
+            "--no-ff",
+            "--no-gpg-sign",
+            "-m",
+            "Merge fix-issue-two",
+            "fix-issue-two",
+        ],
+        "git merge --no-ff fix-issue-two",
+    )
+    .await?;
+    let merge_two = rev_parse(&maintainer_repo, "HEAD").await?;
+
+    maintainer_repo
+        .nostr_push(["origin", "main"])
+        .await
+        .context("git push origin main after two merges")?;
+
+    let event_one = find_issue_resolved_status_event(
+        &harness,
+        issue_one,
+        published.maintainer_keys.public_key(),
+    )
+    .await?;
+    let event_two = find_issue_resolved_status_event(
+        &harness,
+        issue_two,
+        published.maintainer_keys.public_key(),
+    )
+    .await?;
+
+    assert!(
+        has_r_tag(&event_one, &source_one),
+        "issue one status should carry source commit r tag {source_one}; tags: {:?}",
+        event_one.tags
+    );
+    assert!(
+        has_r_tag(&event_two, &source_two),
+        "issue two status should carry source commit r tag {source_two}; tags: {:?}",
+        event_two.tags
+    );
+
+    assert!(
+        has_r_tag(&event_one, &merge_one),
+        "issue one status should carry merge-one r tag {merge_one}; tags: {:?}",
+        event_one.tags
+    );
+    assert!(
+        !has_r_tag(&event_one, &merge_two),
+        "issue one status should not carry merge-two r tag {merge_two}; tags: {:?}",
+        event_one.tags
+    );
+
+    assert!(
+        has_r_tag(&event_two, &merge_two),
+        "issue two status should carry merge-two r tag {merge_two}; tags: {:?}",
+        event_two.tags
+    );
+    assert!(
+        !has_r_tag(&event_two, &merge_one),
+        "issue two status should not carry merge-one r tag {merge_one}; tags: {:?}",
+        event_two.tags
+    );
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Shared assertions
 // ---------------------------------------------------------------------------

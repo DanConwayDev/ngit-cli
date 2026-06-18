@@ -1240,6 +1240,7 @@ struct IssueResolutionMention {
     references: Vec<IssueReferenceToken>,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn get_issue_resolution_status_events(
     term: &console::Term,
     decoded_nostr_url: &NostrUrlDecoded,
@@ -1297,17 +1298,20 @@ async fn get_issue_resolution_status_events(
         let (ahead, _) =
             git_repo.get_commits_ahead_behind(&tip_of_remote_branch, &tip_of_pushed_branch)?;
 
-        // If this push introduced a true merge commit, annotate issue status
-        // events with both the source commit that referenced the issue and the
-        // merge commit that landed it.
-        let merge_commit_in_push = ahead.iter().find_map(|hash| {
-            git_repo
-                .git_repo
-                .find_commit(sha1_to_oid(hash).ok()?)
-                .ok()
-                .filter(|c| c.parent_count() > 1)
-                .map(|_| *hash)
-        });
+        // Track all merge commits introduced by this push so each referenced
+        // source commit can be attributed to the merge commit that actually
+        // landed it. `ahead` is youngest-first.
+        let merge_commits_in_push = ahead
+            .iter()
+            .filter_map(|hash| {
+                git_repo
+                    .git_repo
+                    .find_commit(sha1_to_oid(hash).ok()?)
+                    .ok()
+                    .filter(|c| c.parent_count() > 1)
+                    .map(|_| *hash)
+            })
+            .collect::<Vec<_>>();
 
         for commit_hash in ahead {
             let commit_message = git_repo
@@ -1363,7 +1367,12 @@ async fn get_issue_resolution_status_events(
                         continue;
                     }
 
-                    let merge_commit = merge_commit_in_push.filter(|merge| *merge != commit_hash);
+                    let merge_commit = find_issue_merge_commit_for_source_commit(
+                        git_repo,
+                        &merge_commits_in_push,
+                        commit_hash,
+                    )
+                    .filter(|merge| *merge != commit_hash);
                     let status_event = create_issue_resolution_status_event(
                         signer,
                         repo_ref,
@@ -1407,10 +1416,7 @@ fn create_issue_resolution_content(
     };
 
     let suffix = if let Some(merge_commit) = merge_commit {
-        format!(
-            "resolved by commit {}, when merged in commit {}",
-            source_commit, merge_commit
-        )
+        format!("resolved by commit {source_commit}, when merged in commit {merge_commit}")
     } else {
         format!("resolved by commit {source_commit}")
     };
@@ -1495,7 +1501,7 @@ fn issue_reference_to_string(reference: &IssueReferenceToken) -> String {
 }
 
 enum IssueReferenceResolution {
-    Found(Event),
+    Found(Box<Event>),
     NotFound,
     Ambiguous,
 }
@@ -1505,10 +1511,13 @@ fn resolve_issue_reference(
     issues: &[Event],
 ) -> IssueReferenceResolution {
     match reference {
-        IssueReferenceToken::Full(id) => issues.iter().find(|e| e.id == *id).cloned().map_or(
-            IssueReferenceResolution::NotFound,
-            IssueReferenceResolution::Found,
-        ),
+        IssueReferenceToken::Full(id) => issues
+            .iter()
+            .find(|e| e.id == *id)
+            .cloned()
+            .map_or(IssueReferenceResolution::NotFound, |e| {
+                IssueReferenceResolution::Found(Box::new(e))
+            }),
         IssueReferenceToken::Shorthand8(prefix) => {
             let matches = issues
                 .iter()
@@ -1516,7 +1525,7 @@ fn resolve_issue_reference(
                 .cloned()
                 .collect::<Vec<_>>();
             match matches.as_slice() {
-                [single] => IssueReferenceResolution::Found(single.clone()),
+                [single] => IssueReferenceResolution::Found(Box::new(single.clone())),
                 [] => IssueReferenceResolution::NotFound,
                 _ => IssueReferenceResolution::Ambiguous,
             }
@@ -1543,7 +1552,7 @@ fn extract_issue_resolution_mentions(commit_message: &str) -> Vec<IssueResolutio
                 continue;
             }
             mentions.push(IssueResolutionMention {
-                verb: verb.to_string(),
+                verb,
                 phrase: trimmed_line.to_string(),
                 references,
             });
@@ -1653,6 +1662,28 @@ fn parse_event_id_token(token: &str) -> Option<EventId> {
     }
 
     EventId::from_hex(token).ok()
+}
+
+fn find_issue_merge_commit_for_source_commit(
+    git_repo: &Repo,
+    merge_commits_in_push: &[Sha1Hash],
+    source_commit: Sha1Hash,
+) -> Option<Sha1Hash> {
+    let source_oid = sha1_to_oid(&source_commit).ok()?;
+
+    // `merge_commits_in_push` is in youngest-first order. If multiple merge
+    // commits are descendants of `source_commit` in one push, we want the
+    // merge that *introduced* it, i.e. the oldest matching descendant in this
+    // push batch.
+    merge_commits_in_push.iter().copied().rfind(|merge| {
+        let Ok(merge_oid) = sha1_to_oid(merge) else {
+            return false;
+        };
+        git_repo
+            .git_repo
+            .graph_descendant_of(merge_oid, source_oid)
+            .unwrap_or(false)
+    })
 }
 
 /// (`proposal_id`, `revision_id`)
