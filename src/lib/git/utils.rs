@@ -27,10 +27,20 @@ pub fn check_ssh_keys() -> bool {
 }
 
 pub fn set_git_timeout() -> Result<()> {
+    let connect_ms = std::env::var("NGIT_HTTP_CONNECT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(3_000);
+
+    let io_ms = std::env::var("NGIT_HTTP_IO_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(15_000);
+
     unsafe {
         // Set a 3 000 ms timeout for establishing the TCP connection (default: 60 000
-        // ms).
-        set_server_connect_timeout_in_milliseconds(3_000)
+        // ms). Override with NGIT_HTTP_CONNECT_TIMEOUT_MS env var.
+        set_server_connect_timeout_in_milliseconds(connect_ms)
             .context("failed to set libgit2 connect timeout")?;
 
         // The server timeout applies per socket send()/recv() call rather than
@@ -38,10 +48,22 @@ pub fn set_git_timeout() -> Result<()> {
         // so each chunk’s transfer is subject to this timeout instead of the
         // overall command.
         //
-        // We set it to 15 000 ms (instead of the 300 000 ms default) to quickly
+        // Default is 15 000 ms (instead of libgit2's 300 000 ms default) to quickly
         // abort any stalled ~16 KiB chunk transfer—enabling fast failover across
         // redundant Git servers—while still accommodating transient hiccups.
-        set_server_timeout_in_milliseconds(15_000).context("failed to set libgit2 I/O timeout")?;
+        //
+        // For GRASP servers that buffer the entire receive-pack response (the
+        // current ngit-grasp implementation reads `git receive-pack` stdout to
+        // EOF before sending any HTTP body bytes back), the client sees zero
+        // bytes for as long as the server takes to index the pushed pack. Big
+        // packs (>100k objects) can easily exceed 15 s of silence, manifesting
+        // as `could not read from socket: timed out; class=Net (12); code=Timeout (-37)`
+        // even though the push actually completed server-side.
+        //
+        // Workaround: override via the NGIT_HTTP_IO_TIMEOUT_MS env var.
+        // Recommended values: 600_000 (10 min) for trees with >500k objects,
+        // 60_000 (1 min) for trees with >50k objects, default 15_000 otherwise.
+        set_server_timeout_in_milliseconds(io_ms).context("failed to set libgit2 I/O timeout")?;
 
         Ok(())
     }
