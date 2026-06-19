@@ -3,7 +3,7 @@
 //! Spawns the real `ngit-grasp` binary in in-memory test mode on a loopback
 //! port and waits for it to start accepting connections. Modelled on
 //! ngit-grasp's own `tests/common/relay.rs` — same env-var configuration,
-//! same TCP-connect readiness probe, same drop-based shutdown.
+//! same HTTP readiness probe, same drop-based shutdown.
 //!
 //! We deliberately do **not** link against `ngit_grasp` as a library: it pulls
 //! in `clap`, `dotenvy`, `tracing-subscriber`, etc., none of which are wanted
@@ -35,21 +35,25 @@ use std::{
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 use tempfile::TempDir;
-use tokio::time::sleep;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::sleep,
+};
 
 use crate::{
     port::{self, PortReservation},
     query,
 };
 
-/// How long to wait for ngit-grasp to accept TCP connections before giving up.
+/// How long to wait for ngit-grasp to handle HTTP requests before giving up.
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Poll interval for the readiness probe.
 const READY_POLL: Duration = Duration::from_millis(100);
-/// Tiny grace period after the first successful TCP connect, mirroring the
-/// upstream pattern. The relay listener accepts before the websocket handler
-/// is fully wired; without this the first REQ can race the binding.
+/// Tiny grace period after the first successful HTTP probe, mirroring the
+/// upstream pattern.
 const READY_GRACE: Duration = Duration::from_millis(100);
+/// Per-attempt timeout for the HTTP readiness probe once TCP connects.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// How many fresh port reservations to attempt before giving up. The
 /// subprocess binds itself from `NGIT_BIND_ADDRESS`, so there is a
 /// microsecond-scale TOCTOU window between [`PortReservation::release`]
@@ -243,17 +247,22 @@ impl GraspServer {
         Ok(server)
     }
 
-    /// Probe the listener with async TCP connects until it accepts, while
-    /// concurrently watching for the subprocess to exit early (the
-    /// signature of a bind-collision). Mirrors the pattern in ngit-grasp's
-    /// own test harness, plus the early-exit detection that lets us retry
-    /// instead of waiting the full 15s for a doomed process.
+    /// Probe the relay with a real HTTP request until it responds 200,
+    /// while concurrently watching for the subprocess to exit early (the
+    /// signature of a bind-collision). A raw TCP connect can succeed before
+    /// Hyper has installed the service that accepts test clients, so HTTP
+    /// readiness is the point where websocket REQs may safely begin racing
+    /// the relay.
+    ///
+    /// Mirrors the pattern in ngit-grasp's own test harness, plus the
+    /// early-exit detection that lets us retry instead of waiting the full
+    /// 15s for a doomed process.
     async fn wait_for_ready_or_early_exit(&mut self) -> std::result::Result<(), StartFailure> {
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
-            // Check whether the subprocess has already exited. If so the
-            // TCP probe will never succeed — bail immediately so the
-            // caller can retry with a fresh port.
+            // Check whether the subprocess has already exited. If so no
+            // readiness probe can succeed — bail immediately so the caller
+            // can retry with a fresh port.
             match self.process.try_wait() {
                 Ok(Some(status)) => return Err(StartFailure::EarlyExit { status }),
                 Ok(None) => { /* still running */ }
@@ -264,8 +273,10 @@ impl GraspServer {
                 }
             }
 
-            match tokio::net::TcpStream::connect(("127.0.0.1", self.port)).await {
+            match self.probe_http_ready().await {
                 Ok(_) => {
+                    // HTTP service handled a request successfully, so the
+                    // accept loop, Hyper service, and relay wiring are ready.
                     sleep(READY_GRACE).await;
                     return Ok(());
                 }
@@ -281,6 +292,48 @@ impl GraspServer {
                 }
             }
         }
+    }
+
+    async fn probe_http_ready(&self) -> std::io::Result<()> {
+        let probe = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", self.port)).await?;
+            // Use the relay's HTTP handler rather than a bare TCP connect:
+            // this verifies the accept loop and Hyper service are both live,
+            // which is what the immediately-following websocket tests need.
+            let request = format!(
+                "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                self.port
+            );
+            stream.write_all(request.as_bytes()).await?;
+
+            let mut response = [0_u8; 64];
+            let read = stream.read(&mut response).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "readiness probe got empty HTTP response",
+                ));
+            }
+
+            let status = String::from_utf8_lossy(&response[..read]);
+            if status.starts_with("HTTP/1.1 200") || status.starts_with("HTTP/1.0 200") {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("readiness probe got non-200 response: {status:?}"),
+                ))
+            }
+        };
+
+        tokio::time::timeout(READY_PROBE_TIMEOUT, probe)
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP readiness probe timed out",
+                ))
+            })
     }
 
     /// Role label this server was registered under (e.g. `"repo"`).
