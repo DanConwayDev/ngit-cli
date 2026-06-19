@@ -131,11 +131,16 @@ ngit pr checkout <ID|nevent>
 ### Merge (maintainer)
 
 ```bash
+ngit merge <ID|nevent>                    # merge PR into default branch; does not push
 ngit pr checkout <ID|nevent>
-git checkout main
-git merge pr/my-feature   # or: git merge --squash pr/my-feature && git commit
-git push origin main      # push to nostr remote records the merge event
+ngit merge                                # infers PR from checked-out pr/ branch
+ngit merge --exclude-description <ID|nevent>
+git push origin main                      # publishes the merge event
 ```
+
+`ngit merge` creates a no-ff merge commit on the default branch with the
+standard `Merge #<8-hex>: <PR title>` message. If conflicts occur, resolve them
+and run `git commit`; ngit has already prepared the commit message.
 
 ### Lifecycle
 
