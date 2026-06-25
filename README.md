@@ -21,6 +21,15 @@ install options:
 
 run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in your PATH.
 
+## configuration
+
+Run `ngit --customize` to list supported git config keys and their environment-variable overrides. Useful examples:
+
+```sh
+git config nostr.repo-relay-only true       # only publish nostr events to repo relays
+git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes up to 10 minutes of socket silence
+```
+
 ## contributions welcome!
 
 [gitworkshop.dev/danconwaydev.com/ngit](https://gitworkshop.dev/danconwaydev.com/ngit) to report issues and see PRs

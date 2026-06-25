@@ -134,6 +134,8 @@ async fn main() -> Result<()> {
 
     let git_repo_path = git_repo.get_path()?;
 
+    let _ = set_git_timeout(Some(&git_repo));
+
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     if let Ok((signer, _, _)) = load_existing_login(
@@ -160,8 +162,6 @@ async fn main() -> Result<()> {
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
 
     repo_ref.set_nostr_git_url(decoded_nostr_url.clone());
-
-    let _ = set_git_timeout();
 
     let stdin = io::stdin();
     let mut line = String::new();

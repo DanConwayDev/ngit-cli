@@ -60,9 +60,9 @@ pub fn customise_template() -> String {
 {title}
 ==============
 
-ngit settings are managed through git config. For the relay defaults below,
-environment variables override git config; local git config overrides global
-git config; built-in defaults are used last.
+ngit settings are managed through git config. Where an environment variable is
+listed, it overrides git config; local git config overrides global git config;
+built-in defaults are used last.
 
 {relay_defaults}
 
@@ -91,6 +91,15 @@ Values are semicolon-separated URLs without spaces.
     Semicolon-separated git-server hostnames that `ngit sync` should trust when
     they are fast-forward ahead of nostr state, without `--trust-server`.
     Example: {trust_server_example}
+
+  {http_connect_timeout:<39} {http_connect_timeout_env:<32}
+    HTTP connect timeout for libgit2 fetch/push operations in milliseconds.
+    Default: {http_connect_timeout_default}. Example: {http_connect_timeout_example}
+
+  {http_io_timeout:<39} {http_io_timeout_env:<32}
+    Per-socket send/recv timeout for libgit2 fetch/push operations in milliseconds.
+    Raise this for large pushes to GRASP servers that may be silent while indexing.
+    Default: {http_io_timeout_default}. Example: {http_io_timeout_example}
 
 {login_settings}
 
@@ -127,6 +136,14 @@ implementation details used for efficiency.
         trust_server_domains = key("nostr.trust-server-domains"),
         trust_server_example =
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
+        http_connect_timeout = key("nostr.http-connect-timeout-ms"),
+        http_connect_timeout_env = env("NGIT_HTTP_CONNECT_TIMEOUT_MS"),
+        http_connect_timeout_default = key("3000"),
+        http_connect_timeout_example = cmd("git config nostr.http-connect-timeout-ms 10000"),
+        http_io_timeout = key("nostr.http-io-timeout-ms"),
+        http_io_timeout_env = env("NGIT_HTTP_IO_TIMEOUT_MS"),
+        http_io_timeout_default = key("15000"),
+        http_io_timeout_example = cmd("git config nostr.http-io-timeout-ms 600000"),
         login_settings = section("Login settings"),
         login_cmd = cmd("ngit account login"),
         nsec = key("nostr.nsec"),
