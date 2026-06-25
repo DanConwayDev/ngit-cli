@@ -212,4 +212,5 @@ ngit sync --ref-name main        # sync specific ref
 ```bash
 ngit --customize                          # show all options
 git config nostr.repo-relay-only true     # don't broadcast to personal relays
+git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes
 ```

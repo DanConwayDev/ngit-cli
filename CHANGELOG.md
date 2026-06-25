@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ngit merge` merges a PR into the default branch as a no-ff merge commit (recording the PR nevent and author in the commit message) without pushing
 - `ngit account connect` as an alias for `ngit account login -i` (interactive nostr connect login) [hzd149]
 - Pushing commits that include issue-closing keywords (e.g. `fixes` / `resolves`) followed by #<hex-event-id-or-8-char-prefix> or nostr:nevent123 now auto-resolves referenced issues
+- Added env-var and git-config options to increase libgit2 HTTP connect and per-socket I/O timeouts, helpful for large pushes with git servers that may be silent for longer than the default timeout; `NGIT_HTTP_CONNECT_TIMEOUT_MS` / `NGIT_HTTP_IO_TIMEOUT_MS` override `nostr.http-connect-timeout-ms` / `nostr.http-io-timeout-ms` for one-off commands — thanks to new contributor mstrofnone
 
 ### Changed
 

@@ -35,7 +35,8 @@ async fn main() {
         std::process::exit(0); // Exit the program
     }
 
-    let _ = set_git_timeout();
+    let git_repo = git::Repo::discover().ok();
+    let _ = set_git_timeout(git_repo.as_ref());
 
     let result = if let Some(command) = &cli.command {
         match command {
