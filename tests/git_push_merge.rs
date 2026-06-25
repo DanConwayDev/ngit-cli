@@ -64,8 +64,8 @@
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use test_harness::{
-    Harness, PublishPatchSeriesOpts, PublishPrOpts, PublishRepoOpts, PublishedPatchSeries,
-    PublishedPr, PublishedRepo, Repo,
+    CloneLogin, Harness, KIND_PULL_REQUEST_UPDATE, PublishPatchSeriesOpts, PublishPrOpts,
+    PublishRepoOpts, PublishedPatchSeries, PublishedPr, PublishedRepo, Repo, clock,
 };
 
 // ---------------------------------------------------------------------------
@@ -805,6 +805,200 @@ async fn merge_commit_publishes_status_event_referencing_patch_series_cover_lett
             event.tags,
         );
     }
+
+    Ok(())
+}
+
+/// Regression coverage for PR updates (kind 1619): the original PR event's
+/// `c` tag is stale after the contributor publishes an update, so push-time
+/// merge-status detection must match the merge commit's second parent against
+/// the PR update event and resolve that update back to the original PR via its
+/// uppercase `E` tag.
+#[tokio::test]
+async fn ngit_merge_of_updated_pr_publishes_status_event_for_original_pr() -> Result<()> {
+    let harness = build_harness().await?;
+    let (maintainer_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("updated-pr maintainer".into()),
+            identifier: Some("updated-pr-merge-status".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "updated-pr contributor".into(),
+            },
+        )
+        .await?;
+    let contributor_nsec = contributor
+        .config("nostr.nsec")
+        .await?
+        .context("contributor clone missing nostr.nsec")?;
+    let contributor_pubkey = Keys::parse(&contributor_nsec)
+        .context("contributor nsec is not a valid key")?
+        .public_key();
+
+    git_ok(
+        &contributor,
+        ["checkout", "-b", "feature"],
+        "git checkout -b feature",
+    )
+    .await?;
+    std::fs::write(contributor.dir().join("a.md"), "alpha\n").context("failed to write a.md")?;
+    git_ok(&contributor, ["add", "a.md"], "git add a.md").await?;
+    git_ok(
+        &contributor,
+        ["commit", "-m", "add a.md", "--no-gpg-sign"],
+        "git commit add a.md",
+    )
+    .await?;
+    std::fs::write(contributor.dir().join("b.md"), "beta\n").context("failed to write b.md")?;
+    git_ok(&contributor, ["add", "b.md"], "git add b.md").await?;
+    git_ok(
+        &contributor,
+        ["commit", "-m", "add b.md", "--no-gpg-sign"],
+        "git commit add b.md",
+    )
+    .await?;
+    let original_tip = rev_parse(&contributor, "HEAD").await?;
+
+    let send_original = contributor
+        .ngit([
+            "send",
+            "HEAD~2",
+            "--force-pr",
+            "--title",
+            "updated pr",
+            "--description",
+            "original description",
+        ])
+        .output()
+        .await
+        .context("failed to spawn ngit send --force-pr")?;
+    anyhow::ensure!(
+        send_original.status.success(),
+        "ngit send --force-pr exited {:?}\nstdout: {}\nstderr: {}",
+        send_original.status,
+        String::from_utf8_lossy(&send_original.stdout),
+        String::from_utf8_lossy(&send_original.stderr),
+    );
+
+    let original_pr_event = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .author(contributor_pubkey)
+                .kind(test_harness::KIND_PULL_REQUEST),
+        )
+        .await?
+        .into_iter()
+        .find(|e| tag_first_value(e, "branch-name") == Some("feature"))
+        .context("no original PR event for branch feature found on grasp repo")?;
+    assert_eq!(
+        tag_first_value(&original_pr_event, "c"),
+        Some(original_tip.as_str()),
+        "original PR event should point at the initial feature tip",
+    );
+
+    // `ngit merge` selects the latest PR update by event timestamp. Keep the
+    // update strictly newer than the original PR even when this test runs in
+    // parallel with the rest of the integration file.
+    clock::tick_to_next_second().await;
+
+    std::fs::write(contributor.dir().join("c.md"), "gamma\n").context("failed to write c.md")?;
+    git_ok(&contributor, ["add", "c.md"], "git add c.md").await?;
+    git_ok(
+        &contributor,
+        ["commit", "-m", "add c.md", "--no-gpg-sign"],
+        "git commit add c.md",
+    )
+    .await?;
+    let updated_tip = rev_parse(&contributor, "HEAD").await?;
+    assert_ne!(
+        updated_tip, original_tip,
+        "test setup must make the PR update tip differ from the original PR tip",
+    );
+
+    let original_pr_id = original_pr_event.id.to_hex();
+    let send_update = contributor
+        .ngit([
+            "send",
+            "HEAD~3",
+            "--force-pr",
+            "--in-reply-to",
+            &original_pr_id,
+            "--title",
+            "updated pr v2",
+            "--description",
+            "updated description",
+        ])
+        .output()
+        .await
+        .context("failed to spawn ngit send --force-pr --in-reply-to")?;
+    anyhow::ensure!(
+        send_update.status.success(),
+        "ngit send --force-pr --in-reply-to exited {:?}\nstdout: {}\nstderr: {}",
+        send_update.status,
+        String::from_utf8_lossy(&send_update.stdout),
+        String::from_utf8_lossy(&send_update.stderr),
+    );
+
+    let pr_update_event = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .author(contributor_pubkey)
+                .kind(KIND_PULL_REQUEST_UPDATE),
+        )
+        .await?
+        .into_iter()
+        .find(|e| tag_first_value(e, "c") == Some(updated_tip.as_str()))
+        .context("no PR update event with updated c tip found on grasp repo")?;
+    assert_eq!(
+        tag_first_value(&pr_update_event, "E"),
+        Some(original_pr_id.as_str()),
+        "PR update must point back to the original PR through uppercase E",
+    );
+
+    let merge_out = maintainer_repo
+        .ngit(["merge", &original_pr_id])
+        .output()
+        .await
+        .context("failed to spawn ngit merge for updated PR")?;
+    anyhow::ensure!(
+        merge_out.status.success(),
+        "ngit merge updated PR exited {:?}\nstdout: {}\nstderr: {}",
+        merge_out.status,
+        String::from_utf8_lossy(&merge_out.stdout),
+        String::from_utf8_lossy(&merge_out.stderr),
+    );
+    let merge_oid = rev_parse(&maintainer_repo, "HEAD").await?;
+    let merged_parent = rev_parse(&maintainer_repo, "HEAD^2").await?;
+    assert_eq!(
+        merged_parent, updated_tip,
+        "ngit merge should merge the latest PR update tip, not the stale original PR tip",
+    );
+
+    maintainer_repo
+        .nostr_push(["origin", "main"])
+        .await
+        .context("git push origin main after ngit merge of updated PR")?;
+
+    let proposal = MergedProposal {
+        kind: ProposalKind::Pr,
+        root_event_id: original_pr_event.id,
+        branch_name: "feature".into(),
+        tip: updated_tip,
+        expected_q_event_ids: vec![pr_update_event.id],
+    };
+    let event =
+        find_merge_status_event(&harness, &proposal, published.maintainer_keys.public_key())
+            .await?;
+
+    assert_merge_commit_status_event(&event, &proposal, &merge_oid);
 
     Ok(())
 }

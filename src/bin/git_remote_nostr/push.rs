@@ -48,7 +48,7 @@ use nostr::{
         nip01::Nip01Tag,
         nip10::{Marker, Nip10Tag},
         nip19::{Nip19, ToBech32},
-        nip22::{CommentTarget, extract_root},
+        nip22::CommentTarget,
         nip34::Nip34Tag,
     },
 };
@@ -2017,7 +2017,7 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
     if event.kind.eq(&KIND_PULL_REQUEST) {
         return Ok((event.id, None));
     } else if event.kind.eq(&KIND_PULL_REQUEST_UPDATE) {
-        if let Some(root) = extract_root(event) {
+        if let Some(root) = extract_pr_update_root(event) {
             if let CommentTarget::Event {
                 id,
                 relay_hint: _,
@@ -2080,6 +2080,36 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
     } else {
         Ok((proposal_or_revision.id, None))
     }
+}
+
+// Temporary patch: nip22::extract_root currently only supports kind-1111
+// events, so PR updates need to read their uppercase E root directly until this
+// lands:
+// nostr:nevent1qy28wumn8ghj7un9d3shjtnwva5hgtnyv4mqqgpvqufjr53e8xrzvsx6whg8aptd3hqfzjllssa33chtu72t9jrgev6cghgp
+fn extract_pr_update_root(event: &Event) -> Option<CommentTarget<'_>> {
+    let id = event.tags.iter().find_map(|tag| {
+        let tag = tag.as_slice();
+        (tag.first().map(String::as_str) == Some("E"))
+            .then(|| tag.get(1))
+            .flatten()
+            .and_then(|id| EventId::parse(id).ok())
+    })?;
+
+    let kind = event.tags.iter().find_map(|tag| {
+        let tag = tag.as_slice();
+        (tag.first().map(String::as_str) == Some("K"))
+            .then(|| tag.get(1))
+            .flatten()
+            .and_then(|kind| kind.parse::<u16>().ok())
+            .map(Kind::from_u16)
+    });
+
+    Some(CommentTarget::Event {
+        id,
+        relay_hint: None,
+        pubkey_hint: None,
+        kind,
+    })
 }
 
 async fn get_proposal_or_revision_event(git_repo: &Repo, event: &Event) -> Result<Event> {

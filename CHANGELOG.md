@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Merge status detection now handles updated PRs correctly
 - Better default branch and merge-base detection when force-pushing PRs
 - `cargo install ngit` was failing to build due to an upstream dependency picking up an incompatible `git2` version
 - Pushing a tag through a `nostr://` remote wrote a stray ref at `refs/remotes/<remote>/<tagname>` — git's remote-tracking branch namespace — so tags appeared as remote branches in `git branch -r`, IDE listings, completion, etc. The remote helper no longer writes a per-remote tracking ref for tags (the local `refs/tags/<name>` is git's single source of truth), and `ngit sync` sources tag push refspecs directly from the nostr state event oid. On the next push or `ngit sync`, any stray legacy entries are deleted automatically.
