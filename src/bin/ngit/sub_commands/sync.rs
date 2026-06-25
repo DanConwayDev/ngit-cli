@@ -105,25 +105,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     let mut nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
 
-    // Self-heal: an earlier ngit version cached tag tracking refs under
-    // `refs/remotes/<nostr_remote>/<tagname>` — git's remote-tracking branch
-    // namespace — so pushed tags showed up as remote branches in
-    // `git branch -r`, IDEs, etc.  Tags are now sourced directly from the
-    // nostr state event oid when building push refspecs, so any such entries
-    // are stray.  Delete them on every sync so affected repos clean up
-    // without manual intervention.
-    for nostr_ref_name in nostr_state.state.keys() {
-        if !nostr_ref_name.starts_with("refs/tags/") || nostr_ref_name.ends_with("^{}") {
-            continue;
-        }
-        let Some(short) = nostr_ref_name.strip_prefix("refs/tags/") else {
-            continue;
-        };
-        let legacy = format!("refs/remotes/{nostr_remote_name}/{short}");
-        if let Ok(mut r) = git_repo.git_repo.find_reference(&legacy) {
-            let _ = r.delete();
-        }
-    }
+    delete_legacy_tag_tracking_refs(&git_repo.git_repo, &nostr_remote_name, &nostr_state.state);
 
     // When --force is given, rebuild and republish the state event even if
     // nothing has changed.  This lets users repair repos whose state event is
@@ -819,6 +801,57 @@ fn invalid_nostr_state_ref(ref_name: &str) -> bool {
         || (!ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/"))
 }
 
+fn delete_legacy_tag_tracking_refs(
+    git_repo: &git2::Repository,
+    nostr_remote_name: &str,
+    state: &HashMap<String, String>,
+) {
+    // Self-heal: older ngit versions cached tag tracking refs under git's
+    // remote-tracking branch namespace, so tags appeared as remote branches in
+    // `git branch -r`, IDEs, etc. Tags are now sourced directly from the nostr
+    // state event oid when building push refspecs, so any such entries are
+    // stray. Delete them on every sync so affected repos clean up without a
+    // manual `git update-ref -d` workaround.
+    let v21_prefix = format!("refs/remotes/{nostr_remote_name}/refs/tags/");
+    if let Ok(mut refs) = git_repo.references() {
+        let legacy_v21_refs: Vec<String> = refs
+            .names()
+            .filter_map(std::result::Result::ok)
+            .filter(|name| name.starts_with(&v21_prefix))
+            .map(str::to_string)
+            .collect();
+        for legacy in legacy_v21_refs {
+            delete_ref_if_exists(git_repo, &legacy);
+        }
+    }
+
+    for nostr_ref_name in state.keys() {
+        if !nostr_ref_name.starts_with("refs/tags/") || nostr_ref_name.ends_with("^{}") {
+            continue;
+        }
+
+        let Some(short) = nostr_ref_name.strip_prefix("refs/tags/") else {
+            continue;
+        };
+
+        for legacy in [
+            // Written by the first tag-tracking fix regression.
+            format!("refs/remotes/{nostr_remote_name}/{short}"),
+            // Written by ngit v2.1 sync, which embedded the full tag refname in
+            // the remote-tracking namespace.
+            format!("refs/remotes/{nostr_remote_name}/{nostr_ref_name}"),
+        ] {
+            delete_ref_if_exists(git_repo, &legacy);
+        }
+    }
+}
+
+fn delete_ref_if_exists(git_repo: &git2::Repository, name: &str) {
+    if let Ok(mut r) = git_repo.find_reference(name) {
+        let _ = r.delete();
+    }
+}
+
 /// Returns `true` when the hostname of `url` matches any entry in
 /// `trusted_domains` (case-insensitive).  An empty `trusted_domains` slice
 /// always returns `false`.
@@ -1174,6 +1207,56 @@ mod tests {
         assert!(
             !invalid_nostr_state_ref("refs/tags/v2.0.0-rc1"),
             "release-candidate tag must be valid"
+        );
+    }
+
+    #[test]
+    fn self_heal_deletes_legacy_tag_tracking_refs() {
+        let test_repo = GitTestRepo::default();
+        let oid = test_repo.populate().unwrap();
+
+        let legacy_short = "refs/remotes/origin/v1.0.0";
+        let legacy_v21 = "refs/remotes/origin/refs/tags/v1.0.0";
+        let legacy_v21_deleted_tag = "refs/remotes/origin/refs/tags/deleted-before-upgrade";
+        let branch_tracking = "refs/remotes/origin/main";
+        for name in [
+            legacy_short,
+            legacy_v21,
+            legacy_v21_deleted_tag,
+            branch_tracking,
+        ] {
+            test_repo
+                .git_repo
+                .reference(name, oid, true, "seed legacy tracking ref")
+                .unwrap();
+        }
+
+        let state = HashMap::from([
+            ("refs/heads/main".to_string(), oid.to_string()),
+            ("refs/tags/v1.0.0".to_string(), oid.to_string()),
+            ("refs/tags/v1.0.0^{}".to_string(), oid.to_string()),
+        ]);
+
+        delete_legacy_tag_tracking_refs(&test_repo.git_repo, "origin", &state);
+
+        assert!(
+            test_repo.git_repo.find_reference(legacy_short).is_err(),
+            "legacy refs/remotes/<remote>/<tag> tracking ref should be deleted"
+        );
+        assert!(
+            test_repo.git_repo.find_reference(legacy_v21).is_err(),
+            "v2.1 refs/remotes/<remote>/refs/tags/<tag> tracking ref should be deleted"
+        );
+        assert!(
+            test_repo
+                .git_repo
+                .find_reference(legacy_v21_deleted_tag)
+                .is_err(),
+            "v2.1 nested tag debris should be deleted even if the tag left nostr state"
+        );
+        assert!(
+            test_repo.git_repo.find_reference(branch_tracking).is_ok(),
+            "normal branch tracking refs must not be deleted"
         );
     }
 
