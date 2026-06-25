@@ -1086,17 +1086,12 @@ pub struct Params {
     pub grasp_default_set: Vec<String>,
 }
 
-/// Parse a `;`-separated list of URLs from an env var.
+/// Parse a `;`-separated string list from an env var.
 ///
-/// Returns `Some(vec)` only when the env var is set AND parses into a
-/// non-empty list. Used by the `NGITTEST=true` branch of `Params::default()`
-/// to let the test harness inject per-spawn relay rosters without touching
-/// process-global state.
-///
-/// Empty strings and unparseable URLs are silently filtered out; if every
-/// entry is filtered, we return `None` so the caller falls back to the
-/// hardcoded legacy default.
-fn env_relay_list(var: &str) -> Option<Vec<String>> {
+/// Returns `Some(vec)` only when the env var is set and parses into a non-empty
+/// list. Empty strings are silently filtered out; if every entry is filtered,
+/// we return `None` so the caller falls back to the next config source.
+fn env_list(var: &str) -> Option<Vec<String>> {
     let raw = std::env::var(var).ok()?;
     let parsed: Vec<String> = raw
         .split(';')
@@ -1116,12 +1111,41 @@ fn env_relay_list(var: &str) -> Option<Vec<String>> {
     }
 }
 
+fn env_relay_url_list(var: &str) -> Option<Vec<String>> {
+    env_list(var).and_then(|urls| {
+        let parsed: Vec<String> = urls
+            .iter()
+            .filter_map(|url| RelayUrl::parse(url).ok())
+            .map(|url| url.to_string())
+            .collect();
+        if parsed.is_empty() {
+            None
+        } else {
+            Some(parsed)
+        }
+    })
+}
+
+fn env_grasp_server_list(var: &str) -> Option<Vec<String>> {
+    env_list(var).and_then(|urls| {
+        let parsed: Vec<String> = urls
+            .iter()
+            .filter_map(|url| normalize_grasp_server_url(url).ok())
+            .collect();
+        if parsed.is_empty() {
+            None
+        } else {
+            Some(parsed)
+        }
+    })
+}
+
 impl Default for Params {
     fn default() -> Self {
         Params {
             keys: None,
             relay_default_set: if std::env::var("NGITTEST").is_ok() {
-                env_relay_list("NGIT_RELAY_DEFAULT_SET").unwrap_or_else(|| {
+                env_relay_url_list("NGIT_RELAY_DEFAULT_SET").unwrap_or_else(|| {
                     vec![
                         "ws://localhost:8051".to_string(),
                         "ws://localhost:8052".to_string(),
@@ -1138,13 +1162,13 @@ impl Default for Params {
                 ]
             },
             blaster_relays: if std::env::var("NGITTEST").is_ok() {
-                env_relay_list("NGIT_RELAY_BLASTER_SET")
+                env_relay_url_list("NGIT_RELAY_BLASTER_SET")
                     .unwrap_or_else(|| vec!["ws://localhost:8057".to_string()])
             } else {
                 vec![]
             },
             fallback_signer_relays: if std::env::var("NGITTEST").is_ok() {
-                env_relay_list("NGIT_RELAY_SIGNER_FALLBACK_SET")
+                env_relay_url_list("NGIT_RELAY_SIGNER_FALLBACK_SET")
                     .unwrap_or_else(|| vec!["ws://localhost:8051".to_string()])
             } else {
                 vec![
@@ -1154,7 +1178,7 @@ impl Default for Params {
                 ]
             },
             grasp_default_set: if std::env::var("NGITTEST").is_ok() {
-                env_relay_list("NGIT_GRASP_DEFAULT_SET").unwrap_or_default()
+                env_grasp_server_list("NGIT_GRASP_DEFAULT_SET").unwrap_or_default()
             } else {
                 vec!["relay.ngit.dev".to_string(), "gitnostr.com".to_string()]
             },
@@ -1162,6 +1186,21 @@ impl Default for Params {
     }
 }
 impl Params {
+    fn apply_env_overrides(&mut self) {
+        if let Some(relays) = env_relay_url_list("NGIT_RELAY_DEFAULT_SET") {
+            self.relay_default_set = relays;
+        }
+        if let Some(relays) = env_relay_url_list("NGIT_RELAY_BLASTER_SET") {
+            self.blaster_relays = relays;
+        }
+        if let Some(relays) = env_relay_url_list("NGIT_RELAY_SIGNER_FALLBACK_SET") {
+            self.fallback_signer_relays = relays;
+        }
+        if let Some(servers) = env_grasp_server_list("NGIT_GRASP_DEFAULT_SET") {
+            self.grasp_default_set = servers;
+        }
+    }
+
     pub fn with_git_config_relay_defaults(git_repo: &Option<&Repo>) -> Self {
         let mut params = Params::default();
         if std::env::var("NGITTEST").is_err() {
@@ -1209,6 +1248,7 @@ impl Params {
                 }
             }
         }
+        params.apply_env_overrides();
         params
     }
 }

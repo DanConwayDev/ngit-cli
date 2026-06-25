@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use console::style;
 use ngit::login::SignerInfo;
 
 use crate::sub_commands;
@@ -47,42 +48,95 @@ pub struct Cli {
     pub verbose: bool,
 }
 
-pub const CUSTOMISE_TEMPLATE: &str = r"
-==========================
-      Customize ngit      
-==========================
-ngit settings are managed through the git config.
+pub fn customise_template() -> String {
+    let title = style("Customize ngit").bold().cyan();
+    let section = |text: &str| style(text.to_string()).bold().yellow();
+    let key = |text: &str| style(text.to_string()).green();
+    let env = |text: &str| style(text.to_string()).magenta();
+    let cmd = |text: &str| style(text.to_string()).dim();
 
-Currently the only settings not reachable through standard commands relate to default hardcoded relays:
+    format!(
+        r"
+{title}
+==============
 
- - nostr.grasp-default-set - only used during `ngit init`
- - nostr.relay-default-set      - used for profile discovery and account bootstrapping
- - nostr.relay-blaster-set      - only used for repo announcement events 
- - nostr.relay-signer-fallback-set
+ngit settings are managed through git config. For the relay defaults below,
+environment variables override git config; local git config overrides global
+git config; built-in defaults are used last.
 
-These take a string of semi-colon separated websocket URLs without spaces. For example:
-`git config --global nostr.relay-default-set 'wss://relay1.example.com;wss://relay2.example.com'`
-Or just for this repository:
-`git config nostr.relay-default-set 'wss://relay1.example.com;wss://relay2.example.com'`
+{relay_defaults}
 
-Other useful settings:
- - 'nostr.nostate true' to avoid publishing a state event when pushing to a nostr remote.
- - 'nostr.repo-relay-only true' to only publish nostr events to repo relays, skipping user and
-   default relays. Useful for repositories where you don't want to broadcast to your personal
-   relay set. Set via `git config nostr.repo-relay-only true` or `ngit init --repo-relay-only`.
- - 'nostr.trust-server-domains' — semicolon-separated list of git-server hostnames that `ngit sync`
-   should automatically trust when they are fast-forward ahead of nostr state, without requiring
-   the `--trust-server` flag.  Can be set globally or per-repository.
-   Example: `git config --global nostr.trust-server-domains 'github.com;codeberg.org'`
- - Login settings configured during `ngit account login`:
-   - nostr.nsec - nsec or ncryptsec
-   - nostr.npub - used for ncryptsec and remote signer
-   - nostr.bunker-uri - used for remote signer
-   - nostr.bunker-app-key - used for remote signer
+  {grasp:<39} {grasp_env:<32} only used during `ngit init`
+  {relay:<39} {relay_env:<32} profile discovery and account bootstrapping
+  {blaster:<39} {blaster_env:<32} repo announcement events only
+  {signer:<39} {signer_env:<32} remote signer fallback relays
 
-Other config settings are applied to the local repository but just for effiency reasons eg nostr.nip05 and nostr.protocol-push
-==========================
-";
+Values are semicolon-separated URLs without spaces.
+
+  Global: {global_example}
+  Local:  {local_example}
+  Env:    {env_example}
+
+{other_settings}
+
+  {nostate}
+    Avoid publishing a state event when pushing to a nostr remote.
+
+  {repo_relay_only}
+    Only publish nostr events to repo relays, skipping user and default relays.
+    Useful when you do not want to broadcast to your personal relay set.
+    Also available as: {repo_relay_only_flag}
+
+  {trust_server_domains}
+    Semicolon-separated git-server hostnames that `ngit sync` should trust when
+    they are fast-forward ahead of nostr state, without `--trust-server`.
+    Example: {trust_server_example}
+
+{login_settings}
+
+  These are configured by {login_cmd}:
+
+  {nsec:<27} nsec or ncryptsec
+  {npub:<27} used for ncryptsec and remote signer
+  {bunker_uri:<27} used for remote signer
+  {bunker_app_key:<27} used for remote signer
+
+Other repository-local config keys, such as {nip05} and {protocol_push}, are
+implementation details used for efficiency.
+",
+        relay_defaults = section("Relay defaults"),
+        grasp = key("nostr.grasp-default-set"),
+        grasp_env = env("NGIT_GRASP_DEFAULT_SET"),
+        relay = key("nostr.relay-default-set"),
+        relay_env = env("NGIT_RELAY_DEFAULT_SET"),
+        blaster = key("nostr.relay-blaster-set"),
+        blaster_env = env("NGIT_RELAY_BLASTER_SET"),
+        signer = key("nostr.relay-signer-fallback-set"),
+        signer_env = env("NGIT_RELAY_SIGNER_FALLBACK_SET"),
+        global_example = cmd("git config --global nostr.relay-default-set \
+             'wss://relay1.example.com;wss://relay2.example.com'"),
+        local_example = cmd("git config nostr.relay-default-set \
+             'wss://relay1.example.com;wss://relay2.example.com'"),
+        env_example = cmd(
+            "NGIT_RELAY_DEFAULT_SET='wss://relay1.example.com;wss://relay2.example.com' ngit repo"
+        ),
+        other_settings = section("Other useful settings"),
+        nostate = key("nostr.nostate true"),
+        repo_relay_only = key("nostr.repo-relay-only true"),
+        repo_relay_only_flag = cmd("ngit init --repo-relay-only"),
+        trust_server_domains = key("nostr.trust-server-domains"),
+        trust_server_example =
+            cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
+        login_settings = section("Login settings"),
+        login_cmd = cmd("ngit account login"),
+        nsec = key("nostr.nsec"),
+        npub = key("nostr.npub"),
+        bunker_uri = key("nostr.bunker-uri"),
+        bunker_app_key = key("nostr.bunker-app-key"),
+        nip05 = key("nostr.nip05"),
+        protocol_push = key("nostr.protocol-push"),
+    )
+}
 
 pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
     if let Some(nsec) = &args.nsec {

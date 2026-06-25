@@ -3,7 +3,7 @@
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use clap::Parser;
-use cli::{AccountCommands, CUSTOMISE_TEMPLATE, Cli, Commands, IssueCommands, PrCommands};
+use cli::{AccountCommands, Cli, Commands, IssueCommands, PrCommands, customise_template};
 
 mod cli;
 use ngit::{
@@ -31,7 +31,7 @@ async fn main() {
     }
 
     if cli.customize {
-        print!("{CUSTOMISE_TEMPLATE}");
+        print!("{}", customise_template());
         std::process::exit(0); // Exit the program
     }
 
