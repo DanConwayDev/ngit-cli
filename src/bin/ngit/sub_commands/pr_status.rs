@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
 use ngit::{
+    accept_maintainership::{
+        build_maintainership_acceptance_with_defaults, finalize_maintainership_acceptance,
+    },
     client::{Params, get_proposals_and_revisions_from_cache, send_events, sign_event},
     git_events::{get_status, status_kinds},
 };
@@ -14,8 +17,7 @@ use nostr::{
 
 use crate::{
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache,
-        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
+        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
     },
     git::{Repo, RepoActions},
     login,
@@ -57,7 +59,6 @@ async fn launch_status(
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
-    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let proposals_and_revisions =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
@@ -125,6 +126,22 @@ async fn launch_status(
         return Ok(());
     }
 
+    let maintainer_acceptance = if repo_ref
+        .maintainers_without_annoucnement
+        .as_ref()
+        .is_some_and(|ms| ms.contains(&user_pubkey))
+    {
+        Some(
+            build_maintainership_acceptance_with_defaults(
+                &git_repo, &repo_ref, &user_ref, &client, &signer,
+            )
+            .await
+            .context("failed to auto-accept co-maintainership")?,
+        )
+    } else {
+        None
+    };
+
     let alt_text = match new_kind {
         Kind::GitStatusOpen => "PR reopened",
         Kind::GitStatusClosed => "PR closed",
@@ -177,16 +194,36 @@ async fn launch_status(
     let mut client = client;
     client.set_signer(signer).await;
 
+    let mut events = maintainer_acceptance
+        .as_ref()
+        .map(|acceptance| acceptance.event.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
+    events.push(status_event);
+
+    let mut relay_targets = repo_ref.relays.clone();
+    if let Some(acceptance) = &maintainer_acceptance {
+        for relay in &acceptance.relays {
+            if !relay_targets.contains(relay) {
+                relay_targets.push(relay.clone());
+            }
+        }
+    }
+
     send_events(
         &client,
         Some(git_repo_path),
-        vec![status_event],
+        events,
         user_ref.relays.write(),
-        repo_ref.relays.clone(),
+        relay_targets,
         true,
         false,
     )
     .await?;
+
+    if let Some(acceptance) = &maintainer_acceptance {
+        finalize_maintainership_acceptance(&git_repo, acceptance).await?;
+    }
 
     println!(
         "PR {} {action}: {}",
