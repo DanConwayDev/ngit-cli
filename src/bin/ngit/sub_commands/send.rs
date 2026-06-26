@@ -284,13 +284,22 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     )
     .await?;
 
-    if let Some(root_proposal) = &root_proposal {
-        if root_proposal.pubkey != user_ref.public_key
-            && !repo_ref.maintainers.contains(&user_ref.public_key)
-        {
-            bail!(
-                "only the proposal author or a repository maintainer can update an existing proposal"
-            );
+    // Authorization is a UX guard, not enforcement (signatures can't be
+    // forged and the original author's events are immutable regardless).
+    // It applies only to *updates* of an existing PR thread — appending
+    // commits to someone else's pull request (a KIND_PULL_REQUEST_UPDATE
+    // threaded onto their proposal). It deliberately does NOT apply to a
+    // new patch *revision*, which is a fresh proposal root anyone may
+    // publish under NIP-34 (see tests/send_patch_revision.rs).
+    if existing_thread_is_pr {
+        if let Some(root_proposal) = &root_proposal {
+            if root_proposal.pubkey != user_ref.public_key
+                && !repo_ref.maintainers.contains(&user_ref.public_key)
+            {
+                bail!(
+                    "only the proposal author or a repository maintainer can update an existing pull request"
+                );
+            }
         }
     }
 
