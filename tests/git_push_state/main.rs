@@ -52,8 +52,10 @@
 //! pinpoint-named in `cargo test` output.
 
 mod add_branch;
+mod all_servers_down;
 mod auto_accept_maintainership;
 mod clone_interact_tag;
 mod delete_branch;
 mod fresh_repo;
+mod grasp_accepts_remaining_relay_down;
 mod push_tag;

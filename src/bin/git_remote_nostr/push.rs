@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use client::{
-    delete_event_from_local_cache, get_events_from_local_cache, get_issues_from_cache,
+    STATE_KIND, delete_event_from_local_cache, get_events_from_local_cache, get_issues_from_cache,
     get_state_from_cache, send_events, sign_event,
 };
 use console::Term;
@@ -140,13 +140,15 @@ pub async fn run_push(
 
     // all refspecs aren't rejected
     if !(git_state_refspecs.is_empty() && proposal_refspecs.is_empty()) {
-        let (
+        let PushEventsPlan {
             rejected_proposal_refspecs,
             rejected,
-            relay_results,
-            old_state_event,
+            events,
+            previous_state_event,
             new_state_event_id,
-        ) = create_and_publish_events_and_proposals(
+            my_write_relays,
+            repo_relay_only,
+        } = create_events_and_proposals(
             git_repo,
             repo_ref,
             &git_state_refspecs,
@@ -161,91 +163,125 @@ pub async fn run_push(
         .await?;
 
         if !rejected {
-            for refspec in git_state_refspecs.iter().chain(proposal_refspecs.iter()) {
+            let (state_events, other_events): (Vec<Event>, Vec<Event>) = events
+                .into_iter()
+                .partition(|event| event.kind.eq(&STATE_KIND));
+
+            if git_state_refspecs.is_empty() {
+                if !other_events.is_empty() {
+                    publish_events_to_relays(
+                        client,
+                        git_repo,
+                        repo_ref,
+                        other_events,
+                        &my_write_relays,
+                        repo_relay_only,
+                        None,
+                    )
+                    .await?;
+                }
+
+                for refspec in git_state_refspecs.iter().chain(proposal_refspecs.iter()) {
+                    if rejected_proposal_refspecs.contains(refspec) {
+                        continue;
+                    }
+                    mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
+                }
+
+                println!();
+                return Ok(());
+            }
+
+            // GRASP relays that support purgatory hold repo state events until the
+            // matching git data arrives at the paired git server. Publishing to
+            // them before the git push is therefore safe: if the later git push
+            // fails, the relay never broadcasts the unreachable state.
+            //
+            // This intentionally makes state publication a two-stage process.
+            // First seed purgatory on the GRASP relays we are about to push to,
+            // then push git data, and only after at least one git server accepts
+            // the data fan out the state to any remaining relays. The extra
+            // round-trip prevents us reporting `ok` or broadcasting state for
+            // commits that no git server has.
+            let initial_state_publish =
+                publish_state_to_grasps_first(client, git_repo, repo_ref, &state_events).await?;
+
+            for refspec in &proposal_refspecs {
                 if rejected_proposal_refspecs.contains(refspec) {
                     continue;
                 }
-                let (_, to) = refspec_to_from_to(refspec)?;
-                println!("ok {to}");
-                update_remote_refs_pushed(
-                    &git_repo.git_repo,
-                    refspec,
-                    remote_name,
-                    &repo_ref.to_nostr_git_url(&None).to_string(),
-                )
-                .context("could not update remote_ref locally")?;
+                mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
             }
 
-            // TODO make async - check gitlib2 callbacks work async
+            match push_git_state_refspecs(
+                git_repo,
+                repo_ref,
+                &term,
+                remote_refspecs,
+                &git_state_refspecs,
+                &initial_state_publish,
+                &git_server_push_options,
+            ) {
+                GitStatePushOutcome::NoEligibleServers => {
+                    report_state_push_failure(
+                        git_repo,
+                        &git_state_refspecs,
+                        "state event failed to reach any git server relay",
+                        new_state_event_id,
+                        previous_state_event.as_ref(),
+                    )
+                    .await?;
+                }
+                GitStatePushOutcome::AllPushesFailed => {
+                    report_state_push_failure(
+                        git_repo,
+                        &git_state_refspecs,
+                        "failed to push to any git server",
+                        new_state_event_id,
+                        previous_state_event.as_ref(),
+                    )
+                    .await?;
+                }
+                GitStatePushOutcome::AcceptedByGitServer => {
+                    let has_state_event = !state_events.is_empty();
+                    let remaining_state_relay_results = publish_state_to_remaining_relays(
+                        client,
+                        git_repo,
+                        repo_ref,
+                        state_events,
+                        &my_write_relays,
+                        repo_relay_only,
+                        &initial_state_publish.grasp_relays,
+                    )
+                    .await?;
 
-            // Filter out grasp servers whose relay did not receive the state event
-            let mut servers_to_push: Vec<(String, Vec<String>)> = vec![];
-            for (git_server_url, server_refspecs) in remote_refspecs {
-                let server_refspecs = server_refspecs
-                    .iter()
-                    .filter(|refspec| git_state_refspecs.contains(refspec))
-                    .cloned()
-                    .collect::<Vec<String>>();
-                if is_grasp_server_clone_url(&git_server_url) && !relay_results.is_empty() {
-                    if let Ok(relay_url) = format_grasp_server_url_as_relay_url(&git_server_url) {
-                        let relay_failed = relay_results
-                            .iter()
-                            .any(|(url, succeeded)| url == &relay_url && !succeeded);
-                        if relay_failed {
-                            let short_name = get_short_git_server_name(&git_server_url);
-                            eprintln!(
-                                "WARNING: skipping {short_name} - state event failed to reach its relay"
-                            );
-                            continue;
-                        }
-                    }
-                }
-                servers_to_push.push((git_server_url, server_refspecs));
-            }
-
-            // If all git servers were skipped and there were refspecs to push,
-            // emit error lines for each ref using the git remote helper protocol
-            // and roll back the state event in the local cache
-            if servers_to_push.is_empty() && !git_state_refspecs.is_empty() {
-                for refspec in &git_state_refspecs {
-                    let (_, to) = refspec_to_from_to(refspec)?;
-                    println!("error {to} state event failed to reach any git server relay");
-                }
-                if let Some(new_id) = new_state_event_id {
-                    rollback_state_event(git_repo.get_path()?, new_id, old_state_event.as_ref())
-                        .await;
-                }
-            } else {
-                let mut any_push_succeeded = false;
-                for (git_server_url, server_refspecs) in &servers_to_push {
-                    if !server_refspecs.is_empty() {
-                        let push_options_refs: Vec<&str> =
-                            git_server_push_options.iter().map(String::as_str).collect();
-                        if push_to_remote(
+                    if !other_events.is_empty() {
+                        publish_events_to_relays(
+                            client,
                             git_repo,
-                            git_server_url,
-                            &repo_ref.to_nostr_git_url(&None),
-                            server_refspecs,
-                            &term,
-                            is_grasp_server_clone_url(git_server_url),
-                            &push_options_refs,
+                            repo_ref,
+                            other_events,
+                            &my_write_relays,
+                            repo_relay_only,
+                            None,
                         )
-                        .is_ok()
-                        {
-                            any_push_succeeded = true;
-                        }
+                        .await?;
                     }
-                }
-                // If every git server push failed, roll back the state event
-                if !any_push_succeeded && !git_state_refspecs.is_empty() {
-                    if let Some(new_id) = new_state_event_id {
-                        rollback_state_event(
-                            git_repo.get_path()?,
-                            new_id,
-                            old_state_event.as_ref(),
-                        )
-                        .await;
-                    }
+
+                    report_state_push_result(
+                        git_repo,
+                        repo_ref,
+                        &git_state_refspecs,
+                        remote_name,
+                        state_relay_accepted(
+                            has_state_event,
+                            initial_state_publish.results.iter(),
+                            remaining_state_relay_results.iter(),
+                        ),
+                        new_state_event_id,
+                        previous_state_event.as_ref(),
+                    )
+                    .await?;
                 }
             }
         }
@@ -253,6 +289,323 @@ pub async fn run_push(
 
     println!();
     Ok(())
+}
+
+struct PushEventsPlan {
+    rejected_proposal_refspecs: Vec<String>,
+    rejected: bool,
+    events: Vec<Event>,
+    previous_state_event: Option<Event>,
+    new_state_event_id: Option<EventId>,
+    my_write_relays: Vec<String>,
+    repo_relay_only: bool,
+}
+
+struct InitialStatePublish {
+    grasp_relays: Vec<RelayUrl>,
+    results: Vec<(String, bool)>,
+}
+
+enum GitStatePushOutcome {
+    NoEligibleServers,
+    AllPushesFailed,
+    AcceptedByGitServer,
+}
+
+fn mark_refspec_pushed(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    refspec: &str,
+    remote_name: Option<&str>,
+) -> Result<()> {
+    let (_, to) = refspec_to_from_to(refspec)?;
+    println!("ok {to}");
+    update_remote_refs_pushed(
+        &git_repo.git_repo,
+        refspec,
+        remote_name,
+        &repo_ref.to_nostr_git_url(&None).to_string(),
+    )
+    .context("could not update remote_ref locally")
+}
+
+/// Publish state events to GRASP relays before pushing git data.
+///
+/// This relies on GRASP purgatory: the relay accepts the event but withholds
+/// broadcast until the paired git server receives the referenced objects. That
+/// lets us target GRASP servers first without leaking a state event for data
+/// that later fails to push.
+async fn publish_state_to_grasps_first(
+    client: &mut Client,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    state_events: &[Event],
+) -> Result<InitialStatePublish> {
+    let grasp_relays = if state_events.is_empty() {
+        vec![]
+    } else {
+        grasp_server_relay_urls(repo_ref)
+    };
+
+    let results = if state_events.is_empty() || grasp_relays.is_empty() {
+        vec![]
+    } else {
+        send_events(
+            client,
+            Some(git_repo.get_path()?),
+            state_events.to_vec(),
+            vec![],
+            grasp_relays.clone(),
+            true,
+            false,
+        )
+        .await?
+    };
+
+    Ok(InitialStatePublish {
+        grasp_relays,
+        results,
+    })
+}
+
+fn push_git_state_refspecs(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    term: &Term,
+    remote_refspecs: HashMap<String, Vec<String>>,
+    git_state_refspecs: &[String],
+    initial_state_publish: &InitialStatePublish,
+    git_server_push_options: &[String],
+) -> GitStatePushOutcome {
+    if git_state_refspecs.is_empty() {
+        return GitStatePushOutcome::AcceptedByGitServer;
+    }
+
+    let servers_to_push = servers_with_accepted_grasp_state(
+        remote_refspecs,
+        git_state_refspecs,
+        !initial_state_publish.grasp_relays.is_empty(),
+        &initial_state_publish.results,
+    );
+
+    if servers_to_push.is_empty() {
+        return GitStatePushOutcome::NoEligibleServers;
+    }
+
+    let mut any_push_succeeded = false;
+    for (git_server_url, server_refspecs) in &servers_to_push {
+        if !server_refspecs.is_empty() {
+            let push_options_refs: Vec<&str> =
+                git_server_push_options.iter().map(String::as_str).collect();
+            if push_to_remote(
+                git_repo,
+                git_server_url,
+                &repo_ref.to_nostr_git_url(&None),
+                server_refspecs,
+                term,
+                is_grasp_server_clone_url(git_server_url),
+                &push_options_refs,
+            )
+            .is_ok()
+            {
+                any_push_succeeded = true;
+            }
+        }
+    }
+
+    if any_push_succeeded {
+        GitStatePushOutcome::AcceptedByGitServer
+    } else {
+        GitStatePushOutcome::AllPushesFailed
+    }
+}
+
+fn servers_with_accepted_grasp_state(
+    remote_refspecs: HashMap<String, Vec<String>>,
+    git_state_refspecs: &[String],
+    has_state_event: bool,
+    initial_state_relay_results: &[(String, bool)],
+) -> Vec<(String, Vec<String>)> {
+    let mut servers_to_push = vec![];
+    for (git_server_url, server_refspecs) in remote_refspecs {
+        let server_refspecs = server_refspecs
+            .iter()
+            .filter(|refspec| git_state_refspecs.contains(refspec))
+            .cloned()
+            .collect::<Vec<String>>();
+        if is_grasp_server_clone_url(&git_server_url)
+            && has_state_event
+            && !initial_state_relay_results.is_empty()
+        {
+            if let Ok(relay_url) = format_grasp_server_url_as_relay_url(&git_server_url) {
+                let relay_failed = initial_state_relay_results
+                    .iter()
+                    .any(|(url, succeeded)| url == &relay_url && !succeeded);
+                if relay_failed {
+                    let short_name = get_short_git_server_name(&git_server_url);
+                    eprintln!(
+                        "WARNING: skipping {short_name} - state event failed to reach its relay"
+                    );
+                    continue;
+                }
+            }
+        }
+        servers_to_push.push((git_server_url, server_refspecs));
+    }
+    servers_to_push
+}
+
+async fn publish_state_to_remaining_relays(
+    client: &mut Client,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    state_events: Vec<Event>,
+    my_write_relays: &[String],
+    repo_relay_only: bool,
+    grasp_relays: &[RelayUrl],
+) -> Result<Vec<(String, bool)>> {
+    if state_events.is_empty() {
+        return Ok(vec![]);
+    }
+
+    publish_events_to_relays(
+        client,
+        git_repo,
+        repo_ref,
+        state_events,
+        my_write_relays,
+        repo_relay_only,
+        Some(grasp_relays),
+    )
+    .await
+}
+
+fn state_relay_accepted<'a>(
+    has_state_event: bool,
+    initial_results: impl Iterator<Item = &'a (String, bool)>,
+    remaining_results: impl Iterator<Item = &'a (String, bool)>,
+) -> bool {
+    !has_state_event
+        || initial_results
+            .chain(remaining_results)
+            .any(|(_, succeeded)| *succeeded)
+}
+
+async fn report_state_push_result(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    git_state_refspecs: &[String],
+    remote_name: Option<&str>,
+    state_relay_accepted: bool,
+    new_state_event_id: Option<EventId>,
+    previous_state_event: Option<&Event>,
+) -> Result<()> {
+    if state_relay_accepted {
+        for refspec in git_state_refspecs {
+            mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
+        }
+    } else {
+        report_state_push_failure(
+            git_repo,
+            git_state_refspecs,
+            "state event failed to reach any relay",
+            new_state_event_id,
+            previous_state_event,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn report_state_push_failure(
+    git_repo: &Repo,
+    git_state_refspecs: &[String],
+    message: &str,
+    new_state_event_id: Option<EventId>,
+    previous_state_event: Option<&Event>,
+) -> Result<()> {
+    for refspec in git_state_refspecs {
+        let (_, to) = refspec_to_from_to(refspec)?;
+        println!("error {to} {message}");
+    }
+    if let Some(new_id) = new_state_event_id {
+        rollback_state_event(git_repo.get_path()?, new_id, previous_state_event).await;
+    }
+    Ok(())
+}
+
+fn grasp_server_relay_urls(repo_ref: &RepoRef) -> Vec<RelayUrl> {
+    repo_ref
+        .git_server
+        .iter()
+        .filter_map(|git_server_url| {
+            if !is_grasp_server_clone_url(git_server_url) {
+                return None;
+            }
+            format_grasp_server_url_as_relay_url(git_server_url)
+                .ok()
+                .and_then(|relay_url| RelayUrl::parse(&relay_url).ok())
+        })
+        .fold(Vec::new(), |mut relays, relay| {
+            if !relays.iter().any(|existing| existing == &relay) {
+                relays.push(relay);
+            }
+            relays
+        })
+}
+
+async fn publish_events_to_relays(
+    client: &mut Client,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    events: Vec<Event>,
+    my_write_relays: &[String],
+    repo_relay_only: bool,
+    excluded_relays: Option<&[RelayUrl]>,
+) -> Result<Vec<(String, bool)>> {
+    if events.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let is_excluded = |relay: &str| {
+        excluded_relays.is_some_and(|excluded| {
+            excluded
+                .iter()
+                .any(|excluded| relay_urls_match(relay, excluded.as_str()))
+        })
+    };
+
+    let repo_relays = repo_ref
+        .relays
+        .iter()
+        .filter(|relay| !is_excluded(relay.as_str()))
+        .cloned()
+        .collect::<Vec<RelayUrl>>();
+    let write_relays = if repo_relay_only {
+        vec![]
+    } else {
+        my_write_relays
+            .iter()
+            .filter(|relay| !is_excluded(relay))
+            .cloned()
+            .collect::<Vec<String>>()
+    };
+
+    send_events(
+        client,
+        Some(git_repo.get_path()?),
+        events,
+        write_relays,
+        repo_relays,
+        true,
+        false,
+    )
+    .await
+}
+
+fn relay_urls_match(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/') == right.trim_end_matches('/')
 }
 
 /// Remove the newly-published state event from the local nostr cache and
@@ -276,7 +629,7 @@ async fn rollback_state_event(
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
-async fn create_and_publish_events_and_proposals(
+async fn create_events_and_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     git_server_refspecs: &Vec<String>,
@@ -287,13 +640,7 @@ async fn create_and_publish_events_and_proposals(
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
     git_server: Option<&str>,
-) -> Result<(
-    Vec<String>,
-    bool,
-    Vec<(String, bool)>,
-    Option<Event>,
-    Option<EventId>,
-)> {
+) -> Result<PushEventsPlan> {
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
         &None,
@@ -316,7 +663,15 @@ async fn create_and_publish_events_and_proposals(
             );
         }
         if proposal_refspecs.is_empty() {
-            return Ok((vec![], true, vec![], None, None));
+            return Ok(PushEventsPlan {
+                rejected_proposal_refspecs: vec![],
+                rejected: true,
+                events: vec![],
+                previous_state_event: None,
+                new_state_event_id: None,
+                my_write_relays: vec![],
+                repo_relay_only: false,
+            });
         }
     } else if repo_ref
         .maintainers_without_annoucnement
@@ -453,31 +808,21 @@ async fn create_and_publish_events_and_proposals(
             false
         };
 
-    let relay_results = if events.is_empty() {
+    let my_write_relays = if repo_relay_only {
         vec![]
     } else {
-        send_events(
-            client,
-            Some(git_repo.get_path()?),
-            events,
-            if repo_relay_only {
-                vec![]
-            } else {
-                user_ref.relays.write()
-            },
-            repo_ref.relays.clone(),
-            true,
-            false,
-        )
-        .await?
+        user_ref.relays.write()
     };
-    Ok((
+
+    Ok(PushEventsPlan {
         rejected_proposal_refspecs,
-        false,
-        relay_results,
-        old_state_event,
+        rejected: false,
+        events,
+        previous_state_event: old_state_event,
         new_state_event_id,
-    ))
+        my_write_relays,
+        repo_relay_only,
+    })
 }
 
 #[allow(clippy::too_many_lines)]

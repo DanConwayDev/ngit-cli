@@ -128,6 +128,17 @@ impl Harness {
         self.grasps.get_mut(role).and_then(|v| v.pop())
     }
 
+    /// Take ownership of a vanilla relay registered under `role`, removing
+    /// it from the harness. Dropping the returned value shuts the relay down.
+    ///
+    /// `Repo` instances created before the take retain the original env
+    /// snapshot, so they will still attempt to use the now-dead relay. This is
+    /// useful for tests that need one relay publish to fail while other relay
+    /// or git-server surfaces remain available.
+    pub fn take_relay(&mut self, role: &str) -> Option<VanillaRelay> {
+        self.relays.get_mut(role).and_then(|v| v.pop())
+    }
+
     /// `;`-separated URL list for the given relay role — the format every
     /// `NGIT_RELAY_*` env var expects.
     fn relay_role_urls(&self, role: &str) -> String {
