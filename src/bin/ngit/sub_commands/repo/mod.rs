@@ -59,6 +59,8 @@ struct RepoInfoJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     web: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    upstream: Option<Vec<Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     maintainers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     grasp_servers: Option<Vec<String>>,
@@ -109,6 +111,7 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                     nostr_url: None,
                     coordinate: None,
                     web: None,
+                    upstream: None,
                     maintainers: None,
                     grasp_servers: None,
                     git_servers: None,
@@ -154,6 +157,7 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                     nostr_url,
                     coordinate: repo_coordinate.to_bech32().ok(),
                     web: None,
+                    upstream: None,
                     maintainers: None,
                     grasp_servers: None,
                     git_servers: None,
@@ -264,6 +268,11 @@ fn print_repo_info_json(
         } else {
             Some(repo_ref.web.clone())
         },
+        upstream: if repo_ref.upstream.is_empty() {
+            None
+        } else {
+            Some(repo_ref.upstream.clone())
+        },
         maintainers: Some(maintainers),
         grasp_servers: if grasp_servers.is_empty() {
             None
@@ -332,6 +341,14 @@ async fn print_repo_info(
     if !repo_ref.web.is_empty() {
         for url in &repo_ref.web {
             println!(" {}", dim.apply_to(url));
+        }
+    }
+    if !repo_ref.upstream.is_empty() {
+        for upstream in &repo_ref.upstream {
+            println!(
+                " {}",
+                dim.apply_to(format!("upstream: {}", upstream.join(" ")))
+            );
         }
     }
     if !repo_ref.hashtags.is_empty() {
@@ -541,7 +558,7 @@ async fn print_repo_info(
             "{}",
             dim.apply_to(
                 "Note: git servers and relays are pooled from all maintainers' announcements.\n\
-                 Name, description, web, and hashtags come from the most recently updated announcement.\n\
+                 Name, description, web, upstream, and hashtags come from the most recently updated announcement.\n\
                  Each maintainer independently decides who they list as co-maintainers;\n\
                  if Alice lists Bob and Bob lists Carol, all three are in the maintainer set."
             )

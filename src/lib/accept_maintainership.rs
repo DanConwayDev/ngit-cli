@@ -104,6 +104,10 @@ pub async fn build_maintainership_acceptance_with_defaults(
         .map(|lr| lr.description.clone())
         .unwrap_or_default();
     let web = latest.as_ref().map(|lr| lr.web.clone()).unwrap_or_default();
+    let upstream = latest
+        .as_ref()
+        .map(|lr| lr.upstream.clone())
+        .unwrap_or_default();
     let hashtags = latest
         .as_ref()
         .map(|lr| lr.hashtags.clone())
@@ -134,6 +138,7 @@ pub async fn build_maintainership_acceptance_with_defaults(
         root_commit,
         git_server: git_servers,
         web,
+        upstream,
         relays: relays.clone(),
         blossoms,
         hashtags,

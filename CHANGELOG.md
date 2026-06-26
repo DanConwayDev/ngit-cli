@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit init -u ...` / `--u ...` / `--upstream ...` publishes the informational NIP-34 `u` tag for subordinate forks, and `ngit repo` now displays/serializes existing `u` metadata without ever inventing it by default
 - `ngit merge` merges a PR into the default branch as a no-ff merge commit (recording the PR nevent and author in the commit message) without pushing
 - `ngit account connect` as an alias for `ngit account login -i` (interactive nostr connect login) [hzd149]
 - Pushing commits that include issue-closing keywords (e.g. `fixes` / `resolves`) followed by #<hex-event-id-or-8-char-prefix> or nostr:nevent123 now auto-resolves referenced issues

@@ -38,6 +38,10 @@ pub struct RepoRef {
     pub root_commit: String,
     pub git_server: Vec<String>,
     pub web: Vec<String>,
+    /// Informational NIP-34 `u` tags indicating this repository is a
+    /// subordinate fork of another repository. Each inner vector contains the
+    /// tag fields after the leading `u` tag name.
+    pub upstream: Vec<Vec<String>>,
     pub relays: Vec<RelayUrl>,
     pub blossoms: Vec<Url>,
     pub hashtags: Vec<String>,
@@ -70,6 +74,7 @@ pub fn is_known_tag_name(name: &str) -> bool {
             | "description"
             | "clone"
             | "web"
+            | "u"
             | "r"
             | "relays"
             | "t"
@@ -100,6 +105,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
             root_commit: String::new(),
             git_server: Vec::new(),
             web: Vec::new(),
+            upstream: Vec::new(),
             relays: Vec::new(),
             blossoms: Vec::new(),
             hashtags: Vec::new(),
@@ -126,6 +132,9 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
                 }
                 [t, web @ ..] if t == "web" => {
                     r.web = web.to_vec();
+                }
+                [t, upstream @ ..] if t == "u" && !upstream.is_empty() => {
+                    r.upstream.push(upstream.to_vec());
                 }
                 [t, commit_id]
                     if t == "r"
@@ -269,6 +278,12 @@ impl RepoRef {
                     self.hashtags
                         .iter()
                         .map(|h| Tag::parse(["t", h]).unwrap())
+                        .collect(),
+                    self.upstream
+                        .iter()
+                        .map(|upstream| {
+                            Tag::parse([vec!["u".to_string()], upstream.clone()].concat()).unwrap()
+                        })
                         .collect(),
                     if self.blossoms.is_empty() {
                         vec![]
@@ -1051,6 +1066,7 @@ mod tests {
                 "https://exampleproject.xyz".to_string(),
                 "https://gitworkshop.dev/123".to_string(),
             ],
+            upstream: vec![],
             relays: vec![
                 RelayUrl::parse("ws://relay1.io").unwrap(),
                 RelayUrl::parse("ws://relay2.io").unwrap(),
@@ -1080,6 +1096,7 @@ mod tests {
             root_commit: "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2".to_string(),
             git_server: vec!["https://localhost:1000".to_string()],
             web: vec![],
+            upstream: vec![],
             relays: vec![],
             blossoms: vec![],
             hashtags: vec![],
@@ -1137,6 +1154,8 @@ mod tests {
     }
 
     mod try_from {
+        use nostr::event::FinalizeEvent;
+
         use super::*;
 
         #[tokio::test]
@@ -1243,6 +1262,36 @@ mod tests {
                     "https://exampleproject.xyz".to_string(),
                     "https://gitworkshop.dev/123".to_string()
                 ],
+            )
+        }
+
+        #[tokio::test]
+        async fn upstream() {
+            let base = create().await;
+            let mut tags: Vec<Tag> = base.tags.iter().cloned().collect();
+            tags.push(
+                Tag::parse([
+                    "u",
+                    "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:upstream",
+                    "wss://relay.example",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ])
+                .unwrap(),
+            );
+            let event = nostr::EventBuilder::new(base.kind, base.content)
+                .tags(tags)
+                .finalize(&*TEST_KEY_1_KEYS)
+                .unwrap();
+
+            assert_eq!(
+                RepoRef::try_from((event, None)).unwrap().upstream,
+                vec![vec![
+                    "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:upstream"
+                        .to_string(),
+                    "wss://relay.example".to_string(),
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                ]],
             )
         }
 
@@ -1355,6 +1404,35 @@ mod tests {
                 assert_eq!(web_tag.as_slice().len(), 3);
                 assert_eq!(web_tag.as_slice()[1], "https://exampleproject.xyz");
                 assert_eq!(web_tag.as_slice()[2], "https://gitworkshop.dev/123");
+            }
+
+            #[tokio::test]
+            async fn upstream() {
+                let mut repo_ref = RepoRef::try_from((create().await, None)).unwrap();
+                repo_ref.upstream = vec![vec![
+                    "https://example.com/upstream.git".to_string(),
+                    "wss://relay.example".to_string(),
+                    TEST_KEY_2_KEYS.public_key().to_string(),
+                ]];
+
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+                let upstream_tag: &nostr::Tag =
+                    event.tags.iter().find(|t| t.as_slice()[0].eq("u")).unwrap();
+                assert_eq!(upstream_tag.as_slice().len(), 4);
+                assert_eq!(
+                    upstream_tag.as_slice()[1],
+                    "https://example.com/upstream.git"
+                );
+                assert_eq!(upstream_tag.as_slice()[2], "wss://relay.example");
+                assert_eq!(
+                    upstream_tag.as_slice()[3],
+                    TEST_KEY_2_KEYS.public_key().to_string()
+                );
+            }
+
+            #[tokio::test]
+            async fn upstream_is_not_emitted_by_default() {
+                assert!(!create().await.tags.iter().any(|t| t.as_slice()[0].eq("u")))
             }
 
             #[tokio::test]

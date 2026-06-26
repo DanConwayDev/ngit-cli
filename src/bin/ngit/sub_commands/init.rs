@@ -107,6 +107,7 @@ struct ResolvedFields {
     git_servers: Vec<String>,
     relays: Vec<RelayUrl>,
     web: Vec<String>,
+    upstream: Vec<Vec<String>>,
     maintainers: Vec<PublicKey>,
     earliest_unique_commit: String,
     blossoms: Vec<Url>,
@@ -426,6 +427,9 @@ pub struct SubCommandArgs {
     #[clap(long, value_parser, num_args = 1..)]
     /// homepage
     web: Vec<String>,
+    #[clap(short = 'u', long = "u", alias = "upstream", value_parser, num_args = 1..)]
+    /// informational NIP-34 subordinate-fork `u` tag fields
+    upstream: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// npubs of other maintainers
     other_maintainers: Vec<String>,
@@ -455,6 +459,7 @@ impl SubCommandArgs {
             || !self.relay.is_empty()
             || !self.grasp_server.is_empty()
             || !self.web.is_empty()
+            || !self.upstream.is_empty()
             || !self.other_maintainers.is_empty()
             || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
@@ -984,6 +989,18 @@ fn resolve_fields(
             .collect()
     };
 
+    // --- Informational upstream (`u`) tags ---
+    // NIP-34 uses `u` to mark a repository as a subordinate fork. ngit never
+    // invents one; it only preserves existing metadata or emits fields
+    // explicitly supplied with `--u` / `--upstream`.
+    let upstream = if args.upstream.is_empty() {
+        latest
+            .as_ref()
+            .map_or_else(Vec::new, |lr| lr.upstream.clone())
+    } else {
+        vec![args.upstream.clone()]
+    };
+
     // --- Earliest unique commit ---
     // Cascade: my event -> consolidated RepoRef (selected maintainer's) -> local
     // root commit
@@ -1091,6 +1108,7 @@ fn resolve_fields(
         git_servers,
         relays,
         web,
+        upstream,
         maintainers,
         earliest_unique_commit,
         blossoms,
@@ -1220,6 +1238,7 @@ async fn publish_and_finalize(
         root_commit: fields.earliest_unique_commit,
         git_server: fields.git_servers,
         web: fields.web,
+        upstream: fields.upstream,
         relays: fields.relays.clone(),
         blossoms: fields.blossoms,
         hashtags: fields.hashtags,
