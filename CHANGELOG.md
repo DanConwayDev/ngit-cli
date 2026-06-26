@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit pr` and `ngit issue` commands that accept a PR/issue event ID now accept unique hex prefixes, with or without a leading `#`; ambiguous prefixes fail with the matching items listed
 - `ngit init -u ...` / `--u ...` / `--upstream ...` publishes the informational NIP-34 `u` tag for subordinate forks, and `ngit repo` now displays/serializes existing `u` metadata without ever inventing it by default
 - `ngit merge` merges a PR into the default branch as a no-ff merge commit (recording the PR nevent and author in the commit message) without pushing
 - `ngit account connect` as an alias for `ngit account login -i` (interactive nostr connect login) [hzd149]

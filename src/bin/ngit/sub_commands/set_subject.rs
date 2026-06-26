@@ -3,13 +3,10 @@ use ngit::{
     accept_maintainership::{
         build_maintainership_acceptance_with_defaults, finalize_maintainership_acceptance,
     },
-    client::{Params, get_issues_from_cache, get_proposals_and_revisions_from_cache, send_events},
+    client::{Params, send_events},
     git_events::{KIND_LABEL, get_labels_and_subject},
 };
-use nostr::{
-    EventBuilder, EventId, FromBech32, Tag,
-    nips::{nip10::Nip10Tag, nip19::Nip19},
-};
+use nostr::{EventBuilder, Tag, nips::nip10::Nip10Tag};
 
 use crate::{
     client::{
@@ -19,21 +16,8 @@ use crate::{
     git::{Repo, RepoActions},
     login,
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::id_resolver::{load_and_resolve_issue, load_and_resolve_pr_root},
 };
-
-fn parse_event_id(id: &str) -> Result<EventId> {
-    if let Ok(nip19) = Nip19::from_bech32(id) {
-        match nip19 {
-            Nip19::Event(e) => return Ok(e.event_id),
-            Nip19::EventId(event_id) => return Ok(event_id),
-            _ => {}
-        }
-    }
-    if let Ok(event_id) = EventId::from_hex(id) {
-        return Ok(event_id);
-    }
-    bail!("invalid event-id or nevent: {id}")
-}
 
 /// Shared implementation: publish a NIP-32 kind-1985 `#subject` label event
 /// for `target`, overriding its displayed title/subject.
@@ -53,8 +37,6 @@ async fn publish_set_subject_event(
         bail!("--subject value must not be empty");
     }
 
-    let event_id = parse_event_id(id)?;
-
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -69,25 +51,11 @@ async fn publish_set_subject_event(
 
     // Resolve the target event from cache.
     let target = if target_kind == "issue" {
-        let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
-        issues
-            .into_iter()
-            .find(|e| e.id == event_id)
-            .context(format!(
-                "issue with id {} not found in cache",
-                event_id.to_hex()
-            ))?
+        load_and_resolve_issue(git_repo_path, &repo_ref, id).await?
     } else {
-        let proposals =
-            get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
-        proposals
-            .into_iter()
-            .find(|e| e.id == event_id)
-            .context(format!(
-                "PR with id {} not found in cache",
-                event_id.to_hex()
-            ))?
+        load_and_resolve_pr_root(git_repo_path, &repo_ref, id).await?
     };
+    let event_id = target.id;
 
     // Login — we need the signer and user pubkey.
     let (signer, user_ref, _) =

@@ -13,7 +13,6 @@ use ngit::{
     },
     repo_ref::RepoRef,
 };
-use nostr::{EventId, FromBech32, nips::nip19::Nip19};
 
 use crate::{
     client::{
@@ -23,11 +22,10 @@ use crate::{
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::id_resolver::{pr_description, resolve_pr_root_or_prefix},
 };
 
 pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
-    let event_id = parse_event_id(id)?;
-
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -51,13 +49,7 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
     let proposals_and_revisions: Vec<nostr::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
-    let proposal = proposals_and_revisions
-        .iter()
-        .find(|e| e.id == event_id)
-        .context(format!(
-            "proposal with id {} not found in cache",
-            event_id.to_hex()
-        ))?;
+    let proposal = resolve_pr_root_or_prefix(id, proposals_and_revisions.iter(), pr_description)?;
 
     let cover_letter = event_to_cover_letter(proposal)
         .context("failed to extract proposal details from proposal root event")?;
@@ -95,20 +87,6 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
             force,
         )
     }
-}
-
-fn parse_event_id(id: &str) -> Result<EventId> {
-    if let Ok(nip19) = Nip19::from_bech32(id) {
-        match nip19 {
-            Nip19::Event(e) => return Ok(e.event_id),
-            Nip19::EventId(event_id) => return Ok(event_id),
-            _ => {}
-        }
-    }
-    if let Ok(event_id) = EventId::from_hex(id) {
-        return Ok(event_id);
-    }
-    bail!("invalid event-id or nevent: {id}")
 }
 
 fn print_diverged_branch_help(branch_name: &str) {

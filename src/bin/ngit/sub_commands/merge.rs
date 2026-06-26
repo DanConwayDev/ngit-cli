@@ -12,10 +12,7 @@ use ngit::{
     },
     login::{get_curent_user, user::extract_user_metadata},
 };
-use nostr::{
-    EventId, FromBech32, PublicKey, RelayUrl, ToBech32,
-    nips::nip19::{Nip19, Nip19Event},
-};
+use nostr::{EventId, PublicKey, RelayUrl, ToBech32, nips::nip19::Nip19Event};
 
 use crate::{
     client::{
@@ -25,6 +22,7 @@ use crate::{
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::id_resolver::{pr_description, proposal_roots, resolve_pr_root_id_or_prefix},
 };
 
 #[allow(clippy::too_many_lines)]
@@ -58,13 +56,12 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
     // Resolve which proposal to merge: either the explicit id, or — when no id
     // is given — the proposal encoded in the checked-out `pr/...` branch name.
     let event_id = if let Some(id) = id {
-        parse_event_id(id)?
+        resolve_pr_root_id_or_prefix(id, proposals_and_revisions.iter(), pr_description)?
     } else {
         resolve_event_id_from_current_branch(&git_repo, &proposals_and_revisions)?
     };
 
-    let proposal = proposals_and_revisions
-        .iter()
+    let proposal = proposal_roots(&proposals_and_revisions)
         .find(|e| e.id == event_id)
         .context(format!(
             "PR with id {} not found in cache",
@@ -367,20 +364,6 @@ fn build_subject(event_id_hex: &str, title: &str) -> (String, bool) {
     (format!("{prefix}{}\u{2026}", truncated.trim_end()), true)
 }
 
-fn parse_event_id(id: &str) -> Result<EventId> {
-    if let Ok(nip19) = Nip19::from_bech32(id) {
-        match nip19 {
-            Nip19::Event(e) => return Ok(e.event_id),
-            Nip19::EventId(event_id) => return Ok(event_id),
-            _ => {}
-        }
-    }
-    if let Ok(event_id) = EventId::from_hex(id) {
-        return Ok(event_id);
-    }
-    bail!("invalid event-id or nevent: {id}")
-}
-
 /// When invoked without an id, infer the PR from the checked-out branch.
 ///
 /// Two branch-naming conventions are recognised:
@@ -411,20 +394,12 @@ fn resolve_event_id_from_current_branch(
         .rsplit_once('(')
         .and_then(|(_, rest)| rest.strip_suffix(')'))
     {
-        let matches: Vec<&nostr::Event> = proposals_and_revisions
-            .iter()
-            .filter(|e| e.id.to_hex().starts_with(shorthand))
-            .collect();
-
-        return match matches.as_slice() {
-            [] => bail!(
-                "no known PR matches branch '{branch}' (shorthand {shorthand}); specify a PR event-id or nevent"
-            ),
-            [only] => Ok(only.id),
-            _ => bail!(
-                "branch shorthand {shorthand} is ambiguous; specify the full PR event-id or nevent"
-            ),
-        };
+        return resolve_pr_root_id_or_prefix(shorthand, proposals_and_revisions.iter(), pr_description)
+        .with_context(|| {
+            format!(
+                "failed to resolve PR id encoded in branch '{branch}'; specify a PR event-id or nevent"
+            )
+        });
     }
 
     // Convention 2: a plain `pr/<name>` the current user pushed themselves
@@ -433,8 +408,7 @@ fn resolve_event_id_from_current_branch(
     let current_user =
         get_curent_user(git_repo).context("failed to read the logged-in user from git config")?;
 
-    let matches: Vec<&nostr::Event> = proposals_and_revisions
-        .iter()
+    let matches: Vec<&nostr::Event> = proposal_roots(proposals_and_revisions)
         .filter(|e| {
             is_event_proposal_root_for_branch(e, &branch, current_user.as_ref()).unwrap_or(false)
         })

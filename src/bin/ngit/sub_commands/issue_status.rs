@@ -7,11 +7,10 @@ use ngit::{
     git_events::{get_status, status_kinds},
 };
 use nostr::{
-    EventBuilder, EventId, FromBech32, Kind, Tag,
+    EventBuilder, Kind, Tag,
     nips::{
         nip01::Nip01Tag,
         nip10::{Marker, Nip10Tag},
-        nip19::Nip19,
     },
 };
 
@@ -22,21 +21,8 @@ use crate::{
     git::{Repo, RepoActions},
     login,
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::id_resolver::{issue_description, resolve_issue_or_prefix},
 };
-
-fn parse_event_id(id: &str) -> Result<EventId> {
-    if let Ok(nip19) = Nip19::from_bech32(id) {
-        match nip19 {
-            nostr::nips::nip19::Nip19::Event(e) => return Ok(e.event_id),
-            nostr::nips::nip19::Nip19::EventId(event_id) => return Ok(event_id),
-            _ => {}
-        }
-    }
-    if let Ok(event_id) = EventId::from_hex(id) {
-        return Ok(event_id);
-    }
-    bail!("invalid event-id or nevent: {id}")
-}
 
 #[allow(clippy::too_many_lines)]
 async fn launch_status(
@@ -46,8 +32,6 @@ async fn launch_status(
     action: &str,
     reason: Option<&str>,
 ) -> Result<()> {
-    let event_id = parse_event_id(id)?;
-
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -62,14 +46,8 @@ async fn launch_status(
 
     let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
-    let issue = issues
-        .iter()
-        .find(|e| e.id == event_id)
-        .context(format!(
-            "issue with id {} not found in cache",
-            event_id.to_hex()
-        ))?
-        .clone();
+    let issue = resolve_issue_or_prefix(id, issues.iter(), issue_description)?.clone();
+    let event_id = issue.id;
 
     // Login to get signer and user pubkey
     let (signer, user_ref, _) =

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use ngit::{
     client::{Params, get_events_from_local_cache, get_issues_from_cache},
     git_events::{
@@ -9,9 +9,9 @@ use ngit::{
     },
 };
 use nostr::{
-    FromBech32, Kind, RelayUrl, ToBech32,
+    Kind, RelayUrl, ToBech32,
     filter::{Alphabet, SingleLetterTag},
-    nips::nip19::{Nip19, Nip19Event},
+    nips::nip19::Nip19Event,
 };
 
 use crate::{
@@ -21,6 +21,7 @@ use crate::{
     },
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::id_resolver::resolve_issue_id_or_prefix,
 };
 
 /// `(event, status_kind, labels, comment_count, subject_override)`
@@ -239,17 +240,11 @@ pub async fn launch(
 
     if let Some(ref event_id_or_nevent) = id {
         // Resolve the target issue ID so we can fetch its comments.
-        let target_id = if event_id_or_nevent.starts_with("nevent") {
-            let nip19 = nostr::nips::nip19::Nip19::from_bech32(event_id_or_nevent)
-                .context("failed to parse nevent")?;
-            match nip19 {
-                nostr::nips::nip19::Nip19::EventId(id) => id,
-                nostr::nips::nip19::Nip19::Event(event) => event.event_id,
-                _ => anyhow::bail!("invalid nevent format"),
-            }
-        } else {
-            nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
-        };
+        let target_id = resolve_issue_id_or_prefix(
+            event_id_or_nevent,
+            filtered.iter().map(|(issue, _, _, _, _)| *issue),
+            |issue| describe_issue_row(issue, &filtered),
+        )?;
         let comments = if show_comments {
             get_comments_for_issue(git_repo_path, &target_id).await?
         } else {
@@ -268,7 +263,7 @@ pub async fn launch(
         let relay_hint = repo_ref.relays.first();
         return show_issue_details(
             &filtered,
-            event_id_or_nevent,
+            target_id,
             json,
             show_comments,
             &comments,
@@ -315,10 +310,36 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
     })
 }
 
+fn describe_issue_row(issue: &nostr::Event, rows: &[IssueRow<'_>]) -> String {
+    let Some((_, status_kind, labels, comment_count, subject_override)) =
+        rows.iter().find(|(row, _, _, _, _)| row.id == issue.id)
+    else {
+        return get_issue_title(issue, None);
+    };
+
+    let labels = if labels.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " labels={}",
+            labels
+                .iter()
+                .map(|label| format!("#{label}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    format!(
+        "status={} comments={comment_count}{labels} {}",
+        status_kind_to_str(*status_kind),
+        get_issue_title(issue, subject_override.as_deref())
+    )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn show_issue_details(
     issues: &[IssueRow<'_>],
-    event_id_or_nevent: &str,
+    target_id: nostr::EventId,
     json: bool,
     show_comments: bool,
     comments: &[nostr::Event],
@@ -326,17 +347,6 @@ fn show_issue_details(
     repo_ref: &ngit::repo_ref::RepoRef,
     relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
-    let target_id = if event_id_or_nevent.starts_with("nevent") {
-        let nip19 = Nip19::from_bech32(event_id_or_nevent).context("failed to parse nevent")?;
-        match nip19 {
-            Nip19::EventId(id) => id,
-            Nip19::Event(event) => event.event_id,
-            _ => bail!("invalid nevent format"),
-        }
-    } else {
-        nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")?
-    };
-
     let (issue, status_kind, labels, comment_count, subject_override) = issues
         .iter()
         .find(|(e, _, _, _, _)| e.id == target_id)

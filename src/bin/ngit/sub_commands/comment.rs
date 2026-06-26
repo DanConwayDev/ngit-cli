@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use ngit::{
     client::{
         Params, get_events_from_local_cache, get_issues_from_cache,
@@ -7,7 +7,7 @@ use ngit::{
     content_tags::{dedup_tags, tags_from_content},
     git_events::KIND_COMMENT,
 };
-use nostr::{EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag, nips::nip19::Nip19};
+use nostr::{EventBuilder, EventId, Kind, PublicKey, Tag};
 
 use crate::{
     client::{
@@ -17,21 +17,11 @@ use crate::{
     git::{Repo, RepoActions},
     login,
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::id_resolver::{
+        issue_description, parse_event_id, pr_description, resolve_issue_or_prefix,
+        resolve_pr_root_or_prefix,
+    },
 };
-
-fn parse_event_id(id: &str) -> Result<EventId> {
-    if let Ok(nip19) = Nip19::from_bech32(id) {
-        match nip19 {
-            nostr::nips::nip19::Nip19::Event(e) => return Ok(e.event_id),
-            nostr::nips::nip19::Nip19::EventId(event_id) => return Ok(event_id),
-            _ => {}
-        }
-    }
-    if let Ok(event_id) = EventId::from_hex(id) {
-        return Ok(event_id);
-    }
-    bail!("invalid event-id or nevent: {id}")
-}
 
 struct CommentArgs<'a> {
     root_event_id: EventId,
@@ -176,7 +166,6 @@ pub async fn launch_pr_comment(
     reply_to: Option<&str>,
     offline: bool,
 ) -> Result<()> {
-    let root_event_id = parse_event_id(id)?;
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
@@ -191,13 +180,8 @@ pub async fn launch_pr_comment(
     let proposals =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
-    let proposal = proposals
-        .iter()
-        .find(|e| e.id == root_event_id)
-        .context(format!(
-            "PR with id {} not found in cache",
-            root_event_id.to_hex()
-        ))?;
+    let proposal = resolve_pr_root_or_prefix(id, proposals.iter(), pr_description)?;
+    let root_event_id = proposal.id;
 
     let root_kind = proposal.kind;
     let root_pubkey = proposal.pubkey;
@@ -224,7 +208,6 @@ pub async fn launch_issue_comment(
     reply_to: Option<&str>,
     offline: bool,
 ) -> Result<()> {
-    let root_event_id = parse_event_id(id)?;
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
@@ -238,13 +221,8 @@ pub async fn launch_issue_comment(
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
-    let issue = issues
-        .iter()
-        .find(|e| e.id == root_event_id)
-        .context(format!(
-            "issue with id {} not found in cache",
-            root_event_id.to_hex()
-        ))?;
+    let issue = resolve_issue_or_prefix(id, issues.iter(), issue_description)?;
+    let root_event_id = issue.id;
 
     let root_pubkey = issue.pubkey;
     let reply_to_id = reply_to.map(parse_event_id).transpose()?;

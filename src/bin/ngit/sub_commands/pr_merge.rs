@@ -10,11 +10,10 @@ use ngit::{
     },
 };
 use nostr::{
-    EventBuilder, EventId, FromBech32, Kind, Tag,
+    EventBuilder, Kind, Tag,
     nips::{
         nip01::Nip01Tag,
         nip10::{Marker, Nip10Tag},
-        nip19::Nip19,
     },
 };
 
@@ -27,26 +26,11 @@ use crate::{
     git_events::event_to_cover_letter,
     login,
     repo_ref::get_repo_coordinates_when_remote_unknown,
+    sub_commands::id_resolver::{pr_description, proposal_roots, resolve_pr_root_or_prefix},
 };
-
-fn parse_event_id(id: &str) -> Result<EventId> {
-    if let Ok(nip19) = Nip19::from_bech32(id) {
-        match nip19 {
-            nostr::nips::nip19::Nip19::Event(e) => return Ok(e.event_id),
-            nostr::nips::nip19::Nip19::EventId(event_id) => return Ok(event_id),
-            _ => {}
-        }
-    }
-    if let Ok(event_id) = EventId::from_hex(id) {
-        return Ok(event_id);
-    }
-    bail!("invalid event-id or nevent: {id}")
-}
 
 #[allow(clippy::too_many_lines)]
 pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
-    let event_id = parse_event_id(id)?;
-
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -73,14 +57,8 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
     let proposals_and_revisions =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
-    let proposal = proposals_and_revisions
-        .iter()
-        .find(|e| e.id == event_id)
-        .context(format!(
-            "PR with id {} not found in cache",
-            event_id.to_hex()
-        ))?
-        .clone();
+    let proposal =
+        resolve_pr_root_or_prefix(id, proposals_and_revisions.iter(), pr_description)?.clone();
 
     // Check current status — only open/draft PRs can be merged
     let statuses = {
@@ -104,11 +82,8 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
         s
     };
 
-    let proposals_vec: Vec<nostr::Event> = proposals_and_revisions
-        .iter()
-        .filter(|e| !ngit::git_events::event_is_revision_root(e))
-        .cloned()
-        .collect();
+    let proposals_vec: Vec<nostr::Event> =
+        proposal_roots(&proposals_and_revisions).cloned().collect();
 
     let current_status = get_status(&proposal, &repo_ref, &statuses, &proposals_vec);
 

@@ -16,9 +16,9 @@ use ngit::{
     repo_ref::RepoRef,
 };
 use nostr::{
-    FromBech32, Kind, RelayUrl, ToBech32,
+    Kind, RelayUrl, ToBech32,
     filter::{Alphabet, SingleLetterTag},
-    nips::nip19::{Nip19, Nip19Event},
+    nips::nip19::Nip19Event,
 };
 
 use crate::{
@@ -33,7 +33,10 @@ use crate::{
         get_parent_commit_from_patch,
     },
     repo_ref::get_repo_coordinates_when_remote_unknown,
-    sub_commands::checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
+    sub_commands::{
+        checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
+        id_resolver::resolve_pr_root_id_or_prefix,
+    },
 };
 
 #[allow(clippy::too_many_lines)]
@@ -163,7 +166,13 @@ pub async fn launch(
 
     if let Some(ref event_id_or_nevent) = id {
         // Resolve the target proposal ID so we can fetch its comments.
-        let target_id = resolve_event_id(event_id_or_nevent)?;
+        let target_id = resolve_pr_root_id_or_prefix(
+            event_id_or_nevent,
+            filtered_proposals
+                .iter()
+                .map(|(proposal, _, _, _)| *proposal),
+            |proposal| describe_proposal_row(proposal, &filtered_proposals),
+        )?;
         let comments = if show_comments {
             get_comments_for_proposal(git_repo_path, &target_id).await?
         } else {
@@ -190,7 +199,7 @@ pub async fn launch(
         let relay_hint = repo_ref.relays.first();
         return show_proposal_details(
             &filtered_proposals,
-            event_id_or_nevent,
+            target_id,
             json,
             show_comments,
             comment_count,
@@ -209,19 +218,6 @@ pub async fn launch(
     }
 
     Ok(())
-}
-
-fn resolve_event_id(event_id_or_nevent: &str) -> Result<nostr::EventId> {
-    if event_id_or_nevent.starts_with("nevent") {
-        let nip19 = Nip19::from_bech32(event_id_or_nevent).context("failed to parse nevent")?;
-        match nip19 {
-            Nip19::EventId(id) => Ok(id),
-            Nip19::Event(event) => Ok(event.event_id),
-            _ => bail!("invalid nevent format"),
-        }
-    } else {
-        nostr::EventId::from_hex(event_id_or_nevent).context("failed to parse event id")
-    }
 }
 
 /// Fetch NIP-22 kind-1111 comments whose root `#E` tag matches `proposal_id`,
@@ -277,6 +273,35 @@ fn proposal_title(proposal: &nostr::Event, subject_override: Option<&str>) -> St
     } else {
         proposal.id.to_string()
     }
+}
+
+fn describe_proposal_row(
+    proposal: &nostr::Event,
+    rows: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
+) -> String {
+    let Some((_, status_kind, labels, subject_override)) =
+        rows.iter().find(|(row, _, _, _)| row.id == proposal.id)
+    else {
+        return proposal_title(proposal, None);
+    };
+
+    let labels = if labels.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " labels={}",
+            labels
+                .iter()
+                .map(|label| format!("#{label}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    format!(
+        "status={}{labels} {}",
+        status_kind_to_str(*status_kind),
+        proposal_title(proposal, subject_override.as_deref())
+    )
 }
 
 fn output_table(
@@ -418,7 +443,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn show_proposal_details(
     proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
-    event_id_or_nevent: &str,
+    target_id: nostr::EventId,
     json: bool,
     show_comments: bool,
     comment_count: usize,
@@ -428,8 +453,6 @@ fn show_proposal_details(
     relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
     use nostr::ToBech32;
-
-    let target_id = resolve_event_id(event_id_or_nevent)?;
 
     let (proposal, status_kind, proposal_labels, subject_override) = proposals
         .iter()
