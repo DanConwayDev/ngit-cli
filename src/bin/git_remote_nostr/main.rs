@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
         std::env::set_var("NGIT_VERBOSE", "1");
     }
 
-    let Some((decoded_nostr_url, git_repo)) = process_args().await? else {
+    let Some((remote_name, decoded_nostr_url, git_repo)) = process_args().await? else {
         return Ok(());
     };
 
@@ -224,6 +224,7 @@ async fn main() -> Result<()> {
                     &stdin,
                     refspec,
                     &mut client,
+                    remote_name.as_deref(),
                     list_outputs.clone(),
                     title_description,
                     push_options.git_server_extras.clone(),
@@ -250,7 +251,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
+async fn process_args() -> Result<Option<(Option<String>, NostrUrlDecoded, Repo)>> {
     let args = env::args();
     let args = args.skip(1).take(2).collect::<Vec<_>>();
 
@@ -260,26 +261,30 @@ async fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
         return Ok(None);
     }
 
-    let ([_, nostr_remote_url] | [nostr_remote_url]) = args.as_slice() else {
-        println!("nostr plugin for git");
-        println!("Usage:");
-        println!(
-            " - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier"
-        );
-        println!(
-            " - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs"
-        );
-        println!(
-            " - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options"
-        );
-        println!(" - set PR title/description via push options:");
-        println!("     git push -o 'title=My PR' -o 'description=Details' -u origin pr/branch");
-        println!("   for multiline descriptions, use \\n:");
-        println!(
-            "     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch"
-        );
-        println!("- publish a repository to nostr with `ngit init`");
-        return Ok(None);
+    let (remote_name, nostr_remote_url) = match args.as_slice() {
+        [remote_name, nostr_remote_url] => (Some(remote_name.clone()), nostr_remote_url),
+        [nostr_remote_url] => (None, nostr_remote_url),
+        _ => {
+            println!("nostr plugin for git");
+            println!("Usage:");
+            println!(
+                " - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier"
+            );
+            println!(
+                " - remote branches beginning with `pr/` are open PRs from contributors; `ngit list` can be used to view all PRs"
+            );
+            println!(
+                " - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options"
+            );
+            println!(" - set PR title/description via push options:");
+            println!("     git push -o 'title=My PR' -o 'description=Details' -u origin pr/branch");
+            println!("   for multiline descriptions, use \\n:");
+            println!(
+                "     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch"
+            );
+            println!("- publish a repository to nostr with `ngit init`");
+            return Ok(None);
+        }
     };
 
     let git_repo = Repo::from_path(&PathBuf::from(
@@ -290,7 +295,7 @@ async fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
         .await
         .context("invalid nostr url")?;
 
-    Ok(Some((decoded_nostr_url, git_repo)))
+    Ok(Some((remote_name, decoded_nostr_url, git_repo)))
 }
 
 async fn fetching_with_report_for_helper(
