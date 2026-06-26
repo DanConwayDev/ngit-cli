@@ -568,6 +568,35 @@ async fn publish_events_to_relays(
         return Ok(vec![]);
     }
 
+    let (repo_relays, write_relays) = relay_publish_targets(
+        &repo_ref.relays,
+        my_write_relays,
+        repo_relay_only,
+        excluded_relays,
+    );
+
+    if should_skip_empty_relay_publish(&repo_relays, &write_relays, excluded_relays) {
+        return Ok(vec![]);
+    }
+
+    send_events(
+        client,
+        Some(git_repo.get_path()?),
+        events,
+        write_relays,
+        repo_relays,
+        true,
+        false,
+    )
+    .await
+}
+
+fn relay_publish_targets(
+    repo_relays: &[RelayUrl],
+    my_write_relays: &[String],
+    repo_relay_only: bool,
+    excluded_relays: Option<&[RelayUrl]>,
+) -> (Vec<RelayUrl>, Vec<String>) {
     let is_excluded = |relay: &str| {
         excluded_relays.is_some_and(|excluded| {
             excluded
@@ -576,8 +605,7 @@ async fn publish_events_to_relays(
         })
     };
 
-    let repo_relays = repo_ref
-        .relays
+    let repo_relays = repo_relays
         .iter()
         .filter(|relay| !is_excluded(relay.as_str()))
         .cloned()
@@ -592,16 +620,16 @@ async fn publish_events_to_relays(
             .collect::<Vec<String>>()
     };
 
-    send_events(
-        client,
-        Some(git_repo.get_path()?),
-        events,
-        write_relays,
-        repo_relays,
-        true,
-        false,
-    )
-    .await
+    (repo_relays, write_relays)
+}
+
+fn should_skip_empty_relay_publish(
+    repo_relays: &[RelayUrl],
+    write_relays: &[String],
+    excluded_relays: Option<&[RelayUrl]>,
+) -> bool {
+    let excluded_any_relays = excluded_relays.is_some_and(|relays| !relays.is_empty());
+    excluded_any_relays && repo_relays.is_empty() && write_relays.is_empty()
 }
 
 fn relay_urls_match(left: &str, right: &str) -> bool {
@@ -2657,6 +2685,84 @@ mod tests {
         fn trailing_plus_stripped() {
             let (from, _) = refspec_to_from_to("+testing:testingb").unwrap();
             assert_eq!(from, "testing");
+        }
+    }
+
+    mod relay_publish_targets {
+        use super::*;
+
+        #[test]
+        fn excludes_grasp_relays_and_returns_empty_when_none_remain() {
+            let grasp_relay = RelayUrl::parse("ws://grasp.example").unwrap();
+            let (repo_relays, write_relays) = super::relay_publish_targets(
+                std::slice::from_ref(&grasp_relay),
+                &[],
+                false,
+                Some(std::slice::from_ref(&grasp_relay)),
+            );
+
+            assert!(repo_relays.is_empty());
+            assert!(write_relays.is_empty());
+            assert!(super::should_skip_empty_relay_publish(
+                &repo_relays,
+                &write_relays,
+                Some(std::slice::from_ref(&grasp_relay)),
+            ));
+        }
+
+        #[test]
+        fn excludes_matching_write_relays_before_fallback_decision() {
+            let excluded = RelayUrl::parse("ws://grasp.example").unwrap();
+            let write_relays = vec!["ws://grasp.example/".to_string()];
+            let (repo_relays, write_relays) = super::relay_publish_targets(
+                &[],
+                &write_relays,
+                false,
+                Some(std::slice::from_ref(&excluded)),
+            );
+
+            assert!(repo_relays.is_empty());
+            assert!(write_relays.is_empty());
+            assert!(super::should_skip_empty_relay_publish(
+                &repo_relays,
+                &write_relays,
+                Some(std::slice::from_ref(&excluded)),
+            ));
+        }
+
+        #[test]
+        fn allows_send_events_fallback_when_no_grasp_relays_were_excluded() {
+            let (repo_relays, write_relays) =
+                super::relay_publish_targets(&[], &[], false, Some(&[]));
+
+            assert!(repo_relays.is_empty());
+            assert!(write_relays.is_empty());
+            assert!(!super::should_skip_empty_relay_publish(
+                &repo_relays,
+                &write_relays,
+                Some(&[]),
+            ));
+            assert!(!super::should_skip_empty_relay_publish(
+                &repo_relays,
+                &write_relays,
+                None,
+            ));
+        }
+
+        #[test]
+        fn keeps_non_excluded_relays() {
+            let excluded = RelayUrl::parse("ws://grasp.example").unwrap();
+            let repo_relay = RelayUrl::parse("ws://relay.example").unwrap();
+            let write_relays = vec!["ws://write.example".to_string()];
+            let (repo_relays, write_relays) = super::relay_publish_targets(
+                std::slice::from_ref(&repo_relay),
+                &write_relays,
+                false,
+                Some(std::slice::from_ref(&excluded)),
+            );
+
+            assert_eq!(repo_relays, vec![repo_relay]);
+            assert_eq!(write_relays, vec!["ws://write.example".to_string()]);
         }
     }
 
