@@ -13,10 +13,7 @@ use ngit::{
     },
     utils::get_short_git_server_name,
 };
-use nostr::{
-    FromBech32, PublicKey, ToBech32,
-    nips::{nip01::Nip01Tag, nip19::Nip19Coordinate},
-};
+use nostr::{FromBech32, PublicKey, ToBech32, nips::nip19::Nip19Coordinate};
 use serde::Serialize;
 
 use crate::{
@@ -347,10 +344,10 @@ async fn print_repo_info(
     let trusted_name = display_name_for(trusted, my_pubkey, git_repo_path).await;
     println!("  trusted: {trusted_name}");
 
-    let co_maintainers: Vec<&PublicKey> = repo_ref
-        .maintainers
-        .iter()
-        .filter(|m| *m != trusted)
+    let co_maintainers: Vec<PublicKey> = repo_ref
+        .maintainers_with_announcements()
+        .into_iter()
+        .filter(|m| *m != *trusted)
         .collect();
 
     if !co_maintainers.is_empty() {
@@ -589,18 +586,9 @@ fn find_lister(repo_ref: &RepoRef, target: &PublicKey, trusted: &PublicKey) -> O
         relays: vec![],
     };
     if let Some(event) = repo_ref.events.get(&trusted_coord) {
-        let listed: Vec<PublicKey> = event
-            .tags
-            .iter()
-            .filter_map(|t| {
-                if let Ok(Nip01Tag::PublicKey { public_key, .. }) = Nip01Tag::try_from(t.clone()) {
-                    Some(public_key)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if listed.contains(target) {
+        if RepoRef::try_from((event.clone(), None))
+            .is_ok_and(|event_ref| event_ref.maintainers.contains(target))
+        {
             return None;
         }
     }
@@ -610,18 +598,9 @@ fn find_lister(repo_ref: &RepoRef, target: &PublicKey, trusted: &PublicKey) -> O
             continue;
         }
         let lister = coord.coordinate.public_key;
-        let lister_listed: Vec<PublicKey> = event
-            .tags
-            .iter()
-            .filter_map(|t| {
-                if let Ok(Nip01Tag::PublicKey { public_key, .. }) = Nip01Tag::try_from(t.clone()) {
-                    Some(public_key)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if lister_listed.contains(target) {
+        if RepoRef::try_from((event.clone(), None))
+            .is_ok_and(|event_ref| event_ref.maintainers.contains(target))
+        {
             return Some(lister.to_hex());
         }
     }

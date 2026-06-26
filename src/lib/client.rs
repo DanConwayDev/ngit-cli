@@ -1517,9 +1517,11 @@ pub async fn get_repo_ref_from_cache(
     repo_coordinate: &Nip19Coordinate,
 ) -> Result<RepoRef> {
     let mut maintainers = HashSet::new();
+    let mut ordered_maintainers = Vec::new();
     let mut new_coordinate: bool;
 
     maintainers.insert(repo_coordinate.public_key);
+    ordered_maintainers.push(repo_coordinate.public_key);
     let mut repo_events = vec![];
     loop {
         new_coordinate = false;
@@ -1548,6 +1550,7 @@ pub async fn get_repo_ref_from_cache(
             if let Ok(repo_ref) = RepoRef::try_from((e.clone(), None)) {
                 for m in repo_ref.maintainers {
                     if maintainers.insert(m) {
+                        ordered_maintainers.push(m);
                         new_coordinate = true;
                     }
                 }
@@ -1574,7 +1577,7 @@ pub async fn get_repo_ref_from_cache(
         .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
 
     let mut events: HashMap<Nip19Coordinate, nostr::Event> = HashMap::new();
-    for m in &maintainers {
+    for m in &ordered_maintainers {
         if let Some(e) = repo_events.iter().find(|e| e.pubkey.eq(m)) {
             events.insert(
                 Nip19Coordinate {
@@ -1605,7 +1608,7 @@ pub async fn get_repo_ref_from_cache(
     // also set maintainers_without_annoucnement
     let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
 
-    for m in &maintainers {
+    for m in &ordered_maintainers {
         if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
             if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
                 for relay in m_repo_ref.relays {
@@ -1629,10 +1632,24 @@ pub async fn get_repo_ref_from_cache(
         }
     }
 
+    let mut ordered_accepted_maintainers = Vec::new();
+    let mut ordered_requested_maintainers = Vec::new();
+    let requested_maintainers: HashSet<PublicKey> =
+        maintainers_without_annoucnement.iter().copied().collect();
+    for maintainer in ordered_maintainers {
+        if requested_maintainers.contains(&maintainer) {
+            ordered_requested_maintainers.push(maintainer);
+        } else {
+            ordered_accepted_maintainers.push(maintainer);
+        }
+    }
+    let ordered_maintainers =
+        [ordered_accepted_maintainers, ordered_requested_maintainers].concat();
+
     Ok(RepoRef {
         // use all maintainers from all events found, not just maintainers in the most
         // recent event
-        maintainers: maintainers.iter().copied().collect::<Vec<PublicKey>>(),
+        maintainers: ordered_maintainers,
         relays,
         git_server,
         events,

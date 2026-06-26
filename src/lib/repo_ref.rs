@@ -329,6 +329,57 @@ impl RepoRef {
         res
     }
 
+    /// Maintainers in announcement-tag order.
+    ///
+    /// The maintainer selected by the `nostr://` URL or explicit repo
+    /// coordinate is always first. Maintainers with a known announcement come
+    /// before requested maintainers whose announcement has not been seen yet.
+    /// This keeps PR/issue repository `a` tags anchored to an announcement that
+    /// exists, while still tagging requested maintainers for discovery.
+    pub fn maintainers_for_announcement_tags(&self) -> Vec<PublicKey> {
+        let requested: HashSet<PublicKey> = self
+            .maintainers_without_annoucnement
+            .as_ref()
+            .map(|maintainers| maintainers.iter().copied().collect())
+            .unwrap_or_default();
+
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+
+        if seen.insert(self.trusted_maintainer) {
+            ordered.push(self.trusted_maintainer);
+        }
+
+        for maintainer in &self.maintainers {
+            if !requested.contains(maintainer) && seen.insert(*maintainer) {
+                ordered.push(*maintainer);
+            }
+        }
+
+        for maintainer in &self.maintainers {
+            if requested.contains(maintainer) && seen.insert(*maintainer) {
+                ordered.push(*maintainer);
+            }
+        }
+
+        ordered
+    }
+
+    /// Maintainers that have accepted by publishing an announcement.
+    pub fn maintainers_with_announcements(&self) -> Vec<PublicKey> {
+        let requested: HashSet<PublicKey> = self
+            .maintainers_without_annoucnement
+            .as_ref()
+            .map(|maintainers| maintainers.iter().copied().collect())
+            .unwrap_or_default();
+
+        self.maintainers
+            .iter()
+            .copied()
+            .filter(|maintainer| !requested.contains(maintainer))
+            .collect()
+    }
+
     /// coordinates without relay hints
     pub fn coordinate_with_hint(&self) -> Nip19Coordinate {
         Nip19Coordinate {
@@ -1017,6 +1068,74 @@ mod tests {
         .await
         .unwrap()
     }
+
+    fn create_repo_ref_for_maintainer_order(
+        maintainers: Vec<PublicKey>,
+        requested: Vec<PublicKey>,
+    ) -> RepoRef {
+        RepoRef {
+            identifier: "123412341".to_string(),
+            name: "test name".to_string(),
+            description: "test description".to_string(),
+            root_commit: "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2".to_string(),
+            git_server: vec!["https://localhost:1000".to_string()],
+            web: vec![],
+            relays: vec![],
+            blossoms: vec![],
+            hashtags: vec![],
+            trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
+            maintainers_without_annoucnement: Some(requested),
+            maintainers,
+            events: HashMap::new(),
+            nostr_git_url: None,
+            extra_tags: vec![],
+        }
+    }
+
+    mod maintainer_order {
+        use super::*;
+
+        #[test]
+        fn announcement_tags_start_with_selected_and_put_requested_last() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let accepted = TEST_KEY_2_KEYS.public_key();
+            let requested = PublicKey::from_hex(
+                "00000001505e7e48927046e9bbaa728b1f3b511227e2200c578d6e6bb0c77eb9",
+            )
+            .unwrap();
+
+            let repo_ref = create_repo_ref_for_maintainer_order(
+                vec![requested, selected, accepted],
+                vec![requested],
+            );
+
+            assert_eq!(
+                repo_ref.maintainers_for_announcement_tags(),
+                vec![selected, accepted, requested]
+            );
+        }
+
+        #[test]
+        fn maintainers_with_announcements_excludes_requested_maintainers() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let accepted = TEST_KEY_2_KEYS.public_key();
+            let requested = PublicKey::from_hex(
+                "00000001505e7e48927046e9bbaa728b1f3b511227e2200c578d6e6bb0c77eb9",
+            )
+            .unwrap();
+
+            let repo_ref = create_repo_ref_for_maintainer_order(
+                vec![selected, requested, accepted],
+                vec![requested],
+            );
+
+            assert_eq!(
+                repo_ref.maintainers_with_announcements(),
+                vec![selected, accepted]
+            );
+        }
+    }
+
     mod try_from {
         use super::*;
 
