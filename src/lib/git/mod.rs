@@ -291,7 +291,7 @@ impl RepoActions for Repo {
         //    points at a `refs/heads/<name>` that has no commit yet. On a fresh repo
         //    this reflects `init.defaultBranch`. On a born repo HEAD is merely the
         //    checked-out branch (often a feature branch), which is not a default-branch
-        //    signal, so it must not be trusted here.
+        //    signal, so it must not be selected here.
         if let Ok(Some(name)) = self.get_local_head_branch_name() {
             let unborn = self
                 .git_repo

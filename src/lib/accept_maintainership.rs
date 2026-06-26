@@ -1,11 +1,10 @@
-//! Auto-accept co-maintainership on push.
+//! Auto-accept co-maintainership when publishing maintainer events.
 //!
 //! When a user has been offered co-maintainership (they appear in another
 //! maintainer's `maintainers` tag but have never published their own
 //! Kind:30617 announcement), pushing would normally fail. This module
-//! provides `accept_maintainership_with_defaults`, called by the push path
-//! to silently publish the co-maintainer's announcement with sensible
-//! defaults before continuing the push.
+//! provides helpers to publish the co-maintainer's announcement with sensible
+//! defaults before, or batched with, the maintainer's own event.
 //!
 //! See `docs/design/co-maintainer-announcement-rationale.md` for why the
 //! announcement is required (scam-protection) even though the fetch/read side
@@ -23,7 +22,7 @@ use anyhow::{Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use nostr::{
-    Kind, PublicKey, RelayUrl, ToBech32,
+    Event, Kind, PublicKey, RelayUrl, ToBech32,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
 
@@ -45,21 +44,30 @@ use crate::{
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Publish the co-maintainer's own Kind:30617 announcement with defaults and
-/// update the local git config / origin remote to point to it.
+/// A prepared co-maintainer announcement and the metadata needed to finalize
+/// local repository state after it has been published.
+pub struct MaintainerAcceptance {
+    pub event: Event,
+    pub relays: Vec<RelayUrl>,
+    selected_grasp_servers: Vec<String>,
+    public_key: PublicKey,
+    identifier: String,
+    nostr_url: String,
+}
+
+/// Build the co-maintainer's own Kind:30617 announcement with defaults.
 ///
-/// This is called automatically from the push path when the pushing user is
-/// listed as a maintainer but has not yet published their own announcement.
-/// No interactive prompts are shown — all values come from the existing
-/// announcement and the user's saved grasp server / relay preferences.
-pub async fn accept_maintainership_with_defaults(
+/// The caller is responsible for publishing `MaintainerAcceptance::event` to
+/// `MaintainerAcceptance::relays`, optionally batched with another event, and
+/// then calling `finalize_maintainership_acceptance`.
+pub async fn build_maintainership_acceptance_with_defaults(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     user_ref: &UserRef,
-    #[cfg(test)] client: &mut MockConnect,
-    #[cfg(not(test))] client: &mut Client,
+    #[cfg(test)] client: &MockConnect,
+    #[cfg(not(test))] client: &Client,
     signer: &Arc<crate::signer::NgitSigner>,
-) -> Result<()> {
+) -> Result<MaintainerAcceptance> {
     let my_pubkey = &user_ref.public_key;
     let identifier = &repo_ref.identifier;
 
@@ -110,11 +118,11 @@ pub async fn accept_maintainership_with_defaults(
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| repo_ref.root_commit.clone());
 
-    // --- Step 3: maintainers = [me, trusted_maintainer] ---
+    // --- Step 3: maintainers = [me, selected_maintainer] ---
 
     let mut maintainers = vec![*my_pubkey];
-    if repo_ref.trusted_maintainer != *my_pubkey {
-        maintainers.push(repo_ref.trusted_maintainer);
+    if repo_ref.selected_maintainer != *my_pubkey {
+        maintainers.push(repo_ref.selected_maintainer);
     }
 
     // --- Step 4: build RepoRef ---
@@ -129,7 +137,7 @@ pub async fn accept_maintainership_with_defaults(
         relays: relays.clone(),
         blossoms,
         hashtags,
-        trusted_maintainer: *my_pubkey,
+        selected_maintainer: *my_pubkey,
         maintainers_without_annoucnement: None,
         maintainers,
         events: HashMap::new(),
@@ -137,37 +145,41 @@ pub async fn accept_maintainership_with_defaults(
         extra_tags: vec![],
     };
 
-    // --- Step 5: sign and publish the announcement ---
+    // --- Step 5: sign the announcement ---
 
     eprintln!(
         "info: accepting co-maintainership of '{}' with defaults",
         name
     );
-    eprintln!("info: publishing your repository announcement to nostr...");
 
-    let repo_event = my_repo_ref.to_event(signer).await?;
+    let event = my_repo_ref.to_event(signer).await?;
+    let nostr_url = my_repo_ref.to_nostr_git_url(&Some(git_repo)).to_string();
 
-    client.set_signer(signer.clone()).await;
+    Ok(MaintainerAcceptance {
+        event,
+        relays,
+        selected_grasp_servers,
+        public_key: *my_pubkey,
+        identifier: identifier.clone(),
+        nostr_url,
+    })
+}
 
-    let _ = send_events(
-        client,
-        Some(git_repo.get_path()?),
-        vec![repo_event],
-        user_ref.relays.write(),
-        relays.clone(),
-        false, // no spinner — we are mid-push
-        true,  // silent
-    )
-    .await
-    .context("failed to publish co-maintainer announcement")?;
-
-    // --- Step 6: wait for grasp server provisioning ---
-
-    if !selected_grasp_servers.is_empty() {
-        wait_for_grasp_servers(git_repo, &selected_grasp_servers, my_pubkey, identifier).await?;
+/// Update local repository state after a prepared co-maintainer announcement
+/// has been published.
+pub async fn finalize_maintainership_acceptance(
+    git_repo: &Repo,
+    acceptance: &MaintainerAcceptance,
+) -> Result<()> {
+    if !acceptance.selected_grasp_servers.is_empty() {
+        wait_for_grasp_servers(
+            git_repo,
+            &acceptance.selected_grasp_servers,
+            &acceptance.public_key,
+            &acceptance.identifier,
+        )
+        .await?;
     }
-
-    // --- Step 7: update nostr.repo git config ---
 
     git_repo
         .save_git_config_item(
@@ -175,8 +187,8 @@ pub async fn accept_maintainership_with_defaults(
             &Nip19Coordinate {
                 coordinate: Coordinate {
                     kind: Kind::GitRepoAnnouncement,
-                    public_key: *my_pubkey,
-                    identifier: identifier.clone(),
+                    public_key: acceptance.public_key,
+                    identifier: acceptance.identifier.clone(),
                 },
                 relays: vec![],
             }
@@ -185,22 +197,58 @@ pub async fn accept_maintainership_with_defaults(
         )
         .context("failed to update nostr.repo git config")?;
 
-    // --- Step 8: update origin remote ---
-
-    let nostr_url = my_repo_ref.to_nostr_git_url(&Some(git_repo)).to_string();
     if git_repo.git_repo.find_remote("origin").is_ok() {
         git_repo
             .git_repo
-            .remote_set_url("origin", &nostr_url)
+            .remote_set_url("origin", &acceptance.nostr_url)
             .context("failed to update origin remote")?;
     } else {
         git_repo
             .git_repo
-            .remote("origin", &nostr_url)
+            .remote("origin", &acceptance.nostr_url)
             .context("failed to set origin remote")?;
     }
 
     eprintln!("info: co-maintainership accepted. run `ngit init` to customise your announcement.");
+
+    Ok(())
+}
+
+/// Publish the co-maintainer's own Kind:30617 announcement with defaults and
+/// update the local git config / origin remote to point to it.
+///
+/// This is called automatically from the push path when the pushing user is
+/// listed as a maintainer but has not yet published their own announcement.
+/// No interactive prompts are shown — all values come from the existing
+/// announcement and the user's saved grasp server / relay preferences.
+pub async fn accept_maintainership_with_defaults(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    user_ref: &UserRef,
+    #[cfg(test)] client: &mut MockConnect,
+    #[cfg(not(test))] client: &mut Client,
+    signer: &Arc<crate::signer::NgitSigner>,
+) -> Result<()> {
+    let acceptance =
+        build_maintainership_acceptance_with_defaults(git_repo, repo_ref, user_ref, client, signer)
+            .await?;
+    eprintln!("info: publishing your repository announcement to nostr...");
+
+    client.set_signer(signer.clone()).await;
+
+    let _ = send_events(
+        client,
+        Some(git_repo.get_path()?),
+        vec![acceptance.event.clone()],
+        user_ref.relays.write(),
+        acceptance.relays.clone(),
+        false, // no spinner — we are mid-push
+        true,  // silent
+    )
+    .await
+    .context("failed to publish co-maintainer announcement")?;
+
+    finalize_maintainership_acceptance(git_repo, &acceptance).await?;
 
     Ok(())
 }
@@ -212,15 +260,15 @@ pub async fn accept_maintainership_with_defaults(
 /// Return grasp servers for a co-maintainer using the following priority:
 ///
 /// 1. User's own saved grasp server list (if non-empty).
-/// 2. Trusted maintainer's grasp servers derived from
-///    `trusted_maintainer_repo_ref` (if provided and non-empty). If the trusted
-///    maintainer only uses a single grasp server, the first system-default
-///    grasp server is appended so the co-maintainer has at least two servers
-///    for redundancy.
+/// 2. Selected maintainer's grasp servers derived from
+///    `selected_maintainer_repo_ref` (if provided and non-empty). If the
+///    selected maintainer only uses a single grasp server, the first
+///    system-default grasp server is appended so the co-maintainer has at least
+///    two servers for redundancy.
 /// 3. System / client default grasp servers.
 pub fn grasp_servers_from_user_or_fallback(
     user_ref: &UserRef,
-    trusted_maintainer_repo_ref: Option<&RepoRef>,
+    selected_maintainer_repo_ref: Option<&RepoRef>,
     #[cfg(test)] client: &MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Vec<String> {
@@ -234,8 +282,8 @@ pub fn grasp_servers_from_user_or_fallback(
             .collect();
     }
 
-    // Priority 2: trusted maintainer's grasp servers.
-    if let Some(rr) = trusted_maintainer_repo_ref {
+    // Priority 2: selected maintainer's grasp servers.
+    if let Some(rr) = selected_maintainer_repo_ref {
         let maintainer_servers = rr.grasp_servers();
         if !maintainer_servers.is_empty() {
             if maintainer_servers.len() == 1 {

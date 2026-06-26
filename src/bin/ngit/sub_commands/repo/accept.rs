@@ -25,7 +25,7 @@ use crate::{
 pub struct SubCommandArgs {
     #[clap(short, long, value_parser, num_args = 1..)]
     /// where your git+nostr data is hosted (optional; uses your saved grasp
-    /// server list or the trusted maintainer's servers if not specified)
+    /// server list or the selected maintainer's servers if not specified)
     grasp_server: Vec<String>,
 }
 
@@ -72,11 +72,11 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     };
 
     // Validate state
-    let trusted = repo_ref.trusted_maintainer;
+    let selected = repo_ref.selected_maintainer;
 
-    if trusted == my_pubkey {
+    if selected == my_pubkey {
         return Err(cli_error(
-            "you are already the trusted maintainer of this repository",
+            "you are already the selected maintainer of this repository",
             &[],
             &["use `ngit repo edit` to update your announcement"],
         ));
@@ -96,18 +96,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     }
 
     if !repo_ref.maintainers.contains(&my_pubkey) {
-        let trusted_npub = trusted.to_bech32().unwrap_or_else(|_| trusted.to_hex());
+        let selected_npub = selected.to_bech32().unwrap_or_else(|_| selected.to_hex());
         return Err(cli_error(
             "you have not been invited as a maintainer of this repository",
-            &[("trusted maintainer", trusted_npub.as_str())],
-            &["the trusted maintainer must add your npub to their announcement first"],
+            &[("selected maintainer", selected_npub.as_str())],
+            &["the selected maintainer must add your npub to their announcement first"],
         ));
     }
 
     // Happy path: CoMaintainer state without an existing announcement
     let repo_name = &repo_ref.name;
-    let trusted_npub = trusted.to_bech32().unwrap_or_else(|_| trusted.to_hex());
-    println!("accepting co-maintainership of '{repo_name}' (offered by {trusted_npub})");
+    let selected_npub = selected.to_bech32().unwrap_or_else(|_| selected.to_hex());
+    println!("accepting co-maintainership of '{repo_name}' (offered by {selected_npub})");
     println!("publishing your repository announcement to nostr...");
 
     if args.grasp_server.is_empty() {
@@ -187,8 +187,8 @@ async fn accept_with_grasp_servers(
         .unwrap_or_else(|| repo_ref.root_commit.clone());
 
     let mut maintainers = vec![*my_pubkey];
-    if repo_ref.trusted_maintainer != *my_pubkey {
-        maintainers.push(repo_ref.trusted_maintainer);
+    if repo_ref.selected_maintainer != *my_pubkey {
+        maintainers.push(repo_ref.selected_maintainer);
     }
 
     let my_repo_ref = RepoRef {
@@ -201,7 +201,7 @@ async fn accept_with_grasp_servers(
         relays: relays.clone(),
         blossoms,
         hashtags,
-        trusted_maintainer: *my_pubkey,
+        selected_maintainer: *my_pubkey,
         maintainers_without_annoucnement: None,
         maintainers,
         events: std::collections::HashMap::new(),

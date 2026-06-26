@@ -20,7 +20,8 @@ use nostr::{
 
 use crate::{
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
+        Client, Connect, fetching_with_report, get_events_from_local_cache,
+        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
@@ -57,6 +58,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     // Login to verify maintainer status
     let (signer, user_ref, _) =

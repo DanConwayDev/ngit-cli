@@ -41,12 +41,18 @@
 //!   the grasp's bare repo without a stray remote-tracking ref). The tight pin
 //!   on the annotated tag's `^{}` peel lives in [`push_tag`]; this scenario
 //!   covers the cloner-consumes-and-pushes side.
+//! - [`auto_accept_maintainership`] — a user listed in another maintainer's
+//!   announcement, but without their own kind-30617 yet, clones the repo and
+//!   pushes a normal branch. Asserts the push path auto-publishes their
+//!   co-maintainer announcement and records the branch in a state event signed
+//!   by that co-maintainer.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
 //! pinpoint-named in `cargo test` output.
 
 mod add_branch;
+mod auto_accept_maintainership;
 mod clone_interact_tag;
 mod delete_branch;
 mod fresh_repo;

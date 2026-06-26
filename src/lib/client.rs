@@ -71,6 +71,8 @@ pub fn is_verbose() -> bool {
 
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
 
+static INVITED_MAINTAINER_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
+
 /// Holds the final state of a progress bar that finished before the detail
 /// view was revealed. The style and prefix are already set on the bar; only
 /// the `finish_with_message` call is deferred.
@@ -407,7 +409,7 @@ impl Connect for Client {
     async fn fetch_all<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
-        trusted_maintainer_coordinate: Option<&'a Nip19Coordinate>,
+        selected_maintainer_coordinate: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
         let relay_default_set = &self
@@ -418,7 +420,7 @@ impl Connect for Client {
 
         let mut request = create_relays_request(
             git_repo_path,
-            trusted_maintainer_coordinate,
+            selected_maintainer_coordinate,
             user_profiles,
             relay_default_set.clone(),
         )
@@ -734,9 +736,9 @@ impl Connect for Client {
             }
             processed_relays.extend(relays.clone());
 
-            if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
+            if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
                 if let Ok(repo_ref) =
-                    get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await
+                    get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await
                 {
                     request.repo_relays = repo_ref.relays.iter().cloned().collect();
                 }
@@ -1510,16 +1512,18 @@ pub async fn save_event_in_global_cache(
     }
 }
 
-// use annoucement from trusted maintainer but recursively add maintainers, git
+// use annoucement from selected maintainer but recursively add maintainers, git
 // servers and relays
 pub async fn get_repo_ref_from_cache(
     git_repo_path: Option<&Path>,
     repo_coordinate: &Nip19Coordinate,
 ) -> Result<RepoRef> {
     let mut maintainers = HashSet::new();
+    let mut ordered_maintainers = Vec::new();
     let mut new_coordinate: bool;
 
     maintainers.insert(repo_coordinate.public_key);
+    ordered_maintainers.push(repo_coordinate.public_key);
     let mut repo_events = vec![];
     loop {
         new_coordinate = false;
@@ -1548,6 +1552,7 @@ pub async fn get_repo_ref_from_cache(
             if let Ok(repo_ref) = RepoRef::try_from((e.clone(), None)) {
                 for m in repo_ref.maintainers {
                     if maintainers.insert(m) {
+                        ordered_maintainers.push(m);
                         new_coordinate = true;
                     }
                 }
@@ -1568,13 +1573,14 @@ pub async fn get_repo_ref_from_cache(
         Some(repo_coordinate.public_key),
     ))?;
 
-    // Use name/description/web from the latest event across all maintainers
+    // Use name/description/web/hashtags from the latest event across all
+    // maintainers.
     let latest_metadata = repo_events
         .last()
         .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
 
     let mut events: HashMap<Nip19Coordinate, nostr::Event> = HashMap::new();
-    for m in &maintainers {
+    for m in &ordered_maintainers {
         if let Some(e) = repo_events.iter().find(|e| e.pubkey.eq(m)) {
             events.insert(
                 Nip19Coordinate {
@@ -1605,7 +1611,7 @@ pub async fn get_repo_ref_from_cache(
     // also set maintainers_without_annoucnement
     let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
 
-    for m in &maintainers {
+    for m in &ordered_maintainers {
         if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
             if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
                 for relay in m_repo_ref.relays {
@@ -1629,10 +1635,24 @@ pub async fn get_repo_ref_from_cache(
         }
     }
 
-    Ok(RepoRef {
+    let mut ordered_accepted_maintainers = Vec::new();
+    let mut ordered_requested_maintainers = Vec::new();
+    let requested_maintainers: HashSet<PublicKey> =
+        maintainers_without_annoucnement.iter().copied().collect();
+    for maintainer in ordered_maintainers {
+        if requested_maintainers.contains(&maintainer) {
+            ordered_requested_maintainers.push(maintainer);
+        } else {
+            ordered_accepted_maintainers.push(maintainer);
+        }
+    }
+    let ordered_maintainers =
+        [ordered_accepted_maintainers, ordered_requested_maintainers].concat();
+
+    let repo_ref = RepoRef {
         // use all maintainers from all events found, not just maintainers in the most
         // recent event
-        maintainers: maintainers.iter().copied().collect::<Vec<PublicKey>>(),
+        maintainers: ordered_maintainers,
         relays,
         git_server,
         events,
@@ -1646,8 +1666,31 @@ pub async fn get_repo_ref_from_cache(
         web: latest_metadata
             .as_ref()
             .map_or_else(|| repo_ref.web.clone(), |r| r.web.clone()),
+        hashtags: latest_metadata
+            .as_ref()
+            .map_or_else(|| repo_ref.hashtags.clone(), |r| r.hashtags.clone()),
         ..repo_ref
-    })
+    };
+
+    Ok(repo_ref)
+}
+
+pub async fn warn_if_invited_as_maintainer(git_repo_path: &Path, repo_ref: &RepoRef) {
+    if INVITED_MAINTAINER_WARNING_PRINTED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let invited_as_maintainer = match get_likely_logged_in_user(git_repo_path).await {
+        Ok(Some(pubkey)) => repo_ref
+            .maintainers_without_annoucnement
+            .as_ref()
+            .is_some_and(|without| without.contains(&pubkey)),
+        Ok(None) | Err(_) => false,
+    };
+
+    if invited_as_maintainer && !INVITED_MAINTAINER_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
+        eprintln!("warning: you are invited as a maintainer, consider running `ngit repo accept`.");
+    }
 }
 
 pub async fn get_state_from_cache(
@@ -1676,12 +1719,12 @@ pub async fn get_state_from_cache(
 #[allow(clippy::too_many_lines)]
 async fn create_relays_request(
     git_repo_path: Option<&Path>,
-    trusted_maintainer_coordinate: Option<&Nip19Coordinate>,
+    selected_maintainer_coordinate: Option<&Nip19Coordinate>,
     user_profiles: &HashSet<PublicKey>,
     fallback_relays: HashSet<RelayUrl>,
 ) -> Result<FetchRequest> {
-    let repo_ref = if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
-        (get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await).ok()
+    let repo_ref = if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
+        (get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await).ok()
     } else {
         None
     };
@@ -1690,8 +1733,8 @@ async fn create_relays_request(
         // add Nip19Coordinates of users listed in maintainers to explicitly
         // specified coodinates
         let mut set: HashSet<Nip19Coordinate> = HashSet::new();
-        if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
-            set.insert(trusted_maintainer_coordinate.clone());
+        if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
+            set.insert(selected_maintainer_coordinate.clone());
         }
         if let Some(repo_ref) = &repo_ref {
             for c in repo_ref.coordinates() {
@@ -1879,7 +1922,7 @@ async fn create_relays_request(
         // Only use fallback relays for bootstrapping (no repo context).
         // When we have a repo coordinate, rely on repo relays and coordinate
         // hint relays instead of always merging in the default set.
-        let mut relays = if trusted_maintainer_coordinate.is_none() {
+        let mut relays = if selected_maintainer_coordinate.is_none() {
             fallback_relays.clone()
         } else {
             HashSet::new()
@@ -2628,7 +2671,7 @@ pub async fn fetching_with_report(
     git_repo_path: &Path,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    trusted_maintainer_coordinate: &Nip19Coordinate,
+    selected_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<FetchReport> {
     let verbose = is_verbose();
     if verbose {
@@ -2638,7 +2681,7 @@ pub async fn fetching_with_report(
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
-            Some(trusted_maintainer_coordinate),
+            Some(selected_maintainer_coordinate),
             &HashSet::new(),
         )
         .await?;
@@ -2662,7 +2705,7 @@ pub async fn fetching_quietly(
     git_repo_path: &Path,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    trusted_maintainer_coordinate: &Nip19Coordinate,
+    selected_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<(FetchReport, bool)> {
     let verbose = is_verbose();
     if verbose {
@@ -2672,7 +2715,7 @@ pub async fn fetching_quietly(
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
-            Some(trusted_maintainer_coordinate),
+            Some(selected_maintainer_coordinate),
             &HashSet::new(),
         )
         .await?;

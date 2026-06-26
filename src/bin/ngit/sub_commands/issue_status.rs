@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
 use ngit::{
+    accept_maintainership::{
+        build_maintainership_acceptance_with_defaults, finalize_maintainership_acceptance,
+    },
     client::{Params, get_issues_from_cache, send_events, sign_event},
     git_events::{get_status, status_kinds},
 };
@@ -115,6 +118,22 @@ async fn launch_status(
         return Ok(());
     }
 
+    let maintainer_acceptance = if repo_ref
+        .maintainers_without_annoucnement
+        .as_ref()
+        .is_some_and(|ms| ms.contains(&user_pubkey))
+    {
+        Some(
+            build_maintainership_acceptance_with_defaults(
+                &git_repo, &repo_ref, &user_ref, &client, &signer,
+            )
+            .await
+            .context("failed to auto-accept co-maintainership")?,
+        )
+    } else {
+        None
+    };
+
     let alt_text = match new_kind {
         Kind::GitStatusOpen => "issue reopened",
         Kind::GitStatusClosed => "issue closed",
@@ -165,16 +184,36 @@ async fn launch_status(
     let mut client = client;
     client.set_signer(signer).await;
 
+    let mut events = maintainer_acceptance
+        .as_ref()
+        .map(|acceptance| acceptance.event.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
+    events.push(status_event);
+
+    let mut relay_targets = repo_ref.relays.clone();
+    if let Some(acceptance) = &maintainer_acceptance {
+        for relay in &acceptance.relays {
+            if !relay_targets.contains(relay) {
+                relay_targets.push(relay.clone());
+            }
+        }
+    }
+
     send_events(
         &client,
         Some(git_repo_path),
-        vec![status_event],
+        events,
         user_ref.relays.write(),
-        repo_ref.relays.clone(),
+        relay_targets,
         true,
         false,
     )
     .await?;
+
+    if let Some(acceptance) = &maintainer_acceptance {
+        finalize_maintainership_acceptance(&git_repo, acceptance).await?;
+    }
 
     println!("issue {} {action}", &event_id.to_hex()[..8]);
     Ok(())

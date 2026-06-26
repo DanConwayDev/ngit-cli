@@ -15,7 +15,10 @@ use nostr::{
 };
 
 use crate::{
-    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
+    client::{
+        Client, Connect, fetching_with_report, get_repo_ref_from_cache,
+        warn_if_invited_as_maintainer,
+    },
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates_when_remote_unknown,
 };
@@ -148,6 +151,7 @@ pub async fn launch(
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let issues: Vec<nostr::Event> =
         get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;

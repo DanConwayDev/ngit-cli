@@ -24,7 +24,8 @@ use nostr::{
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
+        Client, Connect, fetching_with_report, get_events_from_local_cache,
+        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::{
@@ -60,6 +61,7 @@ pub async fn launch(
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let proposals_and_revisions: Vec<nostr::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
@@ -628,6 +630,7 @@ async fn launch_interactive() -> Result<()> {
     let nostr_remote_name: Option<&str> = nostr_remote_name.as_deref();
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let proposals_and_revisions: Vec<nostr::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;

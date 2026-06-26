@@ -16,7 +16,10 @@ use ngit::{
 use nostr::{EventId, FromBech32, nips::nip19::Nip19};
 
 use crate::{
-    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
+    client::{
+        Client, Connect, fetching_with_report, get_repo_ref_from_cache,
+        warn_if_invited_as_maintainer,
+    },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::get_repo_coordinates_when_remote_unknown,
@@ -43,6 +46,7 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let proposals_and_revisions: Vec<nostr::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;

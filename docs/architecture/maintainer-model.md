@@ -1,10 +1,10 @@
 # Maintainer Model
 
-How ngit handles multi-maintainer repositories: coordinate discovery, maintainer sets, and the distinction between shared metadata and personal infrastructure.
+How ngit handles multi-maintainer repositories: coordinate discovery, maintainer roles, and the distinction between shared metadata and personal infrastructure.
 
 ## Coordinate Discovery
 
-A **coordinate** is a `(kind, pubkey, identifier)` tuple that uniquely identifies a repository on nostr. The pubkey in the coordinate is the **trusted maintainer** (typically the original creator).
+A **coordinate** is a `(kind, pubkey, identifier)` tuple that uniquely identifies a repository on nostr. The pubkey in the coordinate is the **selected maintainer**: the maintainer chosen by the `nostr://` URL, `nostr.repo` config, or explicit coordinate the user is consuming.
 
 ngit discovers the coordinate locally from (in priority order):
 
@@ -16,9 +16,45 @@ No network access is required to find the coordinate. The coordinate may exist w
 
 ## Maintainer Set
 
-Each repository announcement (kind 30617) contains a `maintainers` tag listing public keys. These form a recursive set: if Alice lists Bob, and Bob lists Carol, then {Alice, Bob, Carol} are all in the maintainer set.
+Each repository announcement (kind 30617) contains a `maintainers` tag listing public keys. These form a recursive graph: if Alice lists Bob, and Bob lists Carol, then {Alice, Bob, Carol} can all be discovered from Alice's selected coordinate.
 
 Each maintainer independently decides who they list. Adding someone to your maintainers tag is an invitation to co-maintain.
+
+## Maintainer Roles
+
+- **Selected maintainer**: the pubkey in the coordinate selected by the user's
+  `nostr://` URL or config. This maintainer's announcement is the anchor for
+  repository discovery and should be listed first in repository `a` tags on
+  proposals.
+- **Lead maintainer**: an optional UI-level role inferred when exactly one
+  maintainer is listed by strictly more recursive maintainers than every other
+  maintainer. If the count ties, UIs should omit the lead indication rather than
+  assert that no lead exists. If one maintainer is intended to be the lead,
+  co-maintainers may list only that lead in their own announcement, letting the
+  lead remove co-maintainers unilaterally by changing the lead's maintainer
+  list. This inferred lead is informational, distinct from the selected
+  maintainer, and not displayed by ngit's CLI.
+- **Co-maintainer**: a discovered maintainer who has published their own kind
+  30617 announcement for this repository identifier. Co-maintainers are shown in
+  `ngit repo`.
+- **Invited maintainer**: a pubkey listed by a co-maintainer, but with no
+  discovered kind 30617 announcement of its own. Invited maintainers are still
+  tagged for discovery, but are not shown as co-maintainers until they publish an
+  announcement.
+
+The selected maintainer is not necessarily the lead maintainer. Different users
+can select different maintainers for the same repository by using different
+`nostr://` URLs, while still discovering the same recursive maintainer graph.
+
+## Announcement Tag Ordering
+
+Proposal events such as patches and pull requests tag repository announcements with `a` tags. These tags should be ordered as:
+
+1. the selected maintainer's announcement coordinate,
+2. other co-maintainers' announcement coordinates,
+3. invited maintainers' announcement coordinates.
+
+Invited maintainers are included so clients can discover the invitation, but they come last because their announcement may not exist yet. Putting the selected maintainer first gives clients a stable, existing announcement to anchor rendering and avoids treating an invitation as the primary repository reference.
 
 ## Consuming vs Publishing
 
@@ -40,6 +76,8 @@ Sourced from the **latest event** (by `created_at`) across the maintainer set:
 - `description`
 - `web`
 - `hashtags`
+- unknown/foreign tags preserved for forward compatibility (`extra_tags`), unless
+  `ngit init --clean` is used
 
 Rationale: these are shared identity. If any maintainer updates the project name, all subsequent re-announcements should pick it up.
 
@@ -59,7 +97,7 @@ Grasp-format clone URLs belonging to other maintainers are kept as additional gi
 
 Sourced from **my own announcement only**. Each maintainer independently decides who they list.
 
-If I don't have an existing announcement (first time co-maintaining), the default is `[me, trusted_maintainer]`.
+If I don't have an existing announcement (first time accepting an invitation), the default is `[me, selected_maintainer]`.
 
 #### Earliest Unique Commit
 
@@ -71,19 +109,20 @@ From the existing coordinate. Cannot change without `--force` (changing it creat
 
 ## Init States
 
-When `ngit init` runs, there are 5 possible states based on what exists locally and on relays:
+When `ngit init` runs, there are 6 possible states based on what exists locally and on relays:
 
-| State | Condition | Behavior |
-|-------|-----------|----------|
-| **Fresh** | No coordinate found | Must provide name + server infrastructure |
-| **Coordinate Only** | Coordinate exists, no announcement on relays | Requires `--force` (could be a relay/network issue) |
-| **My Announcement** | Announcement exists, I'm the trusted maintainer | Re-publish/update, no force needed |
-| **Co-Maintainer** | Announcement exists, I'm listed as maintainer | Publish own announcement, no force needed |
-| **Not Listed** | Announcement exists, I'm not in maintainer set | Requires `--force` |
+| State                      | Condition                                                                  | Behavior                                            |
+| -------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------- |
+| **Fresh**                  | No coordinate found                                                        | Must provide name + server infrastructure           |
+| **Coordinate Only**        | Coordinate exists, no announcement on relays                               | Requires `--force` (could be a relay/network issue) |
+| **My Announcement**        | Announcement exists, I'm the selected maintainer                           | Re-publish/update, no force needed                  |
+| **Invited Maintainer**     | Announcement exists, I'm listed as maintainer but have no announcement yet | Publish own announcement to accept, no force needed |
+| **Co-Maintainer**          | Announcement exists, I'm listed and have my own announcement               | Re-publish/update my announcement, no force needed  |
+| **Not Listed**             | Announcement exists, I'm not in maintainer set                             | Requires `--force`                                  |
 
-See `src/bin/ngit/sub_commands/init.rs` (`InitState` enum) and `tests/ngit_init.rs` for the implementation and test coverage.
+See `src/bin/ngit/sub_commands/init.rs` (`InitState` enum) and the `tests/init_state_*` integration tests for the implementation and test coverage.
 
-## Why Each Co-Maintainer Must Publish Their Own Announcement
+## Why Each Invited Maintainer Must Publish Their Own Announcement
 
 ### The Scam Scenario
 
@@ -91,12 +130,12 @@ Nostr git repository state is tracked by Kind:30618 events (the "git state" even
 These events say: "for the repository with identifier `X`, the current branch tips are...".
 
 Crucially, a state event knows only its identifier (`d` tag) — not which specific
-coordinate chain (which trusted maintainer's pubkey) it belongs to.
+coordinate chain (which selected maintainer's pubkey) it belongs to.
 
 This creates an attack vector:
 
 1. Alice has a reputation in the Rust ecosystem. She contributes to `my-lib` and
-   is listed in the trusted maintainer's Kind:30617 announcement.
+   is listed in the selected maintainer's Kind:30617 announcement.
 2. Alice pushes and, in doing so, publishes a Kind:30618 state event for
    identifier `my-lib`.
 3. A scammer creates a completely different, malicious repository — also with
@@ -112,34 +151,34 @@ This creates an attack vector:
 A Kind:30617 announcement is a signed statement from Alice that says:
 
 > "I, Alice (pubkey X), am a maintainer of the repository at identifier `my-lib`
-> whose trusted maintainer is pubkey Y."
+> whose selected maintainer is pubkey Y."
 
 The coordinate used to discover Alice's announcement is
-`30617:Y:{identifier}` — it is rooted at the trusted maintainer's pubkey, not the
+`30617:Y:{identifier}` — it is rooted at the selected maintainer's pubkey, not the
 identifier alone. Alice's own announcement event, signed by Alice's key, is published
 under that same coordinate chain (because `get_repo_ref_from_cache` walks the
 maintainer graph starting from Y's event, and finds Alice's event because Alice
 listed herself as a maintainer of the same identifier).
 
-A scammer's fake `my-lib` has a different trusted maintainer pubkey (Z, not Y). Even
+A scammer's fake `my-lib` has a different selected maintainer pubkey (Z, not Y). Even
 if Z lists Alice in their maintainers tag, Alice's existing Kind:30617 under the
 `30617:Y:my-lib` coordinate chain does NOT appear under `30617:Z:my-lib`. The scammer
 cannot bootstrap from Alice's existing announcement.
 
-And crucially: Alice's Kind:30618 state events are only fetched when a client is
-looking at a coordinate chain that Alice has explicitly announced. If Alice has never
-published a Kind:30617 for `30617:Z:my-lib`, her state events are not fetched in
-that context.
+Alice's Kind:30617 announcement gives clients a signed opt-in that binds her pubkey
+to one coordinate chain. Without that announcement, Alice is only invited: her pubkey
+appears in someone else's maintainer list, but she has not signed a statement joining
+that repository.
 
-Without Alice's announcement, her state events carry no coordinate chain membership.
-With her announcement, her state events are trusted only within the chains she has
-explicitly joined.
+This distinction lets ngit require an announcement before publishing Alice's own
+state events, and lets UIs avoid displaying an invited maintainer as a
+co-maintainer.
 
 ### The Remaining Vulnerability Without Announcements
 
-If we allowed state events without announcements — i.e., we filtered state events
-by `repo_ref.maintainers` even for maintainers without their own Kind:30617 — the
-attack above works:
+If ngit allowed publishing state events without announcements — i.e., if it let an
+invited maintainer push without first publishing their own Kind:30617 — the attack
+above would be easier to exploit:
 
 - The scammer publishes `30617:Z:my-lib` listing Alice.
 - `get_repo_ref_from_cache` for `Z`'s coordinate now includes Alice in `maintainers`.
@@ -158,12 +197,12 @@ are accepted from any pubkey in the maintainer set, regardless of whether that p
 has published its own Kind:30617. This encourages good practice while remaining
 resilient when other tools don't follow the same pattern.
 
-- **Push (strict)**: ngit will not publish a state event for a co-maintainer who
+- **Push (strict)**: ngit will not publish a state event for an invited maintainer who
   lacks an announcement. If the user has no announcement, ngit auto-publishes one
   with defaults before proceeding. This ensures that every state event ngit produces
   is backed by an explicit, signed opt-in.
 
-- **Fetch (permissive)**: state events from announcement-less maintainers are still
+- **Fetch (permissive)**: state events from invited maintainers are still
   accepted. This keeps ngit interoperable with other tools that may not enforce the
   announcement requirement, and avoids silently dropping legitimate state from
   maintainers who used a different client.

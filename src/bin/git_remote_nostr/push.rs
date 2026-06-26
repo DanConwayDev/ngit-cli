@@ -66,6 +66,7 @@ pub async fn run_push(
     stdin: &Stdin,
     initial_refspec: &str,
     client: &mut Client,
+    remote_name: Option<&str>,
     list_outputs: Option<HashMap<String, (HashMap<String, String>, bool)>>,
     title_description: Option<(String, String)>,
     git_server_push_options: Vec<String>,
@@ -169,6 +170,7 @@ pub async fn run_push(
                 update_remote_refs_pushed(
                     &git_repo.git_repo,
                     refspec,
+                    remote_name,
                     &repo_ref.to_nostr_git_url(&None).to_string(),
                 )
                 .context("could not update remote_ref locally")?;
@@ -1123,6 +1125,7 @@ async fn get_maintainers_yaml_update(
                 git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
                     &git_repo.git_repo,
                     refspec,
+                    None,
                     &decoded_nostr_url.original_string,
                 )?)?;
             let diff = git_repo.git_repo.diff_tree_to_tree(
@@ -1194,6 +1197,7 @@ async fn get_merged_status_events(
                 git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
                     &git_repo.git_repo,
                     refspec,
+                    None,
                     &decoded_nostr_url.original_string,
                 )?)
             else {
@@ -1296,6 +1300,7 @@ async fn get_issue_resolution_status_events(
             git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
                 &git_repo.git_repo,
                 refspec,
+                None,
                 &decoded_nostr_url.original_string,
             )?)
         else {
@@ -2157,6 +2162,7 @@ async fn get_proposal_or_revision_event(git_repo: &Repo, event: &Event) -> Resul
 fn update_remote_refs_pushed(
     git_repo: &Repository,
     refspec: &str,
+    remote_name: Option<&str>,
     nostr_remote_url: &str,
 ) -> Result<()> {
     let (from, to) = refspec_to_from_to(refspec)?;
@@ -2172,14 +2178,16 @@ fn update_remote_refs_pushed(
     // branches in `git branch -r`, IDEs, etc.  Delete any such legacy
     // entry for this tag so the next `git branch -r` is clean.
     if to.starts_with("refs/tags/") {
-        let legacy_ref_name = refspec_remote_ref_name(git_repo, refspec, nostr_remote_url)?;
+        let legacy_ref_name =
+            refspec_remote_ref_name(git_repo, refspec, remote_name, nostr_remote_url)?;
         if let Ok(mut legacy_ref) = git_repo.find_reference(&legacy_ref_name) {
             let _ = legacy_ref.delete();
         }
         return Ok(());
     }
 
-    let target_ref_name = refspec_remote_ref_name(git_repo, refspec, nostr_remote_url)?;
+    let target_ref_name =
+        refspec_remote_ref_name(git_repo, refspec, remote_name, nostr_remote_url)?;
 
     if from.is_empty() {
         if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
@@ -2220,11 +2228,15 @@ fn refspec_to_from_to(refspec: &str) -> Result<(&str, &str)> {
 fn refspec_remote_ref_name(
     git_repo: &Repository,
     refspec: &str,
+    remote_name: Option<&str>,
     nostr_remote_url: &str,
 ) -> Result<String> {
     let (_, to) = refspec_to_from_to(refspec)?;
+    let remote_name = remote_name
+        .map(str::to_string)
+        .map_or_else(|| get_remote_name_by_url(git_repo, nostr_remote_url), Ok)?;
     let nostr_remote = git_repo
-        .find_remote(&get_remote_name_by_url(git_repo, nostr_remote_url)?)
+        .find_remote(&remote_name)
         .context("we should have just located this remote")?;
     let short_name = if let Some(s) = to.strip_prefix("refs/heads/") {
         s.to_string()

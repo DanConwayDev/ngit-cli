@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
 use ngit::{
+    accept_maintainership::{
+        build_maintainership_acceptance_with_defaults, finalize_maintainership_acceptance,
+    },
     client::{Params, get_issues_from_cache, get_proposals_and_revisions_from_cache, send_events},
     git_events::{KIND_LABEL, get_labels_and_subject},
 };
@@ -118,6 +121,22 @@ async fn publish_set_subject_event(
         return Ok(());
     }
 
+    let maintainer_acceptance = if repo_ref
+        .maintainers_without_annoucnement
+        .as_ref()
+        .is_some_and(|ms| ms.contains(&user_pubkey))
+    {
+        Some(
+            build_maintainership_acceptance_with_defaults(
+                &git_repo, &repo_ref, &user_ref, &client, &signer,
+            )
+            .await
+            .context("failed to auto-accept co-maintainership")?,
+        )
+    } else {
+        None
+    };
+
     // Build the kind-1985 subject label event.
     //
     // Structure (NIP-32 §subject namespace):
@@ -158,16 +177,36 @@ async fn publish_set_subject_event(
     let mut client = client;
     client.set_signer(signer).await;
 
+    let mut events = maintainer_acceptance
+        .as_ref()
+        .map(|acceptance| acceptance.event.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
+    events.push(subject_event);
+
+    let mut relay_targets = repo_ref.relays.clone();
+    if let Some(acceptance) = &maintainer_acceptance {
+        for relay in &acceptance.relays {
+            if !relay_targets.contains(relay) {
+                relay_targets.push(relay.clone());
+            }
+        }
+    }
+
     send_events(
         &client,
         Some(git_repo_path),
-        vec![subject_event],
+        events,
         user_ref.relays.write(),
-        repo_ref.relays.clone(),
+        relay_targets,
         true,
         false,
     )
     .await?;
+
+    if let Some(acceptance) = &maintainer_acceptance {
+        finalize_maintainership_acceptance(&git_repo, acceptance).await?;
+    }
 
     println!(
         "{} {} subject set to: {}",

@@ -22,7 +22,8 @@ use crate::{
         cli_error,
     },
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
+        Client, Connect, fetching_with_report, get_events_from_local_cache,
+        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions, identify_ahead_behind},
     git_events::{event_is_patch_set_root, event_tag_from_nip19_or_hex},
@@ -163,6 +164,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let (root_proposal, mention_tags) =
         get_root_proposal_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
@@ -273,6 +275,27 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         should_be_pr
     };
 
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
+        &cli_args.password,
+        Some(&client),
+        true,
+    )
+    .await?;
+
+    if let Some(root_proposal) = &root_proposal {
+        if root_proposal.pubkey != user_ref.public_key
+            && !repo_ref.maintainers.contains(&user_ref.public_key)
+        {
+            bail!(
+                "only the proposal author or a repository maintainer can update an existing proposal"
+            );
+        }
+    }
+
+    client.set_signer(signer.clone()).await;
+
     let cover_letter_title_description = if cli_args.interactive {
         // Interactive flow: prompt for cover letter confirm, title, description
         let title = if as_pr {
@@ -360,17 +383,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
             (None, None) => None, // no cover letter
         }
     };
-
-    let (signer, user_ref, _) = login::login_or_signup(
-        &Some(&git_repo),
-        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
-        &cli_args.password,
-        Some(&client),
-        true,
-    )
-    .await?;
-
-    client.set_signer(signer.clone()).await;
 
     // oldest first
     commits.reverse();
