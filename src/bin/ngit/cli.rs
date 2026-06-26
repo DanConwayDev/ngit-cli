@@ -68,6 +68,7 @@ built-in defaults are used last.
 
   {grasp:<39} {grasp_env:<32} only used during `ngit init`
   {relay:<39} {relay_env:<32} profile discovery and account bootstrapping
+  {ann_indexer:<39} {ann_indexer_env:<32} repo announcement discovery
   {blaster:<39} {blaster_env:<32} repo announcement events only
   {signer:<39} {signer_env:<32} remote signer fallback relays
 
@@ -118,6 +119,8 @@ implementation details used for efficiency.
         grasp_env = env("NGIT_GRASP_DEFAULT_SET"),
         relay = key("nostr.relay-default-set"),
         relay_env = env("NGIT_RELAY_DEFAULT_SET"),
+        ann_indexer = key("nostr.relay-announcement-indexer-set"),
+        ann_indexer_env = env("NGIT_RELAY_ANNOUNCEMENT_INDEXER_SET"),
         blaster = key("nostr.relay-blaster-set"),
         blaster_env = env("NGIT_RELAY_BLASTER_SET"),
         signer = key("nostr.relay-signer-fallback-set"),

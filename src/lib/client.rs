@@ -121,6 +121,7 @@ fn finish_bar(bar: &ProgressBar, message: String, reveal_state: &Option<Arc<BarR
 pub struct Client {
     client: nostr_sdk::client::Client,
     relay_default_set: Vec<String>,
+    announcement_indexer_relays: Vec<String>,
     blaster_relays: Vec<String>,
     fallback_signer_relays: Vec<String>,
     grasp_default_set: Vec<String>,
@@ -158,6 +159,7 @@ pub trait Connect {
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()>;
     async fn disconnect(&self) -> Result<()>;
     fn get_relay_default_set(&self) -> &Vec<String>;
+    fn get_announcement_indexer_relays(&self) -> &Vec<String>;
     fn get_blaster_relays(&self) -> &Vec<String>;
     fn get_fallback_signer_relays(&self) -> &Vec<String>;
     fn get_grasp_default_set(&self) -> &Vec<String>;
@@ -213,6 +215,7 @@ impl Connect for Client {
                     .build()
             },
             relay_default_set: opts.relay_default_set,
+            announcement_indexer_relays: opts.announcement_indexer_relays,
             blaster_relays: opts.blaster_relays,
             fallback_signer_relays: opts.fallback_signer_relays,
             grasp_default_set: opts.grasp_default_set,
@@ -257,6 +260,10 @@ impl Connect for Client {
 
     fn get_relay_default_set(&self) -> &Vec<String> {
         &self.relay_default_set
+    }
+
+    fn get_announcement_indexer_relays(&self) -> &Vec<String> {
+        &self.announcement_indexer_relays
     }
 
     fn get_blaster_relays(&self) -> &Vec<String> {
@@ -417,12 +424,18 @@ impl Connect for Client {
             .iter()
             .filter_map(|r| RelayUrl::parse(r).ok())
             .collect::<HashSet<RelayUrl>>();
+        let announcement_indexer_relays = &self
+            .announcement_indexer_relays
+            .iter()
+            .filter_map(|r| RelayUrl::parse(r).ok())
+            .collect::<HashSet<RelayUrl>>();
 
         let mut request = create_relays_request(
             git_repo_path,
             selected_maintainer_coordinate,
             user_profiles,
             relay_default_set.clone(),
+            announcement_indexer_relays.clone(),
         )
         .await?;
 
@@ -529,6 +542,7 @@ impl Connect for Client {
             let relays = request
                 .repo_relays
                 .union(&request.user_relays_for_profiles)
+                .chain(request.announcement_indexer_relays.iter())
                 .filter(|&r| !r.as_str().contains("nostr.mutinywallet.com"))
                 .cloned()
                 .collect::<HashSet<RelayUrl>>()
@@ -540,6 +554,10 @@ impl Connect for Client {
             }
             let profile_relays_only = request
                 .user_relays_for_profiles
+                .difference(&request.repo_relays)
+                .collect::<HashSet<&RelayUrl>>();
+            let announcement_relays_only = request
+                .announcement_indexer_relays
                 .difference(&request.repo_relays)
                 .collect::<HashSet<&RelayUrl>>();
             for relay in &request.repo_relays {
@@ -560,6 +578,7 @@ impl Connect for Client {
                         FetchRequest {
                             selected_relay: Some(r.to_owned()),
                             repo_coordinates_without_relays: vec![],
+                            announcement_only: false,
                             proposals: HashSet::new(),
                             missing_contributor_profiles: request
                                 .missing_contributor_profiles
@@ -572,6 +591,20 @@ impl Connect for Client {
                                 )
                                 .copied()
                                 .collect(),
+                            ..request.clone()
+                        }
+                    } else if announcement_relays_only.contains(r) {
+                        FetchRequest {
+                            selected_relay: Some(r.to_owned()),
+                            announcement_only: true,
+                            state: None,
+                            proposals: HashSet::new(),
+                            issue_ids: HashSet::new(),
+                            non_proposal_event_ids: HashSet::new(),
+                            contributors: HashSet::new(),
+                            missing_contributor_profiles: HashSet::new(),
+                            profiles_to_fetch_from_user_relays: HashMap::new(),
+                            user_relays_for_profiles: HashSet::new(),
                             ..request.clone()
                         }
                     } else {
@@ -818,13 +851,17 @@ impl Connect for Client {
         let dim = Style::new().color256(247);
 
         loop {
-            let filters = get_fetch_filters(
-                &fresh_coordinates,
-                &fresh_proposal_roots,
-                &fresh_issue_roots,
-                &fresh_non_proposal_event_ids,
-                &fresh_profiles,
-            );
+            let filters = if request.announcement_only {
+                get_announcement_only_fetch_filters(&fresh_coordinates)
+            } else {
+                get_fetch_filters(
+                    &fresh_coordinates,
+                    &fresh_proposal_roots,
+                    &fresh_issue_roots,
+                    &fresh_non_proposal_event_ids,
+                    &fresh_profiles,
+                )
+            };
             fresh_non_proposal_event_ids = HashSet::new();
 
             if let Some(pb) = &pb {
@@ -895,7 +932,11 @@ impl Connect for Client {
             )
             .await?;
 
-            if fresh_coordinates.is_empty()
+            if request.announcement_only {
+                if fresh_coordinates.is_empty() {
+                    break;
+                }
+            } else if fresh_coordinates.is_empty()
                 && fresh_proposal_roots.is_empty()
                 && fresh_issue_roots.is_empty()
                 && fresh_profiles.is_empty()
@@ -1083,6 +1124,7 @@ async fn get_events_of(
 pub struct Params {
     pub keys: Option<nostr::Keys>,
     pub relay_default_set: Vec<String>,
+    pub announcement_indexer_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
     pub fallback_signer_relays: Vec<String>,
     pub grasp_default_set: Vec<String>,
@@ -1163,6 +1205,11 @@ impl Default for Params {
                     // reading
                 ]
             },
+            announcement_indexer_relays: if std::env::var("NGITTEST").is_ok() {
+                env_relay_url_list("NGIT_RELAY_ANNOUNCEMENT_INDEXER_SET").unwrap_or_default()
+            } else {
+                vec!["wss://index.ngit.dev".to_string()]
+            },
             blaster_relays: if std::env::var("NGITTEST").is_ok() {
                 env_relay_url_list("NGIT_RELAY_BLASTER_SET")
                     .unwrap_or_else(|| vec!["ws://localhost:8057".to_string()])
@@ -1191,6 +1238,9 @@ impl Params {
     fn apply_env_overrides(&mut self) {
         if let Some(relays) = env_relay_url_list("NGIT_RELAY_DEFAULT_SET") {
             self.relay_default_set = relays;
+        }
+        if let Some(relays) = env_relay_url_list("NGIT_RELAY_ANNOUNCEMENT_INDEXER_SET") {
+            self.announcement_indexer_relays = relays;
         }
         if let Some(relays) = env_relay_url_list("NGIT_RELAY_BLASTER_SET") {
             self.blaster_relays = relays;
@@ -1227,6 +1277,15 @@ impl Params {
                     .split(';')
                     .filter_map(|url| RelayUrl::parse(url).ok()) // Attempt to parse and filter out errors
                     .map(|relay_url| relay_url.to_string()) // Convert RelayUrl back to String
+                    .collect();
+            }
+            if let Ok(Some(announcement_indexers)) =
+                get_git_config_item(git_repo, "nostr.relay-announcement-indexer-set")
+            {
+                params.announcement_indexer_relays = announcement_indexers
+                    .split(';')
+                    .filter_map(|url| RelayUrl::parse(url).ok())
+                    .map(|relay_url| relay_url.to_string())
                     .collect();
             }
             if let Ok(Some(relay_signer)) =
@@ -1725,6 +1784,7 @@ async fn create_relays_request(
     selected_maintainer_coordinate: Option<&Nip19Coordinate>,
     user_profiles: &HashSet<PublicKey>,
     fallback_relays: HashSet<RelayUrl>,
+    announcement_indexer_relays: HashSet<RelayUrl>,
 ) -> Result<FetchRequest> {
     let repo_ref = if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
         (get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await).ok()
@@ -1948,8 +2008,15 @@ async fn create_relays_request(
         relays
     };
 
+    let announcement_indexer_relays = if repo_coordinates_without_relays.is_empty() {
+        HashSet::new()
+    } else {
+        announcement_indexer_relays
+    };
+
     let relay_column_width = relays
         .union(&user_relays_for_profiles)
+        .chain(announcement_indexer_relays.iter())
         .reduce(|a, r| {
             if r.to_string()
                 .chars()
@@ -1966,6 +2033,8 @@ async fn create_relays_request(
     Ok(FetchRequest {
         selected_relay: None,
         repo_relays: relays,
+        announcement_indexer_relays,
+        announcement_only: false,
         relay_column_width,
         repo_coordinates_without_relays: if let Some(repo_ref) = &repo_ref {
             repo_ref.coordinates_with_timestamps()
@@ -2445,6 +2514,16 @@ pub fn get_fetch_filters(
     .concat()
 }
 
+fn get_announcement_only_fetch_filters(
+    repo_coordinates: &HashSet<Nip19Coordinate>,
+) -> Vec<nostr::Filter> {
+    if repo_coordinates.is_empty() {
+        vec![]
+    } else {
+        vec![get_filter_repo_ann_events(repo_coordinates, true)]
+    }
+}
+
 pub fn get_filter_repo_ann_events(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     maintainers_only: bool,
@@ -2653,7 +2732,9 @@ impl Display for FetchReport {
 #[derive(Default, Clone)]
 pub struct FetchRequest {
     repo_relays: HashSet<RelayUrl>,
+    announcement_indexer_relays: HashSet<RelayUrl>,
     selected_relay: Option<RelayUrl>,
+    announcement_only: bool,
     relay_column_width: usize,
     repo_coordinates_without_relays: Vec<(Nip19Coordinate, Option<Timestamp>)>,
     state: Option<(Timestamp, EventId)>,
@@ -3272,4 +3353,43 @@ fn remove_trailing_slash(s: &str) -> String {
         None => s,
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn announcement_only_filters_request_only_repo_announcements_from_maintainers() {
+        let public_key =
+            PublicKey::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let coordinates = HashSet::from_iter([Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key,
+                identifier: "repo".to_string(),
+            },
+            relays: vec![],
+        }]);
+
+        let filters = get_announcement_only_fetch_filters(&coordinates);
+
+        assert_eq!(filters.len(), 1);
+        assert_eq!(
+            filters[0].kinds,
+            Some(std::collections::BTreeSet::from_iter([
+                Kind::GitRepoAnnouncement,
+            ]))
+        );
+        assert_eq!(
+            filters[0].authors,
+            Some(std::collections::BTreeSet::from_iter([public_key]))
+        );
+    }
+
+    #[test]
+    fn announcement_only_filters_are_empty_without_coordinates() {
+        assert!(get_announcement_only_fetch_filters(&HashSet::new()).is_empty());
+    }
 }
