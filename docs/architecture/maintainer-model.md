@@ -22,30 +22,36 @@ Each maintainer independently decides who they list. Adding someone to your main
 
 ## Maintainer Roles
 
-ngit distinguishes several roles that older docs and code sometimes collapsed into "trusted" or "co-maintainer":
+- **Selected maintainer**: the pubkey in the coordinate selected by the user's
+  `nostr://` URL or config. This maintainer's announcement is the anchor for
+  repository discovery and should be listed first in repository `a` tags on
+  proposals.
+- **Lead maintainer**: an optional UI-level role inferred when exactly one
+  maintainer is listed by strictly more recursive maintainers than every other
+  maintainer. If the count ties, UIs should omit the lead indication rather than
+  assert that no lead exists. If one maintainer is intended to be the lead,
+  co-maintainers may list only that lead in their own announcement, letting the
+  lead remove co-maintainers unilaterally by changing the lead's maintainer
+  list. This inferred lead is informational, distinct from the selected
+  maintainer, and not displayed by ngit's CLI.
+- **Co-maintainer**: a discovered maintainer who has published their own kind
+  30617 announcement for this repository identifier. Co-maintainers are shown in
+  `ngit repo`.
+- **Invited maintainer**: a pubkey listed by a co-maintainer, but with no
+  discovered kind 30617 announcement of its own. Invited maintainers are still
+  tagged for discovery, but are not shown as co-maintainers until they publish an
+  announcement.
 
-- **Selected maintainer**: the pubkey in the coordinate selected by the user's `nostr://` URL or config. This maintainer's announcement is the anchor for repository discovery and should be listed first in repository `a` tags on proposals.
-- **Accepted maintainer**: a discovered maintainer who has published their own kind 30617 announcement for this repository identifier. Accepted maintainers are shown as co-maintainers in `ngit repo`.
-- **Invited maintainer**: a pubkey listed by an accepted maintainer, but with no discovered kind 30617 announcement of its own. Invited maintainers are still tagged for discovery, but are not shown as accepted co-maintainers until they publish an announcement.
-
-Some external tools may need a single default suggested maintainer when acting on
-behalf of a maintainer group. They may derive one by counting how many recursive
-maintainers list each maintainer, but only when exactly one maintainer has a
-strictly greater count than every other maintainer. If the count ties, there is
-no default suggested maintainer. This derived suggestion is informational,
-distinct from the selected maintainer, and not displayed by ngit's CLI.
-
-The selected maintainer is not necessarily the default suggested maintainer.
-Different users can select different maintainers for the same repository by using
-different `nostr://` URLs, while still discovering the same recursive maintainer
-graph.
+The selected maintainer is not necessarily the lead maintainer. Different users
+can select different maintainers for the same repository by using different
+`nostr://` URLs, while still discovering the same recursive maintainer graph.
 
 ## Announcement Tag Ordering
 
 Proposal events such as patches and pull requests tag repository announcements with `a` tags. These tags should be ordered as:
 
 1. the selected maintainer's announcement coordinate,
-2. other accepted maintainers' announcement coordinates,
+2. other co-maintainers' announcement coordinates,
 3. invited maintainers' announcement coordinates.
 
 Invited maintainers are included so clients can discover the invitation, but they come last because their announcement may not exist yet. Putting the selected maintainer first gives clients a stable, existing announcement to anchor rendering and avoids treating an invitation as the primary repository reference.
@@ -111,7 +117,7 @@ When `ngit init` runs, there are 6 possible states based on what exists locally 
 | **Coordinate Only**        | Coordinate exists, no announcement on relays                               | Requires `--force` (could be a relay/network issue) |
 | **My Announcement**        | Announcement exists, I'm the selected maintainer                           | Re-publish/update, no force needed                  |
 | **Invited Maintainer**     | Announcement exists, I'm listed as maintainer but have no announcement yet | Publish own announcement to accept, no force needed |
-| **Accepted Co-Maintainer** | Announcement exists, I'm listed and have my own announcement               | Re-publish/update my announcement, no force needed  |
+| **Co-Maintainer**          | Announcement exists, I'm listed and have my own announcement               | Re-publish/update my announcement, no force needed  |
 | **Not Listed**             | Announcement exists, I'm not in maintainer set                             | Requires `--force`                                  |
 
 See `src/bin/ngit/sub_commands/init.rs` (`InitState` enum) and the `tests/init_state_*` integration tests for the implementation and test coverage.
@@ -165,7 +171,7 @@ appears in someone else's maintainer list, but she has not signed a statement jo
 that repository.
 
 This distinction lets ngit require an announcement before publishing Alice's own
-state events, and lets UIs avoid displaying an invited maintainer as an accepted
+state events, and lets UIs avoid displaying an invited maintainer as a
 co-maintainer.
 
 ### The Remaining Vulnerability Without Announcements
