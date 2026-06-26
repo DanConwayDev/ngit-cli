@@ -391,10 +391,7 @@ async fn print_repo_info(
             }
             println!(
                 "  {}",
-                dim.apply_to(format!(
-                    "invited, no announcement yet: {}",
-                    names.join(", ")
-                ))
+                dim.apply_to(format!("invited: {}", names.join(", ")))
             );
         }
     }

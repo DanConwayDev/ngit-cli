@@ -27,9 +27,18 @@ ngit distinguishes several roles that older docs and code sometimes collapsed in
 - **Selected maintainer**: the pubkey in the coordinate selected by the user's `nostr://` URL or config. This maintainer's announcement is the anchor for repository discovery and should be listed first in repository `a` tags on proposals.
 - **Accepted maintainer**: a discovered maintainer who has published their own kind 30617 announcement for this repository identifier. Accepted maintainers are shown as co-maintainers in `ngit repo`.
 - **Invited maintainer**: a pubkey listed by an accepted maintainer, but with no discovered kind 30617 announcement of its own. Invited maintainers are still tagged for discovery, but are not shown as accepted co-maintainers until they publish an announcement.
-- **Lead maintainer**: a derived role for the maintainer listed by more recursive maintainers than any other maintainer. There is often no lead maintainer because the graph can tie. Lead maintainer status is informational and distinct from the selected maintainer.
 
-The selected maintainer is not necessarily the lead maintainer. Different users can select different maintainers for the same repository by using different `nostr://` URLs, while still discovering the same recursive maintainer graph.
+Some external tools may need a single default suggested maintainer when acting on
+behalf of a maintainer group. They may derive one by counting how many recursive
+maintainers list each maintainer, but only when exactly one maintainer has a
+strictly greater count than every other maintainer. If the count ties, there is
+no default suggested maintainer. This derived suggestion is informational,
+distinct from the selected maintainer, and not displayed by ngit's CLI.
+
+The selected maintainer is not necessarily the default suggested maintainer.
+Different users can select different maintainers for the same repository by using
+different `nostr://` URLs, while still discovering the same recursive maintainer
+graph.
 
 ## Announcement Tag Ordering
 
@@ -61,6 +70,8 @@ Sourced from the **latest event** (by `created_at`) across the maintainer set:
 - `description`
 - `web`
 - `hashtags`
+- unknown/foreign tags preserved for forward compatibility (`extra_tags`), unless
+  `ngit init --clean` is used
 
 Rationale: these are shared identity. If any maintainer updates the project name, all subsequent re-announcements should pick it up.
 

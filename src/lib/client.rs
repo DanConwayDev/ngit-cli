@@ -1571,7 +1571,8 @@ pub async fn get_repo_ref_from_cache(
         Some(repo_coordinate.public_key),
     ))?;
 
-    // Use name/description/web from the latest event across all maintainers
+    // Use name/description/web/hashtags from the latest event across all
+    // maintainers.
     let latest_metadata = repo_events
         .last()
         .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
@@ -1663,6 +1664,9 @@ pub async fn get_repo_ref_from_cache(
         web: latest_metadata
             .as_ref()
             .map_or_else(|| repo_ref.web.clone(), |r| r.web.clone()),
+        hashtags: latest_metadata
+            .as_ref()
+            .map_or_else(|| repo_ref.hashtags.clone(), |r| r.hashtags.clone()),
         ..repo_ref
     })
 }
