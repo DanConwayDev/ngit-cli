@@ -136,6 +136,7 @@ async fn main() -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
 
     let _ = set_git_timeout(Some(&git_repo));
+    let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
@@ -158,6 +159,7 @@ async fn main() -> Result<()> {
     let fetch_report =
         fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinate)
             .await?;
+    let _ = ngit::version_check::refresh_update_cache(Some(git_repo_path)).await;
 
     let mut repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;

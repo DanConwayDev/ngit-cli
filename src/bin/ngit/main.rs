@@ -2,6 +2,8 @@
 #![allow(clippy::large_futures)]
 #![cfg_attr(not(test), warn(clippy::expect_used))]
 
+use std::ffi::OsStr;
+
 use clap::Parser;
 use cli::{AccountCommands, Cli, Commands, IssueCommands, PrCommands, customise_template};
 
@@ -9,7 +11,7 @@ mod cli;
 use ngit::{
     cli_interactor::{self, CliError},
     client,
-    git::{self, utils::set_git_timeout},
+    git::{self, RepoActions, utils::set_git_timeout},
     git_events, login, repo_ref,
 };
 
@@ -18,6 +20,12 @@ mod sub_commands;
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {
+    if version_flag_requested() {
+        print_update_notice_if_available_at_startup().await;
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let cli = Cli::parse();
 
     // Non-interactive by default; set NGIT_INTERACTIVE_MODE only when -i is
@@ -35,8 +43,7 @@ async fn main() {
         std::process::exit(0); // Exit the program
     }
 
-    let git_repo = git::Repo::discover().ok();
-    let _ = set_git_timeout(git_repo.as_ref());
+    print_update_notice_if_available_at_startup().await;
 
     let result = if let Some(command) = &cli.command {
         match command {
@@ -291,4 +298,17 @@ async fn main() {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }
+}
+
+fn version_flag_requested() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .any(|arg| arg == OsStr::new("--version") || arg == OsStr::new("-V"))
+}
+
+async fn print_update_notice_if_available_at_startup() {
+    let git_repo = git::Repo::discover().ok();
+    let _ = set_git_timeout(git_repo.as_ref());
+    let git_repo_path = git_repo.as_ref().and_then(|repo| repo.get_path().ok());
+    let _ = ngit::version_check::print_update_notice_if_available(git_repo_path).await;
 }

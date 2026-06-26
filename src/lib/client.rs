@@ -63,6 +63,7 @@ use crate::{
     repo_ref::{RepoRef, normalize_grasp_server_url},
     repo_state::RepoState,
     signer::NgitSigner,
+    version_check,
 };
 
 pub fn is_verbose() -> bool {
@@ -72,6 +73,7 @@ pub fn is_verbose() -> bool {
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
 
 static INVITED_MAINTAINER_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
+static VERSION_CHECK_STATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Holds the final state of a progress bar that finished before the detail
 /// view was revealed. The style and prefix are already set on the bar; only
@@ -851,7 +853,7 @@ impl Connect for Client {
         let dim = Style::new().color256(247);
 
         loop {
-            let filters = if request.announcement_only {
+            let mut filters = if request.announcement_only {
                 get_announcement_only_fetch_filters(&fresh_coordinates)
             } else {
                 get_fetch_filters(
@@ -862,6 +864,11 @@ impl Connect for Client {
                     &fresh_profiles,
                 )
             };
+            if version_check::is_version_check_relay(&relay_url)
+                && !VERSION_CHECK_STATE_REQUESTED.swap(true, Ordering::AcqRel)
+            {
+                filters.push(version_check::ngit_repo_state_filter());
+            }
             fresh_non_proposal_event_ids = HashSet::new();
 
             if let Some(pb) = &pb {
@@ -2091,8 +2098,13 @@ async fn process_fetched_events(
 ) -> Result<()> {
     for event in &events {
         if !request.existing_events.contains(&event.id) {
-            if let Some(git_repo_path) = git_repo_path {
-                save_event_in_local_cache(git_repo_path, event).await?;
+            let is_version_check_state_for_background_fetch =
+                version_check::is_ngit_repo_state_event(event)
+                    && !request_includes_ngit_repo(request);
+            if !is_version_check_state_for_background_fetch {
+                if let Some(git_repo_path) = git_repo_path {
+                    save_event_in_local_cache(git_repo_path, event).await?;
+                }
             }
             if event.kind.eq(&Kind::GitRepoAnnouncement) {
                 save_event_in_global_cache(git_repo_path, event).await?;
@@ -2167,6 +2179,12 @@ async fn process_fetched_events(
                     }
                 }
             } else if event.kind.eq(&STATE_KIND) {
+                if version_check::is_ngit_repo_state_event(event) {
+                    save_event_in_global_cache(git_repo_path, event).await?;
+                    if !request_includes_ngit_repo(request) {
+                        continue;
+                    }
+                }
                 let existing_state = if report.updated_state.is_some() {
                     report.updated_state
                 } else {
@@ -2269,6 +2287,16 @@ async fn process_fetched_events(
         }
     }
     Ok(())
+}
+
+fn request_includes_ngit_repo(request: &FetchRequest) -> bool {
+    let coordinate = version_check::ngit_repo_coordinate();
+    request
+        .repo_coordinates_without_relays
+        .iter()
+        .any(|(c, _)| {
+            c.identifier == coordinate.identifier && c.public_key == coordinate.public_key
+        })
 }
 
 pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchReport {

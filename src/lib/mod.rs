@@ -13,6 +13,7 @@ pub mod repo_ref;
 pub mod repo_state;
 pub mod signer;
 pub mod utils;
+pub mod version_check;
 
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
