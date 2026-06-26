@@ -275,6 +275,27 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         should_be_pr
     };
 
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
+        &cli_args.password,
+        Some(&client),
+        true,
+    )
+    .await?;
+
+    if let Some(root_proposal) = &root_proposal {
+        if root_proposal.pubkey != user_ref.public_key
+            && !repo_ref.maintainers.contains(&user_ref.public_key)
+        {
+            bail!(
+                "only the proposal author or a repository maintainer can update an existing proposal"
+            );
+        }
+    }
+
+    client.set_signer(signer.clone()).await;
+
     let cover_letter_title_description = if cli_args.interactive {
         // Interactive flow: prompt for cover letter confirm, title, description
         let title = if as_pr {
@@ -362,17 +383,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
             (None, None) => None, // no cover letter
         }
     };
-
-    let (signer, user_ref, _) = login::login_or_signup(
-        &Some(&git_repo),
-        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
-        &cli_args.password,
-        Some(&client),
-        true,
-    )
-    .await?;
-
-    client.set_signer(signer.clone()).await;
 
     // oldest first
     commits.reverse();
