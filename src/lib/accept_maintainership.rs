@@ -110,11 +110,11 @@ pub async fn accept_maintainership_with_defaults(
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| repo_ref.root_commit.clone());
 
-    // --- Step 3: maintainers = [me, trusted_maintainer] ---
+    // --- Step 3: maintainers = [me, selected_maintainer] ---
 
     let mut maintainers = vec![*my_pubkey];
-    if repo_ref.trusted_maintainer != *my_pubkey {
-        maintainers.push(repo_ref.trusted_maintainer);
+    if repo_ref.selected_maintainer != *my_pubkey {
+        maintainers.push(repo_ref.selected_maintainer);
     }
 
     // --- Step 4: build RepoRef ---
@@ -129,7 +129,7 @@ pub async fn accept_maintainership_with_defaults(
         relays: relays.clone(),
         blossoms,
         hashtags,
-        trusted_maintainer: *my_pubkey,
+        selected_maintainer: *my_pubkey,
         maintainers_without_annoucnement: None,
         maintainers,
         events: HashMap::new(),
@@ -212,15 +212,15 @@ pub async fn accept_maintainership_with_defaults(
 /// Return grasp servers for a co-maintainer using the following priority:
 ///
 /// 1. User's own saved grasp server list (if non-empty).
-/// 2. Trusted maintainer's grasp servers derived from
-///    `trusted_maintainer_repo_ref` (if provided and non-empty). If the trusted
-///    maintainer only uses a single grasp server, the first system-default
-///    grasp server is appended so the co-maintainer has at least two servers
-///    for redundancy.
+/// 2. Selected maintainer's grasp servers derived from
+///    `selected_maintainer_repo_ref` (if provided and non-empty). If the
+///    selected maintainer only uses a single grasp server, the first
+///    system-default grasp server is appended so the co-maintainer has at least
+///    two servers for redundancy.
 /// 3. System / client default grasp servers.
 pub fn grasp_servers_from_user_or_fallback(
     user_ref: &UserRef,
-    trusted_maintainer_repo_ref: Option<&RepoRef>,
+    selected_maintainer_repo_ref: Option<&RepoRef>,
     #[cfg(test)] client: &MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Vec<String> {
@@ -234,8 +234,8 @@ pub fn grasp_servers_from_user_or_fallback(
             .collect();
     }
 
-    // Priority 2: trusted maintainer's grasp servers.
-    if let Some(rr) = trusted_maintainer_repo_ref {
+    // Priority 2: selected maintainer's grasp servers.
+    if let Some(rr) = selected_maintainer_repo_ref {
         let maintainer_servers = rr.grasp_servers();
         if !maintainer_servers.is_empty() {
             if maintainer_servers.len() == 1 {

@@ -51,7 +51,7 @@ enum InitState {
     Fresh,
     /// Coordinate found but no announcement event on relays (State B)
     CoordinateOnly { coordinate: Nip19Coordinate },
-    /// Announcement exists, I am the trusted maintainer (State C)
+    /// Announcement exists, I am the selected maintainer (State C)
     MyAnnouncement {
         coordinate: Nip19Coordinate,
         repo_ref: RepoRef,
@@ -287,21 +287,21 @@ fn resolve_grasp_servers(
 
     if !interactive || cli.defaults || state.has_coordinate() || cli.force {
         // Prefer grasp servers from my existing announcement, then user's grasp
-        // list (or trusted maintainer's servers as fallback), then system defaults
+        // list (or selected maintainer's servers as fallback), then system defaults
         let existing = detect_existing_grasp_servers(my_ref.as_ref(), &args.relay, &[], identifier);
         if !existing.is_empty() {
             return Ok(existing);
         }
-        // For co-maintainer state, pass the repo_ref so the trusted
+        // For co-maintainer state, pass the repo_ref so the selected
         // maintainer's grasp servers can be used as a fallback.
-        let trusted_maintainer_repo_ref = if matches!(state, InitState::CoMaintainer { .. }) {
+        let selected_maintainer_repo_ref = if matches!(state, InitState::CoMaintainer { .. }) {
             state.repo_ref()
         } else {
             None
         };
         return Ok(grasp_servers_from_user_or_fallback(
             user_ref,
-            trusted_maintainer_repo_ref,
+            selected_maintainer_repo_ref,
             client,
         ));
     }
@@ -878,11 +878,11 @@ fn resolve_fields(
         }
         m
     } else if let Some(coord) = state.coordinate() {
-        let trusted = coord.coordinate.public_key;
-        if trusted == *my_pubkey {
+        let selected = coord.coordinate.public_key;
+        if selected == *my_pubkey {
             vec![*my_pubkey]
         } else {
-            vec![*my_pubkey, trusted]
+            vec![*my_pubkey, selected]
         }
     } else {
         vec![*my_pubkey]
@@ -985,7 +985,7 @@ fn resolve_fields(
     };
 
     // --- Earliest unique commit ---
-    // Cascade: my event -> consolidated RepoRef (trusted maintainer's) -> local
+    // Cascade: my event -> consolidated RepoRef (selected maintainer's) -> local
     // root commit
     let my_euc = my_ref
         .as_ref()
@@ -1223,7 +1223,7 @@ async fn publish_and_finalize(
         relays: fields.relays.clone(),
         blossoms: fields.blossoms,
         hashtags: fields.hashtags,
-        trusted_maintainer: user_ref.public_key,
+        selected_maintainer: user_ref.public_key,
         maintainers_without_annoucnement: None,
         maintainers: fields.maintainers.clone(),
         events: HashMap::new(),
@@ -1558,9 +1558,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
             println!(
                 "accepting co-maintainership of '{}' (offered by {})",
                 rr.name,
-                rr.trusted_maintainer
+                rr.selected_maintainer
                     .to_bech32()
-                    .unwrap_or_else(|_| rr.trusted_maintainer.to_string()),
+                    .unwrap_or_else(|_| rr.selected_maintainer.to_string()),
             );
             println!(
                 "publishing your repository announcement to nostr to confirm your co-maintainership..."

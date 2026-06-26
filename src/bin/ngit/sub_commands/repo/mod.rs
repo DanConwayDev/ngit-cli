@@ -340,14 +340,14 @@ async fn print_repo_info(
 
     // --- Maintainers ---
     println!("{}", heading.apply_to("Maintainers"));
-    let trusted = &repo_ref.trusted_maintainer;
-    let trusted_name = display_name_for(trusted, my_pubkey, git_repo_path).await;
-    println!("  trusted: {trusted_name}");
+    let selected = &repo_ref.selected_maintainer;
+    let selected_name = display_name_for(selected, my_pubkey, git_repo_path).await;
+    println!("  selected: {selected_name}");
 
     let co_maintainers: Vec<PublicKey> = repo_ref
         .maintainers_with_announcements()
         .into_iter()
-        .filter(|m| *m != *trusted)
+        .filter(|m| *m != *selected)
         .collect();
 
     if !co_maintainers.is_empty() {
@@ -356,7 +356,7 @@ async fn print_repo_info(
 
         for co in &co_maintainers {
             let co_name = display_name_for(co, my_pubkey, git_repo_path).await;
-            match find_lister(repo_ref, co, trusted) {
+            match find_lister(repo_ref, co, selected) {
                 None => direct_names.push(co_name),
                 Some(lister_hex) => {
                     let lister_name = if let Ok(pk) = PublicKey::from_hex(&lister_hex) {
@@ -377,7 +377,7 @@ async fn print_repo_info(
                 "  {} {}",
                 name,
                 dim.apply_to(format!(
-                    "(listed by {lister_name}, not directly by trusted maintainer)"
+                    "(listed by {lister_name}, not directly by selected maintainer)"
                 ))
             );
         }
@@ -572,20 +572,20 @@ async fn display_name_for(
 }
 
 /// Find which maintainer's event lists `target` as a maintainer.
-/// Returns `None` if listed directly by the trusted maintainer,
+/// Returns `None` if listed directly by the selected maintainer,
 /// or `Some(lister_pubkey_hex)` if listed by a co-maintainer.
-fn find_lister(repo_ref: &RepoRef, target: &PublicKey, trusted: &PublicKey) -> Option<String> {
+fn find_lister(repo_ref: &RepoRef, target: &PublicKey, selected: &PublicKey) -> Option<String> {
     use nostr::{Kind, nips::nip01::Coordinate};
 
-    let trusted_coord = nostr::nips::nip19::Nip19Coordinate {
+    let selected_coord = nostr::nips::nip19::Nip19Coordinate {
         coordinate: Coordinate {
             kind: Kind::GitRepoAnnouncement,
-            public_key: *trusted,
+            public_key: *selected,
             identifier: repo_ref.identifier.clone(),
         },
         relays: vec![],
     };
-    if let Some(event) = repo_ref.events.get(&trusted_coord) {
+    if let Some(event) = repo_ref.events.get(&selected_coord) {
         if RepoRef::try_from((event.clone(), None))
             .is_ok_and(|event_ref| event_ref.maintainers.contains(target))
         {
@@ -594,7 +594,7 @@ fn find_lister(repo_ref: &RepoRef, target: &PublicKey, trusted: &PublicKey) -> O
     }
 
     for (coord, event) in &repo_ref.events {
-        if coord.coordinate.public_key == *trusted {
+        if coord.coordinate.public_key == *selected {
             continue;
         }
         let lister = coord.coordinate.public_key;

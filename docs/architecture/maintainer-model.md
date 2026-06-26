@@ -6,8 +6,6 @@ How ngit handles multi-maintainer repositories: coordinate discovery, maintainer
 
 A **coordinate** is a `(kind, pubkey, identifier)` tuple that uniquely identifies a repository on nostr. The pubkey in the coordinate is the **selected maintainer**: the maintainer chosen by the `nostr://` URL, `nostr.repo` config, or explicit coordinate the user is consuming.
 
-Much of the Rust code still uses the older name `trusted_maintainer` for this field. Conceptually, that pubkey is selected, not globally trusted. Trust comes from the maintainer graph and from each maintainer's signed announcements.
-
 ngit discovers the coordinate locally from (in priority order):
 
 1. `nostr://` git remotes
@@ -96,14 +94,14 @@ From the existing coordinate. Cannot change without `--force` (changing it creat
 
 When `ngit init` runs, there are 6 possible states based on what exists locally and on relays:
 
-| State | Condition | Behavior |
-|-------|-----------|----------|
-| **Fresh** | No coordinate found | Must provide name + server infrastructure |
-| **Coordinate Only** | Coordinate exists, no announcement on relays | Requires `--force` (could be a relay/network issue) |
-| **My Announcement** | Announcement exists, I'm the selected maintainer | Re-publish/update, no force needed |
-| **Invited Maintainer** | Announcement exists, I'm listed as maintainer but have no announcement yet | Publish own announcement to accept, no force needed |
-| **Accepted Co-Maintainer** | Announcement exists, I'm listed and have my own announcement | Re-publish/update my announcement, no force needed |
-| **Not Listed** | Announcement exists, I'm not in maintainer set | Requires `--force` |
+| State                      | Condition                                                                  | Behavior                                            |
+| -------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------- |
+| **Fresh**                  | No coordinate found                                                        | Must provide name + server infrastructure           |
+| **Coordinate Only**        | Coordinate exists, no announcement on relays                               | Requires `--force` (could be a relay/network issue) |
+| **My Announcement**        | Announcement exists, I'm the selected maintainer                           | Re-publish/update, no force needed                  |
+| **Invited Maintainer**     | Announcement exists, I'm listed as maintainer but have no announcement yet | Publish own announcement to accept, no force needed |
+| **Accepted Co-Maintainer** | Announcement exists, I'm listed and have my own announcement               | Re-publish/update my announcement, no force needed  |
+| **Not Listed**             | Announcement exists, I'm not in maintainer set                             | Requires `--force`                                  |
 
 See `src/bin/ngit/sub_commands/init.rs` (`InitState` enum) and the `tests/init_state_*` integration tests for the implementation and test coverage.
 

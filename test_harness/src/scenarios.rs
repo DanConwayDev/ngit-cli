@@ -1584,7 +1584,7 @@ pub struct ArrangedInitStateC {
 /// announcement signed by the publisher that inherits the existing
 /// announcement's `name` / `description` / `web` while replacing
 /// `clone` / `relays` with the publisher's own grasp infrastructure
-/// and listing both publisher + trusted maintainer in the
+/// and listing both publisher + selected maintainer in the
 /// `maintainers` tag.
 ///
 /// The arrange publishes the existing announcement to the harness's
@@ -1612,14 +1612,14 @@ pub struct ArrangedInitStateD {
     /// both events coexist on the relay.
     pub coordinate_identifier: String,
     /// Bech32 form of the `nostr.repo` coordinate ngit reads on the
-    /// next subcommand. Coordinate's `public_key` is
-    /// [`trusted_maintainer_keys.public_key()`](Self::trusted_maintainer_keys);
+    /// next subcommand. Coordinate's `public_key` comes from
+    /// [`selected_maintainer_keys`](Self::selected_maintainer_keys);
     /// publisher's own pubkey is **not** in the coordinate.
     pub coordinate_bech32: String,
     /// The kind-30617 event the arrange published before `ngit init`
     /// runs. Signed by
-    /// [`trusted_maintainer_keys`](Self::trusted_maintainer_keys),
-    /// lists both the trusted maintainer and the publisher in its
+    /// [`selected_maintainer_keys`](Self::selected_maintainer_keys),
+    /// lists both the selected maintainer and the publisher in its
     /// `maintainers` tag — that is the State-D discriminator.
     pub existing_announcement: Event,
     /// `name` tag on [`existing_announcement`](Self::existing_announcement).
@@ -1637,7 +1637,7 @@ pub struct ArrangedInitStateD {
     /// the assertion is non-tautological against ngit's own
     /// gitworkshop default URL.
     pub existing_web: Vec<String>,
-    /// Trusted maintainer's git server URL on
+    /// Selected maintainer's git server URL on
     /// [`existing_announcement`](Self::existing_announcement). Captured
     /// so tests can assert this URL is **not** carried over into the
     /// publisher's new announcement (legacy
@@ -1645,12 +1645,12 @@ pub struct ArrangedInitStateD {
     /// non-grasp-format so it survives `is_my_grasp_clone_url` filtering
     /// in init.rs:718 unchanged.
     pub existing_clone_url: String,
-    /// Trusted maintainer's keypair — signs
+    /// Selected maintainer's keypair — signs
     /// [`existing_announcement`](Self::existing_announcement) and
     /// appears alongside the publisher in the post-init
     /// announcement's `maintainers` tag (legacy
-    /// `maintainers_is_me_and_trusted`).
-    pub trusted_maintainer_keys: Keys,
+    /// `maintainers_is_me_and_selected`).
+    pub selected_maintainer_keys: Keys,
 }
 
 /// Captured side-state for a State E "NotListed" arrange.
@@ -1661,7 +1661,7 @@ pub struct ArrangedInitStateD {
 /// Bare `ngit init` (and `ngit init --defaults`) errors with
 /// `"you are not listed as a maintainer"`; only `ngit init --force`
 /// proceeds, after which the publisher is added to the new
-/// announcement's `maintainers` tag alongside the trusted maintainer.
+/// announcement's `maintainers` tag alongside the selected maintainer.
 #[derive(Clone, Debug)]
 pub struct ArrangedInitStateE {
     /// Publisher's keypair (the "me" identity that runs `ngit init`).
@@ -1677,12 +1677,12 @@ pub struct ArrangedInitStateE {
     /// `d` tag on the existing announcement — also the identifier in
     /// `nostr.repo`'s coordinate.
     pub coordinate_identifier: String,
-    /// Bech32 form of `nostr.repo`. Coordinate's `public_key` is
-    /// [`trusted_maintainer_keys.public_key()`](Self::trusted_maintainer_keys).
+    /// Bech32 form of `nostr.repo`. Coordinate's `public_key` comes
+    /// from [`selected_maintainer_keys`](Self::selected_maintainer_keys).
     pub coordinate_bech32: String,
     /// The kind-30617 event the arrange published. Signed by
-    /// [`trusted_maintainer_keys`](Self::trusted_maintainer_keys);
-    /// lists **only** the trusted maintainer in `maintainers` — that
+    /// [`selected_maintainer_keys`](Self::selected_maintainer_keys);
+    /// lists **only** the selected maintainer in `maintainers` — that
     /// is the State-E discriminator.
     pub existing_announcement: Event,
     /// `name` tag on [`existing_announcement`](Self::existing_announcement).
@@ -1698,12 +1698,12 @@ pub struct ArrangedInitStateE {
     /// `--force`; carries the same marker substring as State D so the
     /// `web_inherited_from_other_maintainer` assertion is non-tautological.
     pub existing_web: Vec<String>,
-    /// Trusted maintainer's keypair — signs
+    /// Selected maintainer's keypair — signs
     /// [`existing_announcement`](Self::existing_announcement) and is
     /// listed alongside the publisher in the post-`--force`
     /// announcement's `maintainers` tag (legacy
-    /// `maintainers_is_me_and_trusted`).
-    pub trusted_maintainer_keys: Keys,
+    /// `maintainers_is_me_and_selected`).
+    pub selected_maintainer_keys: Keys,
 }
 
 impl Harness {
@@ -2010,11 +2010,11 @@ impl Harness {
     ///   announcement signed by the publisher whose `d` tag equals the
     ///   coordinate identifier, whose `name` / `description` / `web` are
     ///   inherited from the existing announcement, whose `clone` / `relays`
-    ///   come from the publisher's own grasp infrastructure (the trusted
+    ///   come from the publisher's own grasp infrastructure (the selected
     ///   maintainer's git-server URL is **not** carried over), and whose
-    ///   `maintainers` tag carries `[publisher, trusted_maintainer]` — the
+    ///   `maintainers` tag carries `[publisher, selected_maintainer]` — the
     ///   maintainers-default fallback in init.rs:869-878 when `my_ref.is_none()
-    ///   && trusted != my_pubkey`.
+    ///   && selected != my_pubkey`.
     /// - `ngit init` does **not** error on a missing `--name` /
     ///   `--description`: `validate_post_fetch`'s CoMaintainer arm doesn't gate
     ///   on either — `validate_fresh`'s required-fields check (init.rs:354-371)
@@ -2042,23 +2042,23 @@ impl Harness {
     /// the publisher republishes — back-dating keeps the arrange's
     /// timing predictable.
     ///
-    /// **Trusted maintainer.** A fresh [`Keys`] is minted to play the
-    /// role of the trusted maintainer; its public key is what
+    /// **Selected maintainer.** A fresh [`Keys`] is minted to play the
+    /// role of the selected maintainer; its public key is what
     /// `nostr.repo`'s coordinate points at, and it signs
     /// [`existing_announcement`](ArrangedInitStateD::existing_announcement).
     /// Surfacing the full keypair (not just the pubkey) means tests
-    /// that want to publish further events as the trusted maintainer
+    /// that want to publish further events as the selected maintainer
     /// (e.g. status events on PRs the publisher subsequently sends) can
     /// do so without re-deriving.
     pub async fn arrange_init_state_d_co_maintainer(&self) -> Result<(Repo, ArrangedInitStateD)> {
         let (repo, state_a) = self.arrange_init_state_a_fresh().await?;
-        let trusted = Keys::generate();
+        let selected = Keys::generate();
         let me_pubkey_hex = state_a.keys.public_key().to_string();
-        let trusted_pubkey_hex = trusted.public_key().to_string();
-        // Maintainers list: trusted (the signer of the existing event,
+        let selected_pubkey_hex = selected.public_key().to_string();
+        // Maintainers list: selected (the signer of the existing event,
         // listed first) + publisher. State-D discriminator is
         // "publisher's pubkey appears in this list".
-        let maintainers_hex = vec![trusted_pubkey_hex, me_pubkey_hex];
+        let maintainers_hex = vec![selected_pubkey_hex, me_pubkey_hex];
         let (
             event,
             coordinate_identifier,
@@ -2071,7 +2071,7 @@ impl Harness {
             .publish_other_maintainer_announcement(
                 &repo,
                 &state_a,
-                &trusted,
+                &selected,
                 &maintainers_hex,
                 "co-maintainer",
             )
@@ -2092,14 +2092,14 @@ impl Harness {
                 existing_description,
                 existing_web,
                 existing_clone_url,
-                trusted_maintainer_keys: trusted,
+                selected_maintainer_keys: selected,
             },
         ))
     }
 
     /// State E "NotListed" arrange: same shape as
     /// [`Self::arrange_init_state_d_co_maintainer`] except the existing
-    /// announcement's `maintainers` tag carries **only** the trusted
+    /// announcement's `maintainers` tag carries **only** the selected
     /// maintainer — the publisher's pubkey is absent.
     ///
     /// Running `ngit init` against the returned [`Repo`] hits the
@@ -2115,16 +2115,16 @@ impl Harness {
     /// - `ngit init --force --grasp-server <url>` succeeds and publishes a new
     ///   announcement signed by the publisher whose `name` / `description` /
     ///   `web` are inherited from the existing announcement and whose
-    ///   `maintainers` tag carries `[publisher, trusted_maintainer]` — the same
-    ///   maintainers-default fallback the CoMaintainer arm uses when `my_ref`
-    ///   is None.
+    ///   `maintainers` tag carries `[publisher, selected_maintainer]` — the
+    ///   same maintainers-default fallback the CoMaintainer arm uses when
+    ///   `my_ref` is None.
     pub async fn arrange_init_state_e_not_listed(&self) -> Result<(Repo, ArrangedInitStateE)> {
         let (repo, state_a) = self.arrange_init_state_a_fresh().await?;
-        let trusted = Keys::generate();
-        let trusted_pubkey_hex = trusted.public_key().to_string();
-        // Maintainers list: trusted only — publisher's pubkey is
+        let selected = Keys::generate();
+        let selected_pubkey_hex = selected.public_key().to_string();
+        // Maintainers list: selected only — publisher's pubkey is
         // deliberately absent. That is the State-E discriminator.
-        let maintainers_hex = vec![trusted_pubkey_hex];
+        let maintainers_hex = vec![selected_pubkey_hex];
         let (
             event,
             coordinate_identifier,
@@ -2137,7 +2137,7 @@ impl Harness {
             .publish_other_maintainer_announcement(
                 &repo,
                 &state_a,
-                &trusted,
+                &selected,
                 &maintainers_hex,
                 "not-listed",
             )
@@ -2157,16 +2157,16 @@ impl Harness {
                 existing_name,
                 existing_description,
                 existing_web,
-                trusted_maintainer_keys: trusted,
+                selected_maintainer_keys: selected,
             },
         ))
     }
 
     /// Shared implementation for the State-D / State-E arranges. Mints
-    /// a kind-30617 signed by `trusted` whose `maintainers` tag is
+    /// a kind-30617 signed by `selected` whose `maintainers` tag is
     /// exactly `maintainers_hex`, publishes it to the harness's
     /// `"default"` relay, and writes a `nostr.repo` coordinate
-    /// pointing at `(trusted.public_key(), <identifier>)` into the
+    /// pointing at `(selected.public_key(), <identifier>)` into the
     /// repo's local git config.
     ///
     /// `identifier_suffix` is the human-readable tail used to mint a
@@ -2183,13 +2183,13 @@ impl Harness {
         &self,
         repo: &Repo,
         state_a: &ArrangedInitStateA,
-        trusted: &Keys,
+        selected: &Keys,
         maintainers_hex: &[String],
         identifier_suffix: &str,
     ) -> Result<(Event, String, String, String, String, Vec<String>, String)> {
         let coordinate_identifier = format!("{}-{}", &state_a.root_oid, identifier_suffix);
 
-        // Coordinate points at the *trusted maintainer*, not the
+        // Coordinate points at the *selected maintainer*, not the
         // publisher — that is what makes the next `ngit init` route
         // through validate_post_fetch's CoMaintainer / NotListed arms
         // rather than MyAnnouncement.
@@ -2197,7 +2197,7 @@ impl Harness {
         let default_relay_url = RelayUrl::parse(&default_relay_url_str)
             .context("default relay's url is not a valid RelayUrl")?;
         let coordinate = Nip19Coordinate {
-            coordinate: Coordinate::new(Kind::GitRepoAnnouncement, trusted.public_key())
+            coordinate: Coordinate::new(Kind::GitRepoAnnouncement, selected.public_key())
                 .identifier(coordinate_identifier.clone()),
             relays: vec![default_relay_url],
         };
@@ -2227,7 +2227,7 @@ impl Harness {
         // (and if) it ever reaches `git_servers_default`. Under State D
         // `my_ref` is None, so the filter is bypassed entirely and
         // `git_servers_default = vec![]` — but capturing the URL on the
-        // arrange lets the test assert "the trusted maintainer's git
+        // arrange lets the test assert "the selected maintainer's git
         // server URL did NOT leak into the new announcement" without
         // re-deriving the value (legacy
         // `clone_url_from_my_grasp_server_not_theirs`).
@@ -2235,7 +2235,7 @@ impl Harness {
         // RFC-2606 `.invalid` TLD so this never resolves; `clone` tags
         // are opaque to `ngit init`'s republish logic, which only
         // round-trips them through the filter.
-        let existing_clone_url = "https://ngit-test-trusted.invalid/repo.git".to_string();
+        let existing_clone_url = "https://ngit-test-selected.invalid/repo.git".to_string();
 
         let mut tags: Vec<Tag> = vec![
             Tag::identifier(coordinate_identifier.clone()),
@@ -2266,7 +2266,7 @@ impl Harness {
         let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
             .tags(tags)
             .custom_created_at(created_at)
-            .finalize(trusted)
+            .finalize(selected)
             .context("failed to sign fabricated other-maintainer announcement")?;
 
         let client = Client::default();

@@ -9,7 +9,7 @@
 //! `--defaults` does not bypass the check (regression for the `-d`
 //! shortcut accidentally short-circuiting maintainer-list validation);
 //! only `--force` proceeds, after which the publisher is added to the
-//! new announcement's `maintainers` tag alongside the trusted maintainer.
+//! new announcement's `maintainers` tag alongside the selected maintainer.
 //!
 //! ## Coverage
 //!
@@ -26,8 +26,8 @@
 //!     `state_e_not_listed::success::description_inherited_from_other_maintainer`
 //!   - `force_inherits_web_marker` → legacy
 //!     `state_e_not_listed::success::web_inherited_from_other_maintainer`
-//!   - `force_maintainers_is_me_and_trusted` → legacy
-//!     `state_e_not_listed::success::maintainers_is_me_and_trusted`
+//!   - `force_maintainers_is_me_and_selected` → legacy
+//!     `state_e_not_listed::success::maintainers_is_me_and_selected`
 //!
 //! ## Error-message brittleness
 //!
@@ -140,7 +140,7 @@ struct Snapshot {
     /// Post-init kind-30617 signed by the publisher. Same query strategy
     /// as the State-D snapshot — filter the default relay by `(author =
     /// publisher, kind = GitRepoAnnouncement, d = identifier)` so the
-    /// existing event signed by the trusted maintainer (different
+    /// existing event signed by the selected maintainer (different
     /// `pubkey`) is excluded.
     announcement: Event,
     /// `name` from the existing announcement; should be inherited.
@@ -153,8 +153,8 @@ struct Snapshot {
     existing_web_marker: String,
     /// Publisher's pubkey (hex).
     me_pubkey_hex: String,
-    /// Trusted maintainer's pubkey (hex).
-    trusted_pubkey_hex: String,
+    /// Selected maintainer's pubkey (hex).
+    selected_pubkey_hex: String,
 }
 
 static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
@@ -245,7 +245,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         existing_description: state.existing_description,
         existing_web_marker,
         me_pubkey_hex: state.keys.public_key().to_string(),
-        trusted_pubkey_hex: state.trusted_maintainer_keys.public_key().to_string(),
+        selected_pubkey_hex: state.selected_maintainer_keys.public_key().to_string(),
     })
 }
 
@@ -294,14 +294,14 @@ async fn force_inherits_web_marker(#[future] snapshot: Arc<Snapshot>) -> Result<
 }
 
 /// Equivalent of legacy
-/// `state_e_not_listed::success::maintainers_is_me_and_trusted`. Even
+/// `state_e_not_listed::success::maintainers_is_me_and_selected`. Even
 /// though the existing announcement excluded the publisher, the
-/// post-`--force` announcement carries `[publisher, trusted]` —
+/// post-`--force` announcement carries `[publisher, selected]` —
 /// init.rs:869-878's coordinate-fallback branch when `my_ref` is None
-/// and `trusted != my_pubkey`.
+/// and `selected != my_pubkey`.
 #[rstest]
 #[tokio::test]
-async fn force_maintainers_is_me_and_trusted(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+async fn force_maintainers_is_me_and_selected(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let maintainers = tag_values(&s.announcement, "maintainers");
     assert_eq!(
@@ -317,10 +317,10 @@ async fn force_maintainers_is_me_and_trusted(#[future] snapshot: Arc<Snapshot>) 
         s.me_pubkey_hex,
     );
     assert!(
-        maintainers.contains(&s.trusted_pubkey_hex),
-        "post-init `maintainers` tag should include the trusted maintainer ({}); \
+        maintainers.contains(&s.selected_pubkey_hex),
+        "post-init `maintainers` tag should include the selected maintainer ({}); \
          got {maintainers:?}",
-        s.trusted_pubkey_hex,
+        s.selected_pubkey_hex,
     );
     Ok(())
 }

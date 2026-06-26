@@ -45,14 +45,14 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
-    // Read the optional semicolon-separated list of trusted git-server domains
+    // Read the optional semicolon-separated list of selected git-server domains
     // from git config (local or global).  When a git server's hostname matches
     // one of these entries, `ngit sync` will automatically trust it and update
     // nostr state without requiring `--trust-server`.
     //
     // Example: git config --global nostr.trust-server-domains
     // 'github.com;codeberg.org'
-    let trusted_domains: Vec<String> =
+    let selected_domains: Vec<String> =
         get_git_config_item(&Some(&git_repo), "nostr.trust-server-domains")
             .unwrap_or(None)
             .map(|v| {
@@ -275,16 +275,16 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         }
 
         // Partition ahead refs into those whose server domain is in the
-        // trusted list (auto-trusted) and those that require --trust-server.
-        let (trusted_ahead, untrusted_ahead): (Vec<&AheadRef>, Vec<&AheadRef>) = ahead_refs
+        // selected list (auto-selected) and those that require --trust-server.
+        let (selected_ahead, unselected_ahead): (Vec<&AheadRef>, Vec<&AheadRef>) = ahead_refs
             .iter()
-            .partition(|r| is_url_domain_trusted(&r.source_url, &trusted_domains));
+            .partition(|r| is_url_domain_selected(&r.source_url, &selected_domains));
 
         let refs_to_trust: Vec<&AheadRef> = if args.trust_server {
             // --trust-server covers everything
             ahead_refs.iter().collect()
         } else {
-            trusted_ahead
+            selected_ahead
         };
 
         if !refs_to_trust.is_empty() {
@@ -383,18 +383,18 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             }
         }
 
-        // Report any remaining untrusted-ahead refs that were not covered by
+        // Report any remaining unselected-ahead refs that were not covered by
         // --trust-server.
-        let remaining_untrusted: Vec<&AheadRef> = if args.trust_server {
+        let remaining_unselected: Vec<&AheadRef> = if args.trust_server {
             vec![] // --trust-server already handled everything
         } else {
-            untrusted_ahead
+            unselected_ahead
         };
-        if !remaining_untrusted.is_empty() {
+        if !remaining_unselected.is_empty() {
             term.write_line(
                 "run `ngit sync --trust-server` to update nostr state from ahead git server(s)",
             )?;
-            if trusted_domains.is_empty() {
+            if selected_domains.is_empty() {
                 term.write_line(
                     "  tip: set `nostr.trust-server-domains` in git config to auto-trust servers by domain",
                 )?;
@@ -853,10 +853,10 @@ fn delete_ref_if_exists(git_repo: &git2::Repository, name: &str) {
 }
 
 /// Returns `true` when the hostname of `url` matches any entry in
-/// `trusted_domains` (case-insensitive).  An empty `trusted_domains` slice
+/// `selected_domains` (case-insensitive).  An empty `selected_domains` slice
 /// always returns `false`.
-fn is_url_domain_trusted(url: &str, trusted_domains: &[String]) -> bool {
-    if trusted_domains.is_empty() {
+fn is_url_domain_selected(url: &str, selected_domains: &[String]) -> bool {
+    if selected_domains.is_empty() {
         return false;
     }
     let host = CloneUrl::from_str(url)
@@ -865,7 +865,7 @@ fn is_url_domain_trusted(url: &str, trusted_domains: &[String]) -> bool {
     if host.is_empty() {
         return false;
     }
-    trusted_domains.iter().any(|d| d == &host)
+    selected_domains.iter().any(|d| d == &host)
 }
 
 fn identify_missing_refs(git_repo: &Repo, state: &HashMap<String, String>) -> Vec<String> {
@@ -1639,34 +1639,34 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // is_url_domain_trusted
+    // is_url_domain_selected
     // -----------------------------------------------------------------------
 
     #[test]
-    fn trusted_domain_matches_exact_hostname() {
+    fn selected_domain_matches_exact_hostname() {
         let domains = vec!["github.com".to_string(), "codeberg.org".to_string()];
-        assert!(is_url_domain_trusted(
+        assert!(is_url_domain_selected(
             "https://github.com/user/repo.git",
             &domains
         ));
-        assert!(is_url_domain_trusted(
+        assert!(is_url_domain_selected(
             "https://codeberg.org/user/repo.git",
             &domains
         ));
     }
 
     #[test]
-    fn untrusted_domain_not_matched() {
+    fn unselected_domain_not_matched() {
         let domains = vec!["github.com".to_string()];
-        assert!(!is_url_domain_trusted(
+        assert!(!is_url_domain_selected(
             "https://evil.example.com/user/repo.git",
             &domains
         ));
     }
 
     #[test]
-    fn empty_trusted_domains_never_matches() {
-        assert!(!is_url_domain_trusted(
+    fn empty_selected_domains_never_matches() {
+        assert!(!is_url_domain_selected(
             "https://github.com/user/repo.git",
             &[]
         ));
@@ -1675,7 +1675,7 @@ mod tests {
     #[test]
     fn domain_matching_is_case_insensitive() {
         let domains = vec!["GitHub.COM".to_lowercase()];
-        assert!(is_url_domain_trusted(
+        assert!(is_url_domain_selected(
             "https://GITHUB.COM/user/repo.git",
             &domains
         ));

@@ -22,7 +22,7 @@
 //! - `web_inherited_from_other_maintainer`
 //! - `clone_url_from_my_grasp_server_not_theirs`
 //! - `relays_from_my_grasp_server`
-//! - `maintainers_is_me_and_trusted`
+//! - `maintainers_is_me_and_selected`
 //!
 //! No error path is tested — State D never errors on bare init; that is
 //! the entire CoMaintainer-vs-NotListed discriminator.
@@ -49,7 +49,7 @@ struct Snapshot {
     /// Post-init kind-30617 signed by the publisher. Located by
     /// querying the default relay for `(author = publisher, kind =
     /// GitRepoAnnouncement, d = coordinate_identifier)` — that filter
-    /// excludes the existing State-D event signed by the trusted
+    /// excludes the existing State-D event signed by the selected
     /// maintainer, which has a different `pubkey`.
     announcement: Event,
     /// `name` tag carried by the State-D arrange's existing
@@ -65,7 +65,7 @@ struct Snapshot {
     /// catches "ngit dropped the inherited web tag" without pinning the
     /// exact list, which init.rs may reorder.
     existing_web_marker: String,
-    /// Trusted maintainer's git server URL on the existing
+    /// Selected maintainer's git server URL on the existing
     /// announcement. Should **not** appear in the post-init `clone`
     /// tag (legacy `clone_url_from_my_grasp_server_not_theirs`).
     existing_clone_url: String,
@@ -78,9 +78,9 @@ struct Snapshot {
     /// Publisher's pubkey (hex) — asserted to appear in the post-init
     /// `maintainers` tag.
     me_pubkey_hex: String,
-    /// Trusted maintainer's pubkey (hex) — asserted to appear
+    /// Selected maintainer's pubkey (hex) — asserted to appear
     /// alongside the publisher in the post-init `maintainers` tag.
-    trusted_pubkey_hex: String,
+    selected_pubkey_hex: String,
 }
 
 static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
@@ -185,7 +185,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         grasp_http_url,
         grasp_relay_url,
         me_pubkey_hex: state.keys.public_key().to_string(),
-        trusted_pubkey_hex: state.trusted_maintainer_keys.public_key().to_string(),
+        selected_pubkey_hex: state.selected_maintainer_keys.public_key().to_string(),
     })
 }
 
@@ -246,7 +246,7 @@ async fn web_inherited_from_other_maintainer(#[future] snapshot: Arc<Snapshot>) 
 /// `state_d_co_maintainer::success::clone_url_from_my_grasp_server_not_theirs`.
 /// Two assertions:
 /// 1. The publisher's grasp HTTP URL appears in the `clone` tag.
-/// 2. The trusted maintainer's git-server URL is **absent** from the `clone`
+/// 2. The selected maintainer's git-server URL is **absent** from the `clone`
 ///    tag — `git_servers_default = vec![]` when `my_ref` is None (init.rs:736),
 ///    so the only thing surviving into `clone` is what
 ///    `apply_grasp_infrastructure` adds.
@@ -265,7 +265,7 @@ async fn clone_url_from_my_grasp_server_not_theirs(
     );
     assert!(
         !clone_urls.iter().any(|u| u == &s.existing_clone_url),
-        "trusted maintainer's git-server URL ({}) should NOT survive into the \
+        "selected maintainer's git-server URL ({}) should NOT survive into the \
          post-init `clone` tag; got {clone_urls:?}",
         s.existing_clone_url,
     );
@@ -293,13 +293,13 @@ async fn relays_from_my_grasp_server(#[future] snapshot: Arc<Snapshot>) -> Resul
 }
 
 /// Equivalent of legacy
-/// `state_d_co_maintainer::success::maintainers_is_me_and_trusted`. The
+/// `state_d_co_maintainer::success::maintainers_is_me_and_selected`. The
 /// post-init `maintainers` tag carries exactly the publisher and the
-/// trusted maintainer — the maintainers-default fallback in
-/// init.rs:869-878 when `my_ref` is None and `trusted != my_pubkey`.
+/// selected maintainer — the maintainers-default fallback in
+/// init.rs:869-878 when `my_ref` is None and `selected != my_pubkey`.
 #[rstest]
 #[tokio::test]
-async fn maintainers_is_me_and_trusted(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+async fn maintainers_is_me_and_selected(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let maintainers = tag_values(&s.announcement, "maintainers");
     assert_eq!(
@@ -315,10 +315,10 @@ async fn maintainers_is_me_and_trusted(#[future] snapshot: Arc<Snapshot>) -> Res
         s.me_pubkey_hex,
     );
     assert!(
-        maintainers.contains(&s.trusted_pubkey_hex),
-        "post-init `maintainers` tag should include the trusted maintainer ({}); \
+        maintainers.contains(&s.selected_pubkey_hex),
+        "post-init `maintainers` tag should include the selected maintainer ({}); \
          got {maintainers:?}",
-        s.trusted_pubkey_hex,
+        s.selected_pubkey_hex,
     );
     Ok(())
 }

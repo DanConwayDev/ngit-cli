@@ -294,7 +294,7 @@ async fn process_args() -> Result<Option<(NostrUrlDecoded, Repo)>> {
 async fn fetching_with_report_for_helper(
     git_repo_path: &Path,
     client: &Client,
-    trusted_maintainer_coordinate: &Nip19Coordinate,
+    selected_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<FetchReport> {
     let term = console::Term::stderr();
     let verbose = is_verbose();
@@ -304,7 +304,7 @@ async fn fetching_with_report_for_helper(
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
-            Some(trusted_maintainer_coordinate),
+            Some(selected_maintainer_coordinate),
             &HashSet::new(),
         )
         .await?;

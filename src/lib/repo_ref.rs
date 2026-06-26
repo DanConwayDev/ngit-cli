@@ -42,7 +42,7 @@ pub struct RepoRef {
     pub blossoms: Vec<Url>,
     pub hashtags: Vec<String>,
     pub maintainers: Vec<PublicKey>,
-    pub trusted_maintainer: PublicKey,
+    pub selected_maintainer: PublicKey,
     // set to None if not known
     pub maintainers_without_annoucnement: Option<Vec<PublicKey>>,
     pub events: HashMap<Nip19Coordinate, nostr::Event>,
@@ -87,8 +87,8 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
      * `get_repo_ref_from_cache`. Other than tests, its only used there and the
      * changes made by that function are important.
      */
-    fn try_from((event, trusted_maintainer): (nostr::Event, Option<PublicKey>)) -> Result<Self> {
-        // TODO: turn trusted maintainer into NostrUrlDecoded
+    fn try_from((event, selected_maintainer): (nostr::Event, Option<PublicKey>)) -> Result<Self> {
+        // TODO: turn selected maintainer into NostrUrlDecoded
         if !event.kind.eq(&Kind::GitRepoAnnouncement) {
             bail!("incorrect kind");
         }
@@ -104,7 +104,7 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
             blossoms: Vec::new(),
             hashtags: Vec::new(),
             maintainers: Vec::new(),
-            trusted_maintainer: trusted_maintainer.unwrap_or(event.pubkey),
+            selected_maintainer: selected_maintainer.unwrap_or(event.pubkey),
             maintainers_without_annoucnement: None,
             events: HashMap::new(),
             nostr_git_url: None,
@@ -310,7 +310,7 @@ impl RepoRef {
         res.insert(Nip19Coordinate {
             coordinate: Coordinate {
                 kind: Kind::GitRepoAnnouncement,
-                public_key: self.trusted_maintainer,
+                public_key: self.selected_maintainer,
                 identifier: self.identifier.clone(),
             },
             relays: vec![],
@@ -346,8 +346,8 @@ impl RepoRef {
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
 
-        if seen.insert(self.trusted_maintainer) {
-            ordered.push(self.trusted_maintainer);
+        if seen.insert(self.selected_maintainer) {
+            ordered.push(self.selected_maintainer);
         }
 
         for maintainer in &self.maintainers {
@@ -385,7 +385,7 @@ impl RepoRef {
         Nip19Coordinate {
             coordinate: Coordinate {
                 kind: Kind::GitRepoAnnouncement,
-                public_key: self.trusted_maintainer,
+                public_key: self.selected_maintainer,
                 identifier: self.identifier.clone(),
             },
             relays: if let Some(relay) = self.relays.first() {
@@ -1057,7 +1057,7 @@ mod tests {
             ],
             blossoms: vec![],
             hashtags: vec![],
-            trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
+            selected_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers_without_annoucnement: None,
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             events: HashMap::new(),
@@ -1083,7 +1083,7 @@ mod tests {
             relays: vec![],
             blossoms: vec![],
             hashtags: vec![],
-            trusted_maintainer: TEST_KEY_1_KEYS.public_key(),
+            selected_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers_without_annoucnement: Some(requested),
             maintainers,
             events: HashMap::new(),

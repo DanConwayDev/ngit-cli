@@ -407,7 +407,7 @@ impl Connect for Client {
     async fn fetch_all<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
-        trusted_maintainer_coordinate: Option<&'a Nip19Coordinate>,
+        selected_maintainer_coordinate: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
         let relay_default_set = &self
@@ -418,7 +418,7 @@ impl Connect for Client {
 
         let mut request = create_relays_request(
             git_repo_path,
-            trusted_maintainer_coordinate,
+            selected_maintainer_coordinate,
             user_profiles,
             relay_default_set.clone(),
         )
@@ -734,9 +734,9 @@ impl Connect for Client {
             }
             processed_relays.extend(relays.clone());
 
-            if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
+            if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
                 if let Ok(repo_ref) =
-                    get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await
+                    get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await
                 {
                     request.repo_relays = repo_ref.relays.iter().cloned().collect();
                 }
@@ -1510,7 +1510,7 @@ pub async fn save_event_in_global_cache(
     }
 }
 
-// use annoucement from trusted maintainer but recursively add maintainers, git
+// use annoucement from selected maintainer but recursively add maintainers, git
 // servers and relays
 pub async fn get_repo_ref_from_cache(
     git_repo_path: Option<&Path>,
@@ -1693,12 +1693,12 @@ pub async fn get_state_from_cache(
 #[allow(clippy::too_many_lines)]
 async fn create_relays_request(
     git_repo_path: Option<&Path>,
-    trusted_maintainer_coordinate: Option<&Nip19Coordinate>,
+    selected_maintainer_coordinate: Option<&Nip19Coordinate>,
     user_profiles: &HashSet<PublicKey>,
     fallback_relays: HashSet<RelayUrl>,
 ) -> Result<FetchRequest> {
-    let repo_ref = if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
-        (get_repo_ref_from_cache(git_repo_path, trusted_maintainer_coordinate).await).ok()
+    let repo_ref = if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
+        (get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await).ok()
     } else {
         None
     };
@@ -1707,8 +1707,8 @@ async fn create_relays_request(
         // add Nip19Coordinates of users listed in maintainers to explicitly
         // specified coodinates
         let mut set: HashSet<Nip19Coordinate> = HashSet::new();
-        if let Some(trusted_maintainer_coordinate) = trusted_maintainer_coordinate {
-            set.insert(trusted_maintainer_coordinate.clone());
+        if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
+            set.insert(selected_maintainer_coordinate.clone());
         }
         if let Some(repo_ref) = &repo_ref {
             for c in repo_ref.coordinates() {
@@ -1896,7 +1896,7 @@ async fn create_relays_request(
         // Only use fallback relays for bootstrapping (no repo context).
         // When we have a repo coordinate, rely on repo relays and coordinate
         // hint relays instead of always merging in the default set.
-        let mut relays = if trusted_maintainer_coordinate.is_none() {
+        let mut relays = if selected_maintainer_coordinate.is_none() {
             fallback_relays.clone()
         } else {
             HashSet::new()
@@ -2645,7 +2645,7 @@ pub async fn fetching_with_report(
     git_repo_path: &Path,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    trusted_maintainer_coordinate: &Nip19Coordinate,
+    selected_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<FetchReport> {
     let verbose = is_verbose();
     if verbose {
@@ -2655,7 +2655,7 @@ pub async fn fetching_with_report(
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
-            Some(trusted_maintainer_coordinate),
+            Some(selected_maintainer_coordinate),
             &HashSet::new(),
         )
         .await?;
@@ -2679,7 +2679,7 @@ pub async fn fetching_quietly(
     git_repo_path: &Path,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
-    trusted_maintainer_coordinate: &Nip19Coordinate,
+    selected_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<(FetchReport, bool)> {
     let verbose = is_verbose();
     if verbose {
@@ -2689,7 +2689,7 @@ pub async fn fetching_quietly(
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
-            Some(trusted_maintainer_coordinate),
+            Some(selected_maintainer_coordinate),
             &HashSet::new(),
         )
         .await?;
