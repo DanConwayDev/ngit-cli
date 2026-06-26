@@ -10,7 +10,10 @@ use ngit::{
 use nostr::{EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag, nips::nip19::Nip19};
 
 use crate::{
-    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
+    client::{
+        Client, Connect, fetching_with_report, get_repo_ref_from_cache,
+        warn_if_invited_as_maintainer,
+    },
     git::{Repo, RepoActions},
     login,
     repo_ref::get_repo_coordinates_when_remote_unknown,
@@ -184,6 +187,7 @@ pub async fn launch_pr_comment(
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let proposals =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
@@ -231,6 +235,7 @@ pub async fn launch_issue_comment(
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
     let issue = issues

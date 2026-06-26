@@ -11,7 +11,7 @@ use nostr::{
 use crate::{
     client::{
         Client, Connect, fetching_with_report, get_events_from_local_cache,
-        get_repo_ref_from_cache, save_event_in_local_cache,
+        get_repo_ref_from_cache, save_event_in_local_cache, warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions},
     login,
@@ -63,6 +63,7 @@ async fn publish_set_subject_event(
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     // Resolve the target event from cache.
     let target = if target_kind == "issue" {

@@ -71,6 +71,8 @@ pub fn is_verbose() -> bool {
 
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
 
+static INVITED_MAINTAINER_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
+
 /// Holds the final state of a progress bar that finished before the detail
 /// view was revealed. The style and prefix are already set on the bar; only
 /// the `finish_with_message` call is deferred.
@@ -1647,7 +1649,7 @@ pub async fn get_repo_ref_from_cache(
     let ordered_maintainers =
         [ordered_accepted_maintainers, ordered_requested_maintainers].concat();
 
-    Ok(RepoRef {
+    let repo_ref = RepoRef {
         // use all maintainers from all events found, not just maintainers in the most
         // recent event
         maintainers: ordered_maintainers,
@@ -1668,7 +1670,27 @@ pub async fn get_repo_ref_from_cache(
             .as_ref()
             .map_or_else(|| repo_ref.hashtags.clone(), |r| r.hashtags.clone()),
         ..repo_ref
-    })
+    };
+
+    Ok(repo_ref)
+}
+
+pub async fn warn_if_invited_as_maintainer(git_repo_path: &Path, repo_ref: &RepoRef) {
+    if INVITED_MAINTAINER_WARNING_PRINTED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let invited_as_maintainer = match get_likely_logged_in_user(git_repo_path).await {
+        Ok(Some(pubkey)) => repo_ref
+            .maintainers_without_annoucnement
+            .as_ref()
+            .is_some_and(|without| without.contains(&pubkey)),
+        Ok(None) | Err(_) => false,
+    };
+
+    if invited_as_maintainer && !INVITED_MAINTAINER_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
+        eprintln!("warning: you are invited as a maintainer, consider running `ngit repo accept`.");
+    }
 }
 
 pub async fn get_state_from_cache(

@@ -6,7 +6,7 @@ use git2::Oid;
 use ngit::{
     client::{
         Client, Connect, Params, fetching_with_report, get_repo_ref_from_cache,
-        get_state_from_cache, send_events,
+        get_state_from_cache, send_events, warn_if_invited_as_maintainer,
     },
     fetch::fetch_from_git_server,
     git::{
@@ -102,6 +102,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let fetch_report = fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let mut nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
 

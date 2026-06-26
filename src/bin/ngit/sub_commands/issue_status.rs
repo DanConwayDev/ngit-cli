@@ -14,7 +14,8 @@ use nostr::{
 
 use crate::{
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
+        Client, Connect, fetching_with_report, get_events_from_local_cache,
+        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions},
     login,
@@ -56,6 +57,7 @@ async fn launch_status(
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 

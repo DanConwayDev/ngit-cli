@@ -14,6 +14,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use client::{
     Connect, FetchReport, consolidate_fetch_reports, get_repo_ref_from_cache, is_verbose,
+    warn_if_invited_as_maintainer,
 };
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
@@ -160,6 +161,7 @@ async fn main() -> Result<()> {
 
     let mut repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     repo_ref.set_nostr_git_url(decoded_nostr_url.clone());
 

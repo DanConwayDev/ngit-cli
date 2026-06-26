@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use console::Style;
 use ngit::{
-    client::{Params, fetching_quietly, get_repo_ref_from_cache},
+    client::{Params, fetching_quietly, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
     login::{existing::load_existing_login, user::get_user_ref_from_cache},
     repo_ref::{
         RepoRef, extract_npub, format_grasp_server_url_as_relay_url, is_grasp_server_clone_url,
@@ -178,6 +178,8 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
         }
         return Ok(());
     };
+
+    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     if json {
         print_repo_info_json(&repo_ref, &repo_coordinate, &git_repo)?;
