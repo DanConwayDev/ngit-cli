@@ -3,11 +3,11 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use nostr::{
     Event, EventBuilder, Keys, PublicKey,
-    event::UnsignedEvent,
-    signer::{AsyncGetPublicKey, AsyncSignEvent, SignerError},
+    event::{AsyncSignEvent, FinalizeUnsignedEvent, SignEvent, UnsignedEvent},
+    key::AsyncGetPublicKey,
     util::BoxedFuture,
 };
-use nostr_connect::client::NostrConnect;
+use nostr_connect::{client::NostrConnect, error::Error as NostrConnectError};
 use nostr_sdk::{authenticator::SignerAuthenticator, client::ClientBuilder, relay::RelayLimits};
 
 /// Signer abstraction covering both local keys and remote NIP-46 bunker.
@@ -30,18 +30,22 @@ pub enum NgitSigner {
 struct SharedConnect(Arc<NostrConnect>);
 
 impl AsyncGetPublicKey for SharedConnect {
+    type Error = NostrConnectError;
+
     #[inline]
-    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, SignerError>> {
+    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, Self::Error>> {
         self.0.get_public_key_async()
     }
 }
 
 impl AsyncSignEvent for SharedConnect {
+    type Error = NostrConnectError;
+
     #[inline]
     fn sign_event_async(
         &self,
         unsigned: UnsignedEvent,
-    ) -> BoxedFuture<'_, Result<Event, SignerError>> {
+    ) -> BoxedFuture<'_, Result<Event, Self::Error>> {
         self.0.sign_event_async(unsigned)
     }
 }
@@ -56,16 +60,12 @@ impl NgitSigner {
 
     pub async fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event> {
         match self {
-            Self::Keys(k) => {
-                use nostr::signer::SignEvent;
-                k.sign_event(unsigned).map_err(|e| anyhow!(e))
-            }
+            Self::Keys(k) => k.sign_event(unsigned).map_err(|e| anyhow!(e)),
             Self::Connect(c) => c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e)),
         }
     }
 
     pub async fn sign_event_builder(&self, builder: EventBuilder) -> Result<Event> {
-        use nostr::event::unsigned::FinalizeUnsignedEvent;
         let public_key = self.get_public_key().await?;
         let unsigned = builder.finalize_unsigned(public_key);
         self.sign_event(unsigned).await

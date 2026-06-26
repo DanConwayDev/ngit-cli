@@ -42,7 +42,7 @@ use ngit::{
 };
 use nostr::{
     Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, RelayUrl, Tag,
-    event::tag::TagCodec,
+    event::TagCodec,
     hashes::sha1::Hash as Sha1Hash,
     nips::{
         nip01::Nip01Tag,

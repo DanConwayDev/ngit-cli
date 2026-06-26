@@ -12,7 +12,7 @@ use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::{
     EventBuilder, Keys, Metadata, PublicKey, RelayUrl, ToBech32, event::FinalizeEvent,
-    nips::nip46::NostrConnectUri,
+    key::AsyncGetPublicKey, nips::nip46::NostrConnectUri,
 };
 use nostr_connect::client::NostrConnect;
 use qrcode::QrCode;
@@ -362,7 +362,6 @@ pub async fn get_fresh_nip46_signer(
             // after "signer connection established".
             let nc_listener = Arc::clone(&nostr_connect);
             let pubkey_handle = tokio::spawn(async move {
-                use nostr::signer::AsyncGetPublicKey;
                 let res = nc_listener
                     .get_public_key_async()
                     .await
@@ -704,7 +703,6 @@ pub async fn listen_for_remote_signer(
     let pubkey_future = {
         let nc = Arc::clone(&nostr_connect);
         async move {
-            use nostr::signer::AsyncGetPublicKey;
             nc.get_public_key_async()
                 .await
                 .map_err(|e| anyhow::anyhow!(e))
@@ -1072,7 +1070,7 @@ pub async fn signup_non_interactive(
 
     // Build events, save to cache, and optionally publish to relays
     if let Some(client) = client {
-        let profile = EventBuilder::metadata(&Metadata::new().name(name)).finalize(&keys)?;
+        let profile = Metadata::new().name(name).finalize(&keys)?;
         let relay_list = EventBuilder::relay_list(
             relay_urls
                 .iter()

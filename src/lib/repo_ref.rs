@@ -1197,8 +1197,6 @@ mod tests {
         }
 
         mod root_commit_is_empty_if_no_r_tag_which_is_sha1_format {
-            use nostr::JsonUtil;
-
             use super::*;
             async fn create_with_incorrect_first_commit_ref(s: &str) -> nostr::Event {
                 nostr::Event::from_json(

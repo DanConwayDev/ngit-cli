@@ -143,9 +143,9 @@ dependencies = [
 
 [[package]]
 name = "async-wsocket"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa4e4fc7052968df159d32c35df1a2cc0b638041ca80a3f90d0f83ffc4a2e276"
+checksum = "c69f24cf7a798027c6b0801de5bfd05d01fe343e87a8329f7c8b46a6d3bc4a79"
 dependencies = [
  "futures",
  "futures-util",
@@ -984,6 +984,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+ "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -1718,9 +1719,9 @@ dependencies = [
 
 [[package]]
 name = "nostr"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96e9e406a7585380f4a398150ea81919b707b8eb969e37166a6cb17df774c534"
+checksum = "9977476705647b01d49d219fdbd0e5c6d78c817bbef3babbe5edf29b73d4a0b8"
 dependencies = [
  "aes",
  "base64",
@@ -1731,7 +1732,8 @@ dependencies = [
  "chacha20",
  "chacha20poly1305",
  "faster-hex",
- "rand 0.9.4",
+ "opaquerr",
+ "rand 0.10.1",
  "scrypt",
  "secp256k1",
  "serde",
@@ -1743,43 +1745,46 @@ dependencies = [
 
 [[package]]
 name = "nostr-connect"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8f9a18793d64f90e77518bcdfe632b07fdf27bac51b522354d0b31aae6fa02d"
+checksum = "d132bbc5422b7089773079f8de4b479b17439e98bd96be9865a77890361c4963"
 dependencies = [
  "async-utility",
  "futures-core",
  "nostr",
  "nostr-sdk",
+ "opaquerr",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "nostr-database"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b294912f295a8db4cc207daba54f159010b880e7f63bb738f0b6df6673fafaec"
+checksum = "ca4aeb087aa25e6242a07889ac5b2f76fca3bc22e64b5400e17391b66ed757aa"
 dependencies = [
  "btreecap",
  "flatbuffers",
  "nostr",
+ "opaquerr",
 ]
 
 [[package]]
 name = "nostr-gossip"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af7bbb7ba6ea8291d0681d68371044cef60ddcd90be9b71bc3ce87a5f7ec7995"
+checksum = "2c2c92d7e6ece0a552079cde17b707704b2f358fce87b216173803597f221323"
 dependencies = [
  "nostr",
+ "opaquerr",
 ]
 
 [[package]]
 name = "nostr-lmdb"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a15daebdf1c83b31d62f7e23ff567c9566e51d9fb81679394eeb75931e9bdf0f"
+checksum = "63c5986ef6dd1864f78955df1c4ef10ab15442a704faa7a2bf87f4033bf3961e"
 dependencies = [
  "async-utility",
  "flume",
@@ -1792,9 +1797,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-memory"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f12225194780b8c13d77230ac84ba6aaa20985c27132a4ff7ac6064238c290c0"
+checksum = "3bd7f20b0219183636edbe27d298590e152b6083bb4627344f54c54a41498df5"
 dependencies = [
  "btreecap",
  "nostr",
@@ -1804,9 +1809,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-relay-builder"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1416c22b2855d1f644469731009165d8033f75bffdc05bbf11b6a911d662d8c9"
+checksum = "3d61e105a2aa8e4d408e8bcef879624da68fa7998e7234fa33ee271e354a07ae"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -1817,15 +1822,16 @@ dependencies = [
  "nostr-database",
  "nostr-memory",
  "nostr-sdk",
+ "opaquerr",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "nostr-sdk"
-version = "0.45.0-alpha.1"
+version = "0.45.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bcb276045fdf7113bbb6142524ff2497b05eb55f5035b66f3f62393f9626c4d"
+checksum = "548421cef025e913ddbf087c6041820497230f7b0f3d94fea537e94dd16fa057"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -1836,6 +1842,7 @@ dependencies = [
  "nostr",
  "nostr-database",
  "nostr-gossip",
+ "opaquerr",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -1868,6 +1875,12 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "opaquerr"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e55a7b7f0accc9fdd8e514f122a697adf824d55de481ca26c31ff8f9a8e813c5"
 
 [[package]]
 name = "openssl"
@@ -2189,6 +2202,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+dependencies = [
+ "getrandom 0.4.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2215,6 +2238,12 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "random-pick"

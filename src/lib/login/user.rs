@@ -1,9 +1,7 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use nostr::{
-    Alphabet, JsonUtil, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag,
-};
+use nostr::{Alphabet, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag};
 use serde::{self, Deserialize, Serialize};
 
 #[cfg(not(test))]

@@ -10,12 +10,13 @@
 //! goes out of scope.
 
 use std::{
+    error::Error,
     io,
     net::{IpAddr, Ipv4Addr},
 };
 
 use anyhow::{Context, Result};
-use nostr_relay_builder::{Error as RelayBuilderError, LocalRelay};
+use nostr_relay_builder::{Error as RelayBuilderError, LocalRelay, error::ErrorKind};
 use nostr_sdk::prelude::*;
 
 use crate::{
@@ -134,5 +135,8 @@ impl VanillaRelay {
 /// `true` iff `e` is an I/O `AddrInUse` (EADDRINUSE) — the signature of
 /// having lost the port-allocation race.
 fn is_addr_in_use(e: &RelayBuilderError) -> bool {
-    matches!(e, RelayBuilderError::IO(io_err) if io_err.kind() == io::ErrorKind::AddrInUse)
+    e.kind() == ErrorKind::IO
+        && e.source()
+            .and_then(|source| source.downcast_ref::<io::Error>())
+            .is_some_and(|io_err| io_err.kind() == io::ErrorKind::AddrInUse)
 }
