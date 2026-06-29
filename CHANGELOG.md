@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Remove accidental extra relay calls to check for new ngit versions; version checks now only use update relays when already connected to them.
+
 ## [2.6.0] - 2026-06-26
 
 ### Added

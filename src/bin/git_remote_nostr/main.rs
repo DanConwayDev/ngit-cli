@@ -159,7 +159,6 @@ async fn main() -> Result<()> {
     let fetch_report =
         fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinate)
             .await?;
-    let _ = ngit::version_check::refresh_update_cache(Some(git_repo_path)).await;
 
     let mut repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;

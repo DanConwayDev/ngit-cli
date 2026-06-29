@@ -2,7 +2,6 @@ use std::{
     cmp::Ordering,
     path::Path,
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
-    time::Duration,
 };
 
 use anyhow::Result;
@@ -11,14 +10,8 @@ use nostr::{
     RelayUrl,
     nips::{nip01::Coordinate, nip19::Nip19Coordinate},
 };
-use nostr_sdk::{
-    client::ClientBuilder,
-    relay::{RelayLimits, ReqExitPolicy},
-};
 
-use crate::client::{
-    STATE_KIND, get_event_from_global_cache, get_filter_state_events, save_event_in_global_cache,
-};
+use crate::client::{STATE_KIND, get_event_from_global_cache, get_filter_state_events};
 
 pub const UPDATE_RELAY_HOSTS: [&str; 2] = ["relay.ngit.dev", "gitnostr.com"];
 const NGIT_REPO_COORDINATE: &str =
@@ -77,45 +70,6 @@ pub async fn print_update_notice_if_available(git_repo_path: Option<&Path>) -> R
                 .for_stderr()
         );
     }
-    Ok(())
-}
-
-pub async fn refresh_update_cache(git_repo_path: Option<&Path>) -> Result<()> {
-    let client = ClientBuilder::default()
-        .relay_limits(RelayLimits::disable())
-        .verify_subscriptions(true)
-        .build();
-    let filter = ngit_repo_state_filter();
-
-    for host in UPDATE_RELAY_HOSTS {
-        let Ok(relay_url) = RelayUrl::parse(&format!("wss://{host}")) else {
-            continue;
-        };
-        if client.add_relay(relay_url.clone()).await.is_err() {
-            continue;
-        }
-        if client.connect_relay(relay_url.clone()).await.is_err() {
-            continue;
-        }
-        let Ok(Some(relay)) = client.relay(&relay_url).await else {
-            continue;
-        };
-        let Ok(events) = relay
-            .fetch_events(filter.clone())
-            .timeout(Duration::from_secs(5))
-            .policy(ReqExitPolicy::ExitOnEOSE)
-            .await
-        else {
-            continue;
-        };
-        for event in events {
-            if is_ngit_repo_state_event(&event) {
-                save_event_in_global_cache(git_repo_path, &event).await?;
-            }
-        }
-    }
-
-    client.disconnect().await;
     Ok(())
 }
 
