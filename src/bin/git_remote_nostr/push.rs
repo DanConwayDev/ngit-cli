@@ -1,4 +1,4 @@
-use core::str;
+use core::str::{self, FromStr};
 use std::{
     collections::{HashMap, HashSet},
     io::Stdin,
@@ -755,17 +755,16 @@ async fn create_events_and_proposals(
             events.push(new_repo_state.event);
         }
 
-        match get_merged_status_events(
-            term,
-            &repo_ref.to_nostr_git_url(&None),
+        let merge_status_context = MergeStatusContext {
+            decoded_nostr_url: &repo_ref.to_nostr_git_url(&None),
             repo_ref,
             git_repo,
-            &signer,
-            git_server_refspecs,
-            declared_default_branch.as_deref(),
-        )
-        .await
-        {
+            signer: &signer,
+            existing_state: &existing_state,
+            declared_default_branch: declared_default_branch.as_deref(),
+        };
+
+        match get_merged_status_events(term, git_server_refspecs, merge_status_context).await {
             Ok(merged_status_events) => {
                 for event in merged_status_events {
                     events.push(event);
@@ -1552,30 +1551,66 @@ async fn get_maintainers_yaml_update(
     Ok(None)
 }
 
+struct MergeStatusContext<'a> {
+    decoded_nostr_url: &'a NostrUrlDecoded,
+    repo_ref: &'a RepoRef,
+    git_repo: &'a Repo,
+    signer: &'a Arc<NgitSigner>,
+    existing_state: &'a HashMap<String, String>,
+    declared_default_branch: Option<&'a str>,
+}
+
 async fn get_merged_status_events(
     term: &console::Term,
-    decoded_nostr_url: &NostrUrlDecoded,
-    repo_ref: &RepoRef,
-    git_repo: &Repo,
-    signer: &Arc<NgitSigner>,
-    refspecs_to_git_server: &Vec<String>,
-    declared_default_branch: Option<&str>,
+    refspecs_to_git_server: &[String],
+    context: MergeStatusContext<'_>,
 ) -> Result<Vec<Event>> {
+    let MergeStatusContext {
+        decoded_nostr_url,
+        repo_ref,
+        git_repo,
+        signer,
+        existing_state,
+        declared_default_branch,
+    } = context;
+
     let mut events = vec![];
+    let mut status_events = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![nostr::Filter::default().kinds(status_kinds().clone())],
+    )
+    .await?;
+    status_events.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    let pr_roots = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![nostr::Filter::default().kind(KIND_PULL_REQUEST)],
+    )
+    .await?;
+
     for refspec in refspecs_to_git_server {
         let (from, to) = refspec_to_from_to(refspec)?;
         if is_default_branch_ref(to, declared_default_branch) {
             let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-            let Ok(tip_of_remote_branch) =
-                git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
-                    &git_repo.git_repo,
-                    refspec,
-                    None,
-                    &decoded_nostr_url.original_string,
-                )?)
-            else {
-                // branch not on remote
-                continue;
+            let tip_of_remote_branch = if let Some(oid) = existing_state.get(to) {
+                Sha1Hash::from_str(oid)
+                    .with_context(|| format!("state for {to} contains invalid oid {oid}"))?
+            } else {
+                let Ok(tip_of_remote_branch) =
+                    git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
+                        &git_repo.git_repo,
+                        refspec,
+                        None,
+                        &decoded_nostr_url.original_string,
+                    )?)
+                else {
+                    // branch not on remote
+                    continue;
+                };
+                tip_of_remote_branch
             };
             let (ahead, _) =
                 git_repo.get_commits_ahead_behind(&tip_of_remote_branch, &tip_of_pushed_branch)?;
@@ -1594,9 +1629,16 @@ async fn get_merged_status_events(
             let merged_proposals_info =
                 get_merged_proposals_info(git_repo, &ahead, &commit_events).await?;
 
-            for event in
-                create_merge_events(term, git_repo, repo_ref, signer, &merged_proposals_info)
-                    .await?
+            for event in create_merge_events(
+                term,
+                git_repo,
+                repo_ref,
+                signer,
+                &merged_proposals_info,
+                &status_events,
+                &pr_roots,
+            )
+            .await?
             {
                 events.push(event);
             }
@@ -2211,10 +2253,15 @@ async fn create_merge_events(
     repo_ref: &RepoRef,
     signer: &Arc<NgitSigner>,
     merged_proposals_info: &MergedProposalsInfo,
+    status_events: &[Event],
+    pr_roots: &[Event],
 ) -> Result<Vec<Event>> {
     let mut events = vec![];
     for (proposal_id, (revision_id, merged_patches)) in merged_proposals_info {
         let proposal = get_event_from_cache_by_id(git_repo, proposal_id).await?;
+        if get_status(&proposal, repo_ref, status_events, pr_roots) == Kind::GitStatusApplied {
+            continue;
+        }
 
         if merged_patches
             .values()

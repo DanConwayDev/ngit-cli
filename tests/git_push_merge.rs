@@ -613,6 +613,25 @@ async fn find_merge_status_event(
     }
 }
 
+async fn count_merge_status_events(
+    harness: &Harness,
+    proposal: &MergedProposal,
+    signer_pubkey: PublicKey,
+) -> Result<usize> {
+    let events = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .author(signer_pubkey)
+                .kind(Kind::GitStatusApplied),
+        )
+        .await?;
+    Ok(events
+        .into_iter()
+        .filter(|e| event_root_e_tag(e) == Some(proposal.root_event_id))
+        .count())
+}
+
 /// Find the single `Kind::GitStatusApplied` event signed by `signer_pubkey`
 /// whose root `e` tag points at the given issue id.
 async fn find_issue_resolved_status_event(
@@ -756,6 +775,57 @@ async fn merge_commit_publishes_status_event_referencing_proposal_and_commit() -
             .await?;
 
     assert_merge_commit_status_event(&event, &proposal, &merge_oid);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn later_default_branch_push_does_not_republish_existing_merge_status() -> Result<()> {
+    let Setup {
+        harness,
+        published,
+        maintainer_repo,
+        proposal,
+    } = setup_pr().await?;
+
+    merge_pr_with_merge_commit(&maintainer_repo, &proposal).await?;
+    maintainer_repo
+        .nostr_push(["origin", "main"])
+        .await
+        .context("git push origin main after merge")?;
+    assert_eq!(
+        count_merge_status_events(&harness, &proposal, published.maintainer_keys.public_key())
+            .await?,
+        1,
+        "first merge push should publish exactly one status event"
+    );
+
+    let out = maintainer_repo
+        .git([
+            "commit",
+            "--allow-empty",
+            "-m",
+            "unrelated default-branch work",
+        ])
+        .output()
+        .await
+        .context("create unrelated default-branch commit")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git commit --allow-empty failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    maintainer_repo
+        .nostr_push(["origin", "main"])
+        .await
+        .context("git push origin main after unrelated commit")?;
+
+    assert_eq!(
+        count_merge_status_events(&harness, &proposal, published.maintainer_keys.public_key())
+            .await?,
+        1,
+        "later default-branch pushes must not republish an already-applied PR status"
+    );
 
     Ok(())
 }

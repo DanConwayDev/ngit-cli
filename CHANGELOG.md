@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `git push` to the default branch now never publishes duplicate PR merge/applied status events for PRs that are already marked applied; also improved merge detection now using the pre-push nostr repo state rather than git internals
 ## [2.6.1] - 2026-06-29
 
 ### Fixed
