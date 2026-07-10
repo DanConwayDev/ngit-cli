@@ -46,6 +46,10 @@ pub struct Cli {
     /// Enable verbose output
     #[arg(short = 'v', long, global = true)]
     pub verbose: bool,
+    /// Only publish nostr events to repository relays, not user or default
+    /// relays
+    #[arg(long, global = true)]
+    pub repo_relay_only: bool,
 }
 
 pub fn customise_template() -> String {
@@ -135,7 +139,7 @@ implementation details used for efficiency.
         other_settings = section("Other useful settings"),
         nostate = key("nostr.nostate true"),
         repo_relay_only = key("nostr.repo-relay-only true"),
-        repo_relay_only_flag = cmd("ngit init --repo-relay-only"),
+        repo_relay_only_flag = cmd("ngit --repo-relay-only send"),
         trust_server_domains = key("nostr.trust-server-domains"),
         trust_server_example =
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
@@ -651,4 +655,42 @@ pub enum RepoCommands {
             to a specific repository coordinate chain, preventing scammers from attributing your\n\
             commits to a fake repository. See `ngit repo info` for details on the maintainer model.")]
     Accept(sub_commands::repo::accept::SubCommandArgs),
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn repo_relay_only_is_accepted_by_event_publishing_commands() {
+        for args in [
+            ["ngit", "send", "--repo-relay-only", "--defaults"].as_slice(),
+            [
+                "ngit",
+                "pr",
+                "comment",
+                "deadbeef",
+                "--body",
+                "comment",
+                "--repo-relay-only",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "issue",
+                "create",
+                "--repo-relay-only",
+                "--subject",
+                "issue",
+                "--body",
+                "body",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).expect("command should parse");
+            assert!(cli.repo_relay_only);
+        }
+    }
 }

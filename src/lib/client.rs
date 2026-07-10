@@ -3011,11 +3011,30 @@ pub async fn send_events(
     animate: bool,
     silent: bool,
 ) -> Result<Vec<(String, bool)>> {
+    let repo_relay_only = std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
+        || git_repo_path.is_some_and(|path| {
+            git2::Repository::open(path)
+                .ok()
+                .and_then(|repo| repo.config().ok())
+                .and_then(|config| config.get_bool("nostr.repo-relay-only").ok())
+                .unwrap_or(false)
+        });
+
+    if repo_relay_only && repo_read_relays.is_empty() {
+        bail!("--repo-relay-only requires the repository to declare at least one relay")
+    }
+
+    let my_write_relays = if repo_relay_only {
+        vec![]
+    } else {
+        my_write_relays
+    };
+
     // Only include default relays as fallback when there are no repo relays
     // (bootstrapping case, e.g. new account signup). When repo relays exist,
     // trust the repo and user relay configuration.
     let fallback = [
-        if repo_read_relays.is_empty() && my_write_relays.is_empty() {
+        if !repo_relay_only && repo_read_relays.is_empty() && my_write_relays.is_empty() {
             client.get_relay_default_set().clone()
         } else {
             vec![]

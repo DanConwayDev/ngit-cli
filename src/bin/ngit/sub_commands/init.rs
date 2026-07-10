@@ -347,7 +347,7 @@ fn resolve_grasp_servers(
 /// Validation for State A (Fresh): no existing coordinate.
 fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -> Result<()> {
     // -d or -f with no substantive flags: proceed with all defaults
-    if !args.has_substantive_flags() && (cli.defaults || cli.force) {
+    if !args.has_substantive_flags(cli.repo_relay_only) && (cli.defaults || cli.force) {
         return Ok(());
     }
 
@@ -440,10 +440,6 @@ pub struct SubCommandArgs {
     /// usually root commit but will be more recent commit for forks
     earliest_unique_commit: Option<String>,
     #[clap(long)]
-    /// only publish nostr events to repo relays, not to user or default relays
-    /// (sets nostr.repo-relay-only in local git config)
-    repo_relay_only: bool,
-    #[clap(long)]
     /// drop unknown tags from the existing announcement when republishing
     /// (default is to preserve them so tags added by future ngit versions
     /// or third-party tools aren't silently lost)
@@ -451,7 +447,7 @@ pub struct SubCommandArgs {
 }
 
 impl SubCommandArgs {
-    fn has_substantive_flags(&self) -> bool {
+    fn has_substantive_flags(&self, repo_relay_only: bool) -> bool {
         self.name.is_some()
             || self.identifier.is_some()
             || self.description.is_some()
@@ -463,7 +459,7 @@ impl SubCommandArgs {
             || !self.other_maintainers.is_empty()
             || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
-            || self.repo_relay_only
+            || repo_relay_only
             || self.clean
     }
 }
@@ -504,7 +500,7 @@ fn validate_pre_fetch(
                     ));
                 }
             }
-            if !args.has_substantive_flags() && !cli.force {
+            if !args.has_substantive_flags(cli.repo_relay_only) && !cli.force {
                 return Err(cli_error(
                     "no arguments specified, use --force to publish with new timestamp",
                     &[],
@@ -555,7 +551,7 @@ fn validate_post_fetch(cli: &Cli, args: &SubCommandArgs, state: &InitState) -> R
                     ));
                 }
             }
-            if !args.has_substantive_flags() && !cli.force {
+            if !args.has_substantive_flags(cli.repo_relay_only) && !cli.force {
                 return Err(cli_error(
                     "no arguments specified, use --force to publish with new timestamp",
                     &[],
@@ -1343,21 +1339,11 @@ async fn publish_and_finalize(
     // Step 5: Publish events
     client.set_signer(signer).await;
 
-    let repo_relay_only = git_repo
-        .get_git_config_item("nostr.repo-relay-only", None)
-        .ok()
-        .flatten()
-        .is_some_and(|s| s == "true");
-
     let _ = send_events(
         client,
         Some(git_repo_path),
         events,
-        if repo_relay_only {
-            vec![]
-        } else {
-            user_ref.relays.write()
-        },
+        user_ref.relays.write(),
         fields.relays.clone(),
         !cli.disable_cli_spinners,
         false,
@@ -1610,7 +1596,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     )?;
 
     // Phase 6: Persist --repo-relay-only flag to local git config if supplied
-    if args.repo_relay_only {
+    if cli_args.repo_relay_only {
         git_repo.save_git_config_item("nostr.repo-relay-only", "true", false)?;
     }
 

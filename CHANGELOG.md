@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Expand `--repo-relay-only` to all ngit commands that publish nostr events.
+
 ## [2.6.3] - 2026-07-10
 
 ### Fixed

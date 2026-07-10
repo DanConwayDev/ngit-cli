@@ -38,6 +38,10 @@ async fn main() {
         std::env::set_var("NGIT_VERBOSE", "1");
     }
 
+    if cli.repo_relay_only {
+        std::env::set_var("NGIT_REPO_RELAY_ONLY", "1");
+    }
+
     if cli.customize {
         print!("{}", customise_template());
         std::process::exit(0); // Exit the program
