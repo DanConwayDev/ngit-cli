@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-07-10
+
 ### Fixed
 
 - `ngit init` now promptly reports actionable account setup guidance when no signer is configured, instead of repeatedly trying to prompt for an nsec.
