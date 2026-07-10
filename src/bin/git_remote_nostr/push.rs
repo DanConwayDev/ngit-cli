@@ -680,7 +680,9 @@ async fn create_events_and_proposals(
         true,  // fetch_profile_updates
     )
     .await
-    .context("Authentication required. Run 'ngit account login' first, then try again.")?;
+    .context(
+        "authentication required; run 'ngit account login' or 'ngit account create', then try again",
+    )?;
 
     if !repo_ref.maintainers.contains(&user_ref.public_key) {
         for refspec in git_server_refspecs {

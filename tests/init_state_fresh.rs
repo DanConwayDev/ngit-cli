@@ -106,8 +106,12 @@ async fn no_signer_fails_without_retrying_interactive_login() -> Result<()> {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("failed to get or find signer info"),
-        "expected missing signer error, got: {stderr}"
+        stderr.contains("nostr account required"),
+        "expected account-required error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("ngit account login") && stderr.contains("ngit account create"),
+        "expected login and account creation guidance, got: {stderr}"
     );
     assert!(
         !stderr.contains("error getting fresh signer from nsec"),

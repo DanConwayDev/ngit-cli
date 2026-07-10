@@ -20,6 +20,19 @@ use crate::{
     git::{Repo, RepoActions, get_git_config_item, get_git_config_item_system},
 };
 
+#[derive(Debug)]
+pub(super) struct SignerInfoNotFound;
+
+impl std::fmt::Display for SignerInfoNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "failed to get or find signer info in cli arguments, local git config, global git config or system git config",
+        )
+    }
+}
+
+impl std::error::Error for SignerInfoNotFound {}
+
 /// load signer from git config and UserProfile from cache or relays
 ///
 /// # Parameters
@@ -92,7 +105,7 @@ pub fn get_signer_info(
                     break;
                 }
             }
-            result.context("failed to get or find signer info in cli arguments, local git config, global git config or system git config")?
+            result.ok_or(SignerInfoNotFound)?
         }
         Some(SignerInfoSource::CommandLineArguments) => {
             if let Some(signer_info) = signer_info {

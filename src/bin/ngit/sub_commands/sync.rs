@@ -14,7 +14,7 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded},
     },
     list::{get_ahead_behind, list_from_remotes},
-    login::existing::load_existing_login,
+    login::{self, existing::load_existing_login},
     push::push_to_remote,
     repo_ref::{
         format_grasp_server_url_as_relay_url, get_repo_coordinates_when_remote_unknown,
@@ -92,6 +92,25 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
+    let force_login = if args.force {
+        let (signer, user_ref, _) = load_existing_login(
+            &Some(&git_repo),
+            &None,
+            &None,
+            &None,
+            Some(&client),
+            false,
+            false,
+            false,
+        )
+        .await
+        .map_err(login::require_account)?;
+        client.set_signer(signer.clone()).await;
+        Some((signer, user_ref))
+    } else {
+        None
+    };
+
     let (nostr_remote_name, decoded_nostr_url) = git_repo
         .get_first_nostr_remote_when_in_ngit_binary()
         .await.context("failed to list git remotes")?
@@ -114,19 +133,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     // without needing to push a new ref.  A fresh event is signed (new
     // created_at) and broadcast to all repo relays and the user's write relays.
     if args.force {
-        let (signer, user_ref, _) = load_existing_login(
-            &Some(&git_repo),
-            &None,
-            &None,
-            &None,
-            Some(&client),
-            false, // not silent — we need the user to authenticate if required
-            false, // prompt_for_password
-            false, // fetch_profile_updates
-        )
-        .await
-        .context("authentication required to republish state; run 'ngit account login' first")?;
-        client.set_signer(signer.clone()).await;
+        let (signer, user_ref) = force_login.context("missing force-login preflight result")?;
         // Backfill any missing ^{} peeled refs before rebuilding — the existing
         // state event may predate the fix that started storing them.
         let mut state = nostr_state.state.clone();
@@ -378,7 +385,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 }
                 Err(_) => {
                     term.write_line(
-                        "cannot update nostr state: not logged in — run 'ngit account login' first",
+                        "cannot update nostr state: not logged in — run 'ngit account login' or 'ngit account create' first",
                     )?;
                 }
             }

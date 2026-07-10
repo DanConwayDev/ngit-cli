@@ -1,4 +1,4 @@
-//! Lighthouse test: `ngit account create --relay <url>`.
+//! Account creation and missing-account guidance tests.
 //!
 //! Drives `ngit account create --local --name "..." --relay <url>` against one
 //! vanilla nostr relay that is *not* injected into `NGIT_RELAY_DEFAULT_SET` —
@@ -20,6 +20,38 @@
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use test_harness::Harness;
+
+#[tokio::test]
+async fn export_keys_without_account_suggests_login_or_creation() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+
+    let output = repo
+        .ngit(["account", "export-keys"])
+        .output()
+        .await
+        .context("failed to spawn ngit account export-keys")?;
+
+    assert!(
+        !output.status.success(),
+        "expected account export-keys to fail without an account"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nostr account required"),
+        "expected account-required error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("ngit account login") && stderr.contains("ngit account create"),
+        "expected login and account creation guidance, got: {stderr}"
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<()> {

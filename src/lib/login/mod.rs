@@ -16,7 +16,7 @@ use crate::{
 
 pub mod existing;
 mod key_encryption;
-use existing::load_existing_login;
+use existing::{SignerInfoNotFound, load_existing_login};
 pub mod user;
 use user::UserRef;
 pub mod fresh;
@@ -42,8 +42,22 @@ pub async fn login_or_signup(
     .await;
     match res {
         Ok(login) => Ok(login),
-        Err(error) if Interactor::is_non_interactive() => Err(error),
+        Err(error) if Interactor::is_non_interactive() => Err(require_account(error)),
         Err(_) => fresh_login_or_signup(git_repo, client, None, false, &[]).await,
+    }
+}
+
+/// Replace a missing-signer error with actionable CLI guidance while preserving
+/// errors from configured but invalid or unavailable signers.
+pub fn require_account(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<SignerInfoNotFound>().is_some() {
+        crate::cli_interactor::cli_error(
+            "nostr account required; sign in or create an account first",
+            &[],
+            &["ngit account login", "ngit account create"],
+        )
+    } else {
+        error
     }
 }
 
