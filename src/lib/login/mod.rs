@@ -9,6 +9,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
+    cli_interactor::Interactor,
     client::is_verbose,
     git::{Repo, RepoActions},
 };
@@ -39,10 +40,10 @@ pub async fn login_or_signup(
         fetch_profile_updates,
     )
     .await;
-    if res.is_ok() {
-        res
-    } else {
-        fresh_login_or_signup(git_repo, client, None, false, &[]).await
+    match res {
+        Ok(login) => Ok(login),
+        Err(error) if Interactor::is_non_interactive() => Err(error),
+        Err(_) => fresh_login_or_signup(git_repo, client, None, false, &[]).await,
     }
 }
 

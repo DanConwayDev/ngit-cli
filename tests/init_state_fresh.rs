@@ -11,8 +11,10 @@
 //!
 //! ## Coverage
 //!
-//! - **Errors** (3 tests, no shared setup — each error is a different `ngit
+//! - **Errors** (4 tests, no shared setup — each error is a different `ngit
 //!   init` invocation with its own arg shape):
+//!   - no configured signer → fails instead of repeatedly attempting an nsec
+//!     prompt in non-interactive mode
 //!   - `bare_no_flags` → "missing required fields"
 //!   - `name_only_missing_server_infra` → "missing --grasp-server"
 //!   - `relays_only_missing_name_and_servers` → "missing required fields" (the
@@ -55,7 +57,7 @@
 //! starts wording the messages differently, these tests will fail loudly
 //! and the assertions can be updated in the same change.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
@@ -74,6 +76,45 @@ const EXPECTED_IDENTIFIER: &str = "My-Project";
 // ---------------------------------------------------------------------------
 // Errors — one #[tokio::test] each, no shared setup
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn no_signer_fails_without_retrying_interactive_login() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let commit = repo
+        .git(["commit", "--allow-empty", "-m", "initial commit"])
+        .output()
+        .await
+        .context("failed to create initial commit")?;
+    assert!(commit.status.success(), "failed to create initial commit");
+
+    let mut init = repo.ngit(["init"]);
+    init.kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(5), init.output())
+        .await
+        .context("`ngit init` did not fail promptly without a configured signer")?
+        .context("failed to spawn ngit init")?;
+
+    assert!(
+        !out.status.success(),
+        "expected `ngit init` to fail without a configured signer"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed to get or find signer info"),
+        "expected missing signer error, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("error getting fresh signer from nsec"),
+        "non-interactive init unexpectedly attempted fresh login: {stderr}"
+    );
+    Ok(())
+}
 
 /// Equivalent of legacy `state_a_fresh::errors::bare_no_flags`. Bare
 /// `ngit init` against a fresh repo trips `validate_fresh`'s "two

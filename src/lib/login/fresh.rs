@@ -77,10 +77,7 @@ pub async fn fresh_login_or_signup(
             0 => match get_fresh_nsec_signer().await {
                 Ok(Some(res)) => break res,
                 Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("error getting fresh signer from nsec: {e}");
-                    continue;
-                }
+                Err(e) => return Err(e.context("error getting fresh signer from nsec")),
             },
             1 => match get_fresh_nip46_signer(client, signer_relays).await {
                 Ok(Some(res)) => break res,
