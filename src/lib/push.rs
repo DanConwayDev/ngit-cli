@@ -21,7 +21,7 @@ use crate::{
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
-        oid_to_shorthand_string,
+        oid_to_shorthand_string, remote_helper,
     },
     git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
     login::user::UserRef,
@@ -45,6 +45,17 @@ pub fn push_to_remote(
     is_grasp_server: bool,
     git_server_push_options: &[&str],
 ) -> Result<HashMap<String, Option<String>>> {
+    if remote_helper::handles_url(git_server_url) {
+        term.write_line(&format!("push: {git_server_url} via Git remote helper..."))?;
+        return remote_helper::push(
+            git_repo,
+            git_server_url,
+            remote_refspecs,
+            term,
+            git_server_push_options,
+        );
+    }
+
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
         get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
@@ -426,7 +437,9 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     // Determine whether the user-supplied server is a direct clone URL
     // (ends with .git or an SSH URL) or a GRASP server base URL.
     let user_server_is_direct_url = git_server
-        .map(|s| s.ends_with(".git") || s.starts_with("git@"))
+        .map(|s| {
+            s.ends_with(".git") || s.starts_with("git@") || remote_helper::is_direct_pr_clone_url(s)
+        })
         .unwrap_or(false);
 
     // If the user specified a server, put it first in to_try so it is tried

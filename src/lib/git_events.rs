@@ -419,10 +419,8 @@ pub fn event_tag_from_nip19_or_hex(
                         relay_hint: coordinate.relays.first().cloned(),
                     }));
                 }
-                Nip19::Profile(profile) => {
-                    if allow_npub_reference {
-                        break Ok(Tag::public_key(profile.public_key));
-                    }
+                Nip19::Profile(profile) if allow_npub_reference => {
+                    break Ok(Tag::public_key(profile.public_key));
                 }
                 Nip19::Pubkey(public_key) if allow_npub_reference => {
                     break Ok(Tag::public_key(public_key));
