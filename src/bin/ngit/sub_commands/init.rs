@@ -17,7 +17,10 @@ use ngit::{
     },
     client::{Params, get_state_from_cache, send_events},
     fetch::fetch_from_git_server,
-    git::nostr_url::{CloneUrl, NostrUrlDecoded},
+    git::{
+        is_git_remote_helper_url,
+        nostr_url::{CloneUrl, NostrUrlDecoded},
+    },
     list::list_from_remote,
     repo_ref::{
         apply_grasp_infrastructure, detect_existing_grasp_servers, extract_npub, extract_pks,
@@ -1142,11 +1145,7 @@ fn prompt_git_servers(
                 "git server remote url",
                 additional_server_options,
                 selections,
-                |s| {
-                    CloneUrl::from_str(s)
-                        .map(|_| s.to_string())
-                        .context(format!("Invalid git server URL format: {s}"))
-                },
+                validate_git_server_url,
             )?;
 
             if selected.is_empty()
@@ -1177,14 +1176,20 @@ fn prompt_git_servers(
             "git server remote url",
             git_servers,
             selections,
-            |s| {
-                CloneUrl::from_str(s)
-                    .map(|_| s.to_string())
-                    .context(format!("Invalid git server URL format: {s}"))
-            },
+            validate_git_server_url,
         )?;
         show_multi_input_prompt_success("git servers", &selected);
         Ok(selected)
+    }
+}
+
+fn validate_git_server_url(url: &str) -> Result<String> {
+    if is_git_remote_helper_url(url) {
+        Ok(url.to_string())
+    } else {
+        CloneUrl::from_str(url)
+            .map(|_| url.to_string())
+            .context(format!("Invalid git server URL format: {url}"))
     }
 }
 
@@ -1701,5 +1706,27 @@ fn run_ngit_sync() -> Result<()> {
         Ok(())
     } else {
         bail!("ngit sync process exited with an error: {exit_status}");
+    }
+}
+
+#[cfg(test)]
+mod git_server_url_validation_tests {
+    use super::validate_git_server_url;
+
+    #[test]
+    fn accepts_urls_dispatched_by_git_remote_helpers() {
+        for url in [
+            "htree://npub1example/project",
+            "ext::%S /tmp/project.git",
+            "custom+git://example.test/project",
+        ] {
+            assert_eq!(validate_git_server_url(url).unwrap(), url);
+        }
+    }
+
+    #[test]
+    fn retains_builtin_url_validation() {
+        assert!(validate_git_server_url("https://example.test/project.git").is_ok());
+        assert!(validate_git_server_url("not a git URL").is_err());
     }
 }
