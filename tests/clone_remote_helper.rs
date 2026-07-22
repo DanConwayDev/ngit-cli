@@ -2,7 +2,8 @@
 //! remote.
 //!
 //! The backing repository is exposed only as an `ext::` URL. The test then
-//! runs the production process chain:
+//! publishes the announcement with the real `ngit init` command, then runs
+//! the production process chain:
 //!
 //! ```text
 //! git clone nostr://... -> git-remote-nostr -> git -> git-remote-ext
@@ -14,7 +15,7 @@
 //! capability family without adding an external test dependency.
 
 use anyhow::{Context, Result, ensure};
-use nostr_sdk::prelude::*;
+use nostr_sdk::prelude::{Keys, ToBech32};
 use test_harness::Harness;
 
 #[tokio::test]
@@ -56,9 +57,11 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
         .clone();
 
     let keys = Keys::generate();
-    let pubkey = keys.public_key();
-    let pubkey_hex = pubkey.to_string();
-    let npub = pubkey.to_bech32().context("encode publisher npub")?;
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .context("encode publisher npub")?;
+    let nsec = keys.secret_key().to_bech32()?;
     let identifier = "remote-helper-cli-e2e";
     let relay_url = harness.relay("default").url().to_string();
     let backing_dir = tempfile::tempdir().context("allocate backing repo directory")?;
@@ -98,19 +101,40 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
     )?;
     let helper_url = format!("ext::%S {backing_repo_str}");
 
-    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
-        .tags(vec![
-            Tag::identifier(identifier.to_string()),
-            Tag::parse(["r", main_oid.as_str(), "euc"])?,
-            Tag::parse(["name", "remote helper CLI e2e"])?,
-            Tag::parse(["description", "exercises nested Git remote helpers"])?,
-            Tag::parse(["clone", helper_url.as_str()])?,
-            Tag::parse(["relays", relay_url.as_str()])?,
-            Tag::parse(["maintainers", pubkey_hex.as_str()])?,
-            Tag::parse(["alt", "git repository: remote helper CLI e2e"])?,
+    publisher
+        .git_ok(
+            ["config", "--local", "protocol.ext.allow", "always"],
+            "allow ext helper for init",
+        )
+        .await?;
+    // The backing repository is already seeded. Suppressing state generation
+    // keeps init focused on publishing the real announcement and avoids an
+    // implicit nostr push outside the harness's clock-safe push helper.
+    publisher
+        .git_ok(
+            ["config", "--local", "nostr.nostate", "true"],
+            "disable init state generation",
+        )
+        .await?;
+    let init = publisher
+        .ngit([
+            "init",
+            "--name",
+            identifier,
+            "--description",
+            "exercises nested Git remote helpers",
+            "--clone",
+            helper_url.as_str(),
+            "--relay",
+            relay_url.as_str(),
+            "--nsec",
+            nsec.as_str(),
+            "--defaults",
         ])
-        .finalize(&keys)?;
-    publish_event(&announcement, &relay_url).await?;
+        .output()
+        .await
+        .context("spawn ngit init with external helper URL")?;
+    require_success("ngit init with external helper URL", &init)?;
 
     let relay_hint = urlencoding::encode(&relay_url);
     let nostr_url = format!("nostr://{npub}/{relay_hint}/{identifier}");
@@ -131,7 +155,6 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
         contents
     );
 
-    let nsec = keys.secret_key().to_bech32()?;
     cloned
         .git_ok(
             ["config", "--local", "nostr.nsec", &nsec],
@@ -176,20 +199,6 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
         String::from_utf8(backing_oid.stdout)?.trim(),
         pushed_oid,
         "the actual CLI push must advance the external-helper backing ref"
-    );
-    Ok(())
-}
-
-async fn publish_event(event: &Event, relay_url: &str) -> Result<()> {
-    let client = Client::default();
-    client.add_relay(relay_url).await?;
-    client.connect().await;
-    let output = client.send_event(event).await?;
-    client.disconnect().await;
-    ensure!(
-        output.failed.is_empty(),
-        "relay did not acknowledge announcement: {:?}",
-        output.failed
     );
     Ok(())
 }
