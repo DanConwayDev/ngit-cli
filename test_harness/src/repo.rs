@@ -87,6 +87,16 @@ impl Repo {
     /// `git-remote-nostr` helper inherits relay-URL injection and clones
     /// over `nostr://` URLs against the harness's relays / grasp servers.
     pub(crate) async fn clone(harness: &Harness, url: &str) -> Result<Self> {
+        Self::clone_with_git_config(harness, url, &[]).await
+    }
+
+    /// Clone with command-scoped Git configuration applied to the outer
+    /// `git clone` process and inherited by any remote helpers it launches.
+    pub(crate) async fn clone_with_git_config(
+        harness: &Harness,
+        url: &str,
+        git_config: &[(&str, &str)],
+    ) -> Result<Self> {
         let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
         let dir = tempdir.path().to_path_buf();
 
@@ -100,6 +110,9 @@ impl Repo {
         cmd.env("PATH", &augmented_path);
         cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
         cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        for (key, value) in git_config {
+            cmd.arg("-c").arg(format!("{key}={value}"));
+        }
         cmd.args(["clone", url, "."]);
 
         let out = cmd

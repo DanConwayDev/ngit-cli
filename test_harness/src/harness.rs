@@ -217,6 +217,17 @@ impl Harness {
     pub async fn clone_url(&self, url: &str) -> Result<Repo> {
         Repo::clone(self, url).await
     }
+
+    /// Clone a URL with command-scoped Git configuration. This is useful for
+    /// transport tests that must explicitly allow a protocol whose Git
+    /// default policy is `never`, such as the built-in `ext` helper.
+    pub async fn clone_url_with_git_config(
+        &self,
+        url: &str,
+        git_config: &[(&str, &str)],
+    ) -> Result<Repo> {
+        Repo::clone_with_git_config(self, url, git_config).await
+    }
 }
 
 /// Fluent builder for [`Harness`].

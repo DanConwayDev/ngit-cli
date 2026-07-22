@@ -15,7 +15,14 @@ use nostr_url::NostrUrlDecoded;
 use crate::git_events::{get_commit_id_from_patch, tag_value};
 pub mod identify_ahead_behind;
 pub mod nostr_url;
+pub(crate) mod remote_helper;
 pub mod utils;
+
+/// Return whether Git should dispatch this URL to a remote helper instead of
+/// ngit attempting to parse and operate on it through libgit2.
+pub fn is_git_remote_helper_url(url: &str) -> bool {
+    remote_helper::handles_url(url)
+}
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
