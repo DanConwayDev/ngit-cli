@@ -20,6 +20,7 @@ use crate::{
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
+        remote_helper,
     },
     repo_ref::is_grasp_server_clone_url,
     repo_state::RepoState,
@@ -463,6 +464,13 @@ fn list_from_remote_sync(
     is_grasp_server: bool,
     pb: Option<&ProgressBar>,
 ) -> Result<HashMap<String, String>> {
+    if remote_helper::handles_url(git_server_url) {
+        if let Some(pb) = pb {
+            pb.set_message("via Git remote helper");
+        }
+        return remote_helper::list(git_repo, git_server_url);
+    }
+
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
         get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
