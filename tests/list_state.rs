@@ -355,6 +355,26 @@ async fn lists_head_and_branches_from_git_server_when_state_event_matches() -> R
     Ok(())
 }
 
+/// A second remote-helper process must order its state replacement from the
+/// first push's locally cached event even when no harness timestamp delay
+/// separates the pushes. This deliberately uses the raw transport invocation
+/// to exercise the cache hand-off that lets `Repo::nostr_push` lose its
+/// wall-clock pacing safely.
+#[tokio::test]
+async fn immediate_second_push_orders_state_from_cached_first_push() -> Result<()> {
+    let (harness, publisher, published) = setup().await?;
+    let vnext_oid = commit_on_branch(&publisher, "vnext", "vnext.md", "vnext\n").await?;
+
+    git_ok(
+        &publisher,
+        ["push", "-u", "origin", "vnext"],
+        "immediate git push -u origin vnext",
+    )
+    .await?;
+
+    wait_for_state_event_covering(&harness, &published, "refs/heads/vnext", &vnext_oid).await
+}
+
 // ---------------------------------------------------------------------------
 // Legacy case 3: state event references OIDs that don't exist on the git server
 // ---------------------------------------------------------------------------

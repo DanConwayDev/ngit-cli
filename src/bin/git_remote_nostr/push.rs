@@ -755,6 +755,15 @@ async fn create_events_and_proposals(
                 old_state_event.as_ref(),
             )
             .await?;
+            // Keep the planned replacement in this repository's cache before
+            // the relay publish completes. The next `git-remote-nostr`
+            // process may start immediately after this one, before its relay
+            // query can observe the event; it still needs this event as the
+            // NIP-01 ordering reference. `rollback_state_event` removes it
+            // again if no state relay accepts the publish.
+            save_event_in_local_cache(git_repo.get_path()?, &new_repo_state.event)
+                .await
+                .context("failed to cache planned repository state event")?;
             new_state_event_id = Some(new_repo_state.event.id);
             events.push(new_repo_state.event);
         }
