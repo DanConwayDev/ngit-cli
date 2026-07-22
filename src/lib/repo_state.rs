@@ -2,7 +2,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use git2::Oid;
-use nostr::event::{EventBuilder, Tag};
+use nostr::{
+    Timestamp,
+    event::{EventBuilder, Tag},
+};
 
 use crate::{
     client::{STATE_KIND, sign_draft_event},
@@ -62,11 +65,27 @@ impl RepoState {
         for (name, value) in &state {
             tags.push(Tag::parse([name.as_str(), value.as_str()]).unwrap());
         }
+        // GRASP validates repository-state events separately from generic
+        // replaceable events and does not retain same-second replacements
+        // consistently. Give a state replacement a strictly later timestamp
+        // when needed, rather than spacing pushes with a wall-clock sleep.
+        let builder = EventBuilder::new(STATE_KIND, "").tags(tags);
+        let builder = match reference {
+            Some(event) => {
+                let created_at = Timestamp::from_secs(
+                    Timestamp::now()
+                        .as_secs()
+                        .max(event.created_at.as_secs().saturating_add(1)),
+                );
+                builder.custom_created_at(created_at)
+            }
+            None => builder,
+        };
         let event = sign_draft_event(
             event_ordering::finalize_ordered_unsigned(
-                EventBuilder::new(STATE_KIND, "").tags(tags),
+                builder,
                 signer.get_public_key().await?,
-                reference,
+                None,
             )?,
             signer,
             "git state".to_string(),

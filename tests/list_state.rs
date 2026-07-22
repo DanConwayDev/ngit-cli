@@ -115,10 +115,8 @@ async fn commit_on_branch(repo: &Repo, branch: &str, file: &str, content: &str) 
 ///
 /// `Repo::nostr_push` (not a raw `git push`) is mandatory here because the
 /// push goes through `git-remote-nostr`, which publishes an
-/// auto-generated kind-30618 state event. See `test_harness::clock` for the
-/// timing rule that helper enforces, and the previously-flaky
-/// `state_event_takes_precedence_over_advanced_git_server_state` regression
-/// for why it matters.
+/// auto-generated kind-30618 state event and supplies the harness environment
+/// to the remote helper.
 async fn push_branch(repo: &Repo, branch: &str) -> Result<()> {
     repo.nostr_push(["-u", "origin", branch])
         .await
@@ -658,10 +656,8 @@ async fn uses_older_resolvable_state_event_from_different_relay() -> Result<()> 
     // the same push (the announcement already lists vanilla as a repo
     // relay by then). That doesn't matter for the test contract —
     // `client.rs:859-873` keeps only the newest state event per relay,
-    // and the fabricated event below has a strictly later
-    // `created_at` than the auto event because `Repo::nostr_push`
-    // inside `publish_repo` ticks one whole unix second after the
-    // push completes.
+    // and `publish_state_event` assigns the fabricated event a timestamp
+    // strictly later than the target relay's current winner.
     let mut state = BTreeMap::new();
     state.insert("HEAD".to_string(), "ref: refs/heads/main".to_string());
     state.insert("refs/heads/main".to_string(), fake_oid.clone());

@@ -286,11 +286,9 @@ async fn capture_snapshot() -> Result<Snapshot> {
             .context("failed to spawn git remote add origin")?,
     )?;
 
-    // `Repo::nostr_push` runs `git push <args>` then ticks one whole
-    // unix second — see `test_harness::clock` for why bare `git push`
-    // is forbidden against a nostr remote. `-u` writes the upstream
-    // tracking config so subsequent `git push` calls in this repo work
-    // without re-specifying the ref.
+    // `Repo::nostr_push` supplies the harness environment to the remote
+    // helper. `-u` writes the upstream tracking config so subsequent
+    // `git push` calls in this repo work without re-specifying the ref.
     publisher
         .nostr_push(["-u", "origin", DEFAULT_BRANCH])
         .await

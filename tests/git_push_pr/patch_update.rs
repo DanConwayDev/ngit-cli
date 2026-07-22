@@ -51,8 +51,8 @@
 //!    auto-creates a tracking local branch.
 //! 6. Maintainer commits one new file on that branch.
 //! 7. Maintainer runs `git push origin pr/<branch>(<shorthand>)` (no `-f`, no
-//!    `-u`). [`Repo::nostr_push`] ticks the harness clock forward one whole
-//!    second beforehand to keep `created_at` values strictly ordered.
+//!    `-u`). [`Repo::nostr_push`] supplies the harness environment to the
+//!    remote helper, which orders replaceable updates deterministically.
 //!
 //! ## Coverage (one `#[rstest]` per case)
 //!
@@ -263,10 +263,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 7. Maintainer pushes via the nostr:// remote ------------------------
     //
-    // `nostr_push` ticks the clock so the new patch event lands in a
-    // strictly later `created_at` second than the series' own events.
-    // Mandatory per the test-harness "Timing rule" (see
-    // `docs/architecture/test-harness.md`).
+    // `nostr_push` supplies the harness environment to the remote helper.
     maintainer_clone
         .nostr_push(["origin", &remote_branch])
         .await

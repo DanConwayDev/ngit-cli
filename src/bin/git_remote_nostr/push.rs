@@ -19,7 +19,8 @@ use git2::{Oid, Repository};
 use ngit::{
     accept_maintainership::accept_maintainership_with_defaults,
     client::{
-        self, get_event_from_cache_by_id, get_filter_state_events, save_event_in_local_cache,
+        self, Connect, get_event_from_cache_by_id, get_filter_state_events,
+        save_event_in_local_cache,
     },
     git::{self, nostr_url::NostrUrlDecoded},
     git_events::{
@@ -740,13 +741,36 @@ async fn create_events_and_proposals(
         if store_state {
             // Capture the existing state event before publishing the new one,
             // so we can restore it if all git server pushes fail.
-            old_state_event = get_events_from_local_cache(
+            let mut state_events = get_events_from_local_cache(
                 git_repo.get_path()?,
                 vec![get_filter_state_events(&repo_ref.coordinates(), true)],
             )
             .await
             .ok()
-            .and_then(|events| ngit::event_ordering::latest_event(&events).cloned());
+            .unwrap_or_default();
+
+            let mut state_relays = repo_ref
+                .relays
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            for git_server in &repo_ref.git_server {
+                if is_grasp_server_clone_url(git_server) {
+                    state_relays.push(format_grasp_server_url_as_relay_url(git_server)?);
+                }
+            }
+            state_relays.sort();
+            state_relays.dedup();
+            if let Ok(events) = client
+                .get_events(
+                    state_relays,
+                    vec![get_filter_state_events(&repo_ref.coordinates(), true)],
+                )
+                .await
+            {
+                state_events.extend(events);
+            }
+            old_state_event = ngit::event_ordering::latest_event(&state_events).cloned();
 
             let new_repo_state = RepoState::build(
                 repo_ref.identifier.clone(),

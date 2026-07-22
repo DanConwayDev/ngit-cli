@@ -156,15 +156,7 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
     // repo behaves once `ngit init` has rewritten origin to nostr://.
     //
     // `nostr_push` rather than raw `git push` because origin is now a
-    // `nostr://` URL — `git-remote-nostr` emits a kind-30618 per push,
-    // and `ngit init` has just emitted its own kind-30618 by way of its
-    // post-init `push_main_or_master_branch` step. Without the
-    // `clock::tick_to_next_second` that `nostr_push` runs first, those
-    // two kind-30618s land in the same wall-clock second and the
-    // relay's replaceable-event-id collision check rejects the second
-    // one — causing the test to time out waiting for an updated state
-    // event further down. See AGENTS.md "Push to a nostr remote via
-    // `Repo::nostr_push`" and `test_harness/src/clock.rs` for the chain.
+    // `nostr://` URL and the remote helper needs the harness environment.
     let push_out = publisher
         .nostr_push(["-u", "origin", "main", "vnext"])
         .await
@@ -176,6 +168,17 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
         String::from_utf8_lossy(&push_out.stdout),
         String::from_utf8_lossy(&push_out.stderr),
     );
+
+    // The remote helper has received a publish acknowledgement, but GRASP
+    // still applies the state event asynchronously. Wait for the observable
+    // state needed by the clone rather than relying on a fixed delay.
+    wait_for_state_event_ref(
+        harness.grasp("repo"),
+        pubkey,
+        "refs/heads/vnext",
+        &vnext_oid,
+    )
+    .await?;
 
     // --- step 5: cloner clones, verifies both branches arrived ---------------
     let cloner = harness.fresh_repo()?;
@@ -220,13 +223,7 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
     // --- step 6: publisher advances main with a second commit ----------------
     //
     // `nostr_push` rather than raw `git push` for the same reason as
-    // step 4 — origin is `nostr://`, this push emits a kind-30618, and
-    // it must land in a strictly later wall-clock second than the
-    // previous push's kind-30618 to avoid the relay's replaceable-
-    // event-id collision check. The `tick_to_next_second` baked into
-    // `nostr_push` makes that property local to the publish that's
-    // about to happen, so we don't have to reason about prior pushes'
-    // timing.
+    // step 4: origin is `nostr://`, and this push emits a kind-30618.
 
     std::fs::write(publisher.dir().join("README.md"), "main v2\n")
         .context("failed to overwrite README.md for second commit")?;
@@ -261,10 +258,9 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
     );
 
     // Wait for the kind-30618 state event on the grasp's relay to reflect
-    // the new oid before issuing the fetch. The 1.1s sleep above makes
-    // the timestamp race essentially impossible, but the relay still has
-    // a finite publish-and-ack pipeline; polling the observable state is
-    // strictly more honest than guessing how long that takes.
+    // the new oid before issuing the fetch. The relay has a finite
+    // publish-and-ack pipeline, so poll the observable state rather than
+    // guessing how long it takes.
     wait_for_state_event_main(harness.grasp("repo"), pubkey, &main_oid_v2).await?;
 
     // --- step 7: cloner fetches, sees the advance ----------------------------
@@ -342,18 +338,21 @@ where
     Ok(())
 }
 
-/// Poll the grasp's relay surface until a kind-30618 state event for
-/// `pubkey` lists `refs/heads/main` with `expected_oid`. Times out after a
-/// few seconds with a context-rich error.
-///
-/// State events are parameterised replaceable (kind 30000-39999): a relay
-/// only keeps the latest by `(pubkey, kind, d-tag)`, broken by event id on
-/// `created_at` ties. The publisher's two pushes can land in the same
-/// wall-clock second, in which case the relay may retain the old event
-/// and a naive fetch reads stale state.
+/// Poll the grasp's relay surface until a kind-30618 state event for `pubkey`
+/// lists `ref_name` with `expected_oid`. Times out after a few seconds with a
+/// context-rich error.
 async fn wait_for_state_event_main(
     grasp: &test_harness::GraspServer,
     pubkey: PublicKey,
+    expected_oid: &str,
+) -> Result<()> {
+    wait_for_state_event_ref(grasp, pubkey, "refs/heads/main", expected_oid).await
+}
+
+async fn wait_for_state_event_ref(
+    grasp: &test_harness::GraspServer,
+    pubkey: PublicKey,
+    ref_name: &str,
     expected_oid: &str,
 ) -> Result<()> {
     const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -368,22 +367,22 @@ async fn wait_for_state_event_main(
         // address, but defensive: pick the highest-timestamped one.
         let latest = events.iter().max_by_key(|e| e.created_at);
         if let Some(event) = latest {
-            let main_oid_in_event = event.tags.iter().find_map(|t| {
+            let oid_in_event = event.tags.iter().find_map(|t| {
                 let s = t.as_slice();
-                if s.first().map(String::as_str) == Some("refs/heads/main") {
+                if s.first().map(String::as_str) == Some(ref_name) {
                     s.get(1).cloned()
                 } else {
                     None
                 }
             });
-            if main_oid_in_event.as_deref() == Some(expected_oid) {
+            if oid_in_event.as_deref() == Some(expected_oid) {
                 return Ok(());
             }
         }
         if std::time::Instant::now() >= deadline {
             anyhow::bail!(
                 "timed out after {POLL_TIMEOUT:?} waiting for kind-30618 state event to list \
-                 refs/heads/main {expected_oid}. latest event: {latest:?}"
+                 {ref_name} {expected_oid}. latest event: {latest:?}"
             );
         }
         tokio::time::sleep(POLL_INTERVAL).await;

@@ -14,16 +14,14 @@
 //! to be the only one in play. See the module doc-comment on
 //! [`super::fresh_repo`] for the full rationale.
 //!
-//! ## Timing
+//! ## Replacement ordering
 //!
 //! The fixture issues two pushes to a nostr remote — `main` first, then
 //! `vnext`. Each push emits an auto-generated kind-30618 state event;
 //! the second push *replaces* the first at its replaceable coordinate.
 //! Both pushes go through [`test_harness::Repo::nostr_push`] (never bare
-//! `git push`), which ticks one whole unix second after each push so
-//! the follow-up event lands in a strictly later `created_at` second
-//! and cannot id-collide with the previous one. See
-//! [`test_harness::clock`] for the writeup.
+//! `git push`). ngit orders the follow-up replacement deterministically,
+//! including for same-second events.
 //!
 //! ## rstest discipline
 //!
@@ -269,10 +267,8 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // ---------- first push: `main` --------------------------------------
     //
-    // `Repo::nostr_push` runs `git push <args>` then ticks one whole
-    // unix second so the second push's auto state event lands in a
-    // strictly later created_at second than this one's and can't
-    // id-collide. `-u` writes `branch.main.merge` into local config.
+    // `Repo::nostr_push` supplies the harness environment to the remote
+    // helper. `-u` writes `branch.main.merge` into local config.
     publisher
         .nostr_push(["-u", "origin", DEFAULT_BRANCH])
         .await

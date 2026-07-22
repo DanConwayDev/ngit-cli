@@ -232,7 +232,7 @@ push` finishes (or fails). The harness uses `Command::output()` /
 `wait_with_output()` as the natural barrier. For asynchronous
 secondary effects, use `harness.wait_for_event(filter, timeout)`.
 
-### Timing rule: pushes and explicit publishes tick one second
+### Replaceable-event ordering and asynchronous effects
 
 Nostr `created_at` is unix-seconds (NIP-01) — second resolution. Two
 events signed by the same key with identical `(kind, tags, content)`
@@ -248,26 +248,25 @@ deletion ever happened. Combined with second-resolution timestamps,
 fast back-to-back publishes on the same coordinate flake at roughly
 30% on commodity hardware.
 
-The harness sidesteps this by making every operation that publishes
-a nostr event end with a one-second sleep, so the next caller's
-`Timestamp::now()` lands in a strictly later second:
+ngit now orders its replaceable events deterministically under NIP-01,
+including when an update shares its predecessor's timestamp. Tests
+must not add wall-clock sleeps to make a replacement win. **Push to a
+nostr remote via `Repo::nostr_push`, never `repo.git(["push", …])`**;
+it supplies the harness environment and error context, while ngit
+orders the auto-generated kind-30618 state event.
 
-1. **Push to a nostr remote via `Repo::nostr_push`**, never
-   `repo.git(["push", …])`. A push handled by `git-remote-nostr`
-   emits an auto-generated kind-30618 state event covering the
-   pushed ref(s); `nostr_push` is the variant that ticks afterwards.
-2. **`Harness::publish_state_event` and `Harness::publish_repo` tick
-   automatically.** No additional sleep needed at the call site.
+`Harness::publish_state_event` is a fixture that deliberately creates
+raw kind-30618 events. It queries the target relay and assigns an
+explicit timestamp later than that coordinate's current NIP-01 winner,
+without sleeping. Its `created_at_offset_secs` option remains the
+escape hatch for tests that intentionally need an older event.
 
-If you find yourself reaching for `tokio::time::sleep` or a custom
-`tick_to_next_second()`, prefer the wrapper that owns the publish.
-The bare `test_harness::tick_to_next_second` helper is exported for
-the rare case of publishing a custom-built event directly via
-`nostr-sdk` (which a test shouldn't, but the escape hatch exists).
-
-The flake this fixes is documented in
-`tests/list_state.rs::state_event_takes_precedence_over_advanced_git_server_state`
-— preserved as the regression-witness for the rule.
+This does not remove waits for genuine asynchronous work. A relay ACK
+or completed subprocess does not guarantee that GRASP's asynchronous
+policy has materialized a bare repository, or that a subsequent relay
+query observes the expected event. In those cases, poll the observable
+condition with a bounded timeout (for example, an event with the
+expected ref or a created filesystem path); do not use a fixed sleep.
 
 ## ngit-grasp dependency
 
@@ -303,8 +302,7 @@ to production deployment.
 
 ## References
 
-- `test_harness/src/clock.rs` — full writeup of the timing rule and
-  why one-second ticks are mandatory.
+- `src/lib/event_ordering.rs` — production NIP-01 replacement policy.
 - `test_harness/src/port.rs` — port reservation pattern.
 - ngit-grasp's `tests/common/relay.rs` — port allocation and
   subprocess management pattern adopted here.
