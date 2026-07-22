@@ -159,7 +159,13 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 }
             }
         }
-        let new_state = RepoState::build(repo_ref.identifier.clone(), state, &signer).await?;
+        let new_state = RepoState::build(
+            repo_ref.identifier.clone(),
+            state,
+            &signer,
+            Some(&nostr_state.event),
+        )
+        .await?;
         send_events(
             &client,
             Some(git_repo_path),
@@ -317,8 +323,13 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                         new_state_map.insert(r.ref_name.clone(), r.ahead_oid.clone());
                     }
 
-                    match RepoState::build(repo_ref.identifier.clone(), new_state_map, &signer)
-                        .await
+                    match RepoState::build(
+                        repo_ref.identifier.clone(),
+                        new_state_map,
+                        &signer,
+                        Some(&nostr_state.event),
+                    )
+                    .await
                     {
                         Ok(new_state) => {
                             let publish_result = send_events(

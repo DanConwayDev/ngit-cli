@@ -113,6 +113,9 @@ struct ResolvedFields {
     blossoms: Vec<Url>,
     hashtags: Vec<String>,
     selected_grasp_servers: Vec<String>,
+    /// Existing announcements for this coordinate, retained so a republish can
+    /// order itself after the current NIP-01 winner.
+    announcement_events: HashMap<Nip19Coordinate, nostr::Event>,
     /// Tags from the source announcement that aren't in ngit's known
     /// allowlist ([`is_known_tag_name`]), preserved verbatim on
     /// republish so that tags added by a future ngit version or a
@@ -1110,6 +1113,10 @@ fn resolve_fields(
         blossoms,
         hashtags,
         selected_grasp_servers,
+        announcement_events: state
+            .repo_ref()
+            .map(|repo_ref| repo_ref.events.clone())
+            .unwrap_or_default(),
         extra_tags,
     })
 }
@@ -1241,7 +1248,7 @@ async fn publish_and_finalize(
         selected_maintainer: user_ref.public_key,
         maintainers_without_annoucnement: None,
         maintainers: fields.maintainers.clone(),
-        events: HashMap::new(),
+        events: fields.announcement_events,
         nostr_git_url: None,
         extra_tags: fields.extra_tags,
     };
@@ -1272,6 +1279,7 @@ async fn publish_and_finalize(
             repo_ref.identifier.clone(),
             nostr_state.state.clone(),
             &signer,
+            Some(&nostr_state.event),
         )
         .await?
         .event;
@@ -1317,7 +1325,7 @@ async fn publish_and_finalize(
                     }
                 }
                 let new_state_event =
-                    RepoState::build(repo_ref.identifier.clone(), origin_state, &signer)
+                    RepoState::build(repo_ref.identifier.clone(), origin_state, &signer, None)
                         .await?
                         .event;
                 events.push(new_state_event);

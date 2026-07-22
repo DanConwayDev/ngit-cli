@@ -22,7 +22,7 @@ use crate::{
     cli_interactor::{
         Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
     },
-    client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache, sign_event},
+    client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache},
     git::{
         Repo, RepoActions,
         nostr_url::{NostrUrlDecoded, use_nip05_git_config_cache_to_find_nip05_from_public_key},
@@ -223,96 +223,102 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
 
 impl RepoRef {
     pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::Event> {
-        sign_event(
-            nostr::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
-                [
-                    vec![
-                        Tag::identifier(if self.identifier.to_string().is_empty() {
-                            // fiatjaf thought a random string. its not in the draft nip.
-                            // thread_rng()
-                            //     .sample_iter(&Alphanumeric)
-                            //     .take(15)
-                            //     .map(char::from)
-                            //     .collect()
+        let builder = nostr::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
+            [
+                vec![
+                    Tag::identifier(if self.identifier.to_string().is_empty() {
+                        // fiatjaf thought a random string. its not in the draft nip.
+                        // thread_rng()
+                        //     .sample_iter(&Alphanumeric)
+                        //     .take(15)
+                        //     .map(char::from)
+                        //     .collect()
 
-                            // an identifier based on first commit is better so that users dont
-                            // accidentally create two seperate identifiers for the same repo
-                            // there is a hesitancy to use the commit id
-                            // in another conversaion with fiatjaf he suggested the first 6
-                            // character of the commit id
-                            // here we are using 7 which is the standard for shorthand commit id
-                            self.root_commit.to_string()[..7].to_string()
-                        } else {
-                            self.identifier.to_string()
-                        }),
-                        Tag::parse(["r", &self.root_commit, "euc"]).unwrap(),
-                        Tag::parse(["name", &self.name]).unwrap(),
-                        Tag::parse(["description", &self.description]).unwrap(),
-                        Tag::parse([vec!["clone".to_string()], self.git_server.clone()].concat())
-                            .unwrap(),
-                        Tag::parse([vec!["web".to_string()], self.web.clone()].concat()).unwrap(),
-                        Tag::parse(
-                            [
-                                vec!["relays".to_string()],
-                                self.relays
-                                    .iter()
-                                    .map(|r| r.to_string())
-                                    .collect::<Vec<_>>(),
-                            ]
-                            .concat(),
-                        )
-                        .unwrap(),
-                        Tag::parse(
-                            [
-                                vec!["maintainers".to_string()],
-                                self.maintainers
-                                    .iter()
-                                    .map(|pk| pk.to_string())
-                                    .collect::<Vec<_>>(),
-                            ]
-                            .concat(),
-                        )
-                        .unwrap(),
-                        Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
-                    ],
-                    self.hashtags
-                        .iter()
-                        .map(|h| Tag::parse(["t", h]).unwrap())
-                        .collect(),
-                    self.upstream
-                        .iter()
-                        .map(|upstream| {
-                            Tag::parse([vec!["u".to_string()], upstream.clone()].concat()).unwrap()
-                        })
-                        .collect(),
-                    if self.blossoms.is_empty() {
-                        vec![]
+                        // an identifier based on first commit is better so that users dont
+                        // accidentally create two seperate identifiers for the same repo
+                        // there is a hesitancy to use the commit id
+                        // in another conversaion with fiatjaf he suggested the first 6
+                        // character of the commit id
+                        // here we are using 7 which is the standard for shorthand commit id
+                        self.root_commit.to_string()[..7].to_string()
                     } else {
-                        vec![
-                            Tag::parse(
-                                [
-                                    vec!["blossoms".to_string()],
-                                    self.blossoms
-                                        .iter()
-                                        .map(|b| b.to_string_without_trailing_slash())
-                                        .collect::<Vec<_>>(),
-                                ]
-                                .concat(),
-                            )
-                            .unwrap(),
+                        self.identifier.to_string()
+                    }),
+                    Tag::parse(["r", &self.root_commit, "euc"]).unwrap(),
+                    Tag::parse(["name", &self.name]).unwrap(),
+                    Tag::parse(["description", &self.description]).unwrap(),
+                    Tag::parse([vec!["clone".to_string()], self.git_server.clone()].concat())
+                        .unwrap(),
+                    Tag::parse([vec!["web".to_string()], self.web.clone()].concat()).unwrap(),
+                    Tag::parse(
+                        [
+                            vec!["relays".to_string()],
+                            self.relays
+                                .iter()
+                                .map(|r| r.to_string())
+                                .collect::<Vec<_>>(),
                         ]
-                    },
-                    // Unknown tags carried over verbatim from the source
-                    // announcement. See [`RepoRef::extra_tags`] and
-                    // [`is_known_tag_name`]: ngit-known names never end up
-                    // here (they round-trip through their typed field), so
-                    // appending unconditionally cannot duplicate a typed
-                    // tag emitted above.
-                    self.extra_tags.clone(),
-                    // code languages and hashtags
-                ]
-                .concat(),
-            ),
+                        .concat(),
+                    )
+                    .unwrap(),
+                    Tag::parse(
+                        [
+                            vec!["maintainers".to_string()],
+                            self.maintainers
+                                .iter()
+                                .map(|pk| pk.to_string())
+                                .collect::<Vec<_>>(),
+                        ]
+                        .concat(),
+                    )
+                    .unwrap(),
+                    Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
+                ],
+                self.hashtags
+                    .iter()
+                    .map(|h| Tag::parse(["t", h]).unwrap())
+                    .collect(),
+                self.upstream
+                    .iter()
+                    .map(|upstream| {
+                        Tag::parse([vec!["u".to_string()], upstream.clone()].concat()).unwrap()
+                    })
+                    .collect(),
+                if self.blossoms.is_empty() {
+                    vec![]
+                } else {
+                    vec![
+                        Tag::parse(
+                            [
+                                vec!["blossoms".to_string()],
+                                self.blossoms
+                                    .iter()
+                                    .map(|b| b.to_string_without_trailing_slash())
+                                    .collect::<Vec<_>>(),
+                            ]
+                            .concat(),
+                        )
+                        .unwrap(),
+                    ]
+                },
+                // Unknown tags carried over verbatim from the source
+                // announcement. See [`RepoRef::extra_tags`] and
+                // [`is_known_tag_name`]: ngit-known names never end up
+                // here (they round-trip through their typed field), so
+                // appending unconditionally cannot duplicate a typed
+                // tag emitted above.
+                self.extra_tags.clone(),
+                // code languages and hashtags
+            ]
+            .concat(),
+        );
+        let public_key = signer.get_public_key().await?;
+        crate::client::sign_draft_event(
+            crate::event_ordering::finalize_ordered_unsigned(
+                builder,
+                public_key,
+                crate::event_ordering::latest_event(self.events.values()),
+            )?,
             signer,
             "repo announcement".to_string(),
         )
@@ -973,7 +979,11 @@ pub fn latest_event_repo_ref(repo_ref: &RepoRef) -> Option<RepoRef> {
     repo_ref
         .events
         .values()
-        .max_by_key(|e| e.created_at)
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
         .and_then(|e| RepoRef::try_from((e.clone(), None)).ok())
 }
 

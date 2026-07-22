@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use git2::Oid;
 use nostr::event::{EventBuilder, Tag};
 
-use crate::client::{STATE_KIND, sign_event};
+use crate::{
+    client::{STATE_KIND, sign_draft_event},
+    event_ordering,
+};
 
 pub struct RepoState {
     pub identifier: String,
@@ -13,9 +16,9 @@ pub struct RepoState {
 }
 
 impl RepoState {
-    pub fn try_from(mut state_events: Vec<nostr::Event>) -> Result<Self> {
-        state_events.sort_by_key(|e| e.created_at);
-        let event = state_events.last().context("no state events")?;
+    pub fn try_from(state_events: Vec<nostr::Event>) -> Result<Self> {
+        let event =
+            crate::event_ordering::latest_event(&state_events).context("no state events")?;
         let mut state = HashMap::new();
         for tag in event.tags.iter() {
             if let Some(name) = tag.as_slice().first() {
@@ -52,14 +55,19 @@ impl RepoState {
         identifier: String,
         mut state: HashMap<String, String>,
         signer: &Arc<crate::NgitSigner>,
+        reference: Option<&nostr::Event>,
     ) -> Result<Self> {
         add_head(&mut state);
         let mut tags = vec![Tag::identifier(identifier.clone())];
         for (name, value) in &state {
             tags.push(Tag::parse([name.as_str(), value.as_str()]).unwrap());
         }
-        let event = sign_event(
-            EventBuilder::new(STATE_KIND, "").tags(tags),
+        let event = sign_draft_event(
+            event_ordering::finalize_ordered_unsigned(
+                EventBuilder::new(STATE_KIND, "").tags(tags),
+                signer.get_public_key().await?,
+                reference,
+            )?,
             signer,
             "git state".to_string(),
         )

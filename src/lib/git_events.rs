@@ -117,6 +117,31 @@ pub fn status_kinds() -> Vec<Kind> {
     ]
 }
 
+/// Sign a proposal-status event after ordering it against every existing status
+/// kind in the same NIP-10 proposal thread.
+pub async fn sign_ordered_status_event(
+    builder: EventBuilder,
+    signer: &Arc<crate::NgitSigner>,
+    statuses: &[Event],
+    proposal_id: EventId,
+    description: String,
+) -> Result<Event> {
+    let reference = crate::event_ordering::latest_event(statuses.iter().filter(|event| {
+        status_kinds().contains(&event.kind)
+            && get_event_root(event).is_ok_and(|root| root == proposal_id)
+    }));
+    crate::client::sign_draft_event(
+        crate::event_ordering::finalize_ordered_unsigned(
+            builder,
+            signer.get_public_key().await?,
+            reference,
+        )?,
+        signer,
+        description,
+    )
+    .await
+}
+
 pub const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
 pub const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
 pub const KIND_USER_GRASP_LIST: Kind = Kind::Custom(10317);
@@ -464,6 +489,7 @@ pub async fn generate_unsigned_pr_or_update_event(
     clone_url_hint: &[&str],
     mentions: &[nostr::Tag],
     git_repo_path: Option<&Path>,
+    ordering_reference: Option<&Event>,
 ) -> Result<UnsignedEvent> {
     let root_patch_cover_letter = if let Some(root_proposal) = root_proposal {
         if root_proposal.kind.eq(&Kind::GitPatch) {
@@ -602,13 +628,21 @@ pub async fn generate_unsigned_pr_or_update_event(
         .concat(),
     );
 
-    Ok(if is_pr_update {
+    let builder = if is_pr_update {
         EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
     } else {
         EventBuilder::new(KIND_PULL_REQUEST, description)
     }
-    .tags(all_tags)
-    .finalize_unsigned(*signing_public_key))
+    .tags(all_tags);
+    if is_pr_update {
+        crate::event_ordering::finalize_ordered_unsigned(
+            builder,
+            *signing_public_key,
+            ordering_reference,
+        )
+    } else {
+        Ok(builder.finalize_unsigned(*signing_public_key))
+    }
 }
 
 fn make_branch_name_tag_from_check_out_branch(git_repo: &Repo) -> Option<Tag> {
@@ -1063,8 +1097,8 @@ pub fn process_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event])
 ///   `["L", "#subject"]` + `["l", "<new title>", "#subject"]`
 ///
 /// Unlike hashtag labels, subject overrides are replaceable-style: only the
-/// latest authorised event wins, with tiebreak by lexicographically larger
-/// event ID (consistent with NIP-1 replaceable event semantics).
+/// latest authorised event wins, with tiebreak by lexicographically lower
+/// event ID as required by NIP-01.
 ///
 /// Only the author of `event` or a repository maintainer may set the subject.
 /// Returns `None` when no valid subject override exists.
@@ -1079,46 +1113,36 @@ pub fn process_subject(
 
     let event_id_str = event.id.to_string();
 
-    // Find the winning subject label event: latest created_at, tiebreak by
-    // lexicographically larger event ID (NIP-1 replaceable event semantics).
-    let winner = label_events
-        .iter()
-        .filter(|le| {
-            if !le.kind.eq(&KIND_LABEL) {
-                return false;
-            }
-            if !is_permitted(&le.pubkey) {
-                return false;
-            }
-            // Must reference our event via a lowercase `e` tag.
-            let references_event = le.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.len() >= 2 && s[0].eq("e") && s[1].eq(&event_id_str)
-            });
-            if !references_event {
-                return false;
-            }
-            // Must declare the `#subject` namespace.
-            let has_namespace = le.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.len() >= 2 && s[0].eq("L") && s[1].eq("#subject")
-            });
-            if !has_namespace {
-                return false;
-            }
-            // Must have at least one non-empty `["l", "<value>", "#subject"]` tag.
-            le.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.len() >= 3 && s[0].eq("l") && s[2].eq("#subject") && !s[1].is_empty()
-            })
+    // Find the NIP-01 winner: latest created_at, then lower event ID.
+    let winner = crate::event_ordering::latest_event(label_events.iter().filter(|le| {
+        if !le.kind.eq(&KIND_LABEL) {
+            return false;
+        }
+        if !is_permitted(&le.pubkey) {
+            return false;
+        }
+        // Must reference our event via a lowercase `e` tag.
+        let references_event = le.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0].eq("e") && s[1].eq(&event_id_str)
+        });
+        if !references_event {
+            return false;
+        }
+        // Must declare the `#subject` namespace.
+        let has_namespace = le.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0].eq("L") && s[1].eq("#subject")
+        });
+        if !has_namespace {
+            return false;
+        }
+        // Must have at least one non-empty `["l", "<value>", "#subject"]` tag.
+        le.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 3 && s[0].eq("l") && s[2].eq("#subject") && !s[1].is_empty()
         })
-        .max_by(|a, b| {
-            // Primary: newer created_at wins.
-            // Tiebreak: lexicographically larger event ID wins (NIP-1).
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-        })?;
+    }))?;
 
     // Extract the subject value from the winning event.
     winner.tags.iter().find_map(|t| {
@@ -1164,7 +1188,7 @@ pub fn get_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> 
 /// A cover note is a markdown body attached to a PR, patch or issue by its
 /// author or a repository maintainer.  Only the latest authorised event wins
 /// (replaceable semantics: newest `created_at`, tiebreak by lexicographically
-/// larger event ID).  Events authored by other pubkeys are ignored.
+/// lower event ID). Events authored by other pubkeys are ignored.
 ///
 /// Returns `None` when no valid cover note exists.
 pub fn process_cover_note(
@@ -1178,28 +1202,20 @@ pub fn process_cover_note(
 
     let event_id_str = event.id.to_string();
 
-    // Find the winning cover note: latest created_at, tiebreak by
-    // lexicographically larger event ID (NIP-1 replaceable event semantics).
-    let winner = cover_note_events
-        .iter()
-        .filter(|cn| {
-            if !cn.kind.eq(&KIND_COVER_NOTE) {
-                return false;
-            }
-            if !is_permitted(&cn.pubkey) {
-                return false;
-            }
-            // Must reference our event via a lowercase `e` tag.
-            cn.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.len() >= 2 && s[0].eq("e") && s[1].eq(&event_id_str)
-            })
+    // Find the NIP-01 winner: latest created_at, then lower event ID.
+    let winner = crate::event_ordering::latest_event(cover_note_events.iter().filter(|cn| {
+        if !cn.kind.eq(&KIND_COVER_NOTE) {
+            return false;
+        }
+        if !is_permitted(&cn.pubkey) {
+            return false;
+        }
+        // Must reference our event via a lowercase `e` tag.
+        cn.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0].eq("e") && s[1].eq(&event_id_str)
         })
-        .max_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-        })?;
+    }))?;
 
     // True when the cover note author differs from the original event author
     // (i.e. a maintainer wrote it, not the PR/issue author).
@@ -1214,17 +1230,14 @@ pub fn get_status(
     all_pr_roots_in_repo: &[Event],
 ) -> Kind {
     let get_direct_status = |proposal: &Event| {
-        if let Some(e) = all_status_in_repo
-            .iter()
-            .filter(|e| {
+        if let Some(e) =
+            crate::event_ordering::latest_event(all_status_in_repo.iter().filter(|e| {
                 status_kinds().contains(&e.kind)
                     && e.tags.iter().any(|t| {
                         t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
                     })
                     && (proposal.pubkey.eq(&e.pubkey) || repo_ref.maintainers.contains(&e.pubkey))
-            })
-            .collect::<Vec<&nostr::Event>>()
-            .first()
+            }))
         {
             e.kind
         } else {

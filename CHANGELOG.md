@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Expand `--repo-relay-only` to all ngit commands that publish nostr events.
 
+### Fixed
+
+- Fast successive updates now reliably replace older repository, pull request, and status events, mitigating Nostr's whole-second timestamp limitation with nonce grinding and a timestamp-plus-one fallback.
+
 ## [2.6.3] - 2026-07-10
 
 ### Fixed

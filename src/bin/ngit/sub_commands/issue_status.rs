@@ -3,8 +3,8 @@ use ngit::{
     accept_maintainership::{
         build_maintainership_acceptance_with_defaults, finalize_maintainership_acceptance,
     },
-    client::{Params, get_issues_from_cache, send_events, sign_event},
-    git_events::{get_status, status_kinds},
+    client::{Params, get_issues_from_cache, send_events},
+    git_events::{get_status, sign_ordered_status_event, status_kinds},
 };
 use nostr::{
     EventBuilder, Kind, Tag,
@@ -127,7 +127,7 @@ async fn launch_status(
 
     let alt_tag = Tag::parse(["alt", alt_text])?;
     let r_tag = Tag::parse(["r", &repo_ref.root_commit])?;
-    let status_event = sign_event(
+    let status_event = sign_ordered_status_event(
         EventBuilder::new(new_kind, content).tags(
             [
                 vec![
@@ -155,6 +155,8 @@ async fn launch_status(
             .concat(),
         ),
         &signer,
+        &statuses,
+        issue.id,
         format!("issue {action}"),
     )
     .await?;

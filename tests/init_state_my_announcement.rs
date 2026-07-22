@@ -52,7 +52,10 @@
 //! messages differently, these tests fail loudly and the assertions
 //! can be updated in the same change.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
@@ -151,6 +154,126 @@ async fn identifier_change_errors_creates_new_repo() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Success — `ngit init --force` (force-refresh fixture)
 // ---------------------------------------------------------------------------
+
+/// Rapidly re-publishing an existing announcement must use nonce grinding when
+/// a refresh lands in the same second as the announcement it replaces. The
+/// relay retains only the NIP-01 winner, so after every refresh this test reads
+/// the current winner. After observing a same-second update with ngit's nonce
+/// marker, it waits for the next timestamp tick, refreshes again, and verifies
+/// that ngit's nonce was not passed through as an unknown announcement tag.
+#[tokio::test]
+async fn rapid_force_refresh_uses_nonce_to_order_same_second_update() -> Result<()> {
+    const MAX_ATTEMPTS: usize = 200;
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .build()
+    .await?;
+    let (repo, state) = harness.arrange_init_state_c_my_announcement().await?;
+
+    let mut previous = state.existing_announcement;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let output = repo
+            .ngit(["init", "--force"])
+            .output()
+            .await
+            .with_context(|| {
+                format!("failed to spawn rapid ngit init --force attempt {attempt}")
+            })?;
+        if !output.status.success() {
+            bail!(
+                "rapid ngit init --force attempt {attempt} exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+
+        let current = current_announcement(
+            &harness,
+            state.keys.public_key(),
+            &state.coordinate_identifier,
+        )
+        .await?;
+        if current.created_at == previous.created_at {
+            assert_ne!(
+                current.id,
+                previous.id,
+                "rapid refresh {attempt} did not replace the same-second announcement: \
+                 the relay still returned {current_id}. This usually means ngit published a \
+                 higher-ID candidate that lost the NIP-01 tiebreaker.",
+                current_id = current.id,
+            );
+            assert!(
+                current.id < previous.id,
+                "same-second announcement update must have a lower event ID: \
+                 previous={}, current={}",
+                previous.id,
+                current.id,
+            );
+            assert!(
+                has_ngit_nonce(&current),
+                "same-second announcement update is missing ngit's nonce marker"
+            );
+
+            wait_for_next_timestamp_tick().await?;
+            let output = repo
+                .ngit(["init", "--force"])
+                .output()
+                .await
+                .context("failed to spawn post-tick ngit init --force")?;
+            if !output.status.success() {
+                bail!(
+                    "post-tick ngit init --force exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            let later = current_announcement(
+                &harness,
+                state.keys.public_key(),
+                &state.coordinate_identifier,
+            )
+            .await?;
+            assert!(
+                later.created_at > current.created_at,
+                "post-tick announcement must have a later timestamp: before={}, after={}",
+                current.created_at,
+                later.created_at,
+            );
+            assert!(
+                !has_ngit_nonce(&later),
+                "later-timestamp announcement update retained ngit's nonce marker"
+            );
+            return Ok(());
+        }
+        previous = current;
+    }
+
+    bail!(
+        "none of {MAX_ATTEMPTS} rapid force-refreshes shared a timestamp with the prior announcement; \
+         nonce grinding was not exercised"
+    )
+}
+
+fn has_ngit_nonce(event: &Event) -> bool {
+    event.tags.iter().any(|tag| {
+        matches!(tag.as_slice(), [name, _, difficulty, marker]
+            if name == "nonce" && difficulty == "0" && marker == "ngit-created-at-tiebreak")
+    })
+}
+
+async fn wait_for_next_timestamp_tick() -> Result<()> {
+    let elapsed_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .subsec_millis();
+    tokio::time::sleep(Duration::from_millis(u64::from(1_010 - elapsed_ms))).await;
+    Ok(())
+}
 
 /// Captured side-effects of one `ngit init --force` invocation against
 /// a State C repo. Four assertion cases share this snapshot via
@@ -465,6 +588,27 @@ async fn fetch_republished_announcement(
                  created_at > {not_after} on the default relay after \
                  `ngit init` — did the republish fail silently?"
             )
+        })
+}
+
+async fn current_announcement(
+    harness: &Harness,
+    author: PublicKey,
+    identifier: &str,
+) -> Result<Event> {
+    harness
+        .relay("default")
+        .events(Filter::new().author(author).kind(Kind::GitRepoAnnouncement))
+        .await?
+        .into_iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(identifier))
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .with_context(|| {
+            format!("no kind-30617 announcement with d tag {identifier:?} on the default relay")
         })
 }
 

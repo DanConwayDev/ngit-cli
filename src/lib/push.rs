@@ -17,7 +17,10 @@ use nostr::{
 
 use crate::{
     cli_interactor::count_lines_per_msg_vec,
-    client::{Connect, sign_draft_event, sign_event},
+    client::{
+        Connect, get_all_proposal_patch_pr_pr_update_events_from_cache, sign_draft_event,
+        sign_event,
+    },
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
@@ -636,6 +639,29 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
         let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
             unsigned_pr_event.clone()
         } else {
+            let ordering_reference = if root_proposal
+                .is_some_and(|event| event.kind.eq(&crate::git_events::KIND_PULL_REQUEST))
+            {
+                get_all_proposal_patch_pr_pr_update_events_from_cache(
+                    git_repo.get_path()?,
+                    repo_ref,
+                    &root_proposal.expect("checked above").id,
+                )
+                .await
+                .ok()
+                .and_then(|events| {
+                    crate::event_ordering::latest_event(events.iter().filter(|event| {
+                        [
+                            crate::git_events::KIND_PULL_REQUEST,
+                            KIND_PULL_REQUEST_UPDATE,
+                        ]
+                        .contains(&event.kind)
+                    }))
+                    .cloned()
+                })
+            } else {
+                None
+            };
             generate_unsigned_pr_or_update_event(
                 git_repo,
                 repo_ref,
@@ -648,6 +674,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 &[clone_url],
                 &[],
                 git_repo.get_path().ok(),
+                ordering_reference.as_ref(),
             )
             .await?
         };

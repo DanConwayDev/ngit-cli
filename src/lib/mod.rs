@@ -2,6 +2,7 @@ pub mod accept_maintainership;
 pub mod cli_interactor;
 pub mod client;
 pub mod content_tags;
+pub mod event_ordering;
 pub mod fetch;
 pub mod git;
 pub mod git_events;

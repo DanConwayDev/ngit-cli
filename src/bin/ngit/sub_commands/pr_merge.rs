@@ -2,11 +2,12 @@ use anyhow::{Context, Result, bail};
 use ngit::{
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
-        get_proposals_and_revisions_from_cache, send_events, sign_event,
+        get_proposals_and_revisions_from_cache, send_events,
     },
     git_events::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, status_kinds, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status,
+        sign_ordered_status_event, status_kinds, tag_value,
     },
 };
 use nostr::{
@@ -171,7 +172,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
 
     let alt_tag = Tag::parse(["alt", "PR merged"])?;
     let r_tag = Tag::parse(["r", &repo_ref.root_commit])?;
-    let applied_event = sign_event(
+    let applied_event = sign_ordered_status_event(
         EventBuilder::new(Kind::GitStatusApplied, "").tags(
             [
                 vec![
@@ -199,6 +200,8 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
             .concat(),
         ),
         &signer,
+        &statuses,
+        proposal.id,
         "mark PR as applied".to_string(),
     )
     .await?;

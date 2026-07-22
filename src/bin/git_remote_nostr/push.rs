@@ -24,7 +24,7 @@ use ngit::{
     git::{self, nostr_url::NostrUrlDecoded},
     git_events::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
-        get_status, status_kinds,
+        get_status, sign_ordered_status_event, status_kinds,
     },
     list::list_from_remotes,
     login::{existing::load_existing_login, user::UserRef},
@@ -746,13 +746,15 @@ async fn create_events_and_proposals(
             )
             .await
             .ok()
-            .and_then(|mut events| {
-                events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-                events.into_iter().next()
-            });
+            .and_then(|events| ngit::event_ordering::latest_event(&events).cloned());
 
-            let new_repo_state =
-                RepoState::build(repo_ref.identifier.clone(), new_state, &signer).await?;
+            let new_repo_state = RepoState::build(
+                repo_ref.identifier.clone(),
+                new_state,
+                &signer,
+                old_state_event.as_ref(),
+            )
+            .await?;
             new_state_event_id = Some(new_repo_state.event.id);
             events.push(new_repo_state.event);
         }
@@ -2341,6 +2343,7 @@ async fn create_merge_events(
                     && merged_patches
                         .values()
                         .any(|m| matches!(m, MergedPRCommitType::PatchApplied { .. })),
+                status_events,
             )
             .await?,
         );
@@ -2355,6 +2358,7 @@ enum MergedPRCommitType {
     PatchApplied { event_id: EventId },
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_merge_status(
     signer: &Arc<NgitSigner>,
     repo_ref: &RepoRef,
@@ -2363,6 +2367,7 @@ async fn create_merge_status(
     merge_commits: Vec<Sha1Hash>,
     merged_patches: Vec<EventId>,
     applied: bool,
+    status_events: &[Event],
 ) -> Result<Event> {
     let mut public_keys = repo_ref
         .maintainers
@@ -2388,7 +2393,7 @@ async fn create_merge_status(
     let mut parts: Vec<&str> = vec![kind_str];
     parts.extend(commit_strs.iter().map(String::as_str));
     let kind_tag = Tag::parse(parts)?;
-    sign_event(
+    sign_ordered_status_event(
         EventBuilder::new(nostr::event::Kind::GitStatusApplied, String::new()).tags(
             [
                 vec![
@@ -2432,6 +2437,8 @@ async fn create_merge_status(
             .concat(),
         ),
         signer,
+        status_events,
+        proposal.id,
         "PR merge".to_string(),
     )
     .await
