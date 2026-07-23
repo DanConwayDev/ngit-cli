@@ -755,6 +755,13 @@ async fn create_events_and_proposals(
                 old_state_event.as_ref(),
             )
             .await?;
+            // A subsequent remote-helper process can start before this
+            // replacement has propagated through relay queries. Cache the
+            // planned event now so it is available as that process's NIP-01
+            // ordering reference.
+            save_event_in_local_cache(git_repo.get_path()?, &new_repo_state.event)
+                .await
+                .context("failed to cache planned repository state event")?;
             new_state_event_id = Some(new_repo_state.event.id);
             events.push(new_repo_state.event);
         }

@@ -39,6 +39,45 @@ pub fn finalize_ordered_unsigned(
     )
 }
 
+/// Finalize a replaceable event strictly after `reference` by timestamp.
+///
+/// This remains valid NIP-01 ordering, while accommodating GRASP's purgatory
+/// authorization, which selects repository state events by `created_at`.
+/// Repository state publication must therefore not depend on NIP-01's
+/// same-second event-ID tiebreak.
+pub fn finalize_strictly_later_unsigned(
+    mut builder: EventBuilder,
+    public_key: PublicKey,
+    reference: Option<&Event>,
+) -> Result<UnsignedEvent> {
+    builder.tags = nostr::Tags::from_list(
+        builder
+            .tags
+            .into_iter()
+            .filter(|tag| !is_ngit_nonce(tag))
+            .collect(),
+    );
+
+    let Some(reference) = reference else {
+        return Ok(builder.finalize_unsigned(public_key));
+    };
+
+    let now = Timestamp::now();
+    if now > reference.created_at {
+        return Ok(builder.finalize_unsigned(public_key));
+    }
+
+    let created_at = reference
+        .created_at
+        .as_secs()
+        .checked_add(1)
+        .map(Timestamp::from_secs)
+        .ok_or_else(|| anyhow::anyhow!("event timestamp overflow while ordering update"))?;
+    Ok(builder
+        .custom_created_at(created_at)
+        .finalize_unsigned(public_key))
+}
+
 /// The implementation accepts the current time and attempt limit separately so
 /// the timestamp policy can be exercised deterministically in unit tests.
 fn finalize_ordered_unsigned_at(
@@ -212,6 +251,22 @@ mod tests {
             assert!(event.compute_id() < reference.id);
             assert!(event.tags.iter().any(is_ngit_nonce));
         }
+    }
+
+    #[test]
+    fn strictly_later_ordering_advances_timestamp_for_future_reference() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"ff".repeat(32), u64::MAX - 1);
+
+        let event = finalize_strictly_later_unsigned(
+            candidate_builder(),
+            keys.public_key(),
+            Some(&reference),
+        )
+        .unwrap();
+
+        assert_eq!(event.created_at, Timestamp::from_secs(u64::MAX));
+        assert!(!event.tags.iter().any(is_ngit_nonce));
     }
 
     #[test]

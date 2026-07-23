@@ -63,7 +63,7 @@ impl RepoState {
             tags.push(Tag::parse([name.as_str(), value.as_str()]).unwrap());
         }
         let event = sign_draft_event(
-            event_ordering::finalize_ordered_unsigned(
+            event_ordering::finalize_strictly_later_unsigned(
                 EventBuilder::new(STATE_KIND, "").tags(tags),
                 signer.get_public_key().await?,
                 reference,
