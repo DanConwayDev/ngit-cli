@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use ngit::{
     agent_guidance,
     client::get_repo_ref_from_cache,
@@ -12,28 +12,26 @@ use crate::cli::AgentCommands;
 struct AgentContext {
     repo: Repo,
     root: std::path::PathBuf,
-    maintainer: bool,
 }
 
 #[derive(Serialize)]
 struct Output {
     #[serde(flatten)]
     guidance: agent_guidance::GuidanceStatus,
-    is_maintainer: bool,
+    is_maintainer: Option<bool>,
 }
 
 pub async fn launch(command: &AgentCommands) -> Result<()> {
     let context = resolve_context().await?;
     match command {
         AgentCommands::Setup { force } => {
-            require_maintainer(&context)?;
             agent_guidance::setup(&context.root, *force)?;
             eprintln!("installed ngit agent guidance");
         }
         AgentCommands::Status { json } => {
             let output = Output {
                 guidance: agent_guidance::status(&context.root)?,
-                is_maintainer: context.maintainer,
+                is_maintainer: resolve_maintainer(&context).await,
             };
             if *json {
                 println!("{}", serde_json::to_string_pretty(&output)?);
@@ -57,7 +55,14 @@ pub async fn launch(command: &AgentCommands) -> Result<()> {
                         output.guidance.modified_files.join(", ")
                     }
                 );
-                println!("current account is maintainer: {}", output.is_maintainer);
+                println!(
+                    "current account is maintainer: {}",
+                    output.is_maintainer.map_or("unknown", |value| if value {
+                        "true"
+                    } else {
+                        "false"
+                    })
+                );
                 println!(
                     "managed files: {}",
                     output.guidance.managed_files.join(", ")
@@ -69,7 +74,6 @@ pub async fn launch(command: &AgentCommands) -> Result<()> {
             commit,
             force,
         } => {
-            require_maintainer(&context)?;
             if *diff {
                 print!("{}", agent_guidance::proposed_diff(&context.root)?);
                 return Ok(());
@@ -88,36 +92,24 @@ pub async fn launch(command: &AgentCommands) -> Result<()> {
 }
 
 async fn resolve_context() -> Result<AgentContext> {
-    // Leak no data: only the public key stored alongside a login is needed.
     let repo = Repo::discover().context("ngit agent must run inside a Git working tree")?;
     let root = repo.get_path()?.to_path_buf();
-    let (_, decoded) = repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await?
-        .context("ngit agent requires a repository with a nostr:// remote")?;
-    let repo_ref = get_repo_ref_from_cache(Some(&root), &decoded.coordinate)
-        .await
-        .context(
-            "failed to resolve the Nostr repository announcement; fetch the nostr remote and retry",
-        )?;
-    let account = get_likely_logged_in_user(&root)
-        .await
-        .context("failed to resolve the logged-in account")?
-        .context("no logged-in account found; run `ngit account login`")?;
-    let maintainer = repo_ref.maintainers.contains(&account);
-    Ok(AgentContext {
-        repo,
-        root,
-        maintainer,
-    })
+    Ok(AgentContext { repo, root })
 }
 
-fn require_maintainer(context: &AgentContext) -> Result<()> {
-    if context.maintainer {
-        Ok(())
-    } else {
-        bail!("the logged-in account is not a repository maintainer")
-    }
+async fn resolve_maintainer(context: &AgentContext) -> Option<bool> {
+    // Status remains useful without a Nostr remote, cached announcement, or
+    // login. Resolve this extra metadata only when every local lookup works.
+    let (_, decoded) = context
+        .repo
+        .get_first_nostr_remote_when_in_ngit_binary()
+        .await
+        .ok()??;
+    let repo_ref = get_repo_ref_from_cache(Some(&context.root), &decoded.coordinate)
+        .await
+        .ok()?;
+    let account = get_likely_logged_in_user(&context.root).await.ok()??;
+    Some(repo_ref.maintainers.contains(&account))
 }
 
 #[cfg(test)]
