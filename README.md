@@ -68,3 +68,19 @@ eg self-hosted, github, codeberg, etc.
                          │  User   │
                          └─────────┘
 ```
+## Repository-managed agent guidance
+
+Repository maintainers can commit coding-agent guidance with `ngit agent setup`.
+It installs the canonical ngit skill under `.agents/skills/ngit/`, a regular
+Claude-compatible copy under `.claude/skills/ngit/`, and a small managed policy
+section in `AGENTS.md` (referenced from `CLAUDE.md`). The files are ordinary
+Git files, so contributors receive them through normal clone, fetch, and pull
+operations.
+
+Run `ngit agent status` to inspect the installed version and local changes.
+When a newer ngit binary bundles updated guidance, a logged-in repository
+maintainer receives a throttled stderr reminder during normal ngit use. A
+maintainer can inspect and apply it with `ngit agent update --diff` and
+`ngit agent update`; `ngit agent update --commit` creates only the dedicated
+guidance commit and never pushes it. Update safety checks refuse to overwrite
+locally modified managed files.

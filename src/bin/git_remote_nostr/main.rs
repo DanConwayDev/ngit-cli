@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
     let mut repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
+    let _ = ngit::agent_guidance::warn_if_maintainer(&git_repo, &repo_ref).await;
 
     repo_ref.set_nostr_git_url(decoded_nostr_url.clone());
 

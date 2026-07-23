@@ -227,8 +227,37 @@ pub enum Commands {
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
+    /// install and update repository-managed coding-agent guidance
+    Agent(AgentSubCommandArgs),
     /// create account, login, logout or export keys
     Account(AccountSubCommandArgs),
+}
+
+#[derive(clap::Parser)]
+pub struct AgentSubCommandArgs {
+    #[command(subcommand)]
+    pub agent_command: AgentCommands,
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommands {
+    /// install ngit guidance into this repository (maintainer only)
+    Setup,
+    /// show installed guidance and update state
+    Status {
+        /// Output status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// update repository-managed guidance (maintainer only)
+    Update {
+        /// Show the proposed changes without modifying files
+        #[arg(long, conflicts_with = "commit")]
+        diff: bool,
+        /// commit only the updated guidance files
+        #[arg(long)]
+        commit: bool,
+    },
 }
 
 #[derive(Subcommand)]

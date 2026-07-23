@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod apply;
 pub mod checkout;
 pub mod comment;
