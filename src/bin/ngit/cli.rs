@@ -242,7 +242,12 @@ pub struct AgentSubCommandArgs {
 #[derive(Subcommand)]
 pub enum AgentCommands {
     /// install ngit guidance into this repository (maintainer only)
-    Setup,
+    Setup {
+        /// Replace unmanaged or locally modified guidance, or downgrade
+        /// guidance
+        #[arg(long)]
+        force: bool,
+    },
     /// show installed guidance and update state
     Status {
         /// Output status as JSON
@@ -257,6 +262,10 @@ pub enum AgentCommands {
         /// commit only the updated guidance files
         #[arg(long)]
         commit: bool,
+        /// Replace locally modified guidance or downgrade a newer installed
+        /// version
+        #[arg(long)]
+        force: bool,
     },
 }
 

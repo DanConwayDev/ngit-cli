@@ -25,9 +25,9 @@ struct Output {
 pub async fn launch(command: &AgentCommands) -> Result<()> {
     let context = resolve_context().await?;
     match command {
-        AgentCommands::Setup => {
+        AgentCommands::Setup { force } => {
             require_maintainer(&context)?;
-            agent_guidance::setup(&context.root)?;
+            agent_guidance::setup(&context.root, *force)?;
             eprintln!("installed ngit agent guidance");
         }
         AgentCommands::Status { json } => {
@@ -64,13 +64,20 @@ pub async fn launch(command: &AgentCommands) -> Result<()> {
                 );
             }
         }
-        AgentCommands::Update { diff, commit } => {
+        AgentCommands::Update {
+            diff,
+            commit,
+            force,
+        } => {
             require_maintainer(&context)?;
             if *diff {
                 print!("{}", agent_guidance::proposed_diff(&context.root)?);
                 return Ok(());
             }
-            agent_guidance::update(&context.root)?;
+            if *commit {
+                ensure_index_is_clean(&context.repo)?;
+            }
+            agent_guidance::update(&context.root, *force)?;
             if *commit && commit_guidance(&context.repo, &context.root)? {
                 eprintln!("created guidance commit");
             }
@@ -114,6 +121,7 @@ fn require_maintainer(context: &AgentContext) -> Result<()> {
 }
 
 fn commit_guidance(repo: &Repo, root: &std::path::Path) -> Result<bool> {
+    ensure_index_is_clean(repo)?;
     if repo.merge_in_progress()? {
         bail!("cannot create a guidance commit while a merge is in progress")
     }
@@ -123,7 +131,10 @@ fn commit_guidance(repo: &Repo, root: &std::path::Path) -> Result<bool> {
         .context("cannot create a dedicated guidance commit without HEAD")?;
     let parent = head.peel_to_commit()?;
     let tree = parent.tree()?;
-    let mut index = git2::Index::new()?;
+    // Start with the repository-backed index so `add_path` can read the
+    // guidance files from the worktree. The caller has already verified this
+    // index matches HEAD, so this does not absorb unrelated staged changes.
+    let mut index = repo.git_repo.index()?;
     index.read_tree(&tree)?;
     for path in agent_guidance::paths_for_commit(root)? {
         let relative = path
@@ -147,5 +158,92 @@ fn commit_guidance(repo: &Repo, root: &std::path::Path) -> Result<bool> {
         &repo.git_repo.find_tree(tree_id)?,
         &[&parent],
     )?;
+    index.write()?;
     Ok(true)
+}
+
+fn ensure_index_is_clean(repo: &Repo) -> Result<()> {
+    let head = repo
+        .git_repo
+        .head()
+        .context("cannot create a dedicated guidance commit without HEAD")?
+        .peel_to_commit()?;
+    let mut index = repo.git_repo.index()?;
+    if index.has_conflicts() || index.write_tree()? != head.tree_id() {
+        bail!("cannot create a guidance commit while the Git index contains changes")
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::*;
+
+    static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn repository() -> (Repo, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "ngit-agent-command-{}-{}",
+            std::process::id(),
+            TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let git_repo = git2::Repository::init(&root).unwrap();
+        let mut config = git_repo.config().unwrap();
+        config.set_str("user.name", "ngit test").unwrap();
+        config
+            .set_str("user.email", "test@example.invalid")
+            .unwrap();
+        fs::write(root.join("README.md"), "initial\n").unwrap();
+        let mut index = git_repo.index().unwrap();
+        index.add_path(std::path::Path::new("README.md")).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let signature = git_repo.signature().unwrap();
+        git_repo
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "initial",
+                &git_repo.find_tree(tree_id).unwrap(),
+                &[],
+            )
+            .unwrap();
+        (Repo { git_repo }, root)
+    }
+
+    #[test]
+    fn guidance_commit_updates_the_real_index() {
+        let (repo, root) = repository();
+        agent_guidance::setup(&root, false).unwrap();
+
+        assert!(commit_guidance(&repo, &root).unwrap());
+
+        let mut index = repo.git_repo.index().unwrap();
+        let head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(index.write_tree().unwrap(), head.tree_id());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn guidance_commit_refuses_a_dirty_index() {
+        let (repo, root) = repository();
+        fs::write(root.join("staged.txt"), "staged\n").unwrap();
+        let mut index = repo.git_repo.index().unwrap();
+        index.add_path(std::path::Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+
+        assert!(
+            ensure_index_is_clean(&repo)
+                .unwrap_err()
+                .to_string()
+                .contains("index contains changes")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

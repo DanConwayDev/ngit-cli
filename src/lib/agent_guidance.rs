@@ -55,28 +55,6 @@ pub enum WarningKind {
     Update,
 }
 
-/// Prompting is opt-in. Detection is always safe to run; callers must use this
-/// decision separately before offering a setup/update action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InteractionPolicy {
-    pub command_allows_prompts: bool,
-    pub stdin_is_terminal: bool,
-    pub json: bool,
-    pub defaults: bool,
-    pub remote_helper: bool,
-}
-
-impl InteractionPolicy {
-    #[must_use]
-    pub const fn may_prompt(self) -> bool {
-        self.command_allows_prompts
-            && self.stdin_is_terminal
-            && !self.json
-            && !self.defaults
-            && !self.remote_helper
-    }
-}
-
 #[must_use]
 pub fn bundled_skill() -> &'static str {
     CANONICAL_SKILL
@@ -211,21 +189,50 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
     })
 }
 
-pub fn setup(root: &Path) -> Result<GuidanceStatus> {
-    write_guidance(root, false)?;
+pub fn setup(root: &Path, force: bool) -> Result<GuidanceStatus> {
+    write_guidance(root, force)?;
     status(root)
 }
 
-pub fn update(root: &Path) -> Result<GuidanceStatus> {
-    write_guidance(root, true).and_then(|_| status(root))
+pub fn update(root: &Path, force: bool) -> Result<GuidanceStatus> {
+    write_guidance(root, force).and_then(|_| status(root))
 }
 
-fn write_guidance(root: &Path, refuse_modified: bool) -> Result<()> {
-    if refuse_modified {
-        let current = status(root)?;
-        if let Some(path) = current.modified_files.first() {
+fn write_guidance(root: &Path, force: bool) -> Result<()> {
+    if let Some(state) = load_state(root)? {
+        let bundled = bundled_version()?;
+        if !force && version_is_newer(&bundled, &state.version) {
             bail!(
-                "refusing to overwrite locally modified managed file `{path}`; run `ngit agent update --diff`"
+                "refusing to downgrade ngit agent guidance from {} to {}; rerun with --force to override",
+                state.version,
+                bundled
+            );
+        }
+        if !force {
+            if let Some(path) = [SKILL_PATH, CLAUDE_SKILL_PATH, AGENTS_PATH, CLAUDE_PATH]
+                .into_iter()
+                .find(|path| {
+                    !state.files.iter().any(|file| file.path == *path) && root.join(path).exists()
+                })
+            {
+                bail!(
+                    "refusing to overwrite unmanaged file `{path}`; rerun with --force to install ngit agent guidance"
+                );
+            }
+            let current = status(root)?;
+            if let Some(path) = current.modified_files.first() {
+                bail!(
+                    "refusing to overwrite locally modified managed file `{path}`; run `ngit agent update --diff`"
+                );
+            }
+        }
+    } else if !force {
+        let existing = [SKILL_PATH, CLAUDE_SKILL_PATH, AGENTS_PATH, CLAUDE_PATH]
+            .into_iter()
+            .find(|path| root.join(path).exists());
+        if let Some(path) = existing {
+            bail!(
+                "refusing to overwrite unmanaged file `{path}`; rerun with --force to install ngit agent guidance"
             );
         }
     }
@@ -459,55 +466,22 @@ mod tests {
         );
     }
     #[test]
-    fn non_interactive_modes_never_prompt() {
-        let interactive = InteractionPolicy {
-            command_allows_prompts: true,
-            stdin_is_terminal: true,
-            json: false,
-            defaults: false,
-            remote_helper: false,
-        };
-        assert!(interactive.may_prompt());
-        assert!(
-            !InteractionPolicy {
-                json: true,
-                ..interactive
-            }
-            .may_prompt()
-        );
-        assert!(
-            !InteractionPolicy {
-                defaults: true,
-                ..interactive
-            }
-            .may_prompt()
-        );
-        assert!(
-            !InteractionPolicy {
-                remote_helper: true,
-                ..interactive
-            }
-            .may_prompt()
-        );
-        assert!(
-            !InteractionPolicy {
-                stdin_is_terminal: false,
-                ..interactive
-            }
-            .may_prompt()
-        );
-    }
-    #[test]
-    fn setup_is_idempotent_preserves_policy_neighbors_and_syncs_claude_copy() {
+    fn setup_requires_force_for_unmanaged_files_and_preserves_policy_neighbors() {
         let root = temp_root();
         fs::write(
             root.join(AGENTS_PATH),
             "# Local instructions\n\nKeep this text.\n",
         )
         .unwrap();
-        setup(&root).unwrap();
+        assert!(
+            setup(&root, false)
+                .unwrap_err()
+                .to_string()
+                .contains("unmanaged file")
+        );
+        setup(&root, true).unwrap();
         let first = fs::read_to_string(root.join(AGENTS_PATH)).unwrap();
-        setup(&root).unwrap();
+        setup(&root, false).unwrap();
         assert_eq!(first, fs::read_to_string(root.join(AGENTS_PATH)).unwrap());
         assert!(first.contains("Keep this text."));
         assert_eq!(
@@ -525,11 +499,44 @@ mod tests {
     #[test]
     fn modified_managed_files_refuse_update_and_diff_is_available() {
         let root = temp_root();
-        setup(&root).unwrap();
+        setup(&root, false).unwrap();
         fs::write(root.join(SKILL_PATH), "locally customized").unwrap();
         assert_eq!(status(&root).unwrap().modified_files, vec![SKILL_PATH]);
-        assert!(update(&root).unwrap_err().to_string().contains("--diff"));
+        assert!(
+            setup(&root, false)
+                .unwrap_err()
+                .to_string()
+                .contains("--diff")
+        );
+        assert!(
+            update(&root, false)
+                .unwrap_err()
+                .to_string()
+                .contains("--diff")
+        );
         assert!(proposed_diff(&root).unwrap().contains(SKILL_PATH));
+        setup(&root, true).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn newer_installed_guidance_refuses_downgrade_without_force() {
+        let root = temp_root();
+        setup(&root, false).unwrap();
+        let mut state = load_state(&root).unwrap().unwrap();
+        state.version = "999.0.0".into();
+        fs::write(
+            root.join(STATE_PATH),
+            format!("{}\n", serde_json::to_string_pretty(&state).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            update(&root, false)
+                .unwrap_err()
+                .to_string()
+                .contains("refusing to downgrade")
+        );
+        update(&root, true).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }
