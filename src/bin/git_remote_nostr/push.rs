@@ -203,27 +203,8 @@ pub async fn run_push(
             // the data fan out the state to any remaining relays. The extra
             // round-trip prevents us reporting `ok` or broadcasting state for
             // commits that no git server has.
-            let initial_state_publish = match publish_state_to_grasps_first(
-                client,
-                git_repo,
-                repo_ref,
-                &state_events,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    if let Some(new_id) = new_state_event_id {
-                        rollback_state_event(
-                            git_repo.get_path()?,
-                            new_id,
-                            previous_state_event.as_ref(),
-                        )
-                        .await;
-                    }
-                    return Err(err);
-                }
-            };
+            let initial_state_publish =
+                publish_state_to_grasps_first(client, git_repo, repo_ref, &state_events).await?;
 
             for refspec in &proposal_refspecs {
                 if rejected_proposal_refspecs.contains(refspec) {
@@ -774,14 +755,6 @@ async fn create_events_and_proposals(
                 old_state_event.as_ref(),
             )
             .await?;
-            // The next remote-helper process can start before a relay query
-            // observes this accepted replacement. Retain the planned event as
-            // its deterministic NIP-01 ordering reference; rollback removes
-            // it if no state relay accepts the publish or later planning
-            // fails.
-            save_event_in_local_cache(git_repo.get_path()?, &new_repo_state.event)
-                .await
-                .context("failed to cache planned repository state event")?;
             new_state_event_id = Some(new_repo_state.event.id);
             events.push(new_repo_state.event);
         }
@@ -839,7 +812,7 @@ async fn create_events_and_proposals(
         }
     }
 
-    let (proposal_events, rejected_proposal_refspecs) = match process_proposal_refspecs(
+    let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
         client,
         git_repo,
         repo_ref,
@@ -852,16 +825,7 @@ async fn create_events_and_proposals(
         git_server,
         declared_default_branch.as_deref(),
     )
-    .await
-    {
-        Ok(result) => result,
-        Err(err) => {
-            if let Some(new_id) = new_state_event_id {
-                rollback_state_event(git_repo.get_path()?, new_id, old_state_event.as_ref()).await;
-            }
-            return Err(err);
-        }
-    };
+    .await?;
     for e in proposal_events {
         events.push(e);
     }
