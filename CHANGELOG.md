@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Fast successive repository and proposal updates now order reliably despite Nostr's whole-second timestamps. Repository announcements and statuses use bounded nonce grinding with a timestamp fallback, while repository state, patch revisions, and pull-request upgrades or updates use strictly increasing timestamps.
+- Fast successive repository and proposal updates now order reliably despite Nostr's whole-second timestamps. Repository state, announcements, and statuses use bounded nonce grinding with a timestamp fallback; GRASP now honors the lower-event-ID tie-break for same-second state replacements. Patch revisions and pull-request upgrades or updates remain strictly ordered by timestamp.
 
 ## [2.6.3] - 2026-07-10
 

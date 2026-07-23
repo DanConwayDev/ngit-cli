@@ -51,9 +51,11 @@ ngit then uses one of two ordering modes.
 
 ### NIP-01 replacement ordering
 
-Repository announcements and proposal statuses may use NIP-01's event-ID
-tiebreak. If the current timestamp is not newer than the reference, ngit tries
-to publish at the reference timestamp with a lower event ID by varying an
+Repository state, repository announcements, and proposal statuses use NIP-01's
+event-ID tiebreak. GRASP now applies that same ordering when promoting state
+events from purgatory, including retaining the lower event ID when timestamps
+tie. If the current timestamp is not newer than the reference, ngit tries to
+publish at the reference timestamp with a lower event ID by varying an
 ngit-owned nonce tag. This is bounded: ngit only attempts grinding when the
 reference ID makes it practical, and stops after a finite attempt budget.
 
@@ -68,11 +70,10 @@ later update, while unrelated nonce tags are preserved.
 
 ### Strict timestamp ordering
 
-Repository state and proposal history always use a timestamp strictly after
-their reference when the wall clock has not already advanced. Repository state
-cannot rely on an event-ID tie because GRASP purgatory authorizes state using
-`created_at`. Proposal readers likewise use the newest timestamp to select the
-active revision before walking its thread.
+Proposal histories always use a timestamp strictly after their reference when
+the wall clock has not already advanced. Their readers use the newest timestamp
+to select the active revision before walking its thread, so an event-ID tie is
+not sufficient even though it is deterministic.
 
 Every event in one patch revision, including its optional cover letter, receives
 the same explicit timestamp. This keeps the revision coherent if signing spans
@@ -87,8 +88,10 @@ without waiting for the clock.
 ## Guarantees
 
 Each affected event sorts after its reference according to the policy its
-consumers implement: NIP-01 replacements have either a later timestamp or the
-same timestamp with a lower ID, while repository state and proposal-history
-updates have a strictly later timestamp. This keeps relay replacement,
-GRASP authorization, and proposal-tip selection consistent without test or
-production sleeps.
+consumers implement: NIP-01 replacements, including repository state, have
+either a later timestamp or the same timestamp with a lower ID, while
+proposal-history updates have a strictly later timestamp. Planned state events
+are cached before relay publication so an immediate remote-helper process can
+order against its predecessor without waiting for relay propagation. This keeps
+relay replacement, GRASP authorization, and proposal-tip selection consistent
+without test or production sleeps.

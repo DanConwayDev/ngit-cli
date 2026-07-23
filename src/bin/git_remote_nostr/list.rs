@@ -67,11 +67,12 @@ pub async fn run_list(
         .filter_map(|maybe| maybe.as_ref())
         .filter(|event| repo_ref.maintainers.contains(&event.pubkey))
         .collect();
-    // Sort newest-first (by created_at, then by id for tie-breaking).
+    // Sort newest-first using NIP-01 replacement ordering: the lower event ID
+    // wins when timestamps tie.
     candidates.sort_by(|a, b| {
         b.created_at
             .cmp(&a.created_at)
-            .then_with(|| b.id.cmp(&a.id))
+            .then_with(|| a.id.cmp(&b.id))
     });
     // Deduplicate by event id so we don't check the same event twice.
     candidates.dedup_by_key(|e| e.id);

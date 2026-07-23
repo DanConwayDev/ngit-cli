@@ -248,18 +248,22 @@ deletion ever happened. Combined with second-resolution timestamps,
 fast back-to-back publishes on the same coordinate flake at roughly
 30% on commodity hardware.
 
-ngit now orders affected events according to their consumers. Repository
-announcements and proposal statuses use deterministic NIP-01 replacement
-ordering. Repository state and proposal histories use strictly increasing
-timestamps because GRASP authorization and proposal-tip selection cannot rely
-on a same-second event-ID tiebreak. Every event in one patch revision shares a
-timestamp. See `event-created-at-ordering.md` for the complete production
+ngit now orders affected events according to their consumers. Repository state,
+repository announcements, and proposal statuses use deterministic NIP-01
+replacement ordering: bounded nonce grinding seeks a lower ID at the reference
+timestamp, then falls back to the next timestamp. GRASP applies the same lower-ID
+tie-break to same-second state replacements. Only proposal histories require
+strictly increasing timestamps because their readers select the active revision
+by timestamp before walking its thread. Every event in one patch revision shares
+a timestamp. See `event-created-at-ordering.md` for the complete production
 policy.
 
 Tests must not add wall-clock sleeps to make an update win. **Push to a nostr
 remote via `Repo::nostr_push`, never `repo.git(["push", …])`**; it supplies the
 harness environment and error context, while ngit orders the auto-generated
-kind-30618 state event and proposal events produced by the remote helper.
+kind-30618 state event and proposal events produced by the remote helper. The
+planned state is cached before publication, so immediate pushes can order from
+that handoff without waiting for relay visibility.
 
 `Harness::publish_state_event` is a fixture that deliberately creates
 raw kind-30618 events. It queries the target relay and assigns an

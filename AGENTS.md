@@ -277,10 +277,11 @@ exactly these patterns. They are non-negotiable:
   case-insensitive prefix matching, never equality.
 - **Push to a nostr remote via `Repo::nostr_push`, never
   `repo.git(["push", …])`.** It provides the harness environment and
-  error context for the `git-remote-nostr` subprocess. ngit timestamps
-  the auto-generated kind-30618 state event strictly after its cached
-  predecessor and similarly orders rapid proposal revisions. Do not
-  add wall-clock sleeps for event ordering; use bounded polling only
+  error context for the `git-remote-nostr` subprocess. ngit orders the
+  auto-generated kind-30618 state event from its cached predecessor using
+  NIP-01's lower-ID tie-break with bounded grinding and a next-timestamp
+  fallback. Rapid proposal revisions remain strictly newer by timestamp.
+  Do not add wall-clock sleeps for event ordering; use bounded polling only
   for genuinely asynchronous relay, GRASP, or ref visibility. See
   `docs/architecture/test-harness.md` § "Event ordering and asynchronous
   effects".

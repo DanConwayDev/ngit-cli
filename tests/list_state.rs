@@ -58,6 +58,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
+use nostr_sdk::prelude::*;
 use test_harness::{
     CloneLogin, Harness, PublishRepoOpts, PublishStateEventOpts, PublishStateEventTarget,
     PublishedRepo, Repo,
@@ -259,7 +260,7 @@ async fn wait_for_state_event_covering(
     repo: &PublishedRepo,
     ref_name: &str,
     expected_oid: &str,
-) -> Result<()> {
+) -> Result<Event> {
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -279,15 +280,15 @@ async fn wait_for_state_event_covering(
         // selection contract.
         let mut sorted = events.clone();
         sorted.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-        let matches = sorted.iter().any(|e| {
+        let matching = sorted.iter().find(|e| {
             e.tags.iter().any(|t| {
                 let s = t.as_slice();
                 s.first().map(String::as_str) == Some(ref_name)
                     && s.get(1).map(String::as_str) == Some(expected_oid)
             })
         });
-        if matches {
-            return Ok(());
+        if let Some(event) = matching {
+            return Ok((*event).clone());
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
@@ -355,22 +356,111 @@ async fn lists_head_and_branches_from_git_server_when_state_event_matches() -> R
 
 /// A second remote-helper process must order its state replacement from the
 /// first push's locally cached event even when no harness timestamp delay
-/// separates the pushes. This deliberately uses the raw transport invocation
-/// to exercise the cache hand-off that lets `Repo::nostr_push` lose its
-/// wall-clock pacing safely.
+/// separates the pushes. `Repo::nostr_push` supplies the remote helper's
+/// harness environment while preserving the immediate cache hand-off.
 #[tokio::test]
 async fn immediate_second_push_orders_state_from_cached_first_push() -> Result<()> {
     let (harness, publisher, published) = setup().await?;
-    let vnext_oid = commit_on_branch(&publisher, "vnext", "vnext.md", "vnext\n").await?;
-
-    git_ok(
-        &publisher,
-        ["push", "-u", "origin", "vnext"],
-        "immediate git push -u origin vnext",
+    let first = wait_for_state_event_covering(
+        &harness,
+        &published,
+        "refs/heads/main",
+        &published.initial_oid,
     )
     .await?;
+    let vnext_oid = commit_on_branch(&publisher, "vnext", "vnext.md", "vnext\n").await?;
 
-    wait_for_state_event_covering(&harness, &published, "refs/heads/vnext", &vnext_oid).await
+    let push = publisher
+        .nostr_push(["-u", "origin", "vnext"])
+        .await
+        .context("immediate nostr push -u origin vnext")?;
+    anyhow::ensure!(
+        push.status.success(),
+        "immediate nostr push failed: {}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    let second =
+        wait_for_state_event_covering(&harness, &published, "refs/heads/vnext", &vnext_oid).await?;
+    assert!(
+        second.created_at > first.created_at
+            || (second.created_at == first.created_at && second.id < first.id),
+        "second state must win under NIP-01 ordering: first=({}, {}), second=({}, {})",
+        first.created_at,
+        first.id,
+        second.created_at,
+        second.id,
+    );
+
+    Ok(())
+}
+
+/// GRASP must expose a same-timestamp lower-ID kind-30618 replacement rather
+/// than retaining the higher-ID state that arrived first.
+#[tokio::test]
+async fn grasp_exposes_same_second_lower_id_state_replacement() -> Result<()> {
+    let (harness, _publisher, published) = setup().await?;
+    let current = wait_for_state_event_covering(
+        &harness,
+        &published,
+        "refs/heads/main",
+        &published.initial_oid,
+    )
+    .await?;
+    let created_at = Timestamp::from_secs(current.created_at.as_secs() + 1);
+    let state_tags: Vec<Tag> = current.tags.iter().cloned().collect();
+    let build = |nonce: u64| {
+        EventBuilder::new(Kind::Custom(30618), "")
+            .tags(state_tags.clone())
+            .tag(Tag::custom(
+                "nonce",
+                vec![
+                    nonce.to_string(),
+                    "0".to_string(),
+                    "ngit-created-at-tiebreak".to_string(),
+                ],
+            ))
+            .custom_created_at(created_at)
+            .finalize(&published.maintainer_keys)
+            .expect("sign state fixture")
+    };
+    let higher_id = build(0);
+    let lower_id = (1..100_000)
+        .map(build)
+        .find(|candidate| candidate.id < higher_id.id)
+        .context("bounded nonce search did not find a lower state event ID")?;
+
+    let relay_url = harness.grasp("repo").relay_url();
+    let client = Client::default();
+    client.add_relay(&relay_url).await?;
+    client.connect().await;
+    for event in [&higher_id, &lower_id] {
+        let output = client.send_event(event).to([relay_url.as_str()]).await?;
+        anyhow::ensure!(
+            output.failed.is_empty(),
+            "GRASP rejected state {}: {:?}",
+            event.id,
+            output.failed
+        );
+    }
+    client.disconnect().await;
+
+    let exposed = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .kind(Kind::Custom(30618))
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?
+        .into_iter()
+        .find(|event| event.tags.identifier().as_deref() == Some(published.identifier.as_str()))
+        .context("GRASP did not expose repository state")?;
+    assert_eq!(exposed.created_at, higher_id.created_at);
+    assert_eq!(exposed.id, lower_id.id);
+    assert!(lower_id.id < higher_id.id);
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

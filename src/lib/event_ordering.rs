@@ -41,10 +41,8 @@ pub fn finalize_ordered_unsigned(
 
 /// Finalize a replaceable event strictly after `reference` by timestamp.
 ///
-/// This remains valid NIP-01 ordering, while accommodating GRASP's purgatory
-/// authorization, which selects repository state events by `created_at`.
-/// Repository state publication must therefore not depend on NIP-01's
-/// same-second event-ID tiebreak.
+/// This remains valid NIP-01 ordering for proposal histories whose readers
+/// select the active revision by `created_at` before walking its thread.
 pub fn finalize_strictly_later_unsigned(
     mut builder: EventBuilder,
     public_key: PublicKey,
