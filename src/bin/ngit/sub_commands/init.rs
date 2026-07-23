@@ -11,7 +11,6 @@ use console::{Style, Term};
 use git2::Oid;
 use ngit::{
     accept_maintainership::{grasp_servers_from_user_or_fallback, wait_for_grasp_servers},
-    agent_guidance,
     cli_interactor::{
         PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
         show_multi_input_prompt_success,
@@ -1650,25 +1649,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         git_repo.save_git_config_item("nostr.repo-relay-only", "true", false)?;
     }
 
-    // Defaults mode is intentionally the only non-interactive adoption path.
-    // It runs after init has established this account may initialize or
-    // maintain the repository, but before state construction and push/sync.
-    if cli_args.defaults && may_install_guidance(&state) {
-        match agent_guidance::status(git_repo_path) {
-            Ok(status) if !status.installed => {
-                match agent_guidance::setup_and_commit(&git_repo, git_repo_path) {
-                    Ok(true) => eprintln!("installed and committed ngit agent guidance"),
-                    Ok(false) => {}
-                    Err(error) => warn_guidance_install_skipped(&error),
-                }
-            }
-            Ok(_) => {}
-            Err(error) => warn_guidance_install_skipped(&error),
-        }
-    }
-
     // Phase 7: Build and publish
-    publish_and_finalize(
+    let suggest_agent_guidance = may_install_guidance(&state);
+    let result = publish_and_finalize(
         fields,
         signer,
         &user_ref,
@@ -1679,17 +1662,21 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         is_co_maintainer_first_acceptance,
         resolved_repo_coordinate.as_ref(),
     )
-    .await
+    .await;
+    if result.is_ok() && suggest_agent_guidance {
+        print_agent_guidance_suggestion();
+    }
+    result
 }
 
-fn warn_guidance_install_skipped(error: &anyhow::Error) {
+fn print_agent_guidance_suggestion() {
     eprintln!(
         "{}",
         Style::new()
             .fg(console::Color::Color256(214))
-            .apply_to(format!(
-                "warning: agent guidance was not installed: {error}; resolve it and run `ngit agent setup`"
-            ))
+            .apply_to(
+                "tip: help coding agents collaborate through ngit by running `ngit agent setup`",
+            )
             .for_stderr()
     );
 }
