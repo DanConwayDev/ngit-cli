@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Fast successive updates now reliably replace older repository, pull request, and status events, mitigating Nostr's whole-second timestamp limitation with nonce grinding and a timestamp-plus-one fallback.
+- Fast successive repository and proposal updates now order reliably despite Nostr's whole-second timestamps. Repository announcements and statuses use bounded nonce grinding with a timestamp fallback, while repository state, patch revisions, and pull-request upgrades or updates use strictly increasing timestamps.
 
 ## [2.6.3] - 2026-07-10
 

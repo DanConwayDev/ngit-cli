@@ -232,7 +232,7 @@ push` finishes (or fails). The harness uses `Command::output()` /
 `wait_with_output()` as the natural barrier. For asynchronous
 secondary effects, use `harness.wait_for_event(filter, timeout)`.
 
-### Replaceable-event ordering and asynchronous effects
+### Event ordering and asynchronous effects
 
 Nostr `created_at` is unix-seconds (NIP-01) — second resolution. Two
 events signed by the same key with identical `(kind, tags, content)`
@@ -248,16 +248,22 @@ deletion ever happened. Combined with second-resolution timestamps,
 fast back-to-back publishes on the same coordinate flake at roughly
 30% on commodity hardware.
 
-ngit now orders its replaceable events deterministically under NIP-01,
-including when an update shares its predecessor's timestamp. Tests
-must not add wall-clock sleeps to make a replacement win. **Push to a
-nostr remote via `Repo::nostr_push`, never `repo.git(["push", …])`**;
-it supplies the harness environment and error context, while ngit
-orders the auto-generated kind-30618 state event.
+ngit now orders affected events according to their consumers. Repository
+announcements and proposal statuses use deterministic NIP-01 replacement
+ordering. Repository state and proposal histories use strictly increasing
+timestamps because GRASP authorization and proposal-tip selection cannot rely
+on a same-second event-ID tiebreak. Every event in one patch revision shares a
+timestamp. See `event-created-at-ordering.md` for the complete production
+policy.
+
+Tests must not add wall-clock sleeps to make an update win. **Push to a nostr
+remote via `Repo::nostr_push`, never `repo.git(["push", …])`**; it supplies the
+harness environment and error context, while ngit orders the auto-generated
+kind-30618 state event and proposal events produced by the remote helper.
 
 `Harness::publish_state_event` is a fixture that deliberately creates
 raw kind-30618 events. It queries the target relay and assigns an
-explicit timestamp later than that coordinate's current NIP-01 winner,
+explicit timestamp later than that coordinate's current state event,
 without sleeping. Its `created_at_offset_secs` option remains the
 escape hatch for tests that intentionally need an older event.
 
@@ -302,7 +308,9 @@ to production deployment.
 
 ## References
 
-- `src/lib/event_ordering.rs` — production NIP-01 replacement policy.
+- `docs/architecture/event-created-at-ordering.md` — production event-ordering
+  policies.
+- `src/lib/event_ordering.rs` — shared ordering implementation.
 - `test_harness/src/port.rs` — port reservation pattern.
 - ngit-grasp's `tests/common/relay.rs` — port allocation and
   subprocess management pattern adopted here.
