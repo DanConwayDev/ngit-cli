@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use nostr::{
-    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
+    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag, Timestamp,
     event::{FinalizeUnsignedEvent, TagCodec, UnsignedEvent},
     hashes::sha1::Hash as Sha1Hash,
     nips::{
@@ -228,6 +228,39 @@ pub async fn generate_patch_event(
     root_proposal_id: &Option<String>,
     mentions: &[nostr::Tag],
 ) -> Result<nostr::Event> {
+    generate_patch_event_at(
+        git_repo,
+        root_commit,
+        commit,
+        thread_event_id,
+        signer,
+        repo_ref,
+        parent_patch_event_id,
+        series_count,
+        branch_name,
+        root_proposal_id,
+        mentions,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+async fn generate_patch_event_at(
+    git_repo: &Repo,
+    root_commit: &Sha1Hash,
+    commit: &Sha1Hash,
+    thread_event_id: Option<nostr::EventId>,
+    signer: &Arc<crate::NgitSigner>,
+    repo_ref: &RepoRef,
+    parent_patch_event_id: Option<nostr::EventId>,
+    series_count: Option<(u64, u64)>,
+    branch_name: Option<String>,
+    root_proposal_id: &Option<String>,
+    mentions: &[nostr::Tag],
+    created_at: Option<Timestamp>,
+) -> Result<nostr::Event> {
     let commit_parent = git_repo
         .get_commit_parent(commit)
         .context("failed to get parent commit")?;
@@ -369,14 +402,20 @@ pub async fn generate_patch_event(
         .concat(),
     );
 
+    let builder = EventBuilder::new(
+        nostr::event::Kind::GitPatch,
+        git_repo
+            .make_patch_from_commit(commit, &series_count)
+            .context(format!("failed to make patch for commit {commit}"))?,
+    )
+    .tags(patch_tags);
+    let builder = if let Some(created_at) = created_at {
+        builder.custom_created_at(created_at)
+    } else {
+        builder
+    };
     sign_event(
-        EventBuilder::new(
-            nostr::event::Kind::GitPatch,
-            git_repo
-                .make_patch_from_commit(commit, &series_count)
-                .context(format!("failed to make patch for commit {commit}"))?,
-        )
-        .tags(patch_tags),
+        builder,
         signer,
         if let Some((n, total)) = series_count {
             format!("commit {n}/{total}")
@@ -634,8 +673,8 @@ pub async fn generate_unsigned_pr_or_update_event(
         EventBuilder::new(KIND_PULL_REQUEST, description)
     }
     .tags(all_tags);
-    if is_pr_update {
-        crate::event_ordering::finalize_ordered_unsigned(
+    if ordering_reference.is_some() {
+        crate::event_ordering::finalize_strictly_later_unsigned(
             builder,
             *signing_public_key,
             ordering_reference,
@@ -670,7 +709,7 @@ fn make_branch_name_tag_from_check_out_branch(git_repo: &Repo) -> Option<Tag> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn generate_cover_letter_and_patch_events(
     cover_letter_title_description: Option<(String, String)>,
     git_repo: &Repo,
@@ -679,6 +718,7 @@ pub async fn generate_cover_letter_and_patch_events(
     repo_ref: &RepoRef,
     root_proposal_id: &Option<String>,
     mentions: &[nostr::Tag],
+    ordering_reference: Option<&Event>,
 ) -> Result<Vec<nostr::Event>> {
     let git_repo_path = git_repo.get_path().ok();
     let root_commit = git_repo
@@ -686,6 +726,12 @@ pub async fn generate_cover_letter_and_patch_events(
         .context("failed to get root commit of the repository")?;
 
     let mut events = vec![];
+    // Readers identify one revision by its newest timestamp and then walk its
+    // reply chain. Give the whole series one timestamp so signing across a
+    // wall-clock second cannot split the revision, and advance it when needed.
+    let now = Timestamp::now();
+    let created_at =
+        crate::event_ordering::strictly_later_timestamp(ordering_reference, now)?.unwrap_or(now);
 
     if let Some((title, description)) = cover_letter_title_description {
         // NIP-21 mention tags from cover letter title and description
@@ -753,23 +799,26 @@ pub async fn generate_cover_letter_and_patch_events(
             .concat(),
         );
 
-        events.push(sign_event(EventBuilder::new(
-        nostr::event::Kind::GitPatch,
-        format!(
-            "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
-            commits.last().unwrap(),
-            commits.len()
-        ))
-        .tags(cover_letter_tags),
-    signer,
-    format!("commit 0/{}",commits.len()),
-).await
-    .context("failed to create cover-letter event")?);
+        let builder = EventBuilder::new(
+            nostr::event::Kind::GitPatch,
+            format!(
+                "From {} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/{}] {title}\n\n{description}",
+                commits.last().unwrap(),
+                commits.len()
+            ),
+        )
+        .tags(cover_letter_tags);
+        let builder = builder.custom_created_at(created_at);
+        events.push(
+            sign_event(builder, signer, format!("commit 0/{}", commits.len()))
+                .await
+                .context("failed to create cover-letter event")?,
+        );
     }
 
     for (i, commit) in commits.iter().enumerate() {
         events.push(
-            generate_patch_event(
+            generate_patch_event_at(
                 git_repo,
                 &root_commit,
                 commit,
@@ -810,6 +859,7 @@ pub async fn generate_cover_letter_and_patch_events(
                 },
                 root_proposal_id,
                 if events.is_empty() { mentions } else { &[] },
+                Some(created_at),
             )
             .await
             .context("failed to generate patch event")?,

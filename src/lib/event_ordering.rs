@@ -58,24 +58,34 @@ pub fn finalize_strictly_later_unsigned(
             .collect(),
     );
 
-    let Some(reference) = reference else {
+    let Some(created_at) = strictly_later_timestamp(reference, Timestamp::now())? else {
         return Ok(builder.finalize_unsigned(public_key));
     };
+    Ok(builder
+        .custom_created_at(created_at)
+        .finalize_unsigned(public_key))
+}
 
-    let now = Timestamp::now();
+/// Return an explicit timestamp only when `now` must be advanced to sort
+/// strictly after `reference` by timestamp.
+pub fn strictly_later_timestamp(
+    reference: Option<&Event>,
+    now: Timestamp,
+) -> Result<Option<Timestamp>> {
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
     if now > reference.created_at {
-        return Ok(builder.finalize_unsigned(public_key));
+        return Ok(None);
     }
 
-    let created_at = reference
+    reference
         .created_at
         .as_secs()
         .checked_add(1)
         .map(Timestamp::from_secs)
-        .ok_or_else(|| anyhow::anyhow!("event timestamp overflow while ordering update"))?;
-    Ok(builder
-        .custom_created_at(created_at)
-        .finalize_unsigned(public_key))
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("event timestamp overflow while ordering update"))
 }
 
 /// The implementation accepts the current time and attempt limit separately so
@@ -267,6 +277,20 @@ mod tests {
 
         assert_eq!(event.created_at, Timestamp::from_secs(u64::MAX));
         assert!(!event.tags.iter().any(is_ngit_nonce));
+    }
+
+    #[test]
+    fn strictly_later_timestamp_only_overrides_non_later_clock() {
+        let reference = reference_with_id(&"ff".repeat(32), 10);
+
+        assert_eq!(
+            strictly_later_timestamp(Some(&reference), Timestamp::from_secs(10)).unwrap(),
+            Some(Timestamp::from_secs(11))
+        );
+        assert_eq!(
+            strictly_later_timestamp(Some(&reference), Timestamp::from_secs(11)).unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -926,6 +926,7 @@ async fn process_proposal_refspecs(
                         git_server_push_options,
                         git_server,
                         default_branch,
+                        patches.first(),
                     )
                     .await?
                     {
@@ -971,6 +972,7 @@ async fn process_proposal_refspecs(
                                 git_server_push_options,
                                 git_server,
                                 default_branch,
+                                patches.first(),
                             )
                             .await?
                             {
@@ -1041,6 +1043,7 @@ async fn process_proposal_refspecs(
                 git_server_push_options,
                 git_server,
                 default_branch,
+                None,
             )
             .await?
             {
@@ -1067,6 +1070,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     git_server_push_options: &[String],
     git_server: Option<&str>,
     default_branch: Option<&str>,
+    ordering_reference: Option<&Event>,
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
     let commits_too_big = git_repo.are_commits_too_big_for_patches(ahead);
@@ -1140,6 +1144,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             repo_ref,
             &root_proposal.map(|proposal| proposal.id.to_string()),
             &[],
+            ordering_reference,
         )
         .await
     }

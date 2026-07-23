@@ -639,26 +639,15 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
         let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
             unsigned_pr_event.clone()
         } else {
-            let ordering_reference = if root_proposal
-                .is_some_and(|event| event.kind.eq(&crate::git_events::KIND_PULL_REQUEST))
-            {
+            let ordering_reference = if let Some(root_proposal) = root_proposal {
                 get_all_proposal_patch_pr_pr_update_events_from_cache(
                     git_repo.get_path()?,
                     repo_ref,
-                    &root_proposal.expect("checked above").id,
+                    &root_proposal.id,
                 )
                 .await
                 .ok()
-                .and_then(|events| {
-                    crate::event_ordering::latest_event(events.iter().filter(|event| {
-                        [
-                            crate::git_events::KIND_PULL_REQUEST,
-                            KIND_PULL_REQUEST_UPDATE,
-                        ]
-                        .contains(&event.kind)
-                    }))
-                    .cloned()
-                })
+                .and_then(|events| crate::event_ordering::latest_event(&events).cloned())
             } else {
                 None
             };
