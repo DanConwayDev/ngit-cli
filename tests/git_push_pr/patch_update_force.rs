@@ -109,18 +109,12 @@ async fn wait_for_patch_event(
             .grasp("repo")
             .events(Filter::new().kind(Kind::GitPatch))
             .await?;
-        if events.len() >= minimum_event_count {
-            if let Some(event) = events
+        if events.len() >= minimum_event_count
+            && events
                 .iter()
-                .find(|event| tag_value(event, "commit").as_deref() == Some(commit_oid))
-            {
-                // A following push must not share this event's NIP-01 second:
-                // GRASP's event ordering is only deterministic once the prior
-                // event is in an earlier second.
-                if event.created_at < Timestamp::now() {
-                    return Ok(events);
-                }
-            }
+                .any(|event| tag_value(event, "commit").as_deref() == Some(commit_oid))
+        {
+            return Ok(events);
         }
         if Instant::now() >= deadline {
             return Err(anyhow!(
@@ -129,7 +123,19 @@ async fn wait_for_patch_event(
                 events.len(),
                 events
                     .iter()
-                    .map(|event| event.id.to_hex())
+                    .map(|event| {
+                        format!(
+                            "id={} commit={:?} root={:?}",
+                            event.id,
+                            tag_value(event, "commit"),
+                            event.tags.iter().find_map(|tag| {
+                                let values = tag.as_slice();
+                                (values.first().map(String::as_str) == Some("e"))
+                                    .then(|| values.get(1).cloned())
+                                    .flatten()
+                            }),
+                        )
+                    })
                     .collect::<Vec<_>>(),
             ));
         }

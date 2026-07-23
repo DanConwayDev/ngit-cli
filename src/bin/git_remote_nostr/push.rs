@@ -19,8 +19,7 @@ use git2::{Oid, Repository};
 use ngit::{
     accept_maintainership::accept_maintainership_with_defaults,
     client::{
-        self, Connect, get_event_from_cache_by_id, get_filter_state_events,
-        save_event_in_local_cache,
+        self, get_event_from_cache_by_id, get_filter_state_events, save_event_in_local_cache,
     },
     git::{self, nostr_url::NostrUrlDecoded},
     git_events::{
@@ -741,36 +740,13 @@ async fn create_events_and_proposals(
         if store_state {
             // Capture the existing state event before publishing the new one,
             // so we can restore it if all git server pushes fail.
-            let mut state_events = get_events_from_local_cache(
+            old_state_event = get_events_from_local_cache(
                 git_repo.get_path()?,
                 vec![get_filter_state_events(&repo_ref.coordinates(), true)],
             )
             .await
             .ok()
-            .unwrap_or_default();
-
-            let mut state_relays = repo_ref
-                .relays
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            for git_server in &repo_ref.git_server {
-                if is_grasp_server_clone_url(git_server) {
-                    state_relays.push(format_grasp_server_url_as_relay_url(git_server)?);
-                }
-            }
-            state_relays.sort();
-            state_relays.dedup();
-            if let Ok(events) = client
-                .get_events(
-                    state_relays,
-                    vec![get_filter_state_events(&repo_ref.coordinates(), true)],
-                )
-                .await
-            {
-                state_events.extend(events);
-            }
-            old_state_event = ngit::event_ordering::latest_event(&state_events).cloned();
+            .and_then(|events| ngit::event_ordering::latest_event(&events).cloned());
 
             let new_repo_state = RepoState::build(
                 repo_ref.identifier.clone(),
@@ -779,12 +755,10 @@ async fn create_events_and_proposals(
                 old_state_event.as_ref(),
             )
             .await?;
-            // Keep the planned replacement in this repository's cache before
-            // the relay publish completes. The next `git-remote-nostr`
-            // process may start immediately after this one, before its relay
-            // query can observe the event; it still needs this event as the
-            // NIP-01 ordering reference. `rollback_state_event` removes it
-            // again if no state relay accepts the publish.
+            // The next remote-helper process can start before a relay query
+            // observes this accepted replacement. Retain the planned event as
+            // its deterministic NIP-01 ordering reference; rollback removes
+            // it if no state relay accepts the publish.
             save_event_in_local_cache(git_repo.get_path()?, &new_repo_state.event)
                 .await
                 .context("failed to cache planned repository state event")?;
