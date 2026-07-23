@@ -31,11 +31,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1779467914,
-        "narHash": "sha256-qoJBhgsWq3PlTV1cnkVMEQDjpIBE8xaKlxR3EXYVZLM=",
+        "lastModified": 1784776769,
+        "narHash": "sha256-xts7oB7f/fu3Eshx1PX0rk9KOSfz/svrB48L4ECvpjc=",
         "ref": "refs/heads/master",
-        "rev": "70862428b5847ee98e94cc846885f80496cf3533",
-        "revCount": 642,
+        "rev": "8950bf67feb50e1a3537c70834117abab9cba311",
+        "revCount": 834,
         "type": "git",
         "url": "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git"
       },
