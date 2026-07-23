@@ -11,6 +11,7 @@ use console::{Style, Term};
 use git2::Oid;
 use ngit::{
     accept_maintainership::{grasp_servers_from_user_or_fallback, wait_for_grasp_servers},
+    agent_guidance,
     cli_interactor::{
         PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
         show_multi_input_prompt_success,
@@ -71,6 +72,16 @@ enum InitState {
         coordinate: Nip19Coordinate,
         repo_ref: RepoRef,
     },
+}
+
+fn may_install_guidance(state: &InitState) -> bool {
+    matches!(
+        state,
+        InitState::Fresh
+            | InitState::CoordinateOnly { .. }
+            | InitState::MyAnnouncement { .. }
+            | InitState::CoMaintainer { .. }
+    )
 }
 
 impl InitState {
@@ -1639,6 +1650,23 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         git_repo.save_git_config_item("nostr.repo-relay-only", "true", false)?;
     }
 
+    // Defaults mode is intentionally the only non-interactive adoption path.
+    // It runs after init has established this account may initialize or
+    // maintain the repository, but before state construction and push/sync.
+    if cli_args.defaults && may_install_guidance(&state) {
+        match agent_guidance::status(git_repo_path) {
+            Ok(status) if !status.installed => {
+                match agent_guidance::setup_and_commit(&git_repo, git_repo_path) {
+                    Ok(true) => eprintln!("installed and committed ngit agent guidance"),
+                    Ok(false) => {}
+                    Err(error) => warn_guidance_install_skipped(&error),
+                }
+            }
+            Ok(_) => {}
+            Err(error) => warn_guidance_install_skipped(&error),
+        }
+    }
+
     // Phase 7: Build and publish
     publish_and_finalize(
         fields,
@@ -1652,6 +1680,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         resolved_repo_coordinate.as_ref(),
     )
     .await
+}
+
+fn warn_guidance_install_skipped(error: &anyhow::Error) {
+    eprintln!(
+        "{}",
+        Style::new()
+            .fg(console::Color::Color256(214))
+            .apply_to(format!(
+                "warning: agent guidance was not installed: {error}; resolve it and run `ngit agent setup`"
+            ))
+            .for_stderr()
+    );
 }
 
 fn parse_relay_url(s: &str) -> Result<RelayUrl> {

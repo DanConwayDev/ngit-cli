@@ -75,10 +75,10 @@ pub async fn launch(command: &AgentCommands) -> Result<()> {
                 return Ok(());
             }
             if *commit {
-                ensure_index_is_clean(&context.repo)?;
+                agent_guidance::preflight_dedicated_commit(&context.repo, &context.root)?;
             }
             agent_guidance::update(&context.root, *force)?;
-            if *commit && commit_guidance(&context.repo, &context.root)? {
+            if *commit && agent_guidance::commit_guidance(&context.repo, &context.root)? {
                 eprintln!("created guidance commit");
             }
             eprintln!("updated ngit agent guidance");
@@ -118,61 +118,6 @@ fn require_maintainer(context: &AgentContext) -> Result<()> {
     } else {
         bail!("the logged-in account is not a repository maintainer")
     }
-}
-
-fn commit_guidance(repo: &Repo, root: &std::path::Path) -> Result<bool> {
-    ensure_index_is_clean(repo)?;
-    if repo.merge_in_progress()? {
-        bail!("cannot create a guidance commit while a merge is in progress")
-    }
-    let head = repo
-        .git_repo
-        .head()
-        .context("cannot create a dedicated guidance commit without HEAD")?;
-    let parent = head.peel_to_commit()?;
-    let tree = parent.tree()?;
-    // Start with the repository-backed index so `add_path` can read the
-    // guidance files from the worktree. The caller has already verified this
-    // index matches HEAD, so this does not absorb unrelated staged changes.
-    let mut index = repo.git_repo.index()?;
-    index.read_tree(&tree)?;
-    for path in agent_guidance::paths_for_commit(root)? {
-        let relative = path
-            .strip_prefix(root)
-            .context("guidance path outside worktree")?;
-        index.add_path(relative)?;
-    }
-    let tree_id = index.write_tree_to(&repo.git_repo)?;
-    if tree_id == tree.id() {
-        return Ok(false);
-    }
-    let signature = repo
-        .git_repo
-        .signature()
-        .context("cannot determine Git author for guidance commit")?;
-    repo.git_repo.commit(
-        Some("HEAD"),
-        &signature,
-        &signature,
-        "chore: update ngit agent guidance",
-        &repo.git_repo.find_tree(tree_id)?,
-        &[&parent],
-    )?;
-    index.write()?;
-    Ok(true)
-}
-
-fn ensure_index_is_clean(repo: &Repo) -> Result<()> {
-    let head = repo
-        .git_repo
-        .head()
-        .context("cannot create a dedicated guidance commit without HEAD")?
-        .peel_to_commit()?;
-    let mut index = repo.git_repo.index()?;
-    if index.has_conflicts() || index.write_tree()? != head.tree_id() {
-        bail!("cannot create a guidance commit while the Git index contains changes")
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -222,7 +167,7 @@ mod tests {
         let (repo, root) = repository();
         agent_guidance::setup(&root, false).unwrap();
 
-        assert!(commit_guidance(&repo, &root).unwrap());
+        assert!(agent_guidance::commit_guidance(&repo, &root).unwrap());
 
         let mut index = repo.git_repo.index().unwrap();
         let head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
@@ -239,7 +184,7 @@ mod tests {
         index.write().unwrap();
 
         assert!(
-            ensure_index_is_clean(&repo)
+            agent_guidance::preflight_dedicated_commit(&repo, &root)
                 .unwrap_err()
                 .to_string()
                 .contains("index contains changes")

@@ -98,21 +98,27 @@ fn replace_section(existing: Option<&str>, start: &str, end: &str, body: &str) -
     let Some(existing) = existing else {
         return Ok(section);
     };
-    match (existing.find(start), existing.find(end)) {
-        (None, None) => Ok(format!(
-            "{}{}",
-            existing.trim_end(),
-            if existing.trim().is_empty() {
-                section
-            } else {
-                format!("\n\n{section}")
-            }
-        )),
-        (Some(from), Some(end_from)) if end_from >= from => {
-            let after = end_from + end.len();
+    let starts = existing
+        .match_indices(start)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let ends = existing
+        .match_indices(end)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match (starts.as_slice(), ends.as_slice()) {
+        ([], []) => Ok(if existing.is_empty() {
+            section
+        } else if existing.ends_with('\n') {
+            format!("{existing}\n{section}")
+        } else {
+            format!("{existing}\n\n{section}")
+        }),
+        ([from], [end_from]) if end_from >= from => {
+            let after = *end_from + end.len();
             Ok(format!(
                 "{}{}{}",
-                &existing[..from],
+                &existing[..*from],
                 section.trim_end(),
                 &existing[after..]
             ))
@@ -227,7 +233,7 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
             }
         }
     } else if !force {
-        let existing = [SKILL_PATH, CLAUDE_SKILL_PATH, AGENTS_PATH, CLAUDE_PATH]
+        let existing = [SKILL_PATH, CLAUDE_SKILL_PATH]
             .into_iter()
             .find(|path| root.join(path).exists());
         if let Some(path) = existing {
@@ -373,6 +379,177 @@ pub fn paths_for_commit(root: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+const COMMIT_MESSAGE: &str = "chore: update ngit agent guidance";
+
+fn target_paths() -> [&'static str; 5] {
+    [
+        AGENTS_PATH,
+        CLAUDE_PATH,
+        SKILL_PATH,
+        CLAUDE_SKILL_PATH,
+        STATE_PATH,
+    ]
+}
+
+/// Validate that a guidance-only commit can be made without absorbing any
+/// unrelated repository changes. This deliberately happens before setup writes
+/// its files, so callers can safely treat a failure as a no-op.
+pub fn preflight_dedicated_commit(repo: &crate::git::Repo, root: &Path) -> Result<()> {
+    // Parse the target files now: malformed markers are unsafe to replace, and
+    // this also validates that desired content can be computed before writing.
+    let _ = expected_files(root)?;
+    let head = repo
+        .git_repo
+        .head()
+        .context("cannot create a dedicated guidance commit without HEAD")?;
+    if !head.is_branch() || repo.git_repo.head_detached()? {
+        bail!("cannot create a guidance commit while HEAD is detached");
+    }
+    let parent = head.peel_to_commit()?;
+    if repo.git_repo.state() != git2::RepositoryState::Clean {
+        bail!("cannot create a guidance commit while a Git operation is in progress");
+    }
+    let mut index = repo.git_repo.index()?;
+    if index.has_conflicts() || index.write_tree()? != parent.tree_id() {
+        bail!("cannot create a guidance commit while the Git index contains changes");
+    }
+    for relative in target_paths() {
+        let status = repo.git_repo.status_file(Path::new(relative))?;
+        if status.intersects(
+            git2::Status::WT_NEW
+                | git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_RENAMED
+                | git2::Status::WT_TYPECHANGE
+                | git2::Status::CONFLICTED,
+        ) {
+            bail!(
+                "cannot create a guidance commit while target file `{relative}` has unstaged changes"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Create a commit containing only the installed guidance files. The caller
+/// must run [`preflight_dedicated_commit`] before changing the worktree.
+pub fn commit_guidance(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
+    let index_path = repo.git_repo.path().join("index");
+    let original_index = if index_path.exists() {
+        Some(
+            fs::read(&index_path)
+                .with_context(|| format!("failed to read {}", index_path.display()))?,
+        )
+    } else {
+        None
+    };
+    let result = commit_guidance_inner(repo, root);
+    if let Err(error) = result {
+        match original_index {
+            Some(contents) => fs::write(&index_path, contents).map(|_| ()),
+            None if index_path.exists() => fs::remove_file(&index_path),
+            None => Ok(()),
+        }
+        .with_context(|| format!("failed to restore {}", index_path.display()))?;
+        return Err(error);
+    }
+    result
+}
+
+fn commit_guidance_inner(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
+    let head = repo
+        .git_repo
+        .head()
+        .context("cannot create a dedicated guidance commit without HEAD")?;
+    let parent = head.peel_to_commit()?;
+    let tree = parent.tree()?;
+    let mut index = repo.git_repo.index()?;
+    index.read_tree(&tree)?;
+    for path in paths_for_commit(root)? {
+        let relative = path
+            .strip_prefix(root)
+            .context("guidance path outside worktree")?;
+        index.add_path(relative)?;
+    }
+    let tree_id = index.write_tree_to(&repo.git_repo)?;
+    if tree_id == tree.id() {
+        return Ok(false);
+    }
+    let signature = repo
+        .git_repo
+        .signature()
+        .context("cannot determine Git author for guidance commit")?;
+    // Write the real index before moving HEAD. This means a successful commit
+    // cannot subsequently fail while trying to make the index match it.
+    index.write()?;
+    repo.git_repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        COMMIT_MESSAGE,
+        &repo.git_repo.find_tree(tree_id)?,
+        &[&parent],
+    )?;
+    Ok(true)
+}
+
+#[derive(Clone)]
+struct FileSnapshot {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+}
+
+fn snapshot_targets(root: &Path) -> Result<Vec<FileSnapshot>> {
+    target_paths()
+        .into_iter()
+        .map(|relative| {
+            let path = root.join(relative);
+            let contents = if path.exists() {
+                Some(
+                    fs::read(&path)
+                        .with_context(|| format!("failed to read {}", path.display()))?,
+                )
+            } else {
+                None
+            };
+            Ok(FileSnapshot { path, contents })
+        })
+        .collect()
+}
+
+fn restore_targets(snapshots: &[FileSnapshot]) -> Result<()> {
+    for snapshot in snapshots {
+        match &snapshot.contents {
+            Some(contents) => {
+                if let Some(parent) = snapshot.path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&snapshot.path, contents)?;
+            }
+            None if snapshot.path.exists() => fs::remove_file(&snapshot.path)?,
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Install and commit guidance atomically enough for automatic setup: every
+/// target file and the real index are restored if writing or committing fails.
+pub fn setup_and_commit(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
+    preflight_dedicated_commit(repo, root)?;
+    let snapshots = snapshot_targets(root)?;
+    let result = (|| {
+        setup(root, false)?;
+        commit_guidance(repo, root)
+    })();
+    if let Err(error) = result {
+        restore_targets(&snapshots)
+            .context("failed to restore agent guidance after setup failure")?;
+        return Err(error);
+    }
+    result
+}
+
 /// Best-effort only: this deliberately uses the cached public account key and
 /// repository announcement, so it neither prompts nor asks a NIP-46 signer to
 /// sign. Errors are swallowed by callers because a warning must never affect
@@ -466,20 +643,15 @@ mod tests {
         );
     }
     #[test]
-    fn setup_requires_force_for_unmanaged_files_and_preserves_policy_neighbors() {
+    fn setup_adopts_instruction_files_and_preserves_policy_neighbors() {
         let root = temp_root();
         fs::write(
             root.join(AGENTS_PATH),
             "# Local instructions\n\nKeep this text.\n",
         )
         .unwrap();
-        assert!(
-            setup(&root, false)
-                .unwrap_err()
-                .to_string()
-                .contains("unmanaged file")
-        );
-        setup(&root, true).unwrap();
+        fs::write(root.join(CLAUDE_PATH), "# Claude instructions\n").unwrap();
+        setup(&root, false).unwrap();
         let first = fs::read_to_string(root.join(AGENTS_PATH)).unwrap();
         setup(&root, false).unwrap();
         assert_eq!(first, fs::read_to_string(root.join(AGENTS_PATH)).unwrap());
@@ -494,6 +666,38 @@ mod tests {
                 .contains("@AGENTS.md")
         );
         assert!(status(&root).unwrap().modified_files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_or_duplicate_markers_are_conflicts() {
+        let root = temp_root();
+        fs::write(
+            root.join(AGENTS_PATH),
+            format!("{START}\nfirst\n{END}\n{START}\nsecond\n{END}\n"),
+        )
+        .unwrap();
+        assert!(
+            setup(&root, false)
+                .unwrap_err()
+                .to_string()
+                .contains("markers in file are malformed")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_refuses_unmanaged_skill_files_without_force() {
+        let root = temp_root();
+        let skill = root.join(SKILL_PATH);
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(skill, "project skill\n").unwrap();
+        assert!(
+            setup(&root, false)
+                .unwrap_err()
+                .to_string()
+                .contains("unmanaged file")
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
