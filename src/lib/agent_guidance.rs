@@ -414,7 +414,18 @@ pub fn preflight_dedicated_commit(repo: &crate::git::Repo, root: &Path) -> Resul
         bail!("cannot create a guidance commit while the Git index contains changes");
     }
     for relative in target_paths() {
-        let status = repo.git_repo.status_file(Path::new(relative))?;
+        let status = match repo.git_repo.status_file(Path::new(relative)) {
+            Ok(status) => status,
+            Err(error) if error.code() == git2::ErrorCode::NotFound => {
+                // A target that is absent from HEAD, the index, and the
+                // worktree is the normal first-install case.
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect guidance target `{relative}`"));
+            }
+        };
         if status.intersects(
             git2::Status::WT_NEW
                 | git2::Status::WT_MODIFIED

@@ -86,13 +86,6 @@ async fn clone_falls_through_when_first_grasp_is_unreachable() -> Result<()> {
     )
     .await?;
 
-    let main_oid = publisher
-        .snapshot()?
-        .refs
-        .get("refs/heads/main")
-        .context("refs/heads/main missing after initial commit")?
-        .clone();
-
     let primary_url = harness.grasp("primary").url().to_string();
     let secondary_url = harness.grasp("secondary").url().to_string();
     // `--grasp-server` is `clap`-declared as `num_args = 1..` (see
@@ -153,6 +146,12 @@ async fn clone_falls_through_when_first_grasp_is_unreachable() -> Result<()> {
         printed_clone_url.contains(&npub),
         "sanity: printed clone URL {printed_clone_url} should reference publisher npub",
     );
+    let main_oid = publisher
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after ngit init")?
+        .clone();
 
     // --- step 3: push, fanning out to both grasps ----------------------------
     run_git_ok(

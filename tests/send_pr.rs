@@ -286,8 +286,9 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await?;
 
     // merge_base = parent of the first PR commit = clone-time main tip.
-    // `publish_repo`'s `initial_oid` is the seed commit's oid; the clone
-    // lands at exactly that oid, so the contributor branched off there.
+    // `publish_repo`'s `initial_oid` is the post-init main tip (including the
+    // repository-guidance commit); the clone lands at exactly that oid, so the
+    // contributor branched off there.
     let merge_base_oid = published.initial_oid.clone();
 
     // --- 5. Maintainer: advance main ------------------------------------------

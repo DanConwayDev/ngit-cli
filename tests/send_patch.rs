@@ -75,14 +75,10 @@ struct Snapshot {
     second_patch: Event,
     /// OID of the first commit on the feature branch (`t3.md`).
     first_commit_oid: String,
-    /// Commit oid the first patch sits on top of — equals the seed
-    /// commit's oid because the harness's `publish_repo` makes a single
-    /// `main` commit before branching. `parent-commit` and the
-    /// per-patch `r <root>` tag therefore point at the same oid, which
-    /// is *not* true in the legacy fixture (it cherry-picked an extra
-    /// `commit.md` onto main first). The assertion still catches the
-    /// regression — "patch carries a `parent-commit` tag pointing at
-    /// the right oid" — without depending on the legacy commit layout.
+    /// Commit oid the first patch sits on top of: the main tip after ngit
+    /// installed its repository-guidance commit.
+    parent_commit_oid: String,
+    /// Earliest unique/root commit advertised by the repository announcement.
     root_commit_oid: String,
     /// Identifier the announcement was published with — matches the
     /// `d` tag on the kind-30617 event and the third coordinate
@@ -193,7 +189,8 @@ async fn capture_snapshot() -> Result<Snapshot> {
         first_patch,
         second_patch,
         first_commit_oid,
-        root_commit_oid: published.initial_oid.clone(),
+        parent_commit_oid: published.initial_oid.clone(),
+        root_commit_oid: published.root_oid.clone(),
         identifier: published.identifier.clone(),
         maintainer_pubkeys,
         branch_name: series.branch_name.clone(),
@@ -390,7 +387,7 @@ enum PatchCase {
     CommitAndCommitR,
     /// `["parent-commit", <parent_oid>]` — the immediate ancestor of
     /// the patch's commit. In this fixture the first commit's parent is
-    /// the seed (= root_commit_oid).
+    /// the post-init main tip.
     ParentCommit,
     /// `["r", <root_commit_oid>]` — the repo's root commit. Note this
     /// is the **same** `r` family as `commit_and_commit_r`; both
@@ -443,7 +440,7 @@ async fn patch_tags(#[future] snapshot: Arc<Snapshot>, #[case] case: PatchCase) 
         PatchCase::ParentCommit => {
             assert_eq!(
                 tag_value(&s.first_patch, "parent-commit").as_deref(),
-                Some(s.root_commit_oid.as_str()),
+                Some(s.parent_commit_oid.as_str()),
                 "first patch's `parent-commit` should be the main tip before branching",
             );
         }

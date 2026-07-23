@@ -118,13 +118,6 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
         String::from_utf8_lossy(&commit_output.stderr),
     );
 
-    let head_before_push = publisher.snapshot()?;
-    let main_oid = head_before_push
-        .refs
-        .get("refs/heads/main")
-        .context("refs/heads/main missing after initial commit")?
-        .clone();
-
     // --- step 3: ngit init ---------------------------------------------------
     let grasp_url = harness.grasp("repo").url().to_string();
     let init_output = publisher
@@ -167,6 +160,13 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
         clone_url.contains(&npub),
         "clone URL {clone_url} does not contain the publisher's npub {npub}",
     );
+
+    let main_oid = publisher
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after ngit init")?
+        .clone();
 
     // --- step 4: the new bit — push refs through git-remote-nostr ------------
     //

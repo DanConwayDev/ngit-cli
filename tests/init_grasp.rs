@@ -43,6 +43,8 @@
 //! with the right content (the vanilla relay shows it) and the grasp
 //! accepted it (the directory exists).
 
+use std::{collections::BTreeSet, path::PathBuf};
+
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use test_harness::Harness;
@@ -109,6 +111,12 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
         String::from_utf8_lossy(&commit_output.stdout),
         String::from_utf8_lossy(&commit_output.stderr),
     );
+    let initial_oid = repo
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after initial commit")?
+        .clone();
 
     // --- step 3: ngit init ----------------------------------------------------
     //
@@ -139,6 +147,73 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
         String::from_utf8_lossy(&init_output.stdout),
         String::from_utf8_lossy(&init_output.stderr),
     );
+
+    // `-d` installs the repository guidance as a dedicated commit before
+    // init publishes or pushes anything.
+    for path in [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/skills/ngit/SKILL.md",
+        ".claude/skills/ngit/SKILL.md",
+        ".agents/ngit-guidance.json",
+    ] {
+        assert!(
+            repo.dir().join(path).is_file(),
+            "ngit init -d did not install {path}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(repo.dir().join(".agents/skills/ngit/SKILL.md"))?,
+        std::fs::read_to_string(repo.dir().join(".claude/skills/ngit/SKILL.md"))?,
+        "Claude and universal skill copies diverged"
+    );
+    assert!(
+        std::fs::read_to_string(repo.dir().join("AGENTS.md"))?
+            .contains("<!-- ngit-agent-guidance:start -->"),
+        "AGENTS.md is missing its managed guidance section"
+    );
+
+    {
+        let git_repo = git2::Repository::open(repo.dir())?;
+        let head = git_repo.head()?.peel_to_commit()?;
+        assert_eq!(
+            head.parent_id(0)?.to_string(),
+            initial_oid,
+            "guidance commit is not directly above the pre-init HEAD"
+        );
+        assert_eq!(
+            head.summary()?,
+            Some("chore: update ngit agent guidance"),
+            "unexpected automatic guidance commit message"
+        );
+        let parent = head.parent(0)?;
+        let diff = git_repo.diff_tree_to_tree(Some(&parent.tree()?), Some(&head.tree()?), None)?;
+        let changed = diff
+            .deltas()
+            .filter_map(|delta| delta.new_file().path().or_else(|| delta.old_file().path()))
+            .map(PathBuf::from)
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".agents/skills/ngit/SKILL.md",
+            ".claude/skills/ngit/SKILL.md",
+            ".agents/ngit-guidance.json",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            changed, expected,
+            "guidance commit included unexpected paths"
+        );
+        let mut index = git_repo.index()?;
+        assert_eq!(
+            index.write_tree()?,
+            head.tree_id(),
+            "real index does not match the automatic guidance commit"
+        );
+    }
 
     // --- assertion 1: the announcement reached the user's relay --------------
     //
@@ -211,6 +286,94 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
                 .map(|e| e.file_name())
                 .collect::<Vec<_>>())
             .unwrap_or_default(),
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn init_defaults_skips_agent_guidance_when_index_is_staged() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+
+    let create = repo
+        .ngit(["account", "create", "--local", "--name", "staged init"])
+        .output()
+        .await?;
+    assert!(
+        create.status.success(),
+        "account creation failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let commit = repo
+        .git(["commit", "--allow-empty", "-m", "init", "--no-gpg-sign"])
+        .output()
+        .await?;
+    assert!(
+        commit.status.success(),
+        "initial commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let initial_oid = repo
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after initial commit")?
+        .clone();
+
+    std::fs::write(repo.dir().join("pending.txt"), "keep staged\n")?;
+    let add = repo.git(["add", "pending.txt"]).output().await?;
+    assert!(add.status.success(), "failed to stage pending.txt");
+
+    let grasp_url = harness.grasp("repo").url().to_string();
+    let init = repo
+        .ngit([
+            "init",
+            "--name",
+            "staged init",
+            "--identifier",
+            "staged-init",
+            "--grasp-server",
+            &grasp_url,
+            "-d",
+        ])
+        .output()
+        .await?;
+    assert!(
+        init.status.success(),
+        "ngit init should continue after safely skipping guidance: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let warning = String::from_utf8_lossy(&init.stderr);
+    assert!(
+        warning.contains("agent guidance was not installed")
+            && warning.contains("ngit agent setup"),
+        "missing actionable guidance skip warning: {warning}"
+    );
+    assert!(
+        !repo.dir().join(".agents/ngit-guidance.json").exists(),
+        "guidance state was written despite the staged-index preflight failure"
+    );
+    assert_eq!(
+        repo.snapshot()?
+            .refs
+            .get("refs/heads/main")
+            .context("refs/heads/main missing after init")?,
+        &initial_oid,
+        "init created a guidance commit despite staged changes"
+    );
+    let cached = repo.git(["diff", "--cached", "--quiet"]).output().await?;
+    assert!(
+        !cached.status.success(),
+        "the pre-existing staged change was unexpectedly cleared"
     );
 
     Ok(())
