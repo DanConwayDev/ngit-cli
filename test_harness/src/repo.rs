@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use tempfile::TempDir;
 use tokio::process::Command;
 
-use crate::{clock, harness::Harness, snapshot::RepoSnapshot};
+use crate::{harness::Harness, snapshot::RepoSnapshot};
 
 /// One repo, owned for the lifetime of a test.
 pub struct Repo {
@@ -249,31 +249,13 @@ impl Repo {
         RepoSnapshot::capture(&self.dir)
     }
 
-    /// Wait one whole unix second, then `git push <args...>`.
+    /// Push to a nostr remote with `git push <args...>`.
     ///
     /// **Use this for every push to a nostr remote.** A push handled by
     /// `git-remote-nostr` emits an auto-generated kind-30618 state event
     /// covering the just-pushed ref(s); see `src/bin/git_remote_nostr/push.rs`.
-    /// That state event's `created_at` has unix-second resolution, and the
-    /// `nostr-relay-builder` `MemoryDatabase` tracks superseded
-    /// replaceable-event ids as deleted (it adds them to its `deleted_ids`
-    /// set when discarding during replacement). Two same-coordinate
-    /// replaceable events with identical `(pubkey, kind, tags, content)`
-    /// signed in the same wall-clock second hash to the same id — so an
-    /// about-to-be-published kind-30618 whose id collides with a
-    /// previously-superseded one at the same `(pubkey, kind, d-tag)`
-    /// coordinate is rejected by the relay with
-    /// `"blocked: this event is deleted"` even though no NIP-09 deletion
-    /// ever happened.
-    ///
-    /// The fix belongs *before* the push, not after: the safety property
-    /// is "*this* publish's `created_at` is strictly later than any prior
-    /// same-coordinate publish", which is local to the publish that's
-    /// about to happen. So this helper ticks first, then runs `git push`,
-    /// then returns — and does not rely on whoever ran before it having
-    /// cleaned up. See [`crate::clock`] for the full rationale, and
-    /// [`Harness::publish_state_event`] for the explicit-publish sibling
-    /// that follows the same discipline.
+    /// ngit orders that replacement deterministically, including when it is
+    /// created in the same wall-clock second as its predecessor.
     pub async fn nostr_push<I, S>(&self, args: I) -> Result<std::process::Output>
     where
         I: IntoIterator<Item = S>,
@@ -284,9 +266,6 @@ impl Repo {
             argv.push(a.as_ref().to_owned());
         }
         let label = format!("git {}", display_argv(&argv));
-        // Tick before publishing: the sleep is part of preparing to
-        // publish, not cleaning up. See the doc-comment above.
-        clock::tick_to_next_second().await;
         let out = self
             .git(&argv)
             .output()

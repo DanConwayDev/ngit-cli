@@ -15,6 +15,36 @@ use test_harness::{CloneLogin, Harness, KIND_REPO_STATE, PublishRepoOpts, tag_va
 const BRANCH: &str = "co-maintainer-branch";
 const BRANCH_REF: &str = "refs/heads/co-maintainer-branch";
 
+async fn wait_for_authored_event(
+    grasp: &test_harness::GraspServer,
+    author: PublicKey,
+    kind: Kind,
+    identifier: &str,
+) -> Result<Event> {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+    let deadline = std::time::Instant::now() + TIMEOUT;
+
+    loop {
+        if let Some(event) = grasp
+            .events(Filter::new().author(author).kind(kind))
+            .await?
+            .into_iter()
+            .find(|event| tag_value(event, "d").as_deref() == Some(identifier))
+        {
+            return Ok(event);
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out after {TIMEOUT:?} waiting for author {author} kind {} identifier \
+                 {identifier}",
+                kind.as_u16()
+            );
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
+}
+
 #[tokio::test]
 async fn invited_co_maintainer_pushes_branch_and_auto_accepts() -> Result<()> {
     let harness = Harness::builder(
@@ -83,19 +113,16 @@ async fn invited_co_maintainer_pushes_branch_and_auto_accepts() -> Result<()> {
         .context("invited co-maintainer git push -u origin branch")?;
 
     let grasp = harness.grasp("repo");
-    let announcements = grasp
-        .events(
-            Filter::new()
-                .author(co_maintainer_pubkey)
-                .kind(Kind::GitRepoAnnouncement),
-        )
-        .await?;
-    let co_maintainer_announcement = announcements
-        .iter()
-        .find(|e| tag_value(e, "d").as_deref() == Some(published.identifier.as_str()))
-        .context("co-maintainer kind-30617 was not auto-published on branch push")?;
+    let co_maintainer_announcement = wait_for_authored_event(
+        grasp,
+        co_maintainer_pubkey,
+        Kind::GitRepoAnnouncement,
+        &published.identifier,
+    )
+    .await
+    .context("co-maintainer kind-30617 was not auto-published on branch push")?;
 
-    let maintainers = tag_values(co_maintainer_announcement, "maintainers");
+    let maintainers = tag_values(&co_maintainer_announcement, "maintainers");
     assert!(
         maintainers.contains(&co_maintainer_pubkey.to_string()),
         "auto-published announcement should list the co-maintainer; got {maintainers:?}",
@@ -118,19 +145,16 @@ async fn invited_co_maintainer_pushes_branch_and_auto_accepts() -> Result<()> {
         "origin should still point at the same identifier; got {origin_url}",
     );
 
-    let state_events = grasp
-        .events(
-            Filter::new()
-                .author(co_maintainer_pubkey)
-                .kind(KIND_REPO_STATE),
-        )
-        .await?;
-    let state_event = state_events
-        .iter()
-        .find(|e| tag_value(e, "d").as_deref() == Some(published.identifier.as_str()))
-        .context("branch push did not publish a co-maintainer-authored state event")?;
+    let state_event = wait_for_authored_event(
+        grasp,
+        co_maintainer_pubkey,
+        KIND_REPO_STATE,
+        &published.identifier,
+    )
+    .await
+    .context("branch push did not publish a co-maintainer-authored state event")?;
     assert_eq!(
-        tag_value(state_event, BRANCH_REF).as_deref(),
+        tag_value(&state_event, BRANCH_REF).as_deref(),
         Some(branch_oid.as_str()),
         "state event should record the pushed co-maintainer branch",
     );

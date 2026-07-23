@@ -260,10 +260,8 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 5. Contributor: push ---------------------------------------------
     //
-    // `Repo::nostr_push` ticks one whole unix second before the push so
-    // the emitted state events don't collide with the state event published
-    // by `publish_repo`.  See `test_harness::clock` for the writeup.
-    // `-u` sets the upstream: `branch.pr/feature.{remote,merge}`.
+    // `Repo::nostr_push` supplies the harness environment to the remote
+    // helper. `-u` sets the upstream: `branch.pr/feature.{remote,merge}`.
     contributor
         .nostr_push(["-u", "origin", &format!("pr/{BRANCH}")])
         .await

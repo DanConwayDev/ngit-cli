@@ -274,10 +274,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // ---------- first push: `main` --------------------------------------
     //
-    // `nostr_push` ticks one whole unix second so the upcoming tag
-    // push's auto state event lands in a strictly later created_at
-    // second than this one's and can't id-collide. See
-    // `test_harness::clock`.
+    // `nostr_push` supplies the harness environment to the remote helper.
     publisher
         .nostr_push(["-u", "origin", DEFAULT_BRANCH])
         .await

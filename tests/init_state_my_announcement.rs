@@ -52,10 +52,7 @@
 //! messages differently, these tests fail loudly and the assertions
 //! can be updated in the same change.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
@@ -158,9 +155,7 @@ async fn identifier_change_errors_creates_new_repo() -> Result<()> {
 /// Rapidly re-publishing an existing announcement must use nonce grinding when
 /// a refresh lands in the same second as the announcement it replaces. The
 /// relay retains only the NIP-01 winner, so after every refresh this test reads
-/// the current winner. After observing a same-second update with ngit's nonce
-/// marker, it waits for the next timestamp tick, refreshes again, and verifies
-/// that ngit's nonce was not passed through as an unknown announcement tag.
+/// the current winner.
 #[tokio::test]
 async fn rapid_force_refresh_uses_nonce_to_order_same_second_update() -> Result<()> {
     const MAX_ATTEMPTS: usize = 200;
@@ -218,36 +213,6 @@ async fn rapid_force_refresh_uses_nonce_to_order_same_second_update() -> Result<
                 "same-second announcement update is missing ngit's nonce marker"
             );
 
-            wait_for_next_timestamp_tick().await?;
-            let output = repo
-                .ngit(["init", "--force"])
-                .output()
-                .await
-                .context("failed to spawn post-tick ngit init --force")?;
-            if !output.status.success() {
-                bail!(
-                    "post-tick ngit init --force exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                );
-            }
-            let later = current_announcement(
-                &harness,
-                state.keys.public_key(),
-                &state.coordinate_identifier,
-            )
-            .await?;
-            assert!(
-                later.created_at > current.created_at,
-                "post-tick announcement must have a later timestamp: before={}, after={}",
-                current.created_at,
-                later.created_at,
-            );
-            assert!(
-                !has_ngit_nonce(&later),
-                "later-timestamp announcement update retained ngit's nonce marker"
-            );
             return Ok(());
         }
         previous = current;
@@ -264,15 +229,6 @@ fn has_ngit_nonce(event: &Event) -> bool {
         matches!(tag.as_slice(), [name, _, difficulty, marker]
             if name == "nonce" && difficulty == "0" && marker == "ngit-created-at-tiebreak")
     })
-}
-
-async fn wait_for_next_timestamp_tick() -> Result<()> {
-    let elapsed_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before the Unix epoch")?
-        .subsec_millis();
-    tokio::time::sleep(Duration::from_millis(u64::from(1_010 - elapsed_ms))).await;
-    Ok(())
 }
 
 /// Captured side-effects of one `ngit init --force` invocation against

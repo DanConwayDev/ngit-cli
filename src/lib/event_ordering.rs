@@ -39,6 +39,53 @@ pub fn finalize_ordered_unsigned(
     )
 }
 
+/// Finalize a replaceable event strictly after `reference` by timestamp.
+///
+/// This remains valid NIP-01 ordering for proposal histories whose readers
+/// select the active revision by `created_at` before walking its thread.
+pub fn finalize_strictly_later_unsigned(
+    mut builder: EventBuilder,
+    public_key: PublicKey,
+    reference: Option<&Event>,
+) -> Result<UnsignedEvent> {
+    builder.tags = nostr::Tags::from_list(
+        builder
+            .tags
+            .into_iter()
+            .filter(|tag| !is_ngit_nonce(tag))
+            .collect(),
+    );
+
+    let Some(created_at) = strictly_later_timestamp(reference, Timestamp::now())? else {
+        return Ok(builder.finalize_unsigned(public_key));
+    };
+    Ok(builder
+        .custom_created_at(created_at)
+        .finalize_unsigned(public_key))
+}
+
+/// Return an explicit timestamp only when `now` must be advanced to sort
+/// strictly after `reference` by timestamp.
+pub fn strictly_later_timestamp(
+    reference: Option<&Event>,
+    now: Timestamp,
+) -> Result<Option<Timestamp>> {
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    if now > reference.created_at {
+        return Ok(None);
+    }
+
+    reference
+        .created_at
+        .as_secs()
+        .checked_add(1)
+        .map(Timestamp::from_secs)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("event timestamp overflow while ordering update"))
+}
+
 /// The implementation accepts the current time and attempt limit separately so
 /// the timestamp policy can be exercised deterministically in unit tests.
 fn finalize_ordered_unsigned_at(
@@ -212,6 +259,36 @@ mod tests {
             assert!(event.compute_id() < reference.id);
             assert!(event.tags.iter().any(is_ngit_nonce));
         }
+    }
+
+    #[test]
+    fn strictly_later_ordering_advances_timestamp_for_future_reference() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"ff".repeat(32), u64::MAX - 1);
+
+        let event = finalize_strictly_later_unsigned(
+            candidate_builder(),
+            keys.public_key(),
+            Some(&reference),
+        )
+        .unwrap();
+
+        assert_eq!(event.created_at, Timestamp::from_secs(u64::MAX));
+        assert!(!event.tags.iter().any(is_ngit_nonce));
+    }
+
+    #[test]
+    fn strictly_later_timestamp_only_overrides_non_later_clock() {
+        let reference = reference_with_id(&"ff".repeat(32), 10);
+
+        assert_eq!(
+            strictly_later_timestamp(Some(&reference), Timestamp::from_secs(10)).unwrap(),
+            Some(Timestamp::from_secs(11))
+        );
+        assert_eq!(
+            strictly_later_timestamp(Some(&reference), Timestamp::from_secs(11)).unwrap(),
+            None
+        );
     }
 
     #[test]

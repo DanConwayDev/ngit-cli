@@ -276,15 +276,15 @@ exactly these patterns. They are non-negotiable:
   are tolerated as a regression-catching shortcut and must use
   case-insensitive prefix matching, never equality.
 - **Push to a nostr remote via `Repo::nostr_push`, never
-  `repo.git(["push", …])`.** `nostr_push` runs the push and then
-  ticks one whole unix second so the next event-publishing operation
-  lands in a strictly later `created_at` second than the
-  auto-generated kind-30618 state event the push just emitted.
-  Bypassing it produces a roughly 30% flake rate where the next
-  publish hits the relay's "this event is deleted" check_id path on
-  a same-second event-id collision. See
-  `docs/architecture/test-harness.md` § "Timing rule" for the chain;
-  `test_harness/src/clock.rs` for the writeup.
+  `repo.git(["push", …])`.** It provides the harness environment and
+  error context for the `git-remote-nostr` subprocess. ngit orders the
+  auto-generated kind-30618 state event from its cached predecessor using
+  NIP-01's lower-ID tie-break with bounded grinding and a next-timestamp
+  fallback. Rapid proposal revisions remain strictly newer by timestamp.
+  Do not add wall-clock sleeps for event ordering; use bounded polling only
+  for genuinely asynchronous relay, GRASP, or ref visibility. See
+  `docs/architecture/test-harness.md` § "Event ordering and asynchronous
+  effects".
 
 ## Common Pitfalls
 

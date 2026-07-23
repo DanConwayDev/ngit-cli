@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use console::Style;
 use ngit::{
-    client::{Params, send_events},
+    client::{Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events},
     git_events::{EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events},
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
     utils::proposal_tip_is_pr_or_pr_update,
@@ -420,6 +420,18 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
             .await?
         }
     } else {
+        let ordering_reference = if let Some(root) = root_proposal.as_ref() {
+            get_all_proposal_patch_pr_pr_update_events_from_cache(
+                git_repo.get_path()?,
+                &repo_ref,
+                &root.id,
+            )
+            .await
+            .ok()
+            .and_then(|events| ngit::event_ordering::latest_event(&events).cloned())
+        } else {
+            None
+        };
         let events = generate_cover_letter_and_patch_events(
             cover_letter_title_description.clone(),
             &git_repo,
@@ -428,6 +440,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
             &repo_ref,
             &root_proposal.as_ref().map(|e| e.id.to_string()),
             &mention_tags,
+            ordering_reference.as_ref(),
         )
         .await?;
 

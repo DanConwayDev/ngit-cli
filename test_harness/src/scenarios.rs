@@ -49,9 +49,9 @@ use nostr::nips::{nip01::Coordinate, nip19::Nip19Coordinate};
 use nostr_sdk::prelude::*;
 
 use crate::{
-    clock,
     harness::Harness,
     nostr::{KIND_PULL_REQUEST, KIND_REPO_STATE, event_branch_name_tag},
+    query,
     repo::Repo,
 };
 
@@ -380,9 +380,8 @@ impl Harness {
         // this point a fresh `git clone` of the nostr:// URL works.
         //
         // `Repo::nostr_push` (rather than a raw `git push`) is mandatory
-        // here because the push emits a kind-30618 state event — see its
-        // doc-comment for the timing rule, and `crate::clock` for the
-        // root-cause writeup.
+        // here because the push emits a kind-30618 state event and supplies
+        // the harness environment to the remote helper.
         publisher
             .nostr_push(["-u", "origin", "main"])
             .await
@@ -754,41 +753,52 @@ impl Harness {
             tags.push(Tag::custom(name.clone(), vec![value.clone()]));
         }
 
-        // Tick *before* building the event so this kind-30618's
-        // `created_at` (taken from `Timestamp::now()` at sign-time) lands
-        // in a strictly later unix second than any prior same-coordinate
-        // replaceable event. The collision being avoided is two
-        // same-coordinate replaceable events with identical
-        // `(pubkey, kind, tags, content)` sharing a `created_at` second
-        // — see `crate::clock` for the writeup. The tick is skipped when
-        // the caller explicitly asks for a back-dated `created_at` via
-        // `created_at_offset_secs`: the whole point of that knob is to
-        // produce an event with a deterministically older timestamp, and
-        // sleeping first would just make the test slower without
-        // changing anything.
-        if opts.created_at_offset_secs.is_none() {
-            clock::tick_to_next_second().await;
-        }
+        let relay_url = match &opts.target {
+            PublishStateEventTarget::DefaultGrasp => self.grasp("repo").relay_url(),
+            PublishStateEventTarget::GraspRole(role) => self.grasp(role).relay_url(),
+            PublishStateEventTarget::RelayUrl(url) => url.clone(),
+        };
 
-        // `created_at` defaults to "now"; `created_at_offset_secs` makes
-        // the event look older by the given number of seconds, so a test
-        // can publish "older resolvable" + "newer unresolvable" events
-        // whose creation-time ordering is deterministic regardless of how
-        // close together the two publishes run.
+        // Explicit offsets deliberately create an older candidate. Otherwise,
+        // make this fabricated replacement strictly newer than the current
+        // NIP-01 winner on its target relay without waiting for the wall clock.
         let mut builder = EventBuilder::new(KIND_REPO_STATE, "").tags(tags);
         if let Some(offset) = opts.created_at_offset_secs {
             let ts = Timestamp::now() - offset;
             builder = builder.custom_created_at(ts);
+        } else {
+            let reference = query::fetch_events(
+                &relay_url,
+                Filter::new().author(keys.public_key()).kind(KIND_REPO_STATE),
+            )
+            .await?
+            .into_iter()
+            .filter(|event| {
+                event.tags.iter().any(|tag| {
+                    matches!(tag.as_slice(), [name, value, ..] if name == "d" && value == &identifier)
+                })
+            })
+            .max_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
+            let created_at = reference
+                .map(|event| {
+                    event
+                        .created_at
+                        .as_secs()
+                        .checked_add(1)
+                        .map(Timestamp::from_secs)
+                        .context("state-event timestamp overflow")
+                })
+                .transpose()?
+                .unwrap_or_else(Timestamp::now);
+            builder = builder.custom_created_at(created_at);
         }
         let event = builder
             .finalize(&keys)
             .context("failed to sign fabricated state event")?;
-
-        let relay_url = match opts.target {
-            PublishStateEventTarget::DefaultGrasp => self.grasp("repo").relay_url(),
-            PublishStateEventTarget::GraspRole(role) => self.grasp(&role).relay_url(),
-            PublishStateEventTarget::RelayUrl(url) => url,
-        };
 
         let client = Client::default();
         client
@@ -851,8 +861,6 @@ impl Harness {
                 Tag::custom("g", vec![ws_url])
             })
             .collect();
-
-        clock::tick_to_next_second().await;
 
         let event = EventBuilder::new(KIND_USER_GRASP_LIST, "")
             .tags(tags)
@@ -1853,11 +1861,7 @@ impl Harness {
     /// keeps the `relays_from_my_event` regression non-tautological.
     ///
     /// **Timestamp.** The fabricated announcement is back-dated 30s so
-    /// ngit's re-publish carries a strictly greater `created_at` and
-    /// the relay's replaceable-event semantics keep the newer copy.
-    /// Without this the two events can collide in the same unix second
-    /// — see `crate::clock` for the writeup, same root cause as the
-    /// `nostr_push` timing rule.
+    /// ngit's re-publish has an unambiguously newer timestamp.
     ///
     /// **Co-maintainer.** A single fresh [`Keys`] is minted and listed
     /// after the publisher in `maintainers`. The keypair need not
@@ -2035,12 +2039,7 @@ impl Harness {
     /// announcement carries the same EUC.
     ///
     /// **Timestamp.** The fabricated announcement is back-dated 30s so
-    /// the publisher's new event lands in a strictly later unix second.
-    /// Two events with different `(pubkey, kind, d)` tuples can coexist
-    /// on a relay regardless of `created_at`, but the same-second
-    /// chain-of-events flake mode in `crate::clock` still applies if
-    /// the publisher republishes — back-dating keeps the arrange's
-    /// timing predictable.
+    /// the publisher's new event has an unambiguously newer timestamp.
     ///
     /// **Selected maintainer.** A fresh [`Keys`] is minted to play the
     /// role of the selected maintainer; its public key is what

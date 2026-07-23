@@ -74,7 +74,11 @@
 //!   double-advertising the proposal (e.g. by treating a revision root as its
 //!   own independent proposal); zero would mean `list.rs` lost the proposal.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow};
 use nostr_sdk::prelude::*;
@@ -88,6 +92,56 @@ use tokio::sync::OnceCell;
 /// Identifier for this test repo — distinct from every other `git_push_pr`
 /// scenario so the shared vanilla relay's REQ surface stays uncontaminated.
 const IDENTIFIER: &str = "git-push-pr-patch-update-force";
+
+const EVENT_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(10);
+const EVENT_VISIBILITY_POLL: Duration = Duration::from_millis(25);
+
+/// Wait for GRASP to expose a patch event for `commit_oid` before a subsequent
+/// push tries to discover it.
+async fn wait_for_patch_event(
+    harness: &Harness,
+    commit_oid: &str,
+    minimum_event_count: usize,
+) -> Result<Vec<Event>> {
+    let deadline = Instant::now() + EVENT_VISIBILITY_TIMEOUT;
+    loop {
+        let events = harness
+            .grasp("repo")
+            .events(Filter::new().kind(Kind::GitPatch))
+            .await?;
+        if events.len() >= minimum_event_count
+            && events
+                .iter()
+                .any(|event| tag_value(event, "commit").as_deref() == Some(commit_oid))
+        {
+            return Ok(events);
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for at least {minimum_event_count} GitPatch events, including \
+                 commit={commit_oid}; observed {} event(s): {:?}",
+                events.len(),
+                events
+                    .iter()
+                    .map(|event| {
+                        format!(
+                            "id={} commit={:?} root={:?}",
+                            event.id,
+                            tag_value(event, "commit"),
+                            event.tags.iter().find_map(|tag| {
+                                let values = tag.as_slice();
+                                (values.first().map(String::as_str) == Some("e"))
+                                    .then(|| values.get(1).cloned())
+                                    .flatten()
+                            }),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        tokio::time::sleep(EVENT_VISIBILITY_POLL).await;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Snapshot
@@ -278,6 +332,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
             "git add maintainer-update.md",
         )
         .await?;
+
     maintainer_clone
         .git_ok(
             ["commit", "-m", "follow-up on patch series", "--no-gpg-sign"],
@@ -285,14 +340,20 @@ async fn capture_snapshot() -> Result<Snapshot> {
         )
         .await?;
 
+    let first_push_tip_oid = maintainer_clone
+        .rev_parse("HEAD")
+        .await
+        .context("rev-parse HEAD before first push")?;
+
     // --- 7. First push (fast-forward) ----------------------------------------
     //
-    // `nostr_push` ticks one unix second before pushing.  Adds one
-    // `Kind::GitPatch` event covering the new commit.  Total patch events: 3.
+    // Adds one `Kind::GitPatch` event covering the new commit. Wait for GRASP
+    // to expose it before the force push needs to discover this proposal.
     maintainer_clone
         .nostr_push(["origin", &remote_branch])
         .await
         .context("nostr_push of maintainer follow-up (first push) failed")?;
+    wait_for_patch_event(&harness, &first_push_tip_oid, 3).await?;
 
     // --- 8. Amend the tip commit ---------------------------------------------
     //
@@ -330,8 +391,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 9. Force push (revision #1) -----------------------------------------
     //
-    // `nostr_push` ticks another unix second before pushing (mandatory per
-    // the test-harness timing rule).  The `-f` flag causes git to prefix the
+    // The `-f` flag causes git to prefix the
     // refspec with `+`, which `push.rs:485` detects as a force push.  The
     // remote helper resolves all commits ahead of `main` (3 commits: the two
     // original contributor commits plus the amended maintainer commit) and
@@ -342,6 +402,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .nostr_push(["-f", "origin", &remote_branch])
         .await
         .context("nostr_push -f (force push after amend) failed")?;
+    wait_for_patch_event(&harness, &amended_tip_oid, 6).await?;
 
     // --- 10. Amend the tip commit again --------------------------------------
     //
@@ -404,10 +465,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .context("nostr_push -f (second force push after second amend) failed")?;
 
     // --- 12. Query GRASP state -----------------------------------------------
-    let all_patch_events = harness
-        .grasp("repo")
-        .events(Filter::new().kind(Kind::GitPatch))
-        .await?;
+    let all_patch_events = wait_for_patch_event(&harness, &amended_tip_2_oid, 9).await?;
 
     let pr_count = harness
         .grasp("repo")
@@ -426,8 +484,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // Both force pushes produce a revision root carrying
     // `t=root-revision` (or alias `revision-root`).  Disambiguate by
     // `created_at`: earlier = revision #1, later = revision #2.  The
-    // mandatory one-second tick in `nostr_push` guarantees strictly
-    // ordered timestamps.
+    // Event ordering deterministically distinguishes the two revisions.
     let mut revision_roots: Vec<Event> = all_patch_events
         .iter()
         .filter(|e| {

@@ -230,9 +230,9 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 6. Contributor: first push — creates original KIND_PULL_REQUEST -----
     //
-    // `nostr_push` ticks one whole unix second before pushing to avoid
-    // created_at collisions with the publish_repo state event.  `-u` sets
-    // upstream tracking; the second push does NOT use `-u` again (plain FF).
+    // `nostr_push` supplies the harness environment to the remote helper.
+    // `-u` sets upstream tracking; the second push does NOT use `-u` again
+    // (plain FF).
     contributor
         .nostr_push(["-u", "origin", &format!("pr/{BRANCH}")])
         .await

@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
-use test_harness::{Harness, KIND_REPO_STATE, PublishRepoOpts, tag_value, tick_to_next_second};
+use test_harness::{Harness, KIND_REPO_STATE, PublishRepoOpts, tag_value};
 
 const IDENTIFIER: &str = "state-push-all-servers-down";
 
@@ -60,7 +60,6 @@ async fn failed_git_server_push_does_not_report_success_or_fan_out_state() -> Re
         .context("repo grasp should be registered")?;
     drop(stopped_grasp);
 
-    tick_to_next_second().await;
     let push_out = publisher
         .git(["push", "origin", "main"])
         .output()

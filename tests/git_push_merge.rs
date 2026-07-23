@@ -61,11 +61,13 @@
 //! AsMaintainer)`. Either repo would hit the same `get_merged_status_events`
 //! code path on push; the choice is purely setup-cost.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use test_harness::{
     CloneLogin, Harness, KIND_PULL_REQUEST_UPDATE, PublishPatchSeriesOpts, PublishPrOpts,
-    PublishRepoOpts, PublishedPatchSeries, PublishedPr, PublishedRepo, Repo, clock,
+    PublishRepoOpts, PublishedPatchSeries, PublishedPr, PublishedRepo, Repo,
 };
 
 // ---------------------------------------------------------------------------
@@ -585,31 +587,35 @@ async fn find_merge_status_event(
     proposal: &MergedProposal,
     signer_pubkey: PublicKey,
 ) -> Result<Event> {
-    let events = harness
-        .grasp("repo")
-        .events(
-            Filter::new()
-                .author(signer_pubkey)
-                .kind(Kind::GitStatusApplied),
-        )
-        .await?;
-    let mut matches: Vec<Event> = events
-        .into_iter()
-        .filter(|e| event_root_e_tag(e) == Some(proposal.root_event_id))
-        .collect();
-    match matches.len() {
-        1 => Ok(matches.pop().unwrap()),
-        0 => anyhow::bail!(
-            "no Kind::GitStatusApplied event from {signer_pubkey} found on grasp `repo` \
-             whose root `e` tag matches proposal.root_event_id={}",
-            proposal.root_event_id,
-        ),
-        _ => anyhow::bail!(
-            "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for \
-             proposal.root_event_id={}; found {}",
-            proposal.root_event_id,
-            matches.len(),
-        ),
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let events = harness
+            .grasp("repo")
+            .events(
+                Filter::new()
+                    .author(signer_pubkey)
+                    .kind(Kind::GitStatusApplied),
+            )
+            .await?;
+        let mut matches: Vec<Event> = events
+            .into_iter()
+            .filter(|e| event_root_e_tag(e) == Some(proposal.root_event_id))
+            .collect();
+        match matches.len() {
+            1 => return Ok(matches.pop().unwrap()),
+            0 if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(50)).await,
+            0 => anyhow::bail!(
+                "no Kind::GitStatusApplied event from {signer_pubkey} found on grasp `repo` \
+                 whose root `e` tag matches proposal.root_event_id={}",
+                proposal.root_event_id,
+            ),
+            _ => anyhow::bail!(
+                "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for \
+                 proposal.root_event_id={}; found {}",
+                proposal.root_event_id,
+                matches.len(),
+            ),
+        }
     }
 }
 
@@ -639,28 +645,57 @@ async fn find_issue_resolved_status_event(
     issue_id: EventId,
     signer_pubkey: PublicKey,
 ) -> Result<Event> {
-    let events = harness
-        .grasp("repo")
-        .events(
-            Filter::new()
-                .author(signer_pubkey)
-                .kind(Kind::GitStatusApplied),
-        )
-        .await?;
-    let mut matches: Vec<Event> = events
-        .into_iter()
-        .filter(|e| event_root_e_tag(e) == Some(issue_id))
-        .collect();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let events = harness
+            .grasp("repo")
+            .events(
+                Filter::new()
+                    .author(signer_pubkey)
+                    .kind(Kind::GitStatusApplied),
+            )
+            .await?;
+        let mut matches: Vec<Event> = events
+            .into_iter()
+            .filter(|e| event_root_e_tag(e) == Some(issue_id))
+            .collect();
+        match matches.len() {
+            1 => return Ok(matches.pop().unwrap()),
+            0 if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(50)).await,
+            0 => anyhow::bail!(
+                "no Kind::GitStatusApplied event from {signer_pubkey} found for issue {issue_id}"
+            ),
+            _ => anyhow::bail!(
+                "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for issue {issue_id}; found {}",
+                matches.len(),
+            ),
+        }
+    }
+}
 
-    match matches.len() {
-        1 => Ok(matches.pop().unwrap()),
-        0 => anyhow::bail!(
-            "no Kind::GitStatusApplied event from {signer_pubkey} found for issue {issue_id}"
-        ),
-        _ => anyhow::bail!(
-            "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for issue {issue_id}; found {}",
-            matches.len(),
-        ),
+/// Wait until an event observed on GRASP is in an earlier NIP-01 second than
+/// the next event this scenario will publish. Merge selects the latest update
+/// by event ordering, so equal timestamps would make this test ambiguous.
+async fn wait_for_event_ordering(harness: &Harness, event_id: EventId) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let event = harness
+            .grasp("repo")
+            .events(Filter::new().id(event_id))
+            .await?
+            .into_iter()
+            .next()
+            .with_context(|| format!("event {event_id} disappeared from GRASP"))?;
+        if event.created_at < Timestamp::now() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for event {event_id} created at {} to enter an earlier NIP-01 second",
+                event.created_at,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -761,10 +796,8 @@ async fn merge_commit_publishes_status_event_referencing_proposal_and_commit() -
 
     let merge_oid = merge_pr_with_merge_commit(&maintainer_repo, &proposal).await?;
 
-    // Push must go via `nostr_push` so the auto-generated kind-30618
-    // state event covering the new main tip doesn't collide on
-    // `created_at` with the previous state event from `publish_repo`'s
-    // post-init push — see `test_harness::clock` for the writeup.
+    // Push must go via `nostr_push` so the remote helper receives the harness
+    // environment and publishes the state event covering the new main tip.
     maintainer_repo
         .nostr_push(["origin", "main"])
         .await
@@ -973,10 +1006,7 @@ async fn ngit_merge_of_updated_pr_publishes_status_event_for_original_pr() -> Re
         "original PR event should point at the initial feature tip",
     );
 
-    // `ngit merge` selects the latest PR update by event timestamp. Keep the
-    // update strictly newer than the original PR even when this test runs in
-    // parallel with the rest of the integration file.
-    clock::tick_to_next_second().await;
+    wait_for_event_ordering(&harness, original_pr_event.id).await?;
 
     std::fs::write(contributor.dir().join("c.md"), "gamma\n").context("failed to write c.md")?;
     git_ok(&contributor, ["add", "c.md"], "git add c.md").await?;
