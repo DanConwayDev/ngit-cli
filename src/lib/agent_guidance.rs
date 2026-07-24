@@ -2,6 +2,8 @@
 //!
 //! The state file is deliberately separate from the files it verifies: storing
 //! hashes in a managed file would make the hash self-referential.
+//! `AGENTS.md` or `CLAUDE.md` may receive an install-time skill pointer, but
+//! instruction documents remain user-owned and are never tracked or upgraded.
 
 use std::{
     fs,
@@ -20,16 +22,12 @@ pub const AGENTS_PATH: &str = "AGENTS.md";
 pub const CLAUDE_PATH: &str = "CLAUDE.md";
 pub const STATE_PATH: &str = ".agents/ngit-guidance.json";
 pub const REMINDERS_CONFIG_KEY: &str = "nostr.skill-reminders";
-const START: &str = "<!-- ngit-agent-guidance:start -->";
-const END: &str = "<!-- ngit-agent-guidance:end -->";
-const CLAUDE_START: &str = "<!-- ngit-agent-guidance-claude:start -->";
-const CLAUDE_END: &str = "<!-- ngit-agent-guidance-claude:end -->";
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedState {
     pub version: String,
-    pub files: Vec<ManagedFile>,
+    pub skill: ManagedFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +78,7 @@ fn hash(content: &str) -> String {
     encoded
 }
 
-fn managed_paths() -> [&'static str; 5] {
+fn allowed_paths() -> [&'static str; 5] {
     [
         AGENTS_PATH,
         CLAUDE_PATH,
@@ -90,8 +88,8 @@ fn managed_paths() -> [&'static str; 5] {
     ]
 }
 
-fn managed_content_paths() -> [&'static str; 4] {
-    [SKILL_PATH, CLAUDE_SKILL_PATH, AGENTS_PATH, CLAUDE_PATH]
+fn skill_paths() -> [&'static str; 2] {
+    [SKILL_PATH, CLAUDE_SKILL_PATH]
 }
 
 fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -208,26 +206,13 @@ fn create_managed_parent_dirs(root: &Path, relative: &str) -> Result<()> {
 }
 
 fn validate_state_files(state: &ManagedState) -> Result<()> {
-    for file in &state.files {
-        if !managed_content_paths().contains(&file.path.as_str()) {
-            bail!(
-                "ngit repository skill state contains unexpected managed path `{}`",
-                file.path
-            );
-        }
+    if !skill_paths().contains(&state.skill.path.as_str()) {
+        bail!(
+            "ngit repository skill state contains unexpected managed path `{}`",
+            state.skill.path
+        );
     }
     Ok(())
-}
-
-fn managed_content(path: &str, content: &str) -> Option<String> {
-    let (start, end) = match path {
-        AGENTS_PATH => (START, END),
-        CLAUDE_PATH => (CLAUDE_START, CLAUDE_END),
-        _ => return Some(content.to_string()),
-    };
-    let from = content.find(start)?;
-    let to = content[from..].find(end)? + from + end.len();
-    Some(content[from..to].to_string())
 }
 
 fn read_optional_text(path: &Path) -> Result<Option<String>> {
@@ -240,65 +225,73 @@ fn read_optional_text(path: &Path) -> Result<Option<String>> {
     }
 }
 
-fn policy() -> &'static str {
-    "## Repository collaboration\n\nThis repository uses ngit and Nostr for issues, pull requests, reviews, comments, merges, and repository state.\n\n- Do not use GitHub or GitLab issues, pull requests, APIs, or the `gh`/`glab` CLIs for repository collaboration.\n- For issue, pull request, review, comment, merge, push, clone, or repository metadata tasks, load and follow `.agents/skills/ngit/SKILL.md`.\n- Treat a `nostr://` remote as authoritative.\n- Pull request branches must use the `pr/` prefix.\n- If ngit is unavailable, report that it is required rather than falling back to GitHub or GitLab."
+fn policy(skill_path: &str) -> String {
+    format!(
+        "## Repository collaboration\n\nThis repository uses ngit and Nostr for issues, pull requests, reviews, comments, merges, and repository state.\n\n- Do not use GitHub or GitLab issues, pull requests, APIs, or the `gh`/`glab` CLIs for repository collaboration.\n- For issue, pull request, review, comment, merge, push, clone, or repository metadata tasks, load and follow `{skill_path}`.\n- Treat a `nostr://` remote as authoritative.\n- Pull request branches must use the `pr/` prefix.\n- If ngit is unavailable, report that it is required rather than falling back to GitHub or GitLab."
+    )
 }
 
-fn managed_section(start: &str, end: &str, body: &str) -> String {
-    format!("{start}\n{body}\n{end}\n")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ecosystem {
+    instruction_path: &'static str,
+    skill_path: &'static str,
 }
 
-fn replace_section(existing: Option<&str>, start: &str, end: &str, body: &str) -> Result<String> {
-    let section = managed_section(start, end, body);
-    let Some(existing) = existing else {
-        return Ok(section);
-    };
-    let starts = existing
-        .match_indices(start)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let ends = existing
-        .match_indices(end)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    match (starts.as_slice(), ends.as_slice()) {
-        ([], []) => Ok(if existing.is_empty() {
-            section
-        } else if existing.ends_with('\n') {
-            format!("{existing}\n{section}")
-        } else {
-            format!("{existing}\n\n{section}")
-        }),
-        ([from], [end_from]) if end_from >= from => {
-            let after = *end_from + end.len();
-            Ok(format!(
-                "{}{}{}",
-                &existing[..*from],
-                section.trim_end(),
-                &existing[after..]
-            ))
-        }
-        _ => bail!("managed ngit repository skill markers in file are malformed"),
+const AGENT_ECOSYSTEM: Ecosystem = Ecosystem {
+    instruction_path: AGENTS_PATH,
+    skill_path: SKILL_PATH,
+};
+const CLAUDE_ECOSYSTEM: Ecosystem = Ecosystem {
+    instruction_path: CLAUDE_PATH,
+    skill_path: CLAUDE_SKILL_PATH,
+};
+
+fn select_ecosystem(root: &Path) -> Ecosystem {
+    if root.join(AGENTS_PATH).exists() {
+        AGENT_ECOSYSTEM
+    } else if root.join(CLAUDE_PATH).exists() {
+        CLAUDE_ECOSYSTEM
+    } else if root.join(SKILL_PATH).exists() {
+        AGENT_ECOSYSTEM
+    } else if root.join(CLAUDE_SKILL_PATH).exists() {
+        CLAUDE_ECOSYSTEM
+    } else {
+        AGENT_ECOSYSTEM
     }
 }
 
-fn expected_files(root: &Path) -> Result<Vec<(String, String)>> {
-    let agents_path = validate_managed_path(root, AGENTS_PATH)?;
-    let claude_path = validate_managed_path(root, CLAUDE_PATH)?;
-    let agents = read_optional_text(&agents_path)?;
-    let claude = read_optional_text(&claude_path)?;
-    Ok(vec![
-        (SKILL_PATH.to_string(), CANONICAL_SKILL.to_string()),
-        (CLAUDE_SKILL_PATH.to_string(), CANONICAL_SKILL.to_string()),
-        (
-            AGENTS_PATH.to_string(),
-            replace_section(agents.as_deref(), START, END, policy())?,
-        ),
-        (
-            CLAUDE_PATH.to_string(),
-            replace_section(claude.as_deref(), CLAUDE_START, CLAUDE_END, "@AGENTS.md")?,
-        ),
-    ])
+fn append_policy(existing: Option<&str>, skill_path: &str) -> String {
+    if let Some(content) = existing.filter(|content| content.contains(skill_path)) {
+        return content.to_string();
+    }
+    let policy = policy(skill_path);
+    match existing {
+        None | Some("") => format!("{policy}\n"),
+        Some(content) if content.ends_with('\n') => format!("{content}\n{policy}\n"),
+        Some(content) => format!("{content}\n\n{policy}\n"),
+    }
+}
+
+fn expected_files(root: &Path, state: Option<&ManagedState>) -> Result<Vec<(String, String)>> {
+    if let Some(state) = state {
+        return Ok(vec![(
+            state.skill.path.clone(),
+            CANONICAL_SKILL.to_string(),
+        )]);
+    }
+
+    let ecosystem = select_ecosystem(root);
+    let instruction_path = validate_managed_path(root, ecosystem.instruction_path)?;
+    let existing = read_optional_text(&instruction_path)?;
+    let instruction = append_policy(existing.as_deref(), ecosystem.skill_path);
+    let mut files = vec![(
+        ecosystem.skill_path.to_string(),
+        CANONICAL_SKILL.to_string(),
+    )];
+    if existing.as_deref() != Some(instruction.as_str()) {
+        files.push((ecosystem.instruction_path.to_string(), instruction));
+    }
+    Ok(files)
 }
 
 pub fn load_state(root: &Path) -> Result<Option<ManagedState>> {
@@ -323,31 +316,23 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
             bundled_version,
             update_available: false,
             modified_files: vec![],
-            managed_files: vec![
-                SKILL_PATH.into(),
-                CLAUDE_SKILL_PATH.into(),
-                AGENTS_PATH.into(),
-                CLAUDE_PATH.into(),
-            ],
+            managed_files: vec![],
         });
     };
-    let mut modified_files = vec![];
-    for file in &state.files {
-        let path = validate_managed_path(root, &file.path)?;
-        let matches = read_optional_text(&path)?
-            .and_then(|content| managed_content(&file.path, &content))
-            .is_some_and(|content| hash(&content) == file.sha256);
-        if !matches {
-            modified_files.push(file.path.clone());
-        }
-    }
+    let path = validate_managed_path(root, &state.skill.path)?;
+    let modified_files =
+        if read_optional_text(&path)?.is_some_and(|content| hash(&content) == state.skill.sha256) {
+            vec![]
+        } else {
+            vec![state.skill.path.clone()]
+        };
     Ok(GuidanceStatus {
         installed: true,
         update_available: version_is_newer(&state.version, &bundled_version),
         installed_version: Some(state.version),
         bundled_version,
         modified_files,
-        managed_files: state.files.into_iter().map(|file| file.path).collect(),
+        managed_files: vec![state.skill.path],
     })
 }
 
@@ -361,10 +346,21 @@ pub fn update(root: &Path, force: bool) -> Result<GuidanceStatus> {
 }
 
 fn write_guidance(root: &Path, force: bool) -> Result<()> {
-    for relative in managed_paths() {
+    let existing_state = load_state(root)?;
+    let files = expected_files(root, existing_state.as_ref())?;
+    let skill_path = existing_state
+        .as_ref()
+        .map(|state| state.skill.path.clone())
+        .or_else(|| files.first().map(|(path, _)| path.clone()))
+        .context("repository skill plan has no skill file")?;
+    for relative in files
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .chain(std::iter::once(STATE_PATH))
+    {
         let _ = validate_managed_path(root, relative)?;
     }
-    if let Some(state) = load_state(root)? {
+    if let Some(state) = &existing_state {
         let bundled = bundled_version()?;
         if !force && version_is_newer(&bundled, &state.version) {
             bail!(
@@ -374,16 +370,6 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
             );
         }
         if !force {
-            if let Some(path) = [SKILL_PATH, CLAUDE_SKILL_PATH, AGENTS_PATH, CLAUDE_PATH]
-                .into_iter()
-                .find(|path| {
-                    !state.files.iter().any(|file| file.path == *path) && root.join(path).exists()
-                })
-            {
-                bail!(
-                    "refusing to overwrite unmanaged file `{path}`; rerun with --force to install the ngit repository skill"
-                );
-            }
             let current = status(root)?;
             if let Some(path) = current.modified_files.first() {
                 bail!(
@@ -391,21 +377,15 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
                 );
             }
         }
-    } else if !force {
-        let existing = [SKILL_PATH, CLAUDE_SKILL_PATH]
-            .into_iter()
-            .find(|path| root.join(path).exists());
-        if let Some(path) = existing {
-            bail!(
-                "refusing to overwrite unmanaged file `{path}`; rerun with --force to install the ngit repository skill"
-            );
-        }
+    } else if !force && root.join(&skill_path).exists() {
+        bail!(
+            "refusing to overwrite unmanaged file `{skill_path}`; rerun with --force to install the ngit repository skill"
+        );
     }
-    let files = expected_files(root)?;
     for (relative, content) in &files {
         create_managed_parent_dirs(root, relative)?;
         let path = validate_managed_path(root, relative)?;
-        if fs::read_to_string(&path).ok().as_deref() != Some(content) {
+        if read_optional_text(&path)?.as_deref() != Some(content) {
             let _ = validate_managed_path(root, relative)?;
             fs::write(&path, content)
                 .with_context(|| format!("failed to write {}", path.display()))?;
@@ -413,13 +393,10 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
     }
     let state = ManagedState {
         version: bundled_version()?,
-        files: files
-            .into_iter()
-            .map(|(path, content)| ManagedFile {
-                sha256: hash(&managed_content(&path, &content).expect("generated managed content")),
-                path,
-            })
-            .collect(),
+        skill: ManagedFile {
+            path: skill_path,
+            sha256: hash(CANONICAL_SKILL),
+        },
     };
     create_managed_parent_dirs(root, STATE_PATH)?;
     let state_path = validate_managed_path(root, STATE_PATH)?;
@@ -431,19 +408,22 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn proposed_diff(root: &Path) -> Result<String> {
-    let mut output = String::new();
-    let files = expected_files(root)?;
+fn expected_changes(root: &Path) -> Result<Vec<(String, String)>> {
+    let existing_state = load_state(root)?;
+    let files = expected_files(root, existing_state.as_ref())?;
+    let skill_path = existing_state
+        .as_ref()
+        .map(|state| state.skill.path.clone())
+        .or_else(|| files.first().map(|(path, _)| path.clone()))
+        .context("repository skill plan has no skill file")?;
     let state = ManagedState {
         version: bundled_version()?,
-        files: files
-            .iter()
-            .map(|(path, content)| ManagedFile {
-                path: path.clone(),
-                sha256: hash(&managed_content(path, content).expect("generated managed content")),
-            })
-            .collect(),
+        skill: ManagedFile {
+            path: skill_path,
+            sha256: hash(CANONICAL_SKILL),
+        },
     };
+    let mut changes = vec![];
     for (relative, expected) in files.into_iter().chain(std::iter::once((
         STATE_PATH.into(),
         format!("{}\n", serde_json::to_string_pretty(&state)?),
@@ -451,26 +431,10 @@ pub fn proposed_diff(root: &Path) -> Result<String> {
         let path = validate_managed_path(root, &relative)?;
         let actual = read_optional_text(&path)?.unwrap_or_default();
         if actual != expected {
-            output.push_str(&format!("--- a/{relative}\n+++ b/{relative}\n"));
-            output.push_str(&simple_diff(&actual, &expected));
+            changes.push((relative, expected));
         }
     }
-    Ok(output)
-}
-
-fn simple_diff(old: &str, new: &str) -> String {
-    let mut result = String::new();
-    for line in old.lines() {
-        result.push('-');
-        result.push_str(line);
-        result.push('\n');
-    }
-    for line in new.lines() {
-        result.push('+');
-        result.push_str(line);
-        result.push('\n');
-    }
-    result
+    Ok(changes)
 }
 
 #[must_use]
@@ -549,27 +513,39 @@ pub fn set_global_reminders_enabled(enabled: bool) -> Result<()> {
 }
 
 pub fn paths_for_commit(root: &Path) -> Result<Vec<PathBuf>> {
-    let paths = expected_files(root)?
+    let paths = expected_changes(root)?
         .into_iter()
         .map(|(path, _)| validate_managed_path(root, &path))
-        .chain(std::iter::once(validate_managed_path(root, STATE_PATH)))
         .collect::<Result<Vec<_>>>()?;
     Ok(paths)
 }
 
 const COMMIT_MESSAGE: &str = "chore: update ngit repository skill";
 
-fn target_paths() -> [&'static str; 5] {
-    managed_paths()
+fn validate_target_path(root: &Path, path: &Path) -> Result<PathBuf> {
+    let relative = path
+        .strip_prefix(root)
+        .context("guidance path outside worktree")?;
+    let relative = relative
+        .to_str()
+        .context("managed guidance path is not valid UTF-8")?;
+    if !allowed_paths().contains(&relative) {
+        bail!("unexpected guidance commit path `{relative}`");
+    }
+    validate_managed_path(root, relative)
 }
 
 /// Validate that a guidance-only commit can be made without absorbing any
 /// unrelated repository changes. This deliberately happens before setup writes
 /// its files, so callers can safely treat a failure as a no-op.
-pub fn preflight_dedicated_commit(repo: &crate::git::Repo, root: &Path) -> Result<()> {
-    // Parse the target files now: malformed markers are unsafe to replace, and
-    // this also validates that desired content can be computed before writing.
-    let _ = expected_files(root)?;
+pub fn preflight_dedicated_commit(
+    repo: &crate::git::Repo,
+    root: &Path,
+    target_paths: &[PathBuf],
+) -> Result<()> {
+    for path in target_paths {
+        let _ = validate_target_path(root, path)?;
+    }
     let head = repo
         .git_repo
         .head()
@@ -585,8 +561,11 @@ pub fn preflight_dedicated_commit(repo: &crate::git::Repo, root: &Path) -> Resul
     if index.has_conflicts() || index.write_tree()? != parent.tree_id() {
         bail!("cannot create a guidance commit while the Git index contains changes");
     }
-    for relative in target_paths() {
-        let status = match repo.git_repo.status_file(Path::new(relative)) {
+    for path in target_paths {
+        let relative = path
+            .strip_prefix(root)
+            .context("guidance path outside worktree")?;
+        let status = match repo.git_repo.status_file(relative) {
             Ok(status) => status,
             Err(error) if error.code() == git2::ErrorCode::NotFound => {
                 // A target that is absent from HEAD, the index, and the
@@ -594,8 +573,9 @@ pub fn preflight_dedicated_commit(repo: &crate::git::Repo, root: &Path) -> Resul
                 continue;
             }
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to inspect guidance target `{relative}`"));
+                return Err(error).with_context(|| {
+                    format!("failed to inspect guidance target `{}`", relative.display())
+                });
             }
         };
         if status.intersects(
@@ -607,7 +587,8 @@ pub fn preflight_dedicated_commit(repo: &crate::git::Repo, root: &Path) -> Resul
                 | git2::Status::CONFLICTED,
         ) {
             bail!(
-                "cannot create a guidance commit while target file `{relative}` has unstaged changes"
+                "cannot create a guidance commit while target file `{}` has unstaged changes",
+                relative.display()
             );
         }
     }
@@ -616,7 +597,11 @@ pub fn preflight_dedicated_commit(repo: &crate::git::Repo, root: &Path) -> Resul
 
 /// Create a commit containing only the installed guidance files. The caller
 /// must run [`preflight_dedicated_commit`] before changing the worktree.
-pub fn commit_guidance(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
+pub fn commit_guidance(
+    repo: &crate::git::Repo,
+    root: &Path,
+    target_paths: &[PathBuf],
+) -> Result<bool> {
     let index_path = repo.git_repo.path().join("index");
     let original_index = if index_path.exists() {
         Some(
@@ -626,7 +611,7 @@ pub fn commit_guidance(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
     } else {
         None
     };
-    let result = commit_guidance_inner(repo, root);
+    let result = commit_guidance_inner(repo, root, target_paths);
     if let Err(error) = result {
         match original_index {
             Some(contents) => fs::write(&index_path, contents).map(|_| ()),
@@ -639,7 +624,11 @@ pub fn commit_guidance(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
     result
 }
 
-fn commit_guidance_inner(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
+fn commit_guidance_inner(
+    repo: &crate::git::Repo,
+    root: &Path,
+    target_paths: &[PathBuf],
+) -> Result<bool> {
     let head = repo
         .git_repo
         .head()
@@ -648,7 +637,8 @@ fn commit_guidance_inner(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
     let tree = parent.tree()?;
     let mut index = repo.git_repo.index()?;
     index.read_tree(&tree)?;
-    for path in paths_for_commit(root)? {
+    for path in target_paths {
+        let path = validate_target_path(root, path)?;
         let relative = path
             .strip_prefix(root)
             .context("guidance path outside worktree")?;
@@ -741,15 +731,6 @@ mod tests {
         );
     }
     #[test]
-    fn section_replacement_preserves_surrounding_content() {
-        let input = "before\n<!-- ngit-agent-guidance:start -->\nold\n<!-- ngit-agent-guidance:end -->\nafter\n";
-        let output = replace_section(Some(input), START, END, "new").unwrap();
-        assert!(output.contains("before"));
-        assert!(output.contains("new"));
-        assert!(output.contains("after"));
-        assert!(!output.contains("old"));
-    }
-    #[test]
     fn warning_messages_are_exact() {
         let status = GuidanceStatus {
             installed: true,
@@ -767,46 +748,76 @@ mod tests {
         );
     }
     #[test]
-    fn setup_adopts_instruction_files_and_preserves_policy_neighbors() {
+    fn setup_defaults_to_agents_without_creating_claude_files() {
+        let root = temp_root();
+        setup(&root, false).unwrap();
+
+        assert!(root.join(AGENTS_PATH).is_file());
+        assert!(root.join(SKILL_PATH).is_file());
+        assert!(!root.join(CLAUDE_PATH).exists());
+        assert!(!root.join(CLAUDE_SKILL_PATH).exists());
+        assert!(
+            fs::read_to_string(root.join(AGENTS_PATH))
+                .unwrap()
+                .contains(SKILL_PATH)
+        );
+        let state = load_state(&root).unwrap().unwrap();
+        assert_eq!(state.skill.path, SKILL_PATH);
+        assert_eq!(status(&root).unwrap().managed_files, vec![SKILL_PATH]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_uses_existing_claude_without_creating_agents_files() {
+        let root = temp_root();
+        fs::write(root.join(CLAUDE_PATH), "# Claude instructions\n").unwrap();
+        setup(&root, false).unwrap();
+
+        let claude = fs::read_to_string(root.join(CLAUDE_PATH)).unwrap();
+        assert!(claude.contains("# Claude instructions"));
+        assert!(claude.contains(CLAUDE_SKILL_PATH));
+        assert!(root.join(CLAUDE_SKILL_PATH).is_file());
+        assert!(!root.join(AGENTS_PATH).exists());
+        assert!(!root.join(SKILL_PATH).exists());
+        assert_eq!(
+            load_state(&root).unwrap().unwrap().skill.path,
+            CLAUDE_SKILL_PATH
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_prefers_agents_and_leaves_existing_claude_untouched() {
         let root = temp_root();
         fs::write(
             root.join(AGENTS_PATH),
             "# Local instructions\n\nKeep this text.\n",
         )
         .unwrap();
-        fs::write(root.join(CLAUDE_PATH), "# Claude instructions\n").unwrap();
+        let claude = "# Claude instructions\n";
+        fs::write(root.join(CLAUDE_PATH), claude).unwrap();
         setup(&root, false).unwrap();
-        let first = fs::read_to_string(root.join(AGENTS_PATH)).unwrap();
-        setup(&root, false).unwrap();
-        assert_eq!(first, fs::read_to_string(root.join(AGENTS_PATH)).unwrap());
-        assert!(first.contains("Keep this text."));
-        assert_eq!(
-            fs::read_to_string(root.join(SKILL_PATH)).unwrap(),
-            fs::read_to_string(root.join(CLAUDE_SKILL_PATH)).unwrap()
-        );
+
         assert!(
-            fs::read_to_string(root.join(CLAUDE_PATH))
+            fs::read_to_string(root.join(AGENTS_PATH))
                 .unwrap()
-                .contains("@AGENTS.md")
+                .contains("Keep this text.")
         );
-        assert!(status(&root).unwrap().modified_files.is_empty());
+        assert_eq!(fs::read_to_string(root.join(CLAUDE_PATH)).unwrap(), claude);
+        assert!(root.join(SKILL_PATH).is_file());
+        assert!(!root.join(CLAUDE_SKILL_PATH).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn malformed_or_duplicate_markers_are_conflicts() {
+    fn setup_preserves_custom_instruction_wording_that_points_to_skill() {
         let root = temp_root();
-        fs::write(
-            root.join(AGENTS_PATH),
-            format!("{START}\nfirst\n{END}\n{START}\nsecond\n{END}\n"),
-        )
-        .unwrap();
-        assert!(
-            setup(&root, false)
-                .unwrap_err()
-                .to_string()
-                .contains("markers in file are malformed")
-        );
+        let custom = format!("# Local policy\n\nRead `{SKILL_PATH}` before collaborating.\n");
+        fs::write(root.join(AGENTS_PATH), &custom).unwrap();
+
+        setup(&root, false).unwrap();
+
+        assert_eq!(fs::read_to_string(root.join(AGENTS_PATH)).unwrap(), custom);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -845,9 +856,24 @@ mod tests {
     }
 
     #[test]
-    fn setup_validates_all_managed_paths_before_writing() {
+    fn update_ignores_non_utf8_instruction_files() {
         let root = temp_root();
-        fs::write(root.join(".claude"), "not a directory\n").unwrap();
+        setup(&root, false).unwrap();
+        let custom = [0xff, 0xfe, 0xfd];
+        fs::write(root.join(AGENTS_PATH), custom).unwrap();
+
+        assert!(paths_for_commit(&root).unwrap().is_empty());
+        update(&root, false).unwrap();
+
+        assert_eq!(fs::read(root.join(AGENTS_PATH)).unwrap(), custom);
+        assert!(status(&root).unwrap().modified_files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_validates_selected_paths_before_writing() {
+        let root = temp_root();
+        fs::write(root.join(".agents"), "not a directory\n").unwrap();
 
         assert!(
             setup(&root, false)
@@ -930,10 +956,10 @@ mod tests {
         fs::create_dir_all(root.join(".agents")).unwrap();
         let state = ManagedState {
             version: "1.0".into(),
-            files: vec![ManagedFile {
+            skill: ManagedFile {
                 path: "../../outside".into(),
                 sha256: "unused".into(),
-            }],
+            },
         };
         fs::write(
             root.join(STATE_PATH),

@@ -74,21 +74,25 @@ fn reconcile_for_account(
     is_maintainer: Option<bool>,
 ) -> Result<()> {
     let before = agent_guidance::status(&context.root)?;
-    let changes_needed = !agent_guidance::proposed_diff(&context.root)?.is_empty();
+    let paths_for_commit = agent_guidance::paths_for_commit(&context.root)?;
+    let changes_needed = !paths_for_commit.is_empty();
     let commit = changes_needed && is_maintainer == Some(true);
-    let commit_preflight =
-        commit.then(|| agent_guidance::preflight_dedicated_commit(&context.repo, &context.root));
+    let commit_preflight = commit.then(|| {
+        agent_guidance::preflight_dedicated_commit(&context.repo, &context.root, &paths_for_commit)
+    });
     agent_guidance::update(&context.root, force)?;
     let commit_created = match commit_preflight {
-        Some(Ok(())) => match agent_guidance::commit_guidance(&context.repo, &context.root) {
-            Ok(created) => created,
-            Err(error) => {
-                eprintln!(
-                    "could not create repository skill commit; changes remain uncommitted: {error:#}"
-                );
-                false
+        Some(Ok(())) => {
+            match agent_guidance::commit_guidance(&context.repo, &context.root, &paths_for_commit) {
+                Ok(created) => created,
+                Err(error) => {
+                    eprintln!(
+                        "could not create repository skill commit; changes remain uncommitted: {error:#}"
+                    );
+                    false
+                }
             }
-        },
+        }
         Some(Err(error)) => {
             eprintln!(
                 "could not create repository skill commit; changes remain uncommitted: {error:#}"
@@ -228,9 +232,10 @@ mod tests {
     #[test]
     fn guidance_commit_updates_the_real_index() {
         let (repo, root) = repository();
+        let paths = agent_guidance::paths_for_commit(&root).unwrap();
         agent_guidance::setup(&root, false).unwrap();
 
-        assert!(agent_guidance::commit_guidance(&repo, &root).unwrap());
+        assert!(agent_guidance::commit_guidance(&repo, &root, &paths).unwrap());
 
         let mut index = repo.git_repo.index().unwrap();
         let head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
@@ -243,12 +248,13 @@ mod tests {
         let (repo, root) = repository();
         let original_head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
         let head_name = repo.git_repo.head().unwrap().name().unwrap().to_owned();
+        let paths = agent_guidance::paths_for_commit(&root).unwrap();
         agent_guidance::setup(&root, false).unwrap();
         let lock_path = repo.git_repo.path().join(format!("{head_name}.lock"));
         fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
         fs::write(&lock_path, "locked\n").unwrap();
 
-        assert!(agent_guidance::commit_guidance(&repo, &root).is_err());
+        assert!(agent_guidance::commit_guidance(&repo, &root, &paths).is_err());
 
         let reopened = git2::Repository::open(&root).unwrap();
         let head = reopened.head().unwrap().peel_to_commit().unwrap();
@@ -268,13 +274,14 @@ mod tests {
     #[test]
     fn guidance_commit_refuses_a_dirty_index() {
         let (repo, root) = repository();
+        let paths = agent_guidance::paths_for_commit(&root).unwrap();
         fs::write(root.join("staged.txt"), "staged\n").unwrap();
         let mut index = repo.git_repo.index().unwrap();
         index.add_path(std::path::Path::new("staged.txt")).unwrap();
         index.write().unwrap();
 
         assert!(
-            agent_guidance::preflight_dedicated_commit(&repo, &root)
+            agent_guidance::preflight_dedicated_commit(&repo, &root, &paths)
                 .unwrap_err()
                 .to_string()
                 .contains("index contains changes")

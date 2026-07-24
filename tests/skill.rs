@@ -41,18 +41,51 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
         String::from_utf8_lossy(&setup.stderr)
     );
     assert!(repo.dir().join(".agents/ngit-guidance.json").is_file());
+    assert!(repo.dir().join("AGENTS.md").is_file());
+    assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
+    assert!(!repo.dir().join("CLAUDE.md").exists());
+    assert!(!repo.dir().join(".claude/skills/ngit/SKILL.md").exists());
 
     let status = repo.ngit(["skill", "status", "--json"]).output().await?;
     assert!(status.status.success());
     let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
     assert_eq!(json["installed_version"], json["bundled_version"]);
     assert_eq!(json["update_available"], false);
+    assert_eq!(
+        json["managed_files"],
+        serde_json::json!([".agents/skills/ngit/SKILL.md"])
+    );
 
+    let custom = "# Maintainer wording\n\nUse ngit for collaboration.\n";
+    fs::write(repo.dir().join("AGENTS.md"), custom)?;
     let update = repo.ngit(["skill", "upgrade"]).output().await?;
     assert!(
         update.status.success(),
         "skill update failed: {}",
         String::from_utf8_lossy(&update.stderr)
+    );
+    assert_eq!(fs::read_to_string(repo.dir().join("AGENTS.md"))?, custom);
+    Ok(())
+}
+
+#[tokio::test]
+async fn install_uses_existing_claude_without_creating_agents_files() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    fs::write(repo.dir().join("CLAUDE.md"), "# Existing Claude policy\n")?;
+
+    let install = repo.ngit(["skill", "install"]).output().await?;
+
+    assert!(
+        install.status.success(),
+        "skill install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
+    assert!(!repo.dir().join("AGENTS.md").exists());
+    assert!(!repo.dir().join(".agents/skills/ngit/SKILL.md").exists());
+    assert!(
+        fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains(".claude/skills/ngit/SKILL.md")
     );
     Ok(())
 }
