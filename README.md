@@ -73,4 +73,4 @@ eg self-hosted, github, codeberg, etc.
 Run `ngit skill install` to add repository guidance that teaches coding agents
 to use ngit. Use `ngit skill upgrade` to update it.
 
-Run `ngit skill --help` for status, diff, and reminder opt-out commands.
+Run `ngit skill --help` for status and reminder opt-out commands.

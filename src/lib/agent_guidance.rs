@@ -368,7 +368,7 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
             let current = status(root)?;
             if let Some(path) = current.modified_files.first() {
                 bail!(
-                    "refusing to overwrite locally modified managed file `{path}`; run `ngit skill diff`"
+                    "refusing to overwrite locally modified managed file `{path}`; rerun with --force to replace it"
                 );
             }
         }
@@ -890,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn modified_managed_files_refuse_update_and_diff_is_available() {
+    fn modified_managed_files_refuse_update_without_force() {
         let root = temp_root();
         setup(&root, false).unwrap();
         fs::write(root.join(SKILL_PATH), "locally customized").unwrap();
@@ -899,15 +899,14 @@ mod tests {
             setup(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("skill diff")
+                .contains("rerun with --force")
         );
         assert!(
             update(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("skill diff")
+                .contains("rerun with --force")
         );
-        assert!(proposed_diff(&root).unwrap().contains(SKILL_PATH));
         setup(&root, true).unwrap();
         fs::remove_dir_all(root).unwrap();
     }

@@ -257,8 +257,6 @@ pub enum SkillCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Show the proposed skill changes without modifying files
-    Diff,
     /// Disable repository skill reminders
     OptOut(SkillOptOutArgs),
 }

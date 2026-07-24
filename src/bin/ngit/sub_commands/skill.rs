@@ -43,10 +43,6 @@ pub async fn launch(command: &SkillCommands, force: bool) -> Result<()> {
             }
             Ok(())
         }
-        SkillCommands::Diff => {
-            print!("{}", agent_guidance::proposed_diff(&context.root)?);
-            Ok(())
-        }
         SkillCommands::OptOut(_) => unreachable!("opt-out handled before resolving a worktree"),
     }
 }
@@ -68,18 +64,42 @@ fn opt_out(args: &SkillOptOutArgs) -> Result<()> {
 }
 
 async fn reconcile(context: &SkillContext, force: bool) -> Result<()> {
+    let is_maintainer = resolve_maintainer(context).await;
+    reconcile_for_account(context, force, is_maintainer)
+}
+
+fn reconcile_for_account(
+    context: &SkillContext,
+    force: bool,
+    is_maintainer: Option<bool>,
+) -> Result<()> {
     let before = agent_guidance::status(&context.root)?;
     let changes_needed = !agent_guidance::proposed_diff(&context.root)?.is_empty();
-    let is_maintainer = resolve_maintainer(context).await;
-    let commit = is_maintainer == Some(true);
-    if commit {
-        agent_guidance::preflight_dedicated_commit(&context.repo, &context.root)?;
-    }
+    let commit = changes_needed && is_maintainer == Some(true);
+    let commit_preflight =
+        commit.then(|| agent_guidance::preflight_dedicated_commit(&context.repo, &context.root));
     agent_guidance::update(&context.root, force)?;
-    let commit_created = commit && agent_guidance::commit_guidance(&context.repo, &context.root)?;
+    let commit_created = match commit_preflight {
+        Some(Ok(())) => match agent_guidance::commit_guidance(&context.repo, &context.root) {
+            Ok(created) => created,
+            Err(error) => {
+                eprintln!(
+                    "could not create repository skill commit; changes remain uncommitted: {error:#}"
+                );
+                false
+            }
+        },
+        Some(Err(error)) => {
+            eprintln!(
+                "could not create repository skill commit; changes remain uncommitted: {error:#}"
+            );
+            false
+        }
+        None => false,
+    };
     if commit_created {
         eprintln!("created repository skill commit");
-    } else if !commit {
+    } else if changes_needed && is_maintainer != Some(true) {
         eprintln!("no commit created because the current account is not a repository maintainer");
     }
     let after = agent_guidance::status(&context.root)?;
@@ -190,6 +210,7 @@ mod tests {
         let mut index = git_repo.index().unwrap();
         index.add_path(std::path::Path::new("README.md")).unwrap();
         let tree_id = index.write_tree().unwrap();
+        index.write().unwrap();
         let signature = git_repo.signature().unwrap();
         git_repo
             .commit(
@@ -218,6 +239,33 @@ mod tests {
     }
 
     #[test]
+    fn failed_guidance_commit_restores_the_index_and_leaves_changes() {
+        let (repo, root) = repository();
+        let original_head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
+        let head_name = repo.git_repo.head().unwrap().name().unwrap().to_owned();
+        agent_guidance::setup(&root, false).unwrap();
+        let lock_path = repo.git_repo.path().join(format!("{head_name}.lock"));
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::write(&lock_path, "locked\n").unwrap();
+
+        assert!(agent_guidance::commit_guidance(&repo, &root).is_err());
+
+        let reopened = git2::Repository::open(&root).unwrap();
+        let head = reopened.head().unwrap().peel_to_commit().unwrap();
+        let mut index = reopened.index().unwrap();
+        assert_eq!(head.id(), original_head.id());
+        assert_eq!(index.write_tree().unwrap(), original_head.tree_id());
+        assert!(
+            reopened
+                .status_file(std::path::Path::new(agent_guidance::SKILL_PATH))
+                .unwrap()
+                .contains(git2::Status::WT_NEW)
+        );
+        fs::remove_file(lock_path).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn guidance_commit_refuses_a_dirty_index() {
         let (repo, root) = repository();
         fs::write(root.join("staged.txt"), "staged\n").unwrap();
@@ -230,6 +278,40 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("index contains changes")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn maintainer_install_leaves_changes_when_index_is_dirty() {
+        let (repo, root) = repository();
+        fs::write(root.join("staged.txt"), "staged\n").unwrap();
+        let mut index = repo.git_repo.index().unwrap();
+        index.add_path(std::path::Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+        let context = SkillContext {
+            repo,
+            root: root.clone(),
+        };
+
+        reconcile_for_account(&context, false, Some(true)).unwrap();
+
+        assert!(root.join(agent_guidance::SKILL_PATH).is_file());
+        assert!(
+            context
+                .repo
+                .git_repo
+                .status_file(std::path::Path::new("staged.txt"))
+                .unwrap()
+                .contains(git2::Status::INDEX_NEW)
+        );
+        assert!(
+            context
+                .repo
+                .git_repo
+                .status_file(std::path::Path::new(agent_guidance::SKILL_PATH))
+                .unwrap()
+                .contains(git2::Status::WT_NEW)
         );
         fs::remove_dir_all(root).unwrap();
     }
