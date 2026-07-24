@@ -50,6 +50,16 @@ pub struct Cli {
     /// relays
     #[arg(long, global = true)]
     pub repo_relay_only: bool,
+    /// Target repository for repo-scoped operations. Accepts a configured
+    /// nostr:// remote name, an naddr, or a nostr:// URL. Overrides
+    /// `nostr.repo`, tracked-upstream, and remote-based auto-detection.
+    ///
+    /// Available at any command position:
+    ///   `ngit --repo upstream send`
+    ///   `ngit issue --repo upstream create`
+    ///   `ngit issue create --repo upstream`
+    #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
+    pub repo: Option<String>,
 }
 
 pub fn customise_template() -> String {
@@ -662,6 +672,31 @@ mod tests {
     use clap::Parser;
 
     use super::Cli;
+
+    #[test]
+    fn repo_arg_is_accepted_at_every_command_position() {
+        // Documented policy: `--repo` is a global argument accepted at any
+        // level. Regression-test all three placements shown in the spec.
+        for args in [
+            ["ngit", "--repo", "upstream", "issue", "create"].as_slice(),
+            ["ngit", "issue", "--repo", "upstream", "create"].as_slice(),
+            ["ngit", "issue", "create", "--repo", "upstream"].as_slice(),
+            ["ngit", "--repo", "upstream", "send", "--defaults"].as_slice(),
+            ["ngit", "send", "--repo", "upstream", "--defaults"].as_slice(),
+            [
+                "ngit", "pr", "comment", "deadbeef", "--body", "hi", "--repo", "upstream",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args)
+                .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));
+            assert_eq!(
+                cli.repo.as_deref(),
+                Some("upstream"),
+                "--repo not captured for {args:?}"
+            );
+        }
+    }
 
     #[test]
     fn repo_relay_only_is_accepted_by_event_publishing_commands() {

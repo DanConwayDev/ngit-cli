@@ -10,10 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Expand `--repo-relay-only` to all ngit commands that publish nostr events.
+- Global `--repo <REMOTE|NADDR|NOSTR-URL>` argument selects the target repository for repo-scoped operations (`send`, `issue`, `pr`, `repo`, `sync`, and every other command that resolves a repository coordinate). Available at any command position (`ngit --repo upstream issue create`, `ngit issue --repo upstream create`, `ngit issue create --repo upstream`). Value is first matched against configured remote names, then parsed as an naddr, then as a `nostr://` URL.
+- Repo-coordinate resolution now prints a `target repository: <naddr> (source: ...)` diagnostic when publishing repo-scoped events, so an incorrect target is visible before the event is signed.
+
+### Changed
+
+- Repository-coordinate resolution now follows a documented priority: (1) explicit `--repo`, (2) `git config nostr.repo`, (3) current branch's tracked upstream if a `nostr://` remote, (4) `origin` if a `nostr://` remote, (5) sole remaining distinct nostr coordinate. When multiple distinct coordinates remain and none of the earlier rules match, ngit errors by default and prints how to disambiguate, instead of silently picking one at HashMap-iteration random. Interactive selection is offered only when `-i` is explicitly requested and uses deterministic (name-sorted) ordering.
 
 ### Fixed
 
 - Fast successive repository and proposal updates now order reliably despite Nostr's whole-second timestamps. Repository state, announcements, and statuses use bounded nonce grinding with a timestamp fallback; GRASP now honors the lower-event-ID tie-break for same-second state replacements. Patch revisions and pull-request upgrades or updates remain strictly ordered by timestamp.
+- Fix silent mis-targeting of repo-scoped events (`ngit send`, `ngit issue create`, `ngit pr *`, `ngit repo`, etc.) when a repository had multiple `nostr://` remotes with disagreeing coordinates. Previously the resolver iterated a `HashMap` and picked the first key it saw, ignored `nostr.repo`, and printed no diagnostic; the effect was that PRs and issues could be published against the wrong repository coordinate without warning. See the documented priority under "Changed".
 
 ## [2.6.3] - 2026-07-10
 
