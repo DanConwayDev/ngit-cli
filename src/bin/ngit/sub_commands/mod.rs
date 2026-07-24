@@ -1,4 +1,3 @@
-pub mod agent;
 pub mod apply;
 pub mod checkout;
 pub mod comment;
@@ -20,5 +19,6 @@ pub mod repo;
 pub mod send;
 pub mod set_cover_note;
 pub mod set_subject;
+pub mod skill;
 pub mod sync;
 pub mod whoami;

@@ -162,7 +162,7 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
     }
     let init_stderr = String::from_utf8_lossy(&init_output.stderr);
     assert!(
-        init_stderr.contains("ngit agent setup"),
+        init_stderr.contains("ngit skill"),
         "init did not suggest explicit guidance setup: {init_stderr}"
     );
     assert_eq!(
@@ -247,6 +247,47 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
             .unwrap_or_default(),
     );
 
+    let skill = repo.ngit(["skill"]).output().await?;
+    assert!(
+        skill.status.success(),
+        "maintainer skill install failed: {}",
+        String::from_utf8_lossy(&skill.stderr)
+    );
+    assert!(repo.dir().join(".agents/ngit-guidance.json").is_file());
+    let skill_oid = repo
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after skill install")?
+        .clone();
+    assert_ne!(
+        skill_oid, initial_oid,
+        "maintainer skill install did not create its dedicated commit"
+    );
+
+    let second_init = repo
+        .ngit([
+            "init",
+            "--name",
+            display_name,
+            "--identifier",
+            identifier,
+            "--grasp-server",
+            &grasp_url,
+            "-d",
+        ])
+        .output()
+        .await?;
+    assert!(
+        second_init.status.success(),
+        "repeat init failed: {}",
+        String::from_utf8_lossy(&second_init.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&second_init.stderr).contains("ngit skill"),
+        "repeat init suggested an already installed repository skill"
+    );
+
     Ok(())
 }
 
@@ -313,7 +354,7 @@ async fn init_defaults_preserves_staged_changes_without_installing_guidance() ->
     );
     let suggestion = String::from_utf8_lossy(&init.stderr);
     assert!(
-        suggestion.contains("ngit agent setup"),
+        suggestion.contains("ngit skill"),
         "missing explicit guidance setup suggestion: {suggestion}"
     );
     assert!(
@@ -332,6 +373,58 @@ async fn init_defaults_preserves_staged_changes_without_installing_guidance() ->
     assert!(
         !cached.status.success(),
         "the pre-existing staged change was unexpectedly cleared"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn init_honors_repository_skill_reminder_opt_out() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+
+    let create = repo
+        .ngit(["account", "create", "--local", "--name", "opted out"])
+        .output()
+        .await?;
+    assert!(create.status.success());
+    let commit = repo
+        .git(["commit", "--allow-empty", "-m", "init", "--no-gpg-sign"])
+        .output()
+        .await?;
+    assert!(commit.status.success());
+    let opt_out = repo.ngit(["skill", "--opt-out"]).output().await?;
+    assert!(opt_out.status.success());
+
+    let grasp_url = harness.grasp("repo").url().to_string();
+    let init = repo
+        .ngit([
+            "init",
+            "--name",
+            "opted out",
+            "--identifier",
+            "opted-out",
+            "--grasp-server",
+            &grasp_url,
+            "-d",
+        ])
+        .output()
+        .await?;
+    assert!(
+        init.status.success(),
+        "ngit init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&init.stderr).contains("ngit skill"),
+        "init ignored the repository skill reminder opt-out"
     );
 
     Ok(())

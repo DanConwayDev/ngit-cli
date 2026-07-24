@@ -54,7 +54,9 @@ async fn main() {
     }
 
     print_update_notice_if_available_at_startup().await;
-    print_agent_guidance_notice_if_available().await;
+    if !matches!(cli.command, Some(Commands::Init(_) | Commands::Skill(_))) {
+        print_skill_notice_if_available().await;
+    }
 
     let result = if let Some(command) = &cli.command {
         match command {
@@ -286,7 +288,7 @@ async fn main() {
                 }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
-            Commands::Agent(args) => sub_commands::agent::launch(&args.agent_command).await,
+            Commands::Skill(args) => sub_commands::skill::launch(args, cli.force).await,
             Commands::Merge(args) => {
                 sub_commands::merge::launch(
                     args.id.as_deref(),
@@ -325,7 +327,7 @@ async fn print_update_notice_if_available_at_startup() {
     let _ = ngit::version_check::print_update_notice_if_available(git_repo_path).await;
 }
 
-async fn print_agent_guidance_notice_if_available() {
+async fn print_skill_notice_if_available() {
     let Ok(repo) = git::Repo::discover() else {
         return;
     };

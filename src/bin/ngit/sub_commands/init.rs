@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    path::Path,
     process::{Command, Stdio},
     str::FromStr,
     sync::Arc,
@@ -11,6 +12,7 @@ use console::{Style, Term};
 use git2::Oid;
 use ngit::{
     accept_maintainership::{grasp_servers_from_user_or_fallback, wait_for_grasp_servers},
+    agent_guidance,
     cli_interactor::{
         PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
         show_multi_input_prompt_success,
@@ -73,7 +75,7 @@ enum InitState {
     },
 }
 
-fn may_install_guidance(state: &InitState) -> bool {
+fn may_suggest_skill(state: &InitState) -> bool {
     matches!(
         state,
         InitState::Fresh
@@ -1650,7 +1652,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     }
 
     // Phase 7: Build and publish
-    let suggest_agent_guidance = may_install_guidance(&state);
+    let suggest_skill = may_suggest_skill(&state);
     let result = publish_and_finalize(
         fields,
         signer,
@@ -1663,19 +1665,24 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         resolved_repo_coordinate.as_ref(),
     )
     .await;
-    if result.is_ok() && suggest_agent_guidance {
-        print_agent_guidance_suggestion();
+    if result.is_ok() && suggest_skill && should_suggest_skill(&git_repo, git_repo_path) {
+        print_skill_suggestion();
     }
     result
 }
 
-fn print_agent_guidance_suggestion() {
+fn should_suggest_skill(git_repo: &Repo, git_repo_path: &Path) -> bool {
+    agent_guidance::reminders_enabled(git_repo).unwrap_or(false)
+        && agent_guidance::status(git_repo_path).is_ok_and(|status| !status.installed)
+}
+
+fn print_skill_suggestion() {
     eprintln!(
         "{}",
         Style::new()
             .fg(console::Color::Color256(214))
             .apply_to(
-                "tip: help coding agents collaborate through ngit by running `ngit agent setup`",
+                "tip: help coding agents collaborate through ngit by running `ngit skill` (or `ngit skill --opt-out` to stop reminders)",
             )
             .for_stderr()
     );

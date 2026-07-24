@@ -107,6 +107,10 @@ Values are semicolon-separated URLs without spaces.
     they are fast-forward ahead of nostr state, without `--trust-server`.
     Example: {trust_server_example}
 
+  {skill_reminders}
+    Set to false to disable repository skill setup and update reminders.
+    For one repository, run: {skill_opt_out}
+
   {http_connect_timeout:<39} {http_connect_timeout_env:<32}
     HTTP connect timeout for libgit2 fetch/push operations in milliseconds.
     Default: {http_connect_timeout_default}. Example: {http_connect_timeout_example}
@@ -153,6 +157,8 @@ implementation details used for efficiency.
         trust_server_domains = key("nostr.trust-server-domains"),
         trust_server_example =
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
+        skill_reminders = key("nostr.skill-reminders true"),
+        skill_opt_out = cmd("ngit skill --opt-out"),
         http_connect_timeout = key("nostr.http-connect-timeout-ms"),
         http_connect_timeout_env = env("NGIT_HTTP_CONNECT_TIMEOUT_MS"),
         http_connect_timeout_default = key("3000"),
@@ -227,46 +233,28 @@ pub enum Commands {
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
-    /// install and update repository-managed coding-agent guidance
-    Agent(AgentSubCommandArgs),
+    /// install and update ngit's repository skill for coding agents
+    Skill(SkillArgs),
     /// create account, login, logout or export keys
     Account(AccountSubCommandArgs),
 }
 
-#[derive(clap::Parser)]
-pub struct AgentSubCommandArgs {
-    #[command(subcommand)]
-    pub agent_command: AgentCommands,
-}
-
-#[derive(Subcommand)]
-pub enum AgentCommands {
-    /// install ngit guidance into this repository
-    Setup {
-        /// Replace unmanaged or locally modified guidance, or downgrade
-        /// guidance
-        #[arg(long)]
-        force: bool,
-    },
-    /// show installed guidance and update state
-    Status {
-        /// Output status as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// update repository-managed guidance
-    Update {
-        /// Show the proposed changes without modifying files
-        #[arg(long, conflicts_with = "commit")]
-        diff: bool,
-        /// commit only the updated guidance files
-        #[arg(long)]
-        commit: bool,
-        /// Replace locally modified guidance or downgrade a newer installed
-        /// version
-        #[arg(long)]
-        force: bool,
-    },
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct SkillArgs {
+    /// Show installed guidance and available update status without changing
+    /// files
+    #[arg(long, conflicts_with_all = ["diff", "opt_out"])]
+    pub status: bool,
+    /// Output status as JSON
+    #[arg(long, requires = "status")]
+    pub json: bool,
+    /// Show the proposed changes without modifying files
+    #[arg(long, conflicts_with_all = ["status", "opt_out"])]
+    pub diff: bool,
+    /// Disable repository skill reminders in local Git config
+    #[arg(long, conflicts_with_all = ["status", "diff"])]
+    pub opt_out: bool,
 }
 
 #[derive(Subcommand)]

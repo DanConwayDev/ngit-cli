@@ -100,8 +100,13 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
     .await?;
     run_git_ok(&publisher, ["checkout", "main"], "git checkout main").await?;
 
-    let vnext_oid = publisher
-        .snapshot()?
+    let snapshot_before_push = publisher.snapshot()?;
+    let main_oid_v1 = snapshot_before_push
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after initial commit")?
+        .clone();
+    let vnext_oid = snapshot_before_push
         .refs
         .get("refs/heads/vnext")
         .context("refs/heads/vnext missing after vnext commit")?
@@ -143,12 +148,6 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
         clone_url.contains(&npub),
         "clone URL {clone_url} does not contain publisher's npub {npub}",
     );
-    let main_oid_v1 = publisher
-        .snapshot()?
-        .refs
-        .get("refs/heads/main")
-        .context("refs/heads/main missing after ngit init")?
-        .clone();
 
     // --- step 4: push both branches at once ---------------------------------
     //

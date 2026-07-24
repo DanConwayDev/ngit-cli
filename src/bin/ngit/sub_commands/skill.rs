@@ -7,9 +7,9 @@ use ngit::{
 };
 use serde::Serialize;
 
-use crate::cli::AgentCommands;
+use crate::cli::SkillArgs;
 
-struct AgentContext {
+struct SkillContext {
     repo: Repo,
     root: std::path::PathBuf,
 }
@@ -19,85 +19,99 @@ struct Output {
     #[serde(flatten)]
     guidance: agent_guidance::GuidanceStatus,
     is_maintainer: Option<bool>,
+    reminders_enabled: bool,
 }
 
-pub async fn launch(command: &AgentCommands) -> Result<()> {
+pub async fn launch(args: &SkillArgs, force: bool) -> Result<()> {
     let context = resolve_context()?;
-    match command {
-        AgentCommands::Setup { force } => {
-            agent_guidance::setup(&context.root, *force)?;
-            eprintln!("installed ngit agent guidance");
-        }
-        AgentCommands::Status { json } => {
-            let output = Output {
-                guidance: agent_guidance::status(&context.root)?,
-                is_maintainer: resolve_maintainer(&context).await,
-            };
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                println!("installed: {}", output.guidance.installed);
-                println!(
-                    "installed version: {}",
-                    output
-                        .guidance
-                        .installed_version
-                        .as_deref()
-                        .unwrap_or("none")
-                );
-                println!("bundled version: {}", output.guidance.bundled_version);
-                println!("update available: {}", output.guidance.update_available);
-                println!(
-                    "locally modified files: {}",
-                    if output.guidance.modified_files.is_empty() {
-                        "none".into()
-                    } else {
-                        output.guidance.modified_files.join(", ")
-                    }
-                );
-                println!(
-                    "current account is maintainer: {}",
-                    output.is_maintainer.map_or("unknown", |value| if value {
-                        "true"
-                    } else {
-                        "false"
-                    })
-                );
-                println!(
-                    "managed files: {}",
-                    output.guidance.managed_files.join(", ")
-                );
-            }
-        }
-        AgentCommands::Update {
-            diff,
-            commit,
-            force,
-        } => {
-            if *diff {
-                print!("{}", agent_guidance::proposed_diff(&context.root)?);
-                return Ok(());
-            }
-            if *commit {
-                agent_guidance::preflight_dedicated_commit(&context.repo, &context.root)?;
-            }
-            agent_guidance::update(&context.root, *force)?;
-            if *commit && agent_guidance::commit_guidance(&context.repo, &context.root)? {
-                eprintln!("created guidance commit");
-            }
-            eprintln!("updated ngit agent guidance");
-        }
+    if args.opt_out {
+        agent_guidance::set_reminders_enabled(&context.repo, false)?;
+        eprintln!(
+            "disabled ngit repository skill reminders for this repository; re-enable with `git config nostr.skill-reminders true`"
+        );
+        return Ok(());
     }
+    if args.status {
+        let output = Output {
+            guidance: agent_guidance::status(&context.root)?,
+            is_maintainer: resolve_maintainer(&context).await,
+            reminders_enabled: agent_guidance::reminders_enabled(&context.repo)?,
+        };
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            print_status(&output);
+        }
+        return Ok(());
+    }
+    if args.diff {
+        print!("{}", agent_guidance::proposed_diff(&context.root)?);
+        return Ok(());
+    }
+
+    let was_installed = agent_guidance::status(&context.root)?.installed;
+    let is_maintainer = resolve_maintainer(&context).await;
+    let commit = is_maintainer == Some(true);
+    if commit {
+        agent_guidance::preflight_dedicated_commit(&context.repo, &context.root)?;
+    }
+    agent_guidance::update(&context.root, force)?;
+    if commit && agent_guidance::commit_guidance(&context.repo, &context.root)? {
+        eprintln!("created repository skill commit");
+    } else if !commit {
+        eprintln!("repository skill changes are uncommitted");
+    }
+    eprintln!(
+        "{} ngit repository skill",
+        if was_installed {
+            "updated"
+        } else {
+            "installed"
+        }
+    );
     Ok(())
 }
 
-fn resolve_context() -> Result<AgentContext> {
-    let repo = Repo::discover().context("ngit agent must run inside a Git working tree")?;
-    let root = repo.get_path()?.to_path_buf();
-    Ok(AgentContext { repo, root })
+fn print_status(output: &Output) {
+    println!("installed: {}", output.guidance.installed);
+    println!(
+        "installed version: {}",
+        output
+            .guidance
+            .installed_version
+            .as_deref()
+            .unwrap_or("none")
+    );
+    println!("bundled version: {}", output.guidance.bundled_version);
+    println!("update available: {}", output.guidance.update_available);
+    println!(
+        "locally modified files: {}",
+        if output.guidance.modified_files.is_empty() {
+            "none".into()
+        } else {
+            output.guidance.modified_files.join(", ")
+        }
+    );
+    println!(
+        "current account is maintainer: {}",
+        output
+            .is_maintainer
+            .map_or("unknown", |value| if value { "true" } else { "false" })
+    );
+    println!("reminders enabled: {}", output.reminders_enabled);
+    println!(
+        "managed files: {}",
+        output.guidance.managed_files.join(", ")
+    );
 }
 
-async fn resolve_maintainer(context: &AgentContext) -> Option<bool> {
+fn resolve_context() -> Result<SkillContext> {
+    let repo = Repo::discover().context("ngit skill must run inside a Git working tree")?;
+    let root = repo.get_path()?.to_path_buf();
+    Ok(SkillContext { repo, root })
+}
+
+async fn resolve_maintainer(context: &SkillContext) -> Option<bool> {
     // Status remains useful without a Nostr remote, cached announcement, or
     // login. Resolve this extra metadata only when every local lookup works.
     let (_, decoded) = context
@@ -126,7 +140,7 @@ mod tests {
 
     fn repository() -> (Repo, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "ngit-agent-command-{}-{}",
+            "ngit-skill-command-{}-{}",
             std::process::id(),
             TEMP_ID.fetch_add(1, Ordering::Relaxed)
         ));

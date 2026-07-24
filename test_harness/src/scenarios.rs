@@ -155,13 +155,9 @@ pub struct PublishedRepo {
     /// `nostr://<npub>/<grasp>/<identifier>` URL exactly as printed by
     /// `ngit init` — pass straight to `git clone`.
     pub clone_url: String,
-    /// Commit oid of `refs/heads/main` after `ngit init` has installed its
-    /// repository guidance. Use to assert that a later clone resolves to the
-    /// same tree and as the merge base for subsequent proposals.
+    /// Commit oid of `refs/heads/main` after the initial seed commit.
+    /// Use to assert that a later clone resolves to the same tree.
     pub initial_oid: String,
-    /// The original seed commit advertised as the repository's earliest
-    /// unique/root commit.
-    pub root_oid: String,
     /// Keypairs for the *additional* co-maintainers minted by
     /// [`PublishRepoOpts::additional_maintainer_count`], in the order they
     /// were minted — same order they appear on the announcement's
@@ -281,7 +277,7 @@ impl Harness {
         )?;
 
         let snapshot = publisher.snapshot()?;
-        let root_oid = snapshot
+        let initial_oid = snapshot
             .refs
             .get("refs/heads/main")
             .context("refs/heads/main missing after initial commit")?
@@ -375,13 +371,6 @@ impl Harness {
             )
         })?;
 
-        let initial_oid = publisher
-            .snapshot()?
-            .refs
-            .get("refs/heads/main")
-            .context("refs/heads/main missing after ngit init")?
-            .clone();
-
         // --- 4. push to graduate the announcement -----------------------------
         //
         // Without this push the kind 30617 stays in ngit-grasp's purgatory
@@ -408,7 +397,6 @@ impl Harness {
                 display_name,
                 clone_url,
                 initial_oid,
-                root_oid,
                 additional_maintainer_keys,
                 feature_counter: Arc::new(AtomicU32::new(1)),
             },

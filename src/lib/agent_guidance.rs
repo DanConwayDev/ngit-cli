@@ -5,7 +5,8 @@
 
 use std::{
     fs,
-    path::{Path, PathBuf},
+    io::ErrorKind,
+    path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,12 +20,12 @@ pub const CLAUDE_SKILL_PATH: &str = ".claude/skills/ngit/SKILL.md";
 pub const AGENTS_PATH: &str = "AGENTS.md";
 pub const CLAUDE_PATH: &str = "CLAUDE.md";
 pub const STATE_PATH: &str = ".agents/ngit-guidance.json";
+pub const REMINDERS_CONFIG_KEY: &str = "nostr.skill-reminders";
 const START: &str = "<!-- ngit-agent-guidance:start -->";
 const END: &str = "<!-- ngit-agent-guidance:end -->";
 const CLAUDE_START: &str = "<!-- ngit-agent-guidance-claude:start -->";
 const CLAUDE_END: &str = "<!-- ngit-agent-guidance-claude:end -->";
-pub const WARNING_INTERVAL_SECS: i64 = 24 * 60 * 60;
-const WARNING_SAMPLE_DAYS: u8 = 5;
+pub const WARNING_INTERVAL_SECS: i64 = 30 * 24 * 60 * 60;
 
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
 
@@ -73,6 +74,145 @@ pub fn bundled_version() -> Result<String> {
 
 fn hash(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
+}
+
+fn managed_paths() -> [&'static str; 5] {
+    [
+        AGENTS_PATH,
+        CLAUDE_PATH,
+        SKILL_PATH,
+        CLAUDE_SKILL_PATH,
+        STATE_PATH,
+    ]
+}
+
+fn managed_content_paths() -> [&'static str; 4] {
+    [SKILL_PATH, CLAUDE_SKILL_PATH, AGENTS_PATH, CLAUDE_PATH]
+}
+
+fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!("invalid managed guidance path `{relative}`");
+    }
+
+    let canonical_root = fs::canonicalize(root)
+        .with_context(|| format!("failed to resolve repository root {}", root.display()))?;
+    let mut current = root.to_path_buf();
+    let components = relative_path.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    bail!(
+                        "refusing to access managed guidance path `{relative}` because {} is a symlink",
+                        current.display()
+                    );
+                }
+                if index + 1 < components.len() && !metadata.is_dir() {
+                    bail!(
+                        "refusing to access managed guidance path `{relative}` because {} is not a directory",
+                        current.display()
+                    );
+                }
+                let resolved = fs::canonicalize(&current).with_context(|| {
+                    format!(
+                        "failed to resolve managed guidance path {}",
+                        current.display()
+                    )
+                })?;
+                if !resolved.starts_with(&canonical_root) {
+                    bail!(
+                        "refusing to access managed guidance path `{relative}` outside the repository"
+                    );
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect managed guidance path {}",
+                        current.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(root.join(relative_path))
+}
+
+fn create_managed_parent_dirs(root: &Path, relative: &str) -> Result<()> {
+    let relative_path = Path::new(relative);
+    let Some(parent) = relative_path.parent() else {
+        return Ok(());
+    };
+    let mut current = root.to_path_buf();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!(
+                        "refusing to create managed guidance path `{relative}` through {}",
+                        current.display()
+                    );
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "failed to create managed guidance directory {}",
+                                current.display()
+                            )
+                        });
+                    }
+                }
+                let metadata = fs::symlink_metadata(&current).with_context(|| {
+                    format!(
+                        "failed to inspect managed guidance directory {}",
+                        current.display()
+                    )
+                })?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!(
+                        "refusing to create managed guidance path `{relative}` through {}",
+                        current.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect managed guidance directory {}",
+                        current.display()
+                    )
+                });
+            }
+        }
+    }
+    let _ = validate_managed_path(root, relative)?;
+    Ok(())
+}
+
+fn validate_state_files(state: &ManagedState) -> Result<()> {
+    for file in &state.files {
+        if !managed_content_paths().contains(&file.path.as_str()) {
+            bail!(
+                "ngit repository skill state contains unexpected managed path `{}`",
+                file.path
+            );
+        }
+    }
+    Ok(())
 }
 
 fn managed_content(path: &str, content: &str) -> Option<String> {
@@ -124,13 +264,15 @@ fn replace_section(existing: Option<&str>, start: &str, end: &str, body: &str) -
                 &existing[after..]
             ))
         }
-        _ => bail!("managed ngit agent guidance markers in file are malformed"),
+        _ => bail!("managed ngit repository skill markers in file are malformed"),
     }
 }
 
 fn expected_files(root: &Path) -> Result<Vec<(String, String)>> {
-    let agents = fs::read_to_string(root.join(AGENTS_PATH)).ok();
-    let claude = fs::read_to_string(root.join(CLAUDE_PATH)).ok();
+    let agents_path = validate_managed_path(root, AGENTS_PATH)?;
+    let claude_path = validate_managed_path(root, CLAUDE_PATH)?;
+    let agents = fs::read_to_string(agents_path).ok();
+    let claude = fs::read_to_string(claude_path).ok();
     Ok(vec![
         (SKILL_PATH.to_string(), CANONICAL_SKILL.to_string()),
         (CLAUDE_SKILL_PATH.to_string(), CANONICAL_SKILL.to_string()),
@@ -146,15 +288,16 @@ fn expected_files(root: &Path) -> Result<Vec<(String, String)>> {
 }
 
 pub fn load_state(root: &Path) -> Result<Option<ManagedState>> {
-    let path = root.join(STATE_PATH);
+    let path = validate_managed_path(root, STATE_PATH)?;
     if !path.exists() {
         return Ok(None);
     }
-    serde_json::from_str(
+    let state: ManagedState = serde_json::from_str(
         &fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?,
     )
-    .context("failed to parse ngit agent guidance state")
-    .map(Some)
+    .context("failed to parse ngit repository skill state")?;
+    validate_state_files(&state)?;
+    Ok(Some(state))
 }
 
 pub fn status(root: &Path) -> Result<GuidanceStatus> {
@@ -174,18 +317,17 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
             ],
         });
     };
-    let modified_files = state
-        .files
-        .iter()
-        .filter(|file| {
-            fs::read_to_string(root.join(&file.path))
-                .ok()
-                .and_then(|content| managed_content(&file.path, &content))
-                .filter(|content| hash(content) == file.sha256)
-                .is_none()
-        })
-        .map(|file| file.path.clone())
-        .collect();
+    let mut modified_files = vec![];
+    for file in &state.files {
+        let path = validate_managed_path(root, &file.path)?;
+        let matches = fs::read_to_string(path)
+            .ok()
+            .and_then(|content| managed_content(&file.path, &content))
+            .is_some_and(|content| hash(&content) == file.sha256);
+        if !matches {
+            modified_files.push(file.path.clone());
+        }
+    }
     Ok(GuidanceStatus {
         installed: true,
         update_available: version_is_newer(&state.version, &bundled_version),
@@ -210,7 +352,7 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
         let bundled = bundled_version()?;
         if !force && version_is_newer(&bundled, &state.version) {
             bail!(
-                "refusing to downgrade ngit agent guidance from {} to {}; rerun with --force to override",
+                "refusing to downgrade ngit repository skill from {} to {}; rerun with --force to override",
                 state.version,
                 bundled
             );
@@ -223,13 +365,13 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
                 })
             {
                 bail!(
-                    "refusing to overwrite unmanaged file `{path}`; rerun with --force to install ngit agent guidance"
+                    "refusing to overwrite unmanaged file `{path}`; rerun with --force to install the ngit repository skill"
                 );
             }
             let current = status(root)?;
             if let Some(path) = current.modified_files.first() {
                 bail!(
-                    "refusing to overwrite locally modified managed file `{path}`; run `ngit agent update --diff`"
+                    "refusing to overwrite locally modified managed file `{path}`; run `ngit skill --diff`"
                 );
             }
         }
@@ -239,17 +381,16 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
             .find(|path| root.join(path).exists());
         if let Some(path) = existing {
             bail!(
-                "refusing to overwrite unmanaged file `{path}`; rerun with --force to install ngit agent guidance"
+                "refusing to overwrite unmanaged file `{path}`; rerun with --force to install the ngit repository skill"
             );
         }
     }
     let files = expected_files(root)?;
     for (relative, content) in &files {
-        let path = root.join(relative);
+        create_managed_parent_dirs(root, relative)?;
+        let path = validate_managed_path(root, relative)?;
         if fs::read_to_string(&path).ok().as_deref() != Some(content) {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
+            let _ = validate_managed_path(root, relative)?;
             fs::write(&path, content)
                 .with_context(|| format!("failed to write {}", path.display()))?;
         }
@@ -264,10 +405,9 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
             })
             .collect(),
     };
-    let state_path = root.join(STATE_PATH);
-    if let Some(parent) = state_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    create_managed_parent_dirs(root, STATE_PATH)?;
+    let state_path = validate_managed_path(root, STATE_PATH)?;
+    let _ = validate_managed_path(root, STATE_PATH)?;
     fs::write(
         state_path,
         format!("{}\n", serde_json::to_string_pretty(&state)?),
@@ -292,7 +432,8 @@ pub fn proposed_diff(root: &Path) -> Result<String> {
         STATE_PATH.into(),
         format!("{}\n", serde_json::to_string_pretty(&state)?),
     ))) {
-        let actual = fs::read_to_string(root.join(&relative)).unwrap_or_default();
+        let path = validate_managed_path(root, &relative)?;
+        let actual = fs::read_to_string(path).unwrap_or_default();
         if actual != expected {
             output.push_str(&format!("--- a/{relative}\n+++ b/{relative}\n"));
             output.push_str(&simple_diff(&actual, &expected));
@@ -350,10 +491,10 @@ pub fn warning_for(status: &GuidanceStatus) -> Option<WarningKind> {
 pub fn warning_message(status: &GuidanceStatus) -> Option<String> {
     match warning_for(status)? {
         WarningKind::Setup => Some(
-            "warning: this ngit repository has no agent guidance; run `ngit agent setup`".into(),
+            "tip: install ngit's repository skill so coding agents use ngit instead of GitHub; run `ngit skill` (or `ngit skill --opt-out` to stop reminders)".into(),
         ),
         WarningKind::Update => Some(format!(
-            "warning: newer ngit agent guidance is available ({} -> {}); run `ngit agent update`",
+            "tip: newer ngit repository skill guidance is available ({} -> {}); run `ngit skill` (or `ngit skill --opt-out` to stop reminders)",
             status.installed_version.as_deref().unwrap_or("unknown"),
             status.bundled_version
         )),
@@ -365,12 +506,27 @@ pub fn should_warn(last_seen: Option<i64>, now: i64) -> bool {
     last_seen.is_none_or(|last| now.saturating_sub(last) >= WARNING_INTERVAL_SECS)
 }
 
-#[must_use]
-pub fn should_sample_warning(seed: &str, now: i64) -> bool {
-    let digest = Sha256::digest(seed.as_bytes());
-    let phase = i64::from(digest[0] % WARNING_SAMPLE_DAYS);
-    let day = now.div_euclid(WARNING_INTERVAL_SECS);
-    day.rem_euclid(i64::from(WARNING_SAMPLE_DAYS)) == phase
+pub fn reminders_enabled(repo: &crate::git::Repo) -> Result<bool> {
+    use crate::git::RepoActions;
+
+    let Some(value) = repo.get_git_config_item(REMINDERS_CONFIG_KEY, None)? else {
+        return Ok(true);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(true),
+        "false" | "no" | "off" | "0" => Ok(false),
+        _ => bail!("invalid boolean value `{value}` for git config `{REMINDERS_CONFIG_KEY}`"),
+    }
+}
+
+pub fn set_reminders_enabled(repo: &crate::git::Repo, enabled: bool) -> Result<()> {
+    use crate::git::RepoActions;
+
+    repo.save_git_config_item(
+        REMINDERS_CONFIG_KEY,
+        if enabled { "true" } else { "false" },
+        false,
+    )
 }
 
 #[must_use]
@@ -381,23 +537,18 @@ pub fn now_secs() -> i64 {
 }
 
 pub fn paths_for_commit(root: &Path) -> Result<Vec<PathBuf>> {
-    Ok(expected_files(root)?
+    let paths = expected_files(root)?
         .into_iter()
-        .map(|(path, _)| root.join(path))
-        .chain(std::iter::once(root.join(STATE_PATH)))
-        .collect())
+        .map(|(path, _)| validate_managed_path(root, &path))
+        .chain(std::iter::once(validate_managed_path(root, STATE_PATH)))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(paths)
 }
 
-const COMMIT_MESSAGE: &str = "chore: update ngit agent guidance";
+const COMMIT_MESSAGE: &str = "chore: update ngit repository skill";
 
 fn target_paths() -> [&'static str; 5] {
-    [
-        AGENTS_PATH,
-        CLAUDE_PATH,
-        SKILL_PATH,
-        CLAUDE_SKILL_PATH,
-        STATE_PATH,
-    ]
+    managed_paths()
 }
 
 /// Validate that a guidance-only commit can be made without absorbing any
@@ -513,63 +664,6 @@ fn commit_guidance_inner(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-#[derive(Clone)]
-struct FileSnapshot {
-    path: PathBuf,
-    contents: Option<Vec<u8>>,
-}
-
-fn snapshot_targets(root: &Path) -> Result<Vec<FileSnapshot>> {
-    target_paths()
-        .into_iter()
-        .map(|relative| {
-            let path = root.join(relative);
-            let contents = if path.exists() {
-                Some(
-                    fs::read(&path)
-                        .with_context(|| format!("failed to read {}", path.display()))?,
-                )
-            } else {
-                None
-            };
-            Ok(FileSnapshot { path, contents })
-        })
-        .collect()
-}
-
-fn restore_targets(snapshots: &[FileSnapshot]) -> Result<()> {
-    for snapshot in snapshots {
-        match &snapshot.contents {
-            Some(contents) => {
-                if let Some(parent) = snapshot.path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&snapshot.path, contents)?;
-            }
-            None if snapshot.path.exists() => fs::remove_file(&snapshot.path)?,
-            None => {}
-        }
-    }
-    Ok(())
-}
-
-/// Install and commit guidance atomically enough for automatic setup: every
-/// target file and the real index are restored if writing or committing fails.
-pub fn setup_and_commit(repo: &crate::git::Repo, root: &Path) -> Result<bool> {
-    preflight_dedicated_commit(repo, root)?;
-    let snapshots = snapshot_targets(root)?;
-    let result = (|| {
-        setup(root, false)?;
-        commit_guidance(repo, root)
-    })();
-    if let Err(error) = result {
-        restore_targets(&snapshots)
-            .context("failed to restore agent guidance after setup failure")?;
-        return Err(error);
-    }
-    result
-}
-
 /// Best-effort only: this deliberately uses the cached public account key and
 /// repository announcement, so it neither prompts nor asks a NIP-46 signer to
 /// sign. Errors are swallowed by callers because a warning must never affect
@@ -580,27 +674,23 @@ pub async fn warn_if_maintainer(
 ) -> Result<()> {
     use crate::{git::RepoActions, login::get_likely_logged_in_user};
     let root = repo.get_path()?;
+    if !reminders_enabled(repo)? {
+        return Ok(());
+    }
     let Ok(Some(account)) = get_likely_logged_in_user(root).await else {
         return Ok(());
     };
     if !repo_ref.maintainers.contains(&account) {
         return Ok(());
     }
-    let now = now_secs();
-    let warning_seed = format!("{}:{}", repo_ref.selected_maintainer, repo_ref.identifier);
-    if !should_sample_warning(&warning_seed, now) {
-        return Ok(());
-    }
     let status = status(root)?;
     let Some(message) = warning_message(&status) else {
         return Ok(());
     };
-    let throttle_key = format!(
-        "nostr.agent-guidance-warning-{}",
-        status.bundled_version.replace('.', "-")
-    );
+    let now = now_secs();
+    let throttle_key = "nostr.skill-warning-last-seen";
     let last_seen = repo
-        .get_git_config_item(&throttle_key, Some(false))?
+        .get_git_config_item(throttle_key, Some(false))?
         .and_then(|value| value.parse().ok());
     if !should_warn(last_seen, now) {
         return Ok(());
@@ -613,12 +703,14 @@ pub async fn warn_if_maintainer(
             .for_stderr()
     );
     // Git config is repository-local machine state, never a tracked-file mutation.
-    repo.save_git_config_item(&throttle_key, &now.to_string(), false)?;
+    repo.save_git_config_item(throttle_key, &now.to_string(), false)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -642,20 +734,6 @@ mod tests {
         assert!(should_warn(Some(100), 100 + WARNING_INTERVAL_SECS));
     }
     #[test]
-    fn warning_sampling_selects_one_day_in_five() {
-        let sampled_days = (0..i64::from(WARNING_SAMPLE_DAYS))
-            .filter(|day| should_sample_warning("repo-coordinate", day * WARNING_INTERVAL_SECS))
-            .count();
-        assert_eq!(sampled_days, 1);
-        assert_eq!(
-            should_sample_warning("repo-coordinate", 2 * WARNING_INTERVAL_SECS),
-            should_sample_warning(
-                "repo-coordinate",
-                (2 + i64::from(WARNING_SAMPLE_DAYS)) * WARNING_INTERVAL_SECS
-            )
-        );
-    }
-    #[test]
     fn section_replacement_preserves_surrounding_content() {
         let input = "before\n<!-- ngit-agent-guidance:start -->\nold\n<!-- ngit-agent-guidance:end -->\nafter\n";
         let output = replace_section(Some(input), START, END, "new").unwrap();
@@ -677,7 +755,7 @@ mod tests {
         assert_eq!(
             warning_message(&status).as_deref(),
             Some(
-                "warning: newer ngit agent guidance is available (1.0 -> 1.1); run `ngit agent update`"
+                "tip: newer ngit repository skill guidance is available (1.0 -> 1.1); run `ngit skill` (or `ngit skill --opt-out` to stop reminders)"
             )
         );
     }
@@ -739,6 +817,97 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_refuses_symlinked_managed_file_even_with_force() {
+        let root = temp_root();
+        let outside = root.with_extension("outside");
+        fs::write(&outside, "outside content\n").unwrap();
+        symlink(&outside, root.join(AGENTS_PATH)).unwrap();
+
+        for force in [false, true] {
+            assert!(
+                setup(&root, force)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is a symlink")
+            );
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "outside content\n");
+        }
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_refuses_symlinked_managed_parent() {
+        let root = temp_root();
+        let outside = root.with_extension("outside-dir");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join(".agents")).unwrap();
+
+        assert!(
+            setup(&root, true)
+                .unwrap_err()
+                .to_string()
+                .contains("is a symlink")
+        );
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_refuses_symlinked_state_file() {
+        let root = temp_root();
+        fs::create_dir_all(root.join(".agents")).unwrap();
+        let outside = root.with_extension("outside-state");
+        fs::write(&outside, "{}\n").unwrap();
+        symlink(&outside, root.join(STATE_PATH)).unwrap();
+
+        assert!(
+            status(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("is a symlink")
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "{}\n");
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(outside).unwrap();
+    }
+
+    #[test]
+    fn status_rejects_unexpected_paths_from_state() {
+        let root = temp_root();
+        fs::create_dir_all(root.join(".agents")).unwrap();
+        let state = ManagedState {
+            version: "1.0".into(),
+            files: vec![ManagedFile {
+                path: "../../outside".into(),
+                sha256: "unused".into(),
+            }],
+        };
+        fs::write(
+            root.join(STATE_PATH),
+            format!("{}\n", serde_json::to_string_pretty(&state).unwrap()),
+        )
+        .unwrap();
+
+        assert!(
+            status(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected managed path")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn modified_managed_files_refuse_update_and_diff_is_available() {
         let root = temp_root();

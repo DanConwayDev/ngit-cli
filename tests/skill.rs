@@ -16,7 +16,7 @@ struct TestRepo {
 impl TestRepo {
     fn new() -> Result<Self> {
         let path = std::env::temp_dir().join(format!(
-            "ngit-agent-guidance-cli-{}-{}",
+            "ngit-skill-cli-{}-{}",
             std::process::id(),
             TEMP_ID.fetch_add(1, Ordering::Relaxed)
         ));
@@ -48,35 +48,53 @@ impl Drop for TestRepo {
 #[test]
 fn status_works_without_a_nostr_remote_or_login() -> Result<()> {
     let repo = TestRepo::new()?;
-    let output = repo.ngit(&["agent", "status", "--json"])?;
+    let output = repo.ngit(&["skill", "--status", "--json"])?;
 
     assert!(
         output.status.success(),
-        "agent status failed: {}",
+        "skill status failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(json["installed"], false);
     assert_eq!(json["is_maintainer"], serde_json::Value::Null);
+    assert_eq!(json["reminders_enabled"], true);
     Ok(())
 }
 
 #[test]
-fn setup_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
+fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
     let repo = TestRepo::new()?;
-    let setup = repo.ngit(&["agent", "setup"])?;
+    let setup = repo.ngit(&["skill"])?;
     assert!(
         setup.status.success(),
-        "agent setup failed: {}",
+        "skill install failed: {}",
         String::from_utf8_lossy(&setup.stderr)
     );
     assert!(repo.path().join(".agents/ngit-guidance.json").is_file());
 
-    let update = repo.ngit(&["agent", "update"])?;
+    let update = repo.ngit(&["skill"])?;
     assert!(
         update.status.success(),
-        "agent update failed: {}",
+        "skill update failed: {}",
         String::from_utf8_lossy(&update.stderr)
     );
+    Ok(())
+}
+
+#[test]
+fn opt_out_is_reported_by_status() -> Result<()> {
+    let repo = TestRepo::new()?;
+    let opt_out = repo.ngit(&["skill", "--opt-out"])?;
+    assert!(
+        opt_out.status.success(),
+        "skill opt-out failed: {}",
+        String::from_utf8_lossy(&opt_out.stderr)
+    );
+
+    let status = repo.ngit(&["skill", "--status", "--json"])?;
+    assert!(status.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(json["reminders_enabled"], false);
     Ok(())
 }
