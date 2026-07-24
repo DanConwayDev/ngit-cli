@@ -70,7 +70,14 @@ pub fn bundled_version() -> Result<String> {
 }
 
 fn hash(content: &str) -> String {
-    format!("{:x}", Sha256::digest(content.as_bytes()))
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(content.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn managed_paths() -> [&'static str; 5] {
@@ -223,6 +230,16 @@ fn managed_content(path: &str, content: &str) -> Option<String> {
     Some(content[from..to].to_string())
 }
 
+fn read_optional_text(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read managed file {}", path.display()))
+        }
+    }
+}
+
 fn policy() -> &'static str {
     "## Repository collaboration\n\nThis repository uses ngit and Nostr for issues, pull requests, reviews, comments, merges, and repository state.\n\n- Do not use GitHub or GitLab issues, pull requests, APIs, or the `gh`/`glab` CLIs for repository collaboration.\n- For issue, pull request, review, comment, merge, push, clone, or repository metadata tasks, load and follow `.agents/skills/ngit/SKILL.md`.\n- Treat a `nostr://` remote as authoritative.\n- Pull request branches must use the `pr/` prefix.\n- If ngit is unavailable, report that it is required rather than falling back to GitHub or GitLab."
 }
@@ -268,8 +285,8 @@ fn replace_section(existing: Option<&str>, start: &str, end: &str, body: &str) -
 fn expected_files(root: &Path) -> Result<Vec<(String, String)>> {
     let agents_path = validate_managed_path(root, AGENTS_PATH)?;
     let claude_path = validate_managed_path(root, CLAUDE_PATH)?;
-    let agents = fs::read_to_string(agents_path).ok();
-    let claude = fs::read_to_string(claude_path).ok();
+    let agents = read_optional_text(&agents_path)?;
+    let claude = read_optional_text(&claude_path)?;
     Ok(vec![
         (SKILL_PATH.to_string(), CANONICAL_SKILL.to_string()),
         (CLAUDE_SKILL_PATH.to_string(), CANONICAL_SKILL.to_string()),
@@ -317,8 +334,7 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
     let mut modified_files = vec![];
     for file in &state.files {
         let path = validate_managed_path(root, &file.path)?;
-        let matches = fs::read_to_string(path)
-            .ok()
+        let matches = read_optional_text(&path)?
             .and_then(|content| managed_content(&file.path, &content))
             .is_some_and(|content| hash(&content) == file.sha256);
         if !matches {
@@ -345,6 +361,9 @@ pub fn update(root: &Path, force: bool) -> Result<GuidanceStatus> {
 }
 
 fn write_guidance(root: &Path, force: bool) -> Result<()> {
+    for relative in managed_paths() {
+        let _ = validate_managed_path(root, relative)?;
+    }
     if let Some(state) = load_state(root)? {
         let bundled = bundled_version()?;
         if !force && version_is_newer(&bundled, &state.version) {
@@ -430,7 +449,7 @@ pub fn proposed_diff(root: &Path) -> Result<String> {
         format!("{}\n", serde_json::to_string_pretty(&state)?),
     ))) {
         let path = validate_managed_path(root, &relative)?;
-        let actual = fs::read_to_string(path).unwrap_or_default();
+        let actual = read_optional_text(&path)?.unwrap_or_default();
         if actual != expected {
             output.push_str(&format!("--- a/{relative}\n+++ b/{relative}\n"));
             output.push_str(&simple_diff(&actual, &expected));
@@ -715,6 +734,13 @@ mod tests {
         assert!(!version_is_newer("1.1", "1.0"));
     }
     #[test]
+    fn managed_content_hashes_use_sha256_hex() {
+        assert_eq!(
+            hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+    #[test]
     fn section_replacement_preserves_surrounding_content() {
         let input = "before\n<!-- ngit-agent-guidance:start -->\nold\n<!-- ngit-agent-guidance:end -->\nafter\n";
         let output = replace_section(Some(input), START, END, "new").unwrap();
@@ -796,6 +822,42 @@ mod tests {
                 .to_string()
                 .contains("unmanaged file")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_refuses_to_replace_non_utf8_instruction_files() {
+        let root = temp_root();
+        let original = [0xff, 0xfe, 0xfd];
+        fs::write(root.join(AGENTS_PATH), original).unwrap();
+
+        for force in [false, true] {
+            assert!(
+                setup(&root, force)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("failed to read managed file")
+            );
+            assert_eq!(fs::read(root.join(AGENTS_PATH)).unwrap(), original);
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_validates_all_managed_paths_before_writing() {
+        let root = temp_root();
+        fs::write(root.join(".claude"), "not a directory\n").unwrap();
+
+        assert!(
+            setup(&root, false)
+                .unwrap_err()
+                .to_string()
+                .contains("is not a directory")
+        );
+        assert!(!root.join(SKILL_PATH).exists());
+        assert!(!root.join(AGENTS_PATH).exists());
+
         fs::remove_dir_all(root).unwrap();
     }
 

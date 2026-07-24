@@ -1,54 +1,22 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::fs;
 
 use anyhow::{Context, Result};
+use test_harness::Harness;
 
-static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
-
-struct TestRepo {
-    path: PathBuf,
+async fn harness() -> Result<Harness> {
+    Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await
 }
 
-impl TestRepo {
-    fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "ngit-skill-cli-{}-{}",
-            std::process::id(),
-            TEMP_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        git2::Repository::init(&path)?;
-        Ok(Self { path })
-    }
-
-    fn ngit(&self, args: &[&str]) -> Result<std::process::Output> {
-        Command::new(assert_cmd::cargo::cargo_bin!("ngit"))
-            .current_dir(&self.path)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .args(args)
-            .output()
-            .context("failed to run ngit")
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestRepo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-#[test]
-fn status_works_without_a_nostr_remote_or_login() -> Result<()> {
-    let repo = TestRepo::new()?;
-    let output = repo.ngit(&["skill", "status", "--json"])?;
+#[tokio::test]
+async fn status_works_without_a_nostr_remote_or_login() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let output = repo.ngit(["skill", "status", "--json"]).output().await?;
 
     assert!(
         output.status.success(),
@@ -62,23 +30,25 @@ fn status_works_without_a_nostr_remote_or_login() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
-    let repo = TestRepo::new()?;
-    let setup = repo.ngit(&["skill", "install"])?;
+#[tokio::test]
+async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let setup = repo.ngit(["skill", "install"]).output().await?;
     assert!(
         setup.status.success(),
         "skill install failed: {}",
         String::from_utf8_lossy(&setup.stderr)
     );
-    assert!(repo.path().join(".agents/ngit-guidance.json").is_file());
-    let status = repo.ngit(&["skill", "status", "--json"])?;
+    assert!(repo.dir().join(".agents/ngit-guidance.json").is_file());
+
+    let status = repo.ngit(["skill", "status", "--json"]).output().await?;
     assert!(status.status.success());
     let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
     assert_eq!(json["installed_version"], json["bundled_version"]);
     assert_eq!(json["update_available"], false);
 
-    let update = repo.ngit(&["skill", "upgrade"])?;
+    let update = repo.ngit(["skill", "upgrade"]).output().await?;
     assert!(
         update.status.success(),
         "skill update failed: {}",
@@ -87,42 +57,49 @@ fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn opt_out_is_reported_by_status() -> Result<()> {
-    let repo = TestRepo::new()?;
-    let missing_scope = repo.ngit(&["skill", "opt-out"])?;
+#[tokio::test]
+async fn opt_out_is_reported_by_status() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let missing_scope = repo.ngit(["skill", "opt-out"]).output().await?;
     assert!(
         !missing_scope.status.success(),
         "skill opt-out unexpectedly accepted no scope"
     );
 
-    let opt_out = repo.ngit(&["skill", "opt-out", "--local"])?;
+    let opt_out = repo.ngit(["skill", "opt-out", "--local"]).output().await?;
     assert!(
         opt_out.status.success(),
         "skill opt-out failed: {}",
         String::from_utf8_lossy(&opt_out.stderr)
     );
+    assert_eq!(
+        repo.config("nostr.skill-reminders").await?.as_deref(),
+        Some("false")
+    );
 
-    let status = repo.ngit(&["skill", "status", "--json"])?;
+    let status = repo.ngit(["skill", "status", "--json"]).output().await?;
     assert!(status.status.success());
     let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
     assert_eq!(json["reminders_enabled"], false);
     Ok(())
 }
 
-#[test]
-fn global_opt_out_works_without_a_git_worktree() -> Result<()> {
-    let repo = TestRepo::new()?;
-    let global_config = repo.path().join(".gitconfig");
-    let outside = repo.path().join("outside");
+#[tokio::test]
+async fn global_opt_out_works_without_a_git_worktree() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let global_config = repo.dir().join(".gitconfig");
+    let outside = repo.dir().join("outside");
     fs::create_dir(&outside)?;
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("ngit"))
+
+    let mut command = repo.ngit(["skill", "opt-out", "--global"]);
+    let output = command
         .current_dir(outside)
-        .env("HOME", repo.path())
+        .env("HOME", repo.dir())
         .env_remove("XDG_CONFIG_HOME")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .args(["skill", "opt-out", "--global"])
         .output()
+        .await
         .context("failed to run global skill opt-out")?;
     assert!(
         output.status.success(),

@@ -68,6 +68,7 @@ eg self-hosted, github, codeberg, etc.
                          │  User   │
                          └─────────┘
 ```
+
 ## Repository-managed skill
 
 Run `ngit skill install` to add repository guidance that teaches coding agents
