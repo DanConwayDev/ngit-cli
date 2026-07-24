@@ -22,7 +22,7 @@ struct Output {
 }
 
 pub async fn launch(command: &AgentCommands) -> Result<()> {
-    let context = resolve_context().await?;
+    let context = resolve_context()?;
     match command {
         AgentCommands::Setup { force } => {
             agent_guidance::setup(&context.root, *force)?;
@@ -91,7 +91,7 @@ pub async fn launch(command: &AgentCommands) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_context() -> Result<AgentContext> {
+fn resolve_context() -> Result<AgentContext> {
     let repo = Repo::discover().context("ngit agent must run inside a Git working tree")?;
     let root = repo.get_path()?.to_path_buf();
     Ok(AgentContext { repo, root })
