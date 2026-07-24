@@ -158,7 +158,7 @@ implementation details used for efficiency.
         trust_server_example =
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
         skill_reminders = key("nostr.skill-reminders true"),
-        skill_opt_out = cmd("ngit skill --opt-out"),
+        skill_opt_out = cmd("ngit skill opt-out --local"),
         http_connect_timeout = key("nostr.http-connect-timeout-ms"),
         http_connect_timeout_env = env("NGIT_HTTP_CONNECT_TIMEOUT_MS"),
         http_connect_timeout_default = key("3000"),
@@ -239,22 +239,39 @@ pub enum Commands {
     Account(AccountSubCommandArgs),
 }
 
-#[derive(clap::Args)]
-#[allow(clippy::struct_excessive_bools)]
+#[derive(clap::Parser)]
 pub struct SkillArgs {
-    /// Show installed guidance and available update status without changing
-    /// files
-    #[arg(long, conflicts_with_all = ["diff", "opt_out"])]
-    pub status: bool,
-    /// Output status as JSON
-    #[arg(long, requires = "status")]
-    pub json: bool,
-    /// Show the proposed changes without modifying files
-    #[arg(long, conflicts_with_all = ["status", "opt_out"])]
-    pub diff: bool,
-    /// Disable repository skill reminders in local Git config
-    #[arg(long, conflicts_with_all = ["status", "diff"])]
-    pub opt_out: bool,
+    #[command(subcommand)]
+    pub skill_command: SkillCommands,
+}
+
+#[derive(Subcommand)]
+pub enum SkillCommands {
+    /// Install the bundled repository skill
+    Install,
+    /// Upgrade the repository skill to the version bundled with ngit
+    Upgrade,
+    /// Show installed and bundled skill versions without changing files
+    Status {
+        /// Output status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the proposed skill changes without modifying files
+    Diff,
+    /// Disable repository skill reminders
+    OptOut(SkillOptOutArgs),
+}
+
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+pub struct SkillOptOutArgs {
+    /// Disable reminders in this repository
+    #[arg(long)]
+    pub local: bool,
+    /// Disable reminders for all repositories by default
+    #[arg(long)]
+    pub global: bool,
 }
 
 #[derive(Subcommand)]

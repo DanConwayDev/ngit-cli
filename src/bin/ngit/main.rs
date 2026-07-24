@@ -288,7 +288,9 @@ async fn main() {
                 }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
-            Commands::Skill(args) => sub_commands::skill::launch(args, cli.force).await,
+            Commands::Skill(args) => {
+                sub_commands::skill::launch(&args.skill_command, cli.force).await
+            }
             Commands::Merge(args) => {
                 sub_commands::merge::launch(
                     args.id.as_deref(),

@@ -7,7 +7,7 @@ use ngit::{
 };
 use serde::Serialize;
 
-use crate::cli::SkillArgs;
+use crate::cli::{SkillCommands, SkillOptOutArgs};
 
 struct SkillContext {
     repo: Repo,
@@ -22,53 +22,89 @@ struct Output {
     reminders_enabled: bool,
 }
 
-pub async fn launch(args: &SkillArgs, force: bool) -> Result<()> {
+pub async fn launch(command: &SkillCommands, force: bool) -> Result<()> {
+    if let SkillCommands::OptOut(args) = command {
+        return opt_out(args);
+    }
+
     let context = resolve_context()?;
-    if args.opt_out {
+    match command {
+        SkillCommands::Install | SkillCommands::Upgrade => reconcile(&context, force).await,
+        SkillCommands::Status { json } => {
+            let output = Output {
+                guidance: agent_guidance::status(&context.root)?,
+                is_maintainer: resolve_maintainer(&context).await,
+                reminders_enabled: agent_guidance::reminders_enabled(&context.repo)?,
+            };
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                print_status(&output);
+            }
+            Ok(())
+        }
+        SkillCommands::Diff => {
+            print!("{}", agent_guidance::proposed_diff(&context.root)?);
+            Ok(())
+        }
+        SkillCommands::OptOut(_) => unreachable!("opt-out handled before resolving a worktree"),
+    }
+}
+
+fn opt_out(args: &SkillOptOutArgs) -> Result<()> {
+    if args.global {
+        agent_guidance::set_global_reminders_enabled(false)?;
+        eprintln!(
+            "disabled ngit repository skill reminders globally; re-enable with `git config --global nostr.skill-reminders true`"
+        );
+    } else {
+        let context = resolve_context()?;
         agent_guidance::set_reminders_enabled(&context.repo, false)?;
         eprintln!(
             "disabled ngit repository skill reminders for this repository; re-enable with `git config nostr.skill-reminders true`"
         );
-        return Ok(());
     }
-    if args.status {
-        let output = Output {
-            guidance: agent_guidance::status(&context.root)?,
-            is_maintainer: resolve_maintainer(&context).await,
-            reminders_enabled: agent_guidance::reminders_enabled(&context.repo)?,
-        };
-        if args.json {
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else {
-            print_status(&output);
-        }
-        return Ok(());
-    }
-    if args.diff {
-        print!("{}", agent_guidance::proposed_diff(&context.root)?);
-        return Ok(());
-    }
+    Ok(())
+}
 
-    let was_installed = agent_guidance::status(&context.root)?.installed;
-    let is_maintainer = resolve_maintainer(&context).await;
+async fn reconcile(context: &SkillContext, force: bool) -> Result<()> {
+    let before = agent_guidance::status(&context.root)?;
+    let changes_needed = !agent_guidance::proposed_diff(&context.root)?.is_empty();
+    let is_maintainer = resolve_maintainer(context).await;
     let commit = is_maintainer == Some(true);
     if commit {
         agent_guidance::preflight_dedicated_commit(&context.repo, &context.root)?;
     }
     agent_guidance::update(&context.root, force)?;
-    if commit && agent_guidance::commit_guidance(&context.repo, &context.root)? {
+    let commit_created = commit && agent_guidance::commit_guidance(&context.repo, &context.root)?;
+    if commit_created {
         eprintln!("created repository skill commit");
     } else if !commit {
-        eprintln!("repository skill changes are uncommitted");
+        eprintln!("no commit created because the current account is not a repository maintainer");
     }
-    eprintln!(
-        "{} ngit repository skill",
-        if was_installed {
-            "updated"
-        } else {
-            "installed"
-        }
-    );
+    let after = agent_guidance::status(&context.root)?;
+    if !before.installed {
+        eprintln!(
+            "installed ngit repository skill version {}",
+            after.bundled_version
+        );
+    } else if before.update_available {
+        eprintln!(
+            "upgraded ngit repository skill from {} to {}",
+            before.installed_version.as_deref().unwrap_or("unknown"),
+            after.bundled_version
+        );
+    } else if changes_needed {
+        eprintln!(
+            "reconciled ngit repository skill at bundled version {}",
+            after.bundled_version
+        );
+    } else {
+        eprintln!(
+            "ngit repository skill is already at bundled version {}",
+            after.bundled_version
+        );
+    }
     Ok(())
 }
 

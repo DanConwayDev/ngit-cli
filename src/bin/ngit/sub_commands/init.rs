@@ -1682,7 +1682,7 @@ fn print_skill_suggestion() {
         Style::new()
             .fg(console::Color::Color256(214))
             .apply_to(
-                "tip: help coding agents collaborate through ngit by running `ngit skill` (or `ngit skill --opt-out` to stop reminders)",
+                "tip: help coding agents collaborate through ngit by running `ngit skill install` (or `ngit skill opt-out --local` to stop reminders here)",
             )
             .for_stderr()
     );

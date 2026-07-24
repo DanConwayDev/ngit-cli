@@ -247,7 +247,7 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
             .unwrap_or_default(),
     );
 
-    let skill = repo.ngit(["skill"]).output().await?;
+    let skill = repo.ngit(["skill", "install"]).output().await?;
     assert!(
         skill.status.success(),
         "maintainer skill install failed: {}",
@@ -400,7 +400,7 @@ async fn init_honors_repository_skill_reminder_opt_out() -> Result<()> {
         .output()
         .await?;
     assert!(commit.status.success());
-    let opt_out = repo.ngit(["skill", "--opt-out"]).output().await?;
+    let opt_out = repo.ngit(["skill", "opt-out", "--local"]).output().await?;
     assert!(opt_out.status.success());
 
     let grasp_url = harness.grasp("repo").url().to_string();

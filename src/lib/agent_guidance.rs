@@ -7,7 +7,6 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -25,8 +24,6 @@ const START: &str = "<!-- ngit-agent-guidance:start -->";
 const END: &str = "<!-- ngit-agent-guidance:end -->";
 const CLAUDE_START: &str = "<!-- ngit-agent-guidance-claude:start -->";
 const CLAUDE_END: &str = "<!-- ngit-agent-guidance-claude:end -->";
-pub const WARNING_INTERVAL_SECS: i64 = 30 * 24 * 60 * 60;
-
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,7 +368,7 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
             let current = status(root)?;
             if let Some(path) = current.modified_files.first() {
                 bail!(
-                    "refusing to overwrite locally modified managed file `{path}`; run `ngit skill --diff`"
+                    "refusing to overwrite locally modified managed file `{path}`; run `ngit skill diff`"
                 );
             }
         }
@@ -491,19 +488,14 @@ pub fn warning_for(status: &GuidanceStatus) -> Option<WarningKind> {
 pub fn warning_message(status: &GuidanceStatus) -> Option<String> {
     match warning_for(status)? {
         WarningKind::Setup => Some(
-            "tip: install ngit's repository skill so coding agents use ngit instead of GitHub; run `ngit skill` (or `ngit skill --opt-out` to stop reminders)".into(),
+            "tip: install ngit's repository skill so coding agents use ngit instead of GitHub; run `ngit skill install` (or `ngit skill opt-out --local` to stop reminders here)".into(),
         ),
         WarningKind::Update => Some(format!(
-            "tip: newer ngit repository skill guidance is available ({} -> {}); run `ngit skill` (or `ngit skill --opt-out` to stop reminders)",
+            "tip: newer ngit repository skill guidance is available ({} -> {}); run `ngit skill upgrade` (or `ngit skill opt-out --local` to stop reminders here)",
             status.installed_version.as_deref().unwrap_or("unknown"),
             status.bundled_version
         )),
     }
-}
-
-#[must_use]
-pub fn should_warn(last_seen: Option<i64>, now: i64) -> bool {
-    last_seen.is_none_or(|last| now.saturating_sub(last) >= WARNING_INTERVAL_SECS)
 }
 
 pub fn reminders_enabled(repo: &crate::git::Repo) -> Result<bool> {
@@ -529,11 +521,12 @@ pub fn set_reminders_enabled(repo: &crate::git::Repo, enabled: bool) -> Result<(
     )
 }
 
-#[must_use]
-pub fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs() as i64)
+pub fn set_global_reminders_enabled(enabled: bool) -> Result<()> {
+    crate::git::save_git_config_item(
+        &None,
+        REMINDERS_CONFIG_KEY,
+        if enabled { "true" } else { "false" },
+    )
 }
 
 pub fn paths_for_commit(root: &Path) -> Result<Vec<PathBuf>> {
@@ -687,14 +680,6 @@ pub async fn warn_if_maintainer(
     let Some(message) = warning_message(&status) else {
         return Ok(());
     };
-    let now = now_secs();
-    let throttle_key = "nostr.skill-warning-last-seen";
-    let last_seen = repo
-        .get_git_config_item(throttle_key, Some(false))?
-        .and_then(|value| value.parse().ok());
-    if !should_warn(last_seen, now) {
-        return Ok(());
-    }
     eprintln!(
         "{}",
         Style::new()
@@ -702,8 +687,6 @@ pub async fn warn_if_maintainer(
             .apply_to(message)
             .for_stderr()
     );
-    // Git config is repository-local machine state, never a tracked-file mutation.
-    repo.save_git_config_item(throttle_key, &now.to_string(), false)?;
     Ok(())
 }
 
@@ -727,11 +710,9 @@ mod tests {
         path
     }
     #[test]
-    fn newer_versions_and_throttle_are_decided_without_io() {
+    fn newer_versions_are_decided_without_io() {
         assert!(version_is_newer("1.0", "1.1"));
         assert!(!version_is_newer("1.1", "1.0"));
-        assert!(!should_warn(Some(100), 100 + WARNING_INTERVAL_SECS - 1));
-        assert!(should_warn(Some(100), 100 + WARNING_INTERVAL_SECS));
     }
     #[test]
     fn section_replacement_preserves_surrounding_content() {
@@ -755,7 +736,7 @@ mod tests {
         assert_eq!(
             warning_message(&status).as_deref(),
             Some(
-                "tip: newer ngit repository skill guidance is available (1.0 -> 1.1); run `ngit skill` (or `ngit skill --opt-out` to stop reminders)"
+                "tip: newer ngit repository skill guidance is available (1.0 -> 1.1); run `ngit skill upgrade` (or `ngit skill opt-out --local` to stop reminders here)"
             )
         );
     }
@@ -918,13 +899,13 @@ mod tests {
             setup(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("--diff")
+                .contains("skill diff")
         );
         assert!(
             update(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("--diff")
+                .contains("skill diff")
         );
         assert!(proposed_diff(&root).unwrap().contains(SKILL_PATH));
         setup(&root, true).unwrap();

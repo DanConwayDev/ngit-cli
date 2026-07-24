@@ -70,22 +70,28 @@ eg self-hosted, github, codeberg, etc.
 ```
 ## Repository-managed skill
 
-Run `ngit skill` to install or update coding-agent guidance for an ngit
-repository. It installs the canonical ngit skill under `.agents/skills/ngit/`,
-a Claude-compatible copy under `.claude/skills/ngit/`, and a small managed
-policy section in `AGENTS.md` (referenced from `CLAUDE.md`). The files are
-ordinary Git files, so contributors receive them through normal clone, fetch,
-and pull operations.
+Run `ngit skill install` to install coding-agent guidance for an ngit
+repository, and `ngit skill upgrade` to reconcile it with the skill version
+bundled in the current ngit binary. Both commands use the same safe,
+idempotent reconciliation. The installed version is compared with the bundled
+version; ngit never fetches skill content from the network.
+
+The commands install the canonical ngit skill under `.agents/skills/ngit/`, a
+Claude-compatible copy under `.claude/skills/ngit/`, and a small managed policy
+section in `AGENTS.md` (referenced from `CLAUDE.md`). The files are ordinary Git
+files, so contributors receive them through normal clone, fetch, and pull
+operations.
 
 When the current account can be identified as a repository maintainer,
-`ngit skill` creates a dedicated skill-only commit; contributors receive the
-same files as uncommitted changes. The command never pushes.
+the install and upgrade commands create a dedicated skill-only commit;
+contributors receive the same files without an automatic commit. The commands
+never push.
 
-Use `ngit skill --status` to inspect the installed version and local changes,
-or `ngit skill --diff` to preview an update. Update safety checks refuse to
-overwrite locally modified managed files. Maintainers receive a deterministic,
-throttled reminder when setup or an update is available; run
-`ngit skill --opt-out` to disable those reminders for the repository, or set
-`git config --global nostr.skill-reminders false` to disable them by
-default for all repositories. Set the same key to `true` locally to re-enable
-reminders for one repository.
+Use `ngit skill status` to inspect the installed version and local changes, or
+`ngit skill diff` to preview reconciliation. Update safety checks refuse to
+overwrite locally modified managed files. Maintainers receive a reminder while
+installation or an upgrade is available. Run `ngit skill opt-out --local` to
+disable reminders for the current repository, or
+`ngit skill opt-out --global` to disable them by default for all repositories.
+Set `nostr.skill-reminders` to `true` at the corresponding Git config scope to
+re-enable reminders.

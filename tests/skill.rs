@@ -48,7 +48,7 @@ impl Drop for TestRepo {
 #[test]
 fn status_works_without_a_nostr_remote_or_login() -> Result<()> {
     let repo = TestRepo::new()?;
-    let output = repo.ngit(&["skill", "--status", "--json"])?;
+    let output = repo.ngit(&["skill", "status", "--json"])?;
 
     assert!(
         output.status.success(),
@@ -65,15 +65,20 @@ fn status_works_without_a_nostr_remote_or_login() -> Result<()> {
 #[test]
 fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
     let repo = TestRepo::new()?;
-    let setup = repo.ngit(&["skill"])?;
+    let setup = repo.ngit(&["skill", "install"])?;
     assert!(
         setup.status.success(),
         "skill install failed: {}",
         String::from_utf8_lossy(&setup.stderr)
     );
     assert!(repo.path().join(".agents/ngit-guidance.json").is_file());
+    let status = repo.ngit(&["skill", "status", "--json"])?;
+    assert!(status.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(json["installed_version"], json["bundled_version"]);
+    assert_eq!(json["update_available"], false);
 
-    let update = repo.ngit(&["skill"])?;
+    let update = repo.ngit(&["skill", "upgrade"])?;
     assert!(
         update.status.success(),
         "skill update failed: {}",
@@ -85,16 +90,45 @@ fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
 #[test]
 fn opt_out_is_reported_by_status() -> Result<()> {
     let repo = TestRepo::new()?;
-    let opt_out = repo.ngit(&["skill", "--opt-out"])?;
+    let missing_scope = repo.ngit(&["skill", "opt-out"])?;
+    assert!(
+        !missing_scope.status.success(),
+        "skill opt-out unexpectedly accepted no scope"
+    );
+
+    let opt_out = repo.ngit(&["skill", "opt-out", "--local"])?;
     assert!(
         opt_out.status.success(),
         "skill opt-out failed: {}",
         String::from_utf8_lossy(&opt_out.stderr)
     );
 
-    let status = repo.ngit(&["skill", "--status", "--json"])?;
+    let status = repo.ngit(&["skill", "status", "--json"])?;
     assert!(status.status.success());
     let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
     assert_eq!(json["reminders_enabled"], false);
+    Ok(())
+}
+
+#[test]
+fn global_opt_out_works_without_a_git_worktree() -> Result<()> {
+    let repo = TestRepo::new()?;
+    let global_config = repo.path().join(".gitconfig");
+    let outside = repo.path().join("outside");
+    fs::create_dir(&outside)?;
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ngit"))
+        .current_dir(outside)
+        .env("HOME", repo.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(["skill", "opt-out", "--global"])
+        .output()
+        .context("failed to run global skill opt-out")?;
+    assert!(
+        output.status.success(),
+        "global skill opt-out failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!git2::Config::open(&global_config)?.get_bool("nostr.skill-reminders")?);
     Ok(())
 }
