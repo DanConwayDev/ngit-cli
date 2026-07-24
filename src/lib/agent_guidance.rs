@@ -24,6 +24,7 @@ const END: &str = "<!-- ngit-agent-guidance:end -->";
 const CLAUDE_START: &str = "<!-- ngit-agent-guidance-claude:start -->";
 const CLAUDE_END: &str = "<!-- ngit-agent-guidance-claude:end -->";
 pub const WARNING_INTERVAL_SECS: i64 = 24 * 60 * 60;
+const WARNING_SAMPLE_DAYS: u8 = 5;
 
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
 
@@ -365,6 +366,14 @@ pub fn should_warn(last_seen: Option<i64>, now: i64) -> bool {
 }
 
 #[must_use]
+pub fn should_sample_warning(seed: &str, now: i64) -> bool {
+    let digest = Sha256::digest(seed.as_bytes());
+    let phase = i64::from(digest[0] % WARNING_SAMPLE_DAYS);
+    let day = now.div_euclid(WARNING_INTERVAL_SECS);
+    day.rem_euclid(i64::from(WARNING_SAMPLE_DAYS)) == phase
+}
+
+#[must_use]
 pub fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -571,10 +580,15 @@ pub async fn warn_if_maintainer(
 ) -> Result<()> {
     use crate::{git::RepoActions, login::get_likely_logged_in_user};
     let root = repo.get_path()?;
-    let Some(account) = get_likely_logged_in_user(root).await? else {
+    let Ok(Some(account)) = get_likely_logged_in_user(root).await else {
         return Ok(());
     };
     if !repo_ref.maintainers.contains(&account) {
+        return Ok(());
+    }
+    let now = now_secs();
+    let warning_seed = format!("{}:{}", repo_ref.selected_maintainer, repo_ref.identifier);
+    if !should_sample_warning(&warning_seed, now) {
         return Ok(());
     }
     let status = status(root)?;
@@ -588,7 +602,7 @@ pub async fn warn_if_maintainer(
     let last_seen = repo
         .get_git_config_item(&throttle_key, Some(false))?
         .and_then(|value| value.parse().ok());
-    if !should_warn(last_seen, now_secs()) {
+    if !should_warn(last_seen, now) {
         return Ok(());
     }
     eprintln!(
@@ -599,7 +613,7 @@ pub async fn warn_if_maintainer(
             .for_stderr()
     );
     // Git config is repository-local machine state, never a tracked-file mutation.
-    repo.save_git_config_item(&throttle_key, &now_secs().to_string(), false)?;
+    repo.save_git_config_item(&throttle_key, &now.to_string(), false)?;
     Ok(())
 }
 
@@ -626,6 +640,20 @@ mod tests {
         assert!(!version_is_newer("1.1", "1.0"));
         assert!(!should_warn(Some(100), 100 + WARNING_INTERVAL_SECS - 1));
         assert!(should_warn(Some(100), 100 + WARNING_INTERVAL_SECS));
+    }
+    #[test]
+    fn warning_sampling_selects_one_day_in_five() {
+        let sampled_days = (0..i64::from(WARNING_SAMPLE_DAYS))
+            .filter(|day| should_sample_warning("repo-coordinate", day * WARNING_INTERVAL_SECS))
+            .count();
+        assert_eq!(sampled_days, 1);
+        assert_eq!(
+            should_sample_warning("repo-coordinate", 2 * WARNING_INTERVAL_SECS),
+            should_sample_warning(
+                "repo-coordinate",
+                (2 + i64::from(WARNING_SAMPLE_DAYS)) * WARNING_INTERVAL_SECS
+            )
+        );
     }
     #[test]
     fn section_replacement_preserves_surrounding_content() {
