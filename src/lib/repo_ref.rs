@@ -752,16 +752,11 @@ fn find_tracked_upstream_nostr_remote(
     remote_coordinates: &HashMap<String, Nip19Coordinate>,
 ) -> Option<(String, Nip19Coordinate)> {
     let branch = git_repo.get_checked_out_branch_name().ok()?;
-    let upstream = git_repo.get_upstream_for_branch(&branch).ok()??;
+    let remote = git_repo.get_upstream_remote_for_branch(&branch).ok()??;
     remote_coordinates
-        .iter()
-        .filter(|(remote, _)| {
-            upstream
-                .strip_prefix(remote.as_str())
-                .is_some_and(|suffix| suffix.starts_with('/'))
-        })
-        .max_by_key(|(remote, _)| remote.len())
-        .map(|(remote, coordinate)| (remote.clone(), coordinate.clone()))
+        .get(&remote)
+        .cloned()
+        .map(|coordinate| (remote, coordinate))
 }
 
 fn format_ambiguous_error(remote_coordinates: &HashMap<String, Nip19Coordinate>) -> String {
@@ -2450,6 +2445,38 @@ mod tests {
                     .unwrap();
                 branch.set_upstream(Some("upstream/main")).unwrap();
             }
+
+            let resolved = resolve(&repo, None).await.unwrap();
+            assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
+            assert_eq!(
+                resolved.source,
+                RepoCoordinateSource::TrackedUpstreamRemote("upstream".to_string())
+            );
+        }
+
+        #[tokio::test]
+        async fn tier3_configured_remote_wins_without_remote_tracking_ref() {
+            let (test_repo, repo) = setup_repo();
+            test_repo
+                .add_remote("origin", &nostr_url(PUBKEY_B_HEX, "my-repo"))
+                .unwrap();
+            test_repo
+                .add_remote("upstream", &nostr_url(PUBKEY_A_HEX, "my-repo"))
+                .unwrap();
+
+            test_repo.populate().unwrap();
+            let mut config = test_repo.git_repo.config().unwrap();
+            config.set_str("branch.main.remote", "upstream").unwrap();
+            config
+                .set_str("branch.main.merge", "refs/heads/main")
+                .unwrap();
+            assert!(
+                test_repo
+                    .git_repo
+                    .find_reference("refs/remotes/upstream/main")
+                    .is_err(),
+                "regression setup must not create the remote-tracking ref"
+            );
 
             let resolved = resolve(&repo, None).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
