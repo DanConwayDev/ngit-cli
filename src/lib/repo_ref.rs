@@ -500,6 +500,8 @@ pub enum RepoCoordinateSource {
     MaintainersYaml,
     /// A coordinate obtained by prompting the user (interactive fallback).
     UserPrompt,
+    /// A new repository coordinate derived during `ngit init`.
+    NewRepository,
 }
 
 impl RepoCoordinateSource {
@@ -520,6 +522,7 @@ impl RepoCoordinateSource {
             Self::InteractiveSelection(name) => format!("interactive selection ({name})"),
             Self::MaintainersYaml => "maintainers.yaml".to_string(),
             Self::UserPrompt => "interactive prompt".to_string(),
+            Self::NewRepository => "new repository".to_string(),
         }
     }
 }
@@ -539,25 +542,30 @@ pub const NGIT_REPO_ENV: &str = "NGIT_REPO";
 /// when `-i` is supplied). When absent, the resolver refuses to prompt.
 pub const NGIT_INTERACTIVE_ENV: &str = "NGIT_INTERACTIVE_MODE";
 
-fn ngit_repo_override() -> Option<String> {
-    std::env::var(NGIT_REPO_ENV)
-        .ok()
-        .and_then(|s| if s.is_empty() { None } else { Some(s) })
+#[derive(Debug, Clone, Default)]
+struct RepoCoordinateResolutionOptions {
+    repo_override: Option<String>,
+    interactive: bool,
 }
 
-fn ngit_interactive_mode() -> bool {
-    std::env::var(NGIT_INTERACTIVE_ENV)
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
+impl RepoCoordinateResolutionOptions {
+    fn from_env() -> Self {
+        Self {
+            repo_override: std::env::var(NGIT_REPO_ENV)
+                .ok()
+                .filter(|value| !value.is_empty()),
+            interactive: std::env::var(NGIT_INTERACTIVE_ENV).is_ok_and(|value| !value.is_empty()),
+        }
+    }
 }
 
 /// Resolve the target repository coordinate for a repo-scoped operation.
 ///
 /// Documented priority (per repository-coordinate-resolution policy):
 ///
-/// 1. Explicit `--repo <REMOTE|NADDR|NOSTR-URL>` (via the [`NGIT_REPO_ENV`]
-///    env var). The value is first matched against configured remote names,
-///    then parsed as an naddr, then as a `nostr://` URL.
+/// 1. Explicit `--repo <REMOTE|NADDR|NOSTR-URL>` (via the [`NGIT_REPO_ENV`] env
+///    var). The value is first matched against configured remote names, then
+///    parsed as an naddr, then as a `nostr://` URL.
 /// 2. `nostr.repo` git config value (canonical naddr).
 /// 3. The current branch's tracked upstream remote, when it is a valid
 ///    `nostr://` remote.
@@ -571,62 +579,86 @@ fn ngit_interactive_mode() -> bool {
 /// [`NGIT_INTERACTIVE_ENV`]). There is no implicit prompt or "first remote
 /// wins" fallback.
 pub async fn resolve_repo_coordinate(git_repo: &Repo) -> Result<ResolvedRepoCoordinate> {
+    resolve_repo_coordinate_with_options(git_repo, &RepoCoordinateResolutionOptions::from_env())
+        .await
+}
+
+async fn resolve_repo_coordinate_with_options(
+    git_repo: &Repo,
+    options: &RepoCoordinateResolutionOptions,
+) -> Result<ResolvedRepoCoordinate> {
+    try_resolve_repo_coordinate_with_options(git_repo, options)
+        .await?
+        .context("no nostr git remotes or git config \"nostr.repo\" value")
+}
+
+pub async fn try_resolve_repo_coordinate(
+    git_repo: &Repo,
+) -> Result<Option<ResolvedRepoCoordinate>> {
+    try_resolve_repo_coordinate_with_options(git_repo, &RepoCoordinateResolutionOptions::from_env())
+        .await
+}
+
+async fn try_resolve_repo_coordinate_with_options(
+    git_repo: &Repo,
+    options: &RepoCoordinateResolutionOptions,
+) -> Result<Option<ResolvedRepoCoordinate>> {
     // 1. Explicit --repo override.
-    if let Some(raw) = ngit_repo_override() {
-        return resolve_repo_override(git_repo, &raw).await;
+    if let Some(raw) = options.repo_override.as_deref() {
+        return resolve_repo_override(git_repo, raw).await.map(Some);
     }
 
     // 2. nostr.repo git config.
-    if let Ok(c) = get_repo_coordinates_from_git_config(git_repo) {
-        return Ok(ResolvedRepoCoordinate {
+    if let Some(c) = get_repo_coordinates_from_git_config(git_repo)? {
+        return Ok(Some(ResolvedRepoCoordinate {
             coordinate: c,
             source: RepoCoordinateSource::NostrRepoConfig,
-        });
+        }));
     }
 
     let remote_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo).await?;
 
     if remote_coordinates.is_empty() {
         // Legacy fallback: maintainers.yaml.
-        return get_repo_coordinates_from_maintainers_yaml(git_repo)
+        return Ok(get_repo_coordinates_from_maintainers_yaml(git_repo)
             .await
             .map(|c| ResolvedRepoCoordinate {
                 coordinate: c,
                 source: RepoCoordinateSource::MaintainersYaml,
             })
-            .context("no nostr git remotes or git config \"nostr.repo\" value");
+            .ok());
     }
 
     // 3. Tracked upstream of the current branch, if it is a nostr:// remote.
     if let Some((remote_name, coord)) =
         find_tracked_upstream_nostr_remote(git_repo, &remote_coordinates)
     {
-        return Ok(ResolvedRepoCoordinate {
+        return Ok(Some(ResolvedRepoCoordinate {
             coordinate: coord,
             source: RepoCoordinateSource::TrackedUpstreamRemote(remote_name),
-        });
+        }));
     }
 
     // 4. `origin`, if it is a nostr:// remote.
     if let Some(coord) = remote_coordinates.get("origin").cloned() {
-        return Ok(ResolvedRepoCoordinate {
+        return Ok(Some(ResolvedRepoCoordinate {
             coordinate: coord,
             source: RepoCoordinateSource::OriginRemote,
-        });
+        }));
     }
 
     // 5. Sole distinct coordinate among the remaining nostr:// remotes.
     let distinct_coords: Vec<(String, Nip19Coordinate)> = distinct_coordinates(&remote_coordinates);
     if distinct_coords.len() == 1 {
         let (remote_name, coord) = distinct_coords.into_iter().next().unwrap();
-        return Ok(ResolvedRepoCoordinate {
+        return Ok(Some(ResolvedRepoCoordinate {
             coordinate: coord,
             source: RepoCoordinateSource::SingleRemainingRemote(remote_name),
-        });
+        }));
     }
 
     // Ambiguous: multiple distinct coordinates and no explicit selection.
-    if ngit_interactive_mode() {
+    if options.interactive {
         // Interactive: deterministic ordering (sorted by remote name), no
         // "first remote wins" fallback.
         let sorted = sorted_remote_coordinates(&remote_coordinates);
@@ -641,10 +673,10 @@ pub async fn resolve_repo_coordinate(git_repo: &Repo) -> Result<ResolvedRepoCoor
             .get(choice_index)
             .context("invalid interactive choice index")?
             .clone();
-        return Ok(ResolvedRepoCoordinate {
+        return Ok(Some(ResolvedRepoCoordinate {
             coordinate: coord,
             source: RepoCoordinateSource::InteractiveSelection(remote_name),
-        });
+        }));
     }
 
     bail!(format_ambiguous_error(&remote_coordinates));
@@ -721,13 +753,15 @@ fn find_tracked_upstream_nostr_remote(
 ) -> Option<(String, Nip19Coordinate)> {
     let branch = git_repo.get_checked_out_branch_name().ok()?;
     let upstream = git_repo.get_upstream_for_branch(&branch).ok()??;
-    // Upstream string is of the form "<remote>/<branch>". The remote name may
-    // itself contain a `/`, so split on the FIRST slash.
-    let (remote, _) = upstream.split_once('/')?;
     remote_coordinates
-        .get(remote)
-        .cloned()
-        .map(|c| (remote.to_string(), c))
+        .iter()
+        .filter(|(remote, _)| {
+            upstream
+                .strip_prefix(remote.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+        .max_by_key(|(remote, _)| remote.len())
+        .map(|(remote, coordinate)| (remote.clone(), coordinate.clone()))
 }
 
 fn format_ambiguous_error(remote_coordinates: &HashMap<String, Nip19Coordinate>) -> String {
@@ -770,34 +804,43 @@ async fn get_nostr_git_remote_selection_labels_ordered(
     Ok(res)
 }
 
+async fn get_resolved_repo_coordinate_when_remote_unknown(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+) -> Result<ResolvedRepoCoordinate> {
+    let options = RepoCoordinateResolutionOptions::from_env();
+    match try_resolve_repo_coordinate_with_options(git_repo, &options).await? {
+        Some(resolved) => Ok(resolved),
+        None if options.interactive => {
+            let c = get_repo_coordinate_from_user_prompt(git_repo, client).await?;
+            Ok(ResolvedRepoCoordinate {
+                coordinate: c.clone(),
+                source: RepoCoordinateSource::UserPrompt,
+            })
+        }
+        None => bail!("no nostr git remotes or git config \"nostr.repo\" value"),
+    }
+}
+
 pub async fn get_repo_coordinates_when_remote_unknown(
     git_repo: &Repo,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Result<Nip19Coordinate> {
-    match resolve_repo_coordinate(git_repo).await {
-        Ok(resolved) => {
-            print_selected_repo(&resolved);
-            Ok(resolved.coordinate)
-        }
-        Err(_) => {
-            // Only prompt when interactive mode is on. Otherwise, propagate
-            // the ambiguity/no-remote error from `resolve_repo_coordinate`.
-            if ngit_interactive_mode() {
-                let c = get_repo_coordinate_from_user_prompt(git_repo, client).await?;
-                print_selected_repo(&ResolvedRepoCoordinate {
-                    coordinate: c.clone(),
-                    source: RepoCoordinateSource::UserPrompt,
-                });
-                Ok(c)
-            } else {
-                // Re-run to surface the underlying error.
-                resolve_repo_coordinate(git_repo)
-                    .await
-                    .map(|r| r.coordinate)
-            }
-        }
-    }
+    get_resolved_repo_coordinate_when_remote_unknown(git_repo, client)
+        .await
+        .map(|resolved| resolved.coordinate)
+}
+
+pub async fn get_repo_coordinates_for_publishing(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+) -> Result<Nip19Coordinate> {
+    let resolved = get_resolved_repo_coordinate_when_remote_unknown(git_repo, client).await?;
+    print_selected_repo(&resolved);
+    Ok(resolved.coordinate)
 }
 
 pub async fn try_and_get_repo_coordinates_when_remote_unknown(
@@ -832,13 +875,14 @@ pub fn print_selected_repo(resolved: &ResolvedRepoCoordinate) {
     );
 }
 
-fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Nip19Coordinate> {
-    Nip19Coordinate::from_bech32(
-        &git_repo
-            .get_git_config_item("nostr.repo", Some(false))?
-            .context("git config item \"nostr.repo\" is not set in local repository")?,
-    )
-    .context("git config item \"nostr.repo\" is not an naddr")
+fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Option<Nip19Coordinate>> {
+    git_repo
+        .get_git_config_item("nostr.repo", Some(false))?
+        .map(|value| {
+            Nip19Coordinate::from_bech32(&value)
+                .context("git config item \"nostr.repo\" is not an naddr")
+        })
+        .transpose()
 }
 
 async fn get_repo_coordinates_from_nostr_remotes(
@@ -2168,28 +2212,16 @@ mod tests {
     /// Unit tests for the repository-coordinate resolution priority policy.
     ///
     /// Documented priority under test:
-    ///   1. `--repo` (env var `NGIT_REPO`)  — remote name → naddr → nostr:// url
+    ///   1. `--repo` — remote name → naddr → nostr:// URL
     ///   2. `nostr.repo` git config
     ///   3. tracked upstream of current branch (nostr:// remote)
     ///   4. `origin` (nostr:// remote)
     ///   5. sole distinct nostr:// remote coordinate
     ///
     /// Ambiguous → error unless `-i` was passed (interactive).
-    ///
-    /// These tests use `serial_test` because they mutate process-wide env
-    /// vars (`NGIT_REPO`, `NGIT_INTERACTIVE_MODE`). They must not run in
-    /// parallel with each other or with any other test that reads those
-    /// same env vars.
     mod resolve_repo_coordinate_priority {
-        use serial_test::serial;
-
         use super::*;
-        use crate::{
-            git::{Repo, RepoActions, test_helpers::GitTestRepo},
-            repo_ref::{
-                NGIT_INTERACTIVE_ENV, NGIT_REPO_ENV, RepoCoordinateSource, resolve_repo_coordinate,
-            },
-        };
+        use crate::git::{Repo, RepoActions, test_helpers::GitTestRepo};
 
         // Distinct pubkeys for the different "maintainers" in each test
         // scenario. These are the actual bytes from the recently-reported
@@ -2238,23 +2270,26 @@ mod tests {
             let test_repo = GitTestRepo::default();
             let _ = test_repo.git_repo.config().unwrap().remove("nostr.repo");
             let repo = Repo::from_path(&test_repo.dir).unwrap();
-            // Ensure any leaked NGIT_* env vars from a previous test are cleared
-            // before we start. serial_test guarantees serialization but not
-            // teardown.
-            std::env::remove_var(NGIT_REPO_ENV);
-            std::env::remove_var(NGIT_INTERACTIVE_ENV);
             (test_repo, repo)
         }
 
-        fn cleanup_env() {
-            std::env::remove_var(NGIT_REPO_ENV);
-            std::env::remove_var(NGIT_INTERACTIVE_ENV);
+        async fn resolve(
+            repo: &Repo,
+            repo_override: Option<String>,
+        ) -> Result<ResolvedRepoCoordinate> {
+            resolve_repo_coordinate_with_options(
+                repo,
+                &RepoCoordinateResolutionOptions {
+                    repo_override,
+                    interactive: false,
+                },
+            )
+            .await
         }
 
         // ---- Tier 1: --repo override --------------------------------------
 
         #[tokio::test]
-        #[serial]
         async fn tier1_repo_arg_matches_remote_name() {
             let (test_repo, repo) = setup_repo();
             test_repo
@@ -2263,19 +2298,15 @@ mod tests {
             test_repo
                 .add_remote("origin", &nostr_url(PUBKEY_B_HEX, "my-repo"))
                 .unwrap();
-            std::env::set_var(NGIT_REPO_ENV, "upstream");
-
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, Some("upstream".to_string())).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(
                 resolved.source,
                 RepoCoordinateSource::RepoArgRemoteName("upstream".to_string())
             );
-            cleanup_env();
         }
 
         #[tokio::test]
-        #[serial]
         async fn tier1_repo_arg_parses_as_naddr() {
             let (test_repo, repo) = setup_repo();
             // Add a conflicting remote — it must be ignored because --repo
@@ -2283,49 +2314,64 @@ mod tests {
             test_repo
                 .add_remote("origin", &nostr_url(PUBKEY_B_HEX, "my-repo"))
                 .unwrap();
-            std::env::set_var(NGIT_REPO_ENV, naddr(PUBKEY_A_HEX, "my-repo"));
-
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, Some(naddr(PUBKEY_A_HEX, "my-repo")))
+                .await
+                .unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(resolved.source, RepoCoordinateSource::RepoArgNaddr);
-            cleanup_env();
         }
 
         #[tokio::test]
-        #[serial]
         async fn tier1_repo_arg_parses_as_nostr_url() {
             let (test_repo, repo) = setup_repo();
             test_repo
                 .add_remote("origin", &nostr_url(PUBKEY_B_HEX, "my-repo"))
                 .unwrap();
-            std::env::set_var(NGIT_REPO_ENV, nostr_url(PUBKEY_A_HEX, "my-repo"));
-
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, Some(nostr_url(PUBKEY_A_HEX, "my-repo")))
+                .await
+                .unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(resolved.source, RepoCoordinateSource::RepoArgNostrUrl);
-            cleanup_env();
         }
 
         #[tokio::test]
-        #[serial]
         async fn tier1_repo_arg_invalid_returns_error() {
             let (_test_repo, repo) = setup_repo();
-            std::env::set_var(NGIT_REPO_ENV, "not-a-remote-nor-naddr-nor-url");
 
-            let err = resolve_repo_coordinate(&repo).await.err().unwrap();
+            let err = resolve(&repo, Some("not-a-remote-nor-naddr-nor-url".to_string()))
+                .await
+                .err()
+                .unwrap();
             let msg = format!("{err}");
             assert!(
                 msg.contains("--repo value")
                     && msg.contains("neither a valid naddr nor a nostr:// URL"),
                 "unexpected error: {msg}"
             );
-            cleanup_env();
+        }
+
+        #[tokio::test]
+        async fn tier1_invalid_repo_arg_still_errors_in_interactive_mode() {
+            let (_test_repo, repo) = setup_repo();
+            let err = resolve_repo_coordinate_with_options(
+                &repo,
+                &RepoCoordinateResolutionOptions {
+                    repo_override: Some("not-a-remote-nor-naddr-nor-url".to_string()),
+                    interactive: true,
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert!(
+                err.to_string().contains("--repo value"),
+                "unexpected error: {err}"
+            );
         }
 
         // ---- Tier 2: nostr.repo config ------------------------------------
 
         #[tokio::test]
-        #[serial]
         async fn tier2_nostr_repo_config_wins_over_remotes() {
             let (test_repo, repo) = setup_repo();
             // Configure two disagreeing nostr:// remotes so that without
@@ -2341,16 +2387,31 @@ mod tests {
             repo.save_git_config_item("nostr.repo", &naddr(PUBKEY_A_HEX, "my-repo"), false)
                 .unwrap();
 
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, None).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(resolved.source, RepoCoordinateSource::NostrRepoConfig);
-            cleanup_env();
+        }
+
+        #[tokio::test]
+        async fn tier2_invalid_nostr_repo_config_does_not_fall_through() {
+            let (test_repo, repo) = setup_repo();
+            test_repo
+                .add_remote("origin", &nostr_url(PUBKEY_A_HEX, "my-repo"))
+                .unwrap();
+            repo.save_git_config_item("nostr.repo", "not-an-naddr", false)
+                .unwrap();
+
+            let err = resolve(&repo, None).await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("git config item \"nostr.repo\" is not an naddr"),
+                "unexpected error: {err}"
+            );
         }
 
         // ---- Tier 3: tracked upstream remote ------------------------------
 
         #[tokio::test]
-        #[serial]
         async fn tier3_tracked_upstream_remote_wins_over_origin() {
             let (test_repo, repo) = setup_repo();
             // Two disagreeing nostr remotes: origin and upstream.
@@ -2390,19 +2451,58 @@ mod tests {
                 branch.set_upstream(Some("upstream/main")).unwrap();
             }
 
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, None).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(
                 resolved.source,
                 RepoCoordinateSource::TrackedUpstreamRemote("upstream".to_string())
             );
-            cleanup_env();
+        }
+
+        #[tokio::test]
+        async fn tier3_tracked_upstream_remote_name_with_slash_wins_over_origin() {
+            let (test_repo, repo) = setup_repo();
+            test_repo
+                .add_remote("origin", &nostr_url(PUBKEY_B_HEX, "my-repo"))
+                .unwrap();
+            test_repo
+                .add_remote("team/upstream", &nostr_url(PUBKEY_A_HEX, "my-repo"))
+                .unwrap();
+
+            test_repo.populate().unwrap();
+            let head_oid = test_repo
+                .git_repo
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id();
+            test_repo
+                .git_repo
+                .reference(
+                    "refs/remotes/team/upstream/main",
+                    head_oid,
+                    true,
+                    "seed team/upstream/main for test",
+                )
+                .unwrap();
+            let mut branch = test_repo
+                .git_repo
+                .find_branch("main", git2::BranchType::Local)
+                .unwrap();
+            branch.set_upstream(Some("team/upstream/main")).unwrap();
+
+            let resolved = resolve(&repo, None).await.unwrap();
+            assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
+            assert_eq!(
+                resolved.source,
+                RepoCoordinateSource::TrackedUpstreamRemote("team/upstream".to_string())
+            );
         }
 
         // ---- Tier 4: origin remote ----------------------------------------
 
         #[tokio::test]
-        #[serial]
         async fn tier4_origin_wins_when_no_tracked_upstream() {
             let (test_repo, repo) = setup_repo();
             test_repo
@@ -2412,33 +2512,29 @@ mod tests {
                 .add_remote("upstream", &nostr_url(PUBKEY_B_HEX, "my-repo"))
                 .unwrap();
 
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, None).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(resolved.source, RepoCoordinateSource::OriginRemote);
-            cleanup_env();
         }
 
         // ---- Tier 5: sole remaining distinct coordinate -------------------
 
         #[tokio::test]
-        #[serial]
         async fn tier5_single_remaining_remote_wins() {
             let (test_repo, repo) = setup_repo();
             test_repo
                 .add_remote("upstream", &nostr_url(PUBKEY_A_HEX, "my-repo"))
                 .unwrap();
 
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, None).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(
                 resolved.source,
                 RepoCoordinateSource::SingleRemainingRemote("upstream".to_string())
             );
-            cleanup_env();
         }
 
         #[tokio::test]
-        #[serial]
         async fn tier5_multiple_remotes_same_coordinate_collapses_to_single() {
             let (test_repo, repo) = setup_repo();
             // Two remotes, SAME coordinate — must resolve unambiguously.
@@ -2449,20 +2545,18 @@ mod tests {
                 .add_remote("mirror", &nostr_url(PUBKEY_A_HEX, "my-repo"))
                 .unwrap();
 
-            let resolved = resolve_repo_coordinate(&repo).await.unwrap();
+            let resolved = resolve(&repo, None).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             // Deterministic representative: lex-first remote name ("mirror").
             assert_eq!(
                 resolved.source,
                 RepoCoordinateSource::SingleRemainingRemote("mirror".to_string())
             );
-            cleanup_env();
         }
 
         // ---- Ambiguity: multiple distinct coordinates, no --repo, no -i ---
 
         #[tokio::test]
-        #[serial]
         async fn ambiguous_multiple_remotes_no_origin_errors_by_default() {
             let (test_repo, repo) = setup_repo();
             test_repo
@@ -2472,7 +2566,7 @@ mod tests {
                 .add_remote("co", &nostr_url(PUBKEY_B_HEX, "my-repo"))
                 .unwrap();
 
-            let err = resolve_repo_coordinate(&repo).await.err().unwrap();
+            let err = resolve(&repo, None).await.err().unwrap();
             let msg = format!("{err}");
             assert!(
                 msg.contains("multiple nostr:// git remotes disagree")
@@ -2480,13 +2574,11 @@ mod tests {
                     && msg.contains("nostr.repo"),
                 "unexpected error:\n{msg}"
             );
-            cleanup_env();
         }
 
         // ---- Regression: the exact incident that motivated this policy ---
 
         #[tokio::test]
-        #[serial]
         async fn regression_two_disagreeing_remotes_no_config_no_origin_errors() {
             // Recreates the amethyst NIP-05 Namecoin PR mis-target incident:
             // - `nostr` remote → maintainer A (canonical)
@@ -2504,13 +2596,12 @@ mod tests {
                 .add_remote("co-maintainer", &nostr_url(PUBKEY_B_HEX, "amethyst"))
                 .unwrap();
 
-            let err = resolve_repo_coordinate(&repo).await.err().unwrap();
+            let err = resolve(&repo, None).await.err().unwrap();
             let msg = format!("{err}");
             assert!(
                 msg.contains("multiple nostr:// git remotes disagree"),
                 "expected ambiguity error, got:\n{msg}"
             );
-            cleanup_env();
         }
     }
 }

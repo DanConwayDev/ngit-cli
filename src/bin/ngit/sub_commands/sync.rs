@@ -17,7 +17,7 @@ use ngit::{
     login::{self, existing::load_existing_login},
     push::push_to_remote,
     repo_ref::{
-        format_grasp_server_url_as_relay_url, get_repo_coordinates_when_remote_unknown,
+        format_grasp_server_url_as_relay_url, get_repo_coordinates_for_publishing,
         is_grasp_server_clone_url,
     },
     repo_state::RepoState,
@@ -116,7 +116,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         .await.context("failed to list git remotes")?
         .context("no `nostr://` remote detected. `ngit sync` must be run from a repo with a nostr remote")?;
 
-    let repo_coordinate = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let repo_coordinate = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
 
     let fetch_report = fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;
 

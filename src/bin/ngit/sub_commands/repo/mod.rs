@@ -20,7 +20,7 @@ use crate::{
     cli::{Cli, RepoCommands, extract_signer_cli_arguments},
     client::{Client, Connect},
     git::{Repo, RepoActions},
-    repo_ref::try_and_get_repo_coordinates_when_remote_unknown,
+    repo_ref::try_resolve_repo_coordinate,
     sub_commands::init,
 };
 
@@ -97,7 +97,9 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
     .ok()
     .map(|(_, user_ref, _)| user_ref.public_key);
 
-    let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
+    let repo_coordinate = try_resolve_repo_coordinate(&git_repo)
+        .await?
+        .map(|resolved| resolved.coordinate);
 
     let Some(repo_coordinate) = repo_coordinate else {
         if json {

@@ -16,7 +16,7 @@ use crate::{
     },
     git::{Repo, RepoActions},
     login,
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::get_repo_coordinates_for_publishing,
     sub_commands::id_resolver::{
         issue_description, parse_event_id, pr_description, resolve_issue_or_prefix,
         resolve_pr_root_or_prefix,
@@ -169,7 +169,7 @@ pub async fn launch_pr_comment(
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
 
     if !offline {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
@@ -211,7 +211,7 @@ pub async fn launch_issue_comment(
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
 
     if !offline {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;

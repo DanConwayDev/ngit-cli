@@ -26,7 +26,7 @@ use crate::{
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     login,
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::get_repo_coordinates_for_publishing,
     sub_commands::id_resolver::{pr_description, proposal_roots, resolve_pr_root_or_prefix},
 };
 
@@ -36,7 +36,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
 
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
 
     if !offline {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
