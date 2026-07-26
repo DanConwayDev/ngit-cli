@@ -15,7 +15,7 @@ use crate::{
     },
     git::{Repo, RepoActions},
     login,
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::get_repo_coordinates_for_publishing,
 };
 
 pub async fn launch(
@@ -27,7 +27,7 @@ pub async fn launch(
     let git_repo_path = git_repo.get_path()?;
 
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
 
     fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
 

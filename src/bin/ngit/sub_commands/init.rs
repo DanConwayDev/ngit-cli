@@ -38,7 +38,8 @@ use crate::{
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
     login,
     repo_ref::{
-        RepoRef, get_repo_config_from_yaml, try_and_get_repo_coordinates_when_remote_unknown,
+        RepoCoordinateSource, RepoRef, ResolvedRepoCoordinate, get_repo_config_from_yaml,
+        print_selected_repo, try_resolve_repo_coordinate,
     },
 };
 
@@ -1205,6 +1206,7 @@ async fn publish_and_finalize(
     git_repo: &Repo,
     repo_config_result: &Result<ngit::repo_ref::RepoConfigYaml>,
     is_co_maintainer_first_acceptance: bool,
+    selected_repo: Option<&ResolvedRepoCoordinate>,
 ) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
 
@@ -1252,6 +1254,22 @@ async fn publish_and_finalize(
         nostr_git_url: None,
         extra_tags: fields.extra_tags,
     };
+
+    let selected_repo = selected_repo
+        .cloned()
+        .unwrap_or_else(|| ResolvedRepoCoordinate {
+            coordinate: Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: user_ref.public_key,
+                    identifier: repo_ref.identifier.clone(),
+                },
+                relays: repo_ref.relays.clone(),
+            },
+            source: RepoCoordinateSource::NewRepository,
+            remote: None,
+        });
+    print_selected_repo(&selected_repo);
 
     // Step 2: Create event
     let repo_event = repo_ref.to_event(&signer).await?;
@@ -1498,7 +1516,10 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     )
     .await?;
 
-    let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
+    let resolved_repo_coordinate = try_resolve_repo_coordinate(&git_repo).await?;
+    let repo_coordinate = resolved_repo_coordinate
+        .as_ref()
+        .map(|resolved| resolved.coordinate.clone());
 
     // Phase 2: Try to get cached repo_ref for early validation
     let cached_repo_ref = if let Some(coord) = &repo_coordinate {
@@ -1618,6 +1639,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         &git_repo,
         &repo_config_result,
         is_co_maintainer_first_acceptance,
+        resolved_repo_coordinate.as_ref(),
     )
     .await
 }

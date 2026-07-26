@@ -145,6 +145,9 @@ pub trait RepoActions {
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
     fn ancestor_of(&self, decendant: &Sha1Hash, ancestor: &Sha1Hash) -> Result<bool>;
     fn get_upstream_for_branch(&self, branch_name: &str) -> Result<Option<String>>;
+    /// Return the remote configured by `branch.<name>.remote`, even when the
+    /// corresponding remote-tracking reference does not currently exist.
+    fn get_upstream_remote_for_branch(&self, branch_name: &str) -> Result<Option<String>>;
     fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>>;
     fn save_git_config_item(&self, item: &str, value: &str, global: bool) -> Result<()>;
     fn remove_git_config_item(&self, item: &str, global: bool) -> Result<bool>;
@@ -1131,6 +1134,22 @@ impl RepoActions for Repo {
                 Ok(name)
             }
             Err(_) => Ok(None),
+        }
+    }
+
+    fn get_upstream_remote_for_branch(&self, branch_name: &str) -> Result<Option<String>> {
+        let refname = format!("refs/heads/{branch_name}");
+        match self.git_repo.branch_upstream_remote(&refname) {
+            Ok(remote) => Ok(Some(
+                remote
+                    .as_str()
+                    .context("branch upstream remote is not valid UTF-8")?
+                    .to_string(),
+            )),
+            Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(error) => Err(error).context(format!(
+                "failed to find configured upstream remote for local branch {branch_name}"
+            )),
         }
     }
 

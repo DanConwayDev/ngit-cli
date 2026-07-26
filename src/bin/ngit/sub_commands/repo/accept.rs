@@ -18,7 +18,7 @@ use crate::{
     client::{Client, Connect},
     git::{Repo, RepoActions},
     login,
-    repo_ref::try_and_get_repo_coordinates_when_remote_unknown,
+    repo_ref::{print_selected_repo, try_resolve_repo_coordinate},
 };
 
 #[derive(Debug, clap::Args)]
@@ -45,15 +45,15 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let my_pubkey = user_ref.public_key;
 
-    let repo_coordinate = (try_and_get_repo_coordinates_when_remote_unknown(&git_repo).await).ok();
-
-    let Some(repo_coordinate) = repo_coordinate else {
+    let Some(resolved_repo_coordinate) = try_resolve_repo_coordinate(&git_repo).await? else {
         return Err(cli_error(
             "no nostr repository found",
             &[],
             &["use `ngit repo init` to publish this repository to nostr"],
         ));
     };
+    print_selected_repo(&resolved_repo_coordinate);
+    let repo_coordinate = resolved_repo_coordinate.coordinate;
 
     // Fetch latest data from relays
     fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;

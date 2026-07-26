@@ -42,6 +42,12 @@ async fn main() {
         std::env::set_var("NGIT_REPO_RELAY_ONLY", "1");
     }
 
+    if let Some(repo) = cli.repo.as_deref() {
+        // Passed to `repo_ref::resolve_repo_coordinate` via env var so it
+        // does not need threading through every subcommand.
+        std::env::set_var(repo_ref::NGIT_REPO_ENV, repo);
+    }
+
     if cli.customize {
         print!("{}", customise_template());
         std::process::exit(0); // Exit the program

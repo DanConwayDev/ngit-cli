@@ -32,7 +32,10 @@ use crate::{
         commit_msg_from_patch_oneliner, event_is_revision_root, event_to_cover_letter,
         get_parent_commit_from_patch,
     },
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::{
+        get_nostr_remote_for_resolved_coordinate, get_repo_coordinates_when_remote_unknown,
+        get_resolved_repo_coordinate_when_remote_unknown,
+    },
     sub_commands::{
         checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
         id_resolver::resolve_pr_root_id_or_prefix,
@@ -640,16 +643,15 @@ async fn launch_interactive() -> Result<()> {
 
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let resolved_repo =
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &client).await?;
+    let nostr_remote_name: Option<String> =
+        get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo)
+            .await?
+            .map(|remote| remote.name);
+    let repo_coordinates = resolved_repo.coordinate;
 
     fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
-
-    let nostr_remote_name: Option<String> = git_repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await
-        .ok()
-        .flatten()
-        .map(|(name, _)| name);
     let nostr_remote_name: Option<&str> = nostr_remote_name.as_deref();
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
