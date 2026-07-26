@@ -17,8 +17,8 @@ use ngit::{
     login::{self, existing::load_existing_login},
     push::push_to_remote,
     repo_ref::{
-        format_grasp_server_url_as_relay_url, get_repo_coordinates_for_publishing,
-        is_grasp_server_clone_url,
+        format_grasp_server_url_as_relay_url, get_nostr_remote_for_resolved_coordinate,
+        get_resolved_repo_coordinate_for_publishing, is_grasp_server_clone_url,
     },
     repo_state::RepoState,
     utils::{get_short_git_server_name, join_with_and},
@@ -111,12 +111,15 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         None
     };
 
-    let (nostr_remote_name, decoded_nostr_url) = git_repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await.context("failed to list git remotes")?
-        .context("no `nostr://` remote detected. `ngit sync` must be run from a repo with a nostr remote")?;
-
-    let repo_coordinate = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
+    let resolved_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &client).await?;
+    let selected_remote = get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo)
+        .await?
+        .context(
+            "selected repository is not represented by a configured `nostr://` remote; add a matching remote or select one with `--repo <REMOTE>`",
+        )?;
+    let nostr_remote_name = selected_remote.name;
+    let decoded_nostr_url = selected_remote.decoded_url;
+    let repo_coordinate = resolved_repo.coordinate;
 
     let fetch_report = fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;
 

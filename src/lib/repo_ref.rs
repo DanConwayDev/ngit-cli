@@ -532,6 +532,16 @@ impl RepoCoordinateSource {
 pub struct ResolvedRepoCoordinate {
     pub coordinate: Nip19Coordinate,
     pub source: RepoCoordinateSource,
+    /// Configured `nostr://` remote selected by the same resolution decision.
+    /// Coordinate-only sources such as `nostr.repo` may leave this unset until
+    /// a caller specifically needs a matching Git remote.
+    pub remote: Option<ResolvedNostrRemote>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedNostrRemote {
+    pub name: String,
+    pub decoded_url: NostrUrlDecoded,
 }
 
 /// Environment variable used to pass a global `--repo` override from the
@@ -613,47 +623,54 @@ async fn try_resolve_repo_coordinate_with_options(
         return Ok(Some(ResolvedRepoCoordinate {
             coordinate: c,
             source: RepoCoordinateSource::NostrRepoConfig,
+            remote: None,
         }));
     }
 
-    let remote_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo).await?;
+    let nostr_remotes = get_nostr_remotes(git_repo).await?;
 
-    if remote_coordinates.is_empty() {
+    if nostr_remotes.is_empty() {
         // Legacy fallback: maintainers.yaml.
         return Ok(get_repo_coordinates_from_maintainers_yaml(git_repo)
             .await
             .map(|c| ResolvedRepoCoordinate {
                 coordinate: c,
                 source: RepoCoordinateSource::MaintainersYaml,
+                remote: None,
             })
             .ok());
     }
 
     // 3. Tracked upstream of the current branch, if it is a nostr:// remote.
-    if let Some((remote_name, coord)) =
-        find_tracked_upstream_nostr_remote(git_repo, &remote_coordinates)
-    {
+    if let Some(remote) = find_tracked_upstream_nostr_remote(git_repo, &nostr_remotes) {
         return Ok(Some(ResolvedRepoCoordinate {
-            coordinate: coord,
-            source: RepoCoordinateSource::TrackedUpstreamRemote(remote_name),
+            coordinate: remote.decoded_url.coordinate.clone(),
+            source: RepoCoordinateSource::TrackedUpstreamRemote(remote.name.clone()),
+            remote: Some(remote),
         }));
     }
 
     // 4. `origin`, if it is a nostr:// remote.
-    if let Some(coord) = remote_coordinates.get("origin").cloned() {
+    if let Some(decoded_url) = nostr_remotes.get("origin").cloned() {
+        let remote = ResolvedNostrRemote {
+            name: "origin".to_string(),
+            decoded_url,
+        };
         return Ok(Some(ResolvedRepoCoordinate {
-            coordinate: coord,
+            coordinate: remote.decoded_url.coordinate.clone(),
             source: RepoCoordinateSource::OriginRemote,
+            remote: Some(remote),
         }));
     }
 
     // 5. Sole distinct coordinate among the remaining nostr:// remotes.
-    let distinct_coords: Vec<(String, Nip19Coordinate)> = distinct_coordinates(&remote_coordinates);
-    if distinct_coords.len() == 1 {
-        let (remote_name, coord) = distinct_coords.into_iter().next().unwrap();
+    let distinct_remotes = distinct_nostr_remotes(&nostr_remotes);
+    if distinct_remotes.len() == 1 {
+        let remote = distinct_remotes.into_iter().next().unwrap();
         return Ok(Some(ResolvedRepoCoordinate {
-            coordinate: coord,
-            source: RepoCoordinateSource::SingleRemainingRemote(remote_name),
+            coordinate: remote.decoded_url.coordinate.clone(),
+            source: RepoCoordinateSource::SingleRemainingRemote(remote.name.clone()),
+            remote: Some(remote),
         }));
     }
 
@@ -661,7 +678,7 @@ async fn try_resolve_repo_coordinate_with_options(
     if options.interactive {
         // Interactive: deterministic ordering (sorted by remote name), no
         // "first remote wins" fallback.
-        let sorted = sorted_remote_coordinates(&remote_coordinates);
+        let sorted = sorted_nostr_remotes(&nostr_remotes);
         let labels = get_nostr_git_remote_selection_labels_ordered(git_repo, &sorted).await?;
         let choice_index = Interactor::default().choice(
             PromptChoiceParms::default()
@@ -669,42 +686,52 @@ async fn try_resolve_repo_coordinate_with_options(
                 .with_default(0)
                 .with_choices(labels),
         )?;
-        let (remote_name, coord) = sorted
+        let remote = sorted
             .get(choice_index)
             .context("invalid interactive choice index")?
             .clone();
         return Ok(Some(ResolvedRepoCoordinate {
-            coordinate: coord,
-            source: RepoCoordinateSource::InteractiveSelection(remote_name),
+            coordinate: remote.decoded_url.coordinate.clone(),
+            source: RepoCoordinateSource::InteractiveSelection(remote.name.clone()),
+            remote: Some(remote),
         }));
     }
 
-    bail!(format_ambiguous_error(&remote_coordinates));
+    bail!(format_ambiguous_error(&nostr_remotes));
 }
 
 async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRepoCoordinate> {
     // 1a. Match against configured remote names.
-    let remote_coordinates = get_repo_coordinates_from_nostr_remotes(git_repo).await?;
-    if let Some(coord) = remote_coordinates.get(raw).cloned() {
+    let nostr_remotes = get_nostr_remotes(git_repo).await?;
+    if let Some(decoded_url) = nostr_remotes.get(raw).cloned() {
+        let remote = ResolvedNostrRemote {
+            name: raw.to_string(),
+            decoded_url,
+        };
         return Ok(ResolvedRepoCoordinate {
-            coordinate: coord,
+            coordinate: remote.decoded_url.coordinate.clone(),
             source: RepoCoordinateSource::RepoArgRemoteName(raw.to_string()),
+            remote: Some(remote),
         });
     }
 
     // 1b. Parse as an naddr.
     if let Ok(c) = Nip19Coordinate::from_bech32(raw) {
+        let remote = find_matching_nostr_remote(&nostr_remotes, &c);
         return Ok(ResolvedRepoCoordinate {
             coordinate: c,
             source: RepoCoordinateSource::RepoArgNaddr,
+            remote,
         });
     }
 
     // 1c. Parse as a nostr:// URL.
     if let Ok(nostr_url) = NostrUrlDecoded::parse_and_resolve(raw, &Some(git_repo)).await {
+        let remote = find_matching_nostr_remote(&nostr_remotes, &nostr_url.coordinate);
         return Ok(ResolvedRepoCoordinate {
             coordinate: nostr_url.coordinate,
             source: RepoCoordinateSource::RepoArgNostrUrl,
+            remote,
         });
     }
 
@@ -713,62 +740,85 @@ async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRep
     )
 }
 
-/// Return the sorted list of `(remote_name, coordinate)` pairs, deterministic
-/// by remote name. This is the canonical ordering for both
-/// interactive-prompt display and any user-visible listing.
-fn sorted_remote_coordinates(
-    remote_coordinates: &HashMap<String, Nip19Coordinate>,
-) -> Vec<(String, Nip19Coordinate)> {
-    let mut v: Vec<(String, Nip19Coordinate)> = remote_coordinates
+/// Return configured Nostr remotes sorted by name. This is the canonical
+/// ordering for both interactive-prompt display and user-visible listings.
+fn sorted_nostr_remotes(
+    nostr_remotes: &HashMap<String, NostrUrlDecoded>,
+) -> Vec<ResolvedNostrRemote> {
+    let mut remotes: Vec<ResolvedNostrRemote> = nostr_remotes
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(name, decoded_url)| ResolvedNostrRemote {
+            name: name.clone(),
+            decoded_url: decoded_url.clone(),
+        })
         .collect();
-    v.sort_by(|a, b| a.0.cmp(&b.0));
-    v
+    remotes.sort_by(|a, b| a.name.cmp(&b.name));
+    remotes
 }
 
 /// Collapse the remote map to at-most-one entry per distinct coordinate
 /// (pubkey + identifier), keeping the lexicographically-first remote name
 /// as the representative. Returned in deterministic order.
-fn distinct_coordinates(
-    remote_coordinates: &HashMap<String, Nip19Coordinate>,
-) -> Vec<(String, Nip19Coordinate)> {
-    let sorted = sorted_remote_coordinates(remote_coordinates);
+fn distinct_nostr_remotes(
+    nostr_remotes: &HashMap<String, NostrUrlDecoded>,
+) -> Vec<ResolvedNostrRemote> {
+    let sorted = sorted_nostr_remotes(nostr_remotes);
     let mut seen: HashSet<(PublicKey, String)> = HashSet::new();
     let mut out = vec![];
-    for (name, c) in sorted {
-        let key = (c.public_key, c.identifier.clone());
+    for remote in sorted {
+        let coordinate = &remote.decoded_url.coordinate;
+        let key = (coordinate.public_key, coordinate.identifier.clone());
         if seen.insert(key) {
-            out.push((name, c));
+            out.push(remote);
         }
     }
     out
 }
 
-/// If the currently checked-out branch has a tracked upstream whose remote
-/// resolves to a `nostr://` coordinate, return `(remote_name, coordinate)`.
-fn find_tracked_upstream_nostr_remote(
-    git_repo: &Repo,
-    remote_coordinates: &HashMap<String, Nip19Coordinate>,
-) -> Option<(String, Nip19Coordinate)> {
-    let branch = git_repo.get_checked_out_branch_name().ok()?;
-    let remote = git_repo.get_upstream_remote_for_branch(&branch).ok()??;
-    remote_coordinates
-        .get(&remote)
-        .cloned()
-        .map(|coordinate| (remote, coordinate))
+fn coordinates_match(a: &Nip19Coordinate, b: &Nip19Coordinate) -> bool {
+    a.coordinate == b.coordinate
 }
 
-fn format_ambiguous_error(remote_coordinates: &HashMap<String, Nip19Coordinate>) -> String {
-    let sorted = sorted_remote_coordinates(remote_coordinates);
+fn find_matching_nostr_remote(
+    nostr_remotes: &HashMap<String, NostrUrlDecoded>,
+    coordinate: &Nip19Coordinate,
+) -> Option<ResolvedNostrRemote> {
+    sorted_nostr_remotes(nostr_remotes)
+        .into_iter()
+        .find(|remote| coordinates_match(&remote.decoded_url.coordinate, coordinate))
+}
+
+/// If the currently checked-out branch has a tracked upstream whose remote
+/// resolves to a `nostr://` coordinate, return that remote.
+fn find_tracked_upstream_nostr_remote(
+    git_repo: &Repo,
+    nostr_remotes: &HashMap<String, NostrUrlDecoded>,
+) -> Option<ResolvedNostrRemote> {
+    let branch = git_repo.get_checked_out_branch_name().ok()?;
+    let remote = git_repo.get_upstream_remote_for_branch(&branch).ok()??;
+    nostr_remotes
+        .get(&remote)
+        .cloned()
+        .map(|decoded_url| ResolvedNostrRemote {
+            name: remote,
+            decoded_url,
+        })
+}
+
+fn format_ambiguous_error(nostr_remotes: &HashMap<String, NostrUrlDecoded>) -> String {
+    let sorted = sorted_nostr_remotes(nostr_remotes);
     let mut lines = vec![
         "multiple nostr:// git remotes disagree on the target repository and no explicit selection was made".to_string(),
         String::new(),
         "remotes and their coordinates:".to_string(),
     ];
-    for (name, c) in &sorted {
-        let naddr = c.to_bech32().unwrap_or_else(|_| "<invalid>".to_string());
-        lines.push(format!("  {name}: {naddr}"));
+    for remote in &sorted {
+        let naddr = remote
+            .decoded_url
+            .coordinate
+            .to_bech32()
+            .unwrap_or_else(|_| "<invalid>".to_string());
+        lines.push(format!("  {}: {naddr}", remote.name));
     }
     lines.push(String::new());
     lines.push("disambiguate by one of:".to_string());
@@ -783,23 +833,31 @@ fn format_ambiguous_error(remote_coordinates: &HashMap<String, Nip19Coordinate>)
 
 async fn get_nostr_git_remote_selection_labels_ordered(
     git_repo: &Repo,
-    ordered: &[(String, Nip19Coordinate)],
+    ordered: &[ResolvedNostrRemote],
 ) -> Result<Vec<String>> {
     let mut res = vec![];
-    for (remote, c) in ordered {
+    for remote in ordered {
+        let coordinate = &remote.decoded_url.coordinate;
         res.push(format!(
-            "{remote} - {}/{}",
-            get_user_details(&c.public_key, None, Some(git_repo.get_path()?), true, false)
-                .await?
-                .metadata
-                .name,
-            c.identifier
+            "{} - {}/{}",
+            remote.name,
+            get_user_details(
+                &coordinate.public_key,
+                None,
+                Some(git_repo.get_path()?),
+                true,
+                false
+            )
+            .await?
+            .metadata
+            .name,
+            coordinate.identifier
         ));
     }
     Ok(res)
 }
 
-async fn get_resolved_repo_coordinate_when_remote_unknown(
+pub async fn get_resolved_repo_coordinate_when_remote_unknown(
     git_repo: &Repo,
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
@@ -812,6 +870,7 @@ async fn get_resolved_repo_coordinate_when_remote_unknown(
             Ok(ResolvedRepoCoordinate {
                 coordinate: c.clone(),
                 source: RepoCoordinateSource::UserPrompt,
+                remote: find_nostr_remote_for_coordinate(git_repo, &c).await?,
             })
         }
         None => bail!("no nostr git remotes or git config \"nostr.repo\" value"),
@@ -833,9 +892,19 @@ pub async fn get_repo_coordinates_for_publishing(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
 ) -> Result<Nip19Coordinate> {
+    get_resolved_repo_coordinate_for_publishing(git_repo, client)
+        .await
+        .map(|resolved| resolved.coordinate)
+}
+
+pub async fn get_resolved_repo_coordinate_for_publishing(
+    git_repo: &Repo,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+) -> Result<ResolvedRepoCoordinate> {
     let resolved = get_resolved_repo_coordinate_when_remote_unknown(git_repo, client).await?;
     print_selected_repo(&resolved);
-    Ok(resolved.coordinate)
+    Ok(resolved)
 }
 
 pub async fn try_and_get_repo_coordinates_when_remote_unknown(
@@ -880,10 +949,8 @@ fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Option<Nip19C
         .transpose()
 }
 
-async fn get_repo_coordinates_from_nostr_remotes(
-    git_repo: &Repo,
-) -> Result<HashMap<String, Nip19Coordinate>> {
-    let mut repo_coordinates = HashMap::new();
+async fn get_nostr_remotes(git_repo: &Repo) -> Result<HashMap<String, NostrUrlDecoded>> {
+    let mut nostr_remotes = HashMap::new();
     for remote_name in git_repo
         .git_repo
         .remotes()?
@@ -894,11 +961,31 @@ async fn get_repo_coordinates_from_nostr_remotes(
             if let Ok(nostr_url_decoded) =
                 NostrUrlDecoded::parse_and_resolve(remote_url, &Some(git_repo)).await
             {
-                repo_coordinates.insert(remote_name.to_string(), nostr_url_decoded.coordinate);
+                nostr_remotes.insert(remote_name.to_string(), nostr_url_decoded);
             }
         }
     }
-    Ok(repo_coordinates)
+    Ok(nostr_remotes)
+}
+
+async fn find_nostr_remote_for_coordinate(
+    git_repo: &Repo,
+    coordinate: &Nip19Coordinate,
+) -> Result<Option<ResolvedNostrRemote>> {
+    Ok(find_matching_nostr_remote(
+        &get_nostr_remotes(git_repo).await?,
+        coordinate,
+    ))
+}
+
+pub async fn get_nostr_remote_for_resolved_coordinate(
+    git_repo: &Repo,
+    resolved: &ResolvedRepoCoordinate,
+) -> Result<Option<ResolvedNostrRemote>> {
+    if let Some(remote) = &resolved.remote {
+        return Ok(Some(remote.clone()));
+    }
+    find_nostr_remote_for_coordinate(git_repo, &resolved.coordinate).await
 }
 
 async fn get_repo_coordinates_from_maintainers_yaml(git_repo: &Repo) -> Result<Nip19Coordinate> {
@@ -2299,6 +2386,27 @@ mod tests {
                 resolved.source,
                 RepoCoordinateSource::RepoArgRemoteName("upstream".to_string())
             );
+            assert_eq!(
+                resolved.remote.as_ref().map(|remote| remote.name.as_str()),
+                Some("upstream")
+            );
+        }
+
+        #[tokio::test]
+        async fn tier1_repo_arg_preserves_selected_alias_for_downstream_git_operations() {
+            let (test_repo, repo) = setup_repo();
+            let shared_coordinate = nostr_url(PUBKEY_A_HEX, "my-repo");
+            test_repo.add_remote("origin", &shared_coordinate).unwrap();
+            test_repo
+                .add_remote("upstream", &shared_coordinate)
+                .unwrap();
+
+            let resolved = resolve(&repo, Some("upstream".to_string())).await.unwrap();
+            assert_eq!(
+                resolved.remote.as_ref().map(|remote| remote.name.as_str()),
+                Some("upstream"),
+                "an explicit remote must not be replaced by another alias of the same coordinate"
+            );
         }
 
         #[tokio::test]
@@ -2314,6 +2422,10 @@ mod tests {
                 .unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(resolved.source, RepoCoordinateSource::RepoArgNaddr);
+            assert!(
+                resolved.remote.is_none(),
+                "a coordinate-only override must not borrow a disagreeing remote"
+            );
         }
 
         #[tokio::test]
@@ -2385,6 +2497,14 @@ mod tests {
             let resolved = resolve(&repo, None).await.unwrap();
             assert_eq!(resolved.coordinate.public_key, pk(PUBKEY_A_HEX));
             assert_eq!(resolved.source, RepoCoordinateSource::NostrRepoConfig);
+            let remote = get_nostr_remote_for_resolved_coordinate(&repo, &resolved)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                remote.name, "upstream",
+                "downstream Git operations must use the remote matching nostr.repo"
+            );
         }
 
         #[tokio::test]
@@ -2401,6 +2521,25 @@ mod tests {
                 err.to_string()
                     .contains("git config item \"nostr.repo\" is not an naddr"),
                 "unexpected error: {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn tier2_config_without_matching_remote_does_not_borrow_origin() {
+            let (test_repo, repo) = setup_repo();
+            test_repo
+                .add_remote("origin", &nostr_url(PUBKEY_B_HEX, "my-repo"))
+                .unwrap();
+            repo.save_git_config_item("nostr.repo", &naddr(PUBKEY_A_HEX, "my-repo"), false)
+                .unwrap();
+
+            let resolved = resolve(&repo, None).await.unwrap();
+            assert!(
+                get_nostr_remote_for_resolved_coordinate(&repo, &resolved)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "downstream Git operations must not borrow a remote for another coordinate"
             );
         }
 

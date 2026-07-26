@@ -1267,6 +1267,7 @@ async fn publish_and_finalize(
                 relays: repo_ref.relays.clone(),
             },
             source: RepoCoordinateSource::NewRepository,
+            remote: None,
         });
     print_selected_repo(&selected_repo);
 

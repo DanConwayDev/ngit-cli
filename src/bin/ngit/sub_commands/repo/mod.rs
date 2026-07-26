@@ -20,7 +20,7 @@ use crate::{
     cli::{Cli, RepoCommands, extract_signer_cli_arguments},
     client::{Client, Connect},
     git::{Repo, RepoActions},
-    repo_ref::try_resolve_repo_coordinate,
+    repo_ref::{get_nostr_remote_for_resolved_coordinate, try_resolve_repo_coordinate},
     sub_commands::init,
 };
 
@@ -97,11 +97,7 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
     .ok()
     .map(|(_, user_ref, _)| user_ref.public_key);
 
-    let repo_coordinate = try_resolve_repo_coordinate(&git_repo)
-        .await?
-        .map(|resolved| resolved.coordinate);
-
-    let Some(repo_coordinate) = repo_coordinate else {
+    let Some(resolved_repo) = try_resolve_repo_coordinate(&git_repo).await? else {
         if json {
             println!(
                 "{}",
@@ -130,6 +126,9 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
         }
         return Ok(());
     };
+    let selected_remote =
+        get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo).await?;
+    let repo_coordinate = resolved_repo.coordinate;
 
     // Fetch latest data from relays — suppress the summary line.
     // fetching_quietly writes a blank line to stderr after errors so there
@@ -143,12 +142,7 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
     else {
         if json {
             // Coordinate found but no announcement yet — still a nostr repo
-            let nostr_url = git_repo
-                .git_repo
-                .find_remote("origin")
-                .ok()
-                .and_then(|r| r.url().ok().map(std::string::ToString::to_string))
-                .filter(|u| u.starts_with("nostr://"));
+            let nostr_url = selected_remote.map(|remote| remote.decoded_url.original_string);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&RepoInfoJson {

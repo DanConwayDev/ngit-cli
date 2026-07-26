@@ -21,7 +21,9 @@ use crate::{
     },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::{
+        get_nostr_remote_for_resolved_coordinate, get_resolved_repo_coordinate_when_remote_unknown,
+    },
     sub_commands::id_resolver::{pr_description, resolve_pr_root_or_prefix},
 };
 
@@ -31,13 +33,10 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
 
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
-
-    let nostr_remote = git_repo
-        .get_first_nostr_remote_when_in_ngit_binary()
-        .await
-        .ok()
-        .flatten();
+    let resolved_repo =
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &client).await?;
+    let nostr_remote = get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo).await?;
+    let repo_coordinates = resolved_repo.coordinate;
 
     if !offline {
         fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
@@ -74,7 +73,7 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
             &repo_ref,
             &cover_letter,
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
-            nostr_remote.as_ref().map(|(name, _)| name.as_str()),
+            nostr_remote.as_ref().map(|remote| remote.name.as_str()),
             force,
         )
     } else {
@@ -83,7 +82,7 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
             &repo_ref,
             &cover_letter,
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
-            nostr_remote.as_ref().map(|(name, _)| name.as_str()),
+            nostr_remote.as_ref().map(|remote| remote.name.as_str()),
             force,
         )
     }
