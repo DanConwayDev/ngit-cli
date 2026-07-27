@@ -15,8 +15,8 @@
 //! capability family without adding an external test dependency.
 
 use anyhow::{Context, Result, ensure};
-use nostr_sdk::prelude::{Keys, ToBech32};
-use test_harness::Harness;
+use nostr_sdk::prelude::{Filter, Keys, ToBech32};
+use test_harness::{Harness, KIND_REPO_STATE, tag_value};
 
 #[tokio::test]
 async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result<()> {
@@ -199,6 +199,70 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
         String::from_utf8(backing_oid.stdout)?.trim(),
         pushed_oid,
         "the actual CLI push must advance the external-helper backing ref"
+    );
+
+    require_success(
+        "reject deletes on backing repository",
+        &publisher
+            .git([
+                "--git-dir",
+                backing_repo_str,
+                "config",
+                "receive.denyDeletes",
+                "true",
+            ])
+            .output()
+            .await
+            .context("configure backing repository to reject deletes")?,
+    )?;
+
+    let rejected_delete = cloned.nostr_push(["origin", "--delete", "main"]).await;
+    assert!(
+        rejected_delete.is_err(),
+        "nostr push must fail when the external helper rejects its ref update"
+    );
+
+    let backing_oid_after_rejection = publisher
+        .git([
+            "--git-dir",
+            backing_repo_str,
+            "rev-parse",
+            "refs/heads/main",
+        ])
+        .output()
+        .await
+        .context("read backing main after rejected nostr push")?;
+    require_success(
+        "read backing main after rejected nostr push",
+        &backing_oid_after_rejection,
+    )?;
+    assert_eq!(
+        String::from_utf8(backing_oid_after_rejection.stdout)?.trim(),
+        pushed_oid,
+        "the rejected helper push must not change the backing ref"
+    );
+
+    let state_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(keys.public_key())
+                .kind(KIND_REPO_STATE),
+        )
+        .await?;
+    let repo_state_events = state_events
+        .iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(identifier))
+        .collect::<Vec<_>>();
+    ensure!(
+        !repo_state_events.is_empty(),
+        "the successful helper push must publish repository state"
+    );
+    ensure!(
+        repo_state_events.iter().all(|event| {
+            tag_value(event, "refs/heads/main").as_deref() == Some(pushed_oid.as_str())
+        }),
+        "the rejected helper push must not fan out state without main"
     );
     Ok(())
 }
