@@ -20,6 +20,7 @@ use ngit::{
     git::{
         is_git_remote_helper_url,
         nostr_url::{CloneUrl, NostrUrlDecoded},
+        validate_git_server_clone_url,
     },
     list::list_from_remote,
     repo_ref::{
@@ -814,6 +815,9 @@ fn resolve_fields(
     } else {
         prompt_git_servers(git_servers, &selected_grasp_servers, simple_mode)?
     };
+    for git_server in &git_servers {
+        validate_git_server_url(git_server)?;
+    }
 
     // --- Relays ---
     let relays: Vec<RelayUrl> = if !args.relay.is_empty() || !interactive {
@@ -1192,6 +1196,7 @@ fn prompt_git_servers(
 }
 
 fn validate_git_server_url(url: &str) -> Result<String> {
+    validate_git_server_clone_url(url)?;
     if is_git_remote_helper_url(url) {
         Ok(url.to_string())
     } else {
@@ -1758,5 +1763,18 @@ mod git_server_url_validation_tests {
     fn retains_builtin_url_validation() {
         assert!(validate_git_server_url("https://example.test/project.git").is_ok());
         assert!(validate_git_server_url("not a git URL").is_err());
+    }
+
+    #[test]
+    fn rejects_unsafe_or_reserved_helper_schemes() {
+        for url in [
+            "nostr://npub1example/project",
+            "NoStR::npub1example/project",
+            "fd::0,1/project",
+            "ws://relay.example.com",
+            "WSS://relay.example.com",
+        ] {
+            assert!(validate_git_server_url(url).is_err(), "{url}");
+        }
     }
 }

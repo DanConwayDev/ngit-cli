@@ -95,6 +95,8 @@ pub fn fetch_from_git_server(
     term: &console::Term,
     is_grasp_server: bool,
 ) -> Result<()> {
+    remote_helper::validate_clone_url(git_server_url)?;
+
     // Check which OIDs are missing, invalid, or annotated tags
     let mut missing_oids: Vec<&String> = Vec::new();
 

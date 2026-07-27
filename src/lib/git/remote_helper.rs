@@ -6,19 +6,62 @@ use std::{
     thread,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use console::Term;
 
 use super::Repo;
+
+/// Schemes that must never be delegated as Git remote helpers.
+///
+/// Installing a named `git-remote-<scheme>` helper is treated as consent for
+/// repository announcements to invoke it. These schemes are exceptions:
+///
+/// - `nostr` would recursively launch `git-remote-nostr`;
+/// - `fd` is Git's internal bridge to inherited file descriptors;
+/// - `ws` and `wss` are reserved by ngit for GRASP server base URLs.
+const BLOCKED_HELPER_SCHEMES: &[&str] = &["nostr", "fd", "ws", "wss"];
 
 /// Whether Git, rather than libgit2, should handle this URL.
 ///
 /// Git dispatches unknown `<scheme>://` URLs to `git-remote-<scheme>` and
 /// supports the explicit `<scheme>::<address>` helper form. Keeping that
 /// dispatch in Git gives ngit every remote-helper capability without copying
-/// Git's helper state machine.
+/// Git's helper state machine. Git's `protocol.<scheme>.allow` policy remains
+/// authoritative; notably, Git disables the command-executing `ext` helper by
+/// default.
 pub(crate) fn handles_url(url: &str) -> bool {
     helper_scheme(url).is_some()
+}
+
+/// Reject URLs that cannot be used as repository clone URLs.
+pub(crate) fn validate_clone_url(url: &str) -> Result<()> {
+    let Some(scheme) = blocked_helper_scheme(url) else {
+        return Ok(());
+    };
+
+    match scheme.to_ascii_lowercase().as_str() {
+        "nostr" => bail!(
+            "`nostr` URLs cannot be used as git server clone URLs because they would recursively invoke git-remote-nostr"
+        ),
+        "fd" => bail!(
+            "`fd` URLs cannot be used as git server clone URLs because git-remote-fd is an internal file-descriptor transport"
+        ),
+        "ws" | "wss" => bail!(
+            "`{scheme}` URLs are reserved for GRASP server base URLs and cannot be used as git server clone URLs"
+        ),
+        _ => unreachable!("blocked helper scheme is covered"),
+    }
+}
+
+/// Reject schemes that are invalid even where websocket GRASP bases are
+/// accepted.
+pub(crate) fn validate_git_server_argument(url: &str) -> Result<()> {
+    if dispatch_scheme(url)
+        .is_some_and(|scheme| matches!(scheme.to_ascii_lowercase().as_str(), "nostr" | "fd"))
+    {
+        validate_clone_url(url)?;
+    }
+    Ok(())
 }
 
 /// Whether a user-supplied PR server URL is a custom Git clone URL rather
@@ -269,6 +312,12 @@ fn destination_ref(refspec: &str) -> Option<&str> {
 
 fn helper_scheme(url: &str) -> Option<&str> {
     let (scheme, suffix) = scheme_and_suffix(url)?;
+    if BLOCKED_HELPER_SCHEMES
+        .iter()
+        .any(|blocked| scheme.eq_ignore_ascii_case(blocked))
+    {
+        return None;
+    }
     let explicit_helper = suffix.starts_with(':');
 
     if explicit_helper
@@ -281,6 +330,14 @@ fn helper_scheme(url: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn blocked_helper_scheme(url: &str) -> Option<&str> {
+    let scheme = dispatch_scheme(url)?;
+    BLOCKED_HELPER_SCHEMES
+        .iter()
+        .any(|blocked| scheme.eq_ignore_ascii_case(blocked))
+        .then_some(scheme)
 }
 
 fn dispatch_scheme(url: &str) -> Option<&str> {
@@ -450,6 +507,11 @@ mod tests {
             "ssh://example.com/project.git",
             "git://example.com/project.git",
             "ftp://example.com/project.git",
+            "nostr://npub1example/project",
+            "nostr::npub1example/project",
+            "FD::0,1/project",
+            "ws://relay.example.com",
+            "WSS://relay.example.com",
             "git@example.com:project.git",
             "/tmp/project.git",
             "1invalid://project",
@@ -464,6 +526,35 @@ mod tests {
         assert!(is_direct_pr_clone_url("ext::%S /tmp/project.git"));
         assert!(!is_direct_pr_clone_url("ws://relay.example.com"));
         assert!(!is_direct_pr_clone_url("wss://relay.example.com"));
+    }
+
+    #[test]
+    fn rejects_unsafe_or_reserved_clone_url_schemes() {
+        for url in [
+            "nostr://npub1example/project",
+            "NoStR::npub1example/project",
+            "fd::0,1/project",
+            "ws://relay.example.com",
+            "WSS://relay.example.com",
+        ] {
+            assert!(validate_clone_url(url).is_err(), "{url}");
+        }
+
+        for url in [
+            "htree://self/project",
+            "ext::%S /tmp/project.git",
+            "file:///tmp/project.git",
+        ] {
+            assert!(validate_clone_url(url).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn websocket_grasp_bases_remain_valid_server_arguments() {
+        assert!(validate_git_server_argument("ws://relay.example.com").is_ok());
+        assert!(validate_git_server_argument("wss://relay.example.com").is_ok());
+        assert!(validate_git_server_argument("nostr://npub1example/project").is_err());
+        assert!(validate_git_server_argument("fd::0,1/project").is_err());
     }
 
     #[test]

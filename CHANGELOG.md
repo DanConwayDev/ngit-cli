@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Expand `--repo-relay-only` to all ngit commands that publish nostr events.
+- Git server clone URLs can use installed `git-remote-<scheme>` helpers for listing, fetching, and pushing. Installing a helper is treated as consent for signed repository announcements to invoke it, subject to Git's protocol policy; recursive `nostr`, internal `fd`, and GRASP-reserved `ws`/`wss` schemes are not delegated.
 - Global `--repo <REMOTE|NADDR|NOSTR-URL>` argument selects the target repository for repo-scoped operations (`send`, `issue`, `pr`, `repo`, `sync`, and every other command that resolves a repository coordinate). Available at any command position (`ngit --repo upstream issue create`, `ngit issue --repo upstream create`, `ngit issue create --repo upstream`). Value is first matched against configured remote names, then parsed as an naddr, then as a `nostr://` URL.
 - Repo-coordinate resolution now prints a `target repository: <naddr> (source: ...)` diagnostic when publishing repo-scoped events, so an incorrect target is visible before the event is signed.
 

@@ -464,6 +464,8 @@ fn list_from_remote_sync(
     is_grasp_server: bool,
     pb: Option<&ProgressBar>,
 ) -> Result<HashMap<String, String>> {
+    remote_helper::validate_clone_url(git_server_url)?;
+
     if remote_helper::handles_url(git_server_url) {
         if let Some(pb) = pb {
             pb.set_message("via Git remote helper");

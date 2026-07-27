@@ -48,6 +48,8 @@ pub fn push_to_remote(
     is_grasp_server: bool,
     git_server_push_options: &[&str],
 ) -> Result<HashMap<String, Option<String>>> {
+    remote_helper::validate_clone_url(git_server_url)?;
+
     if remote_helper::handles_url(git_server_url) {
         term.write_line(&format!("push: {git_server_url} via Git remote helper..."))?;
         return remote_helper::push(
@@ -433,6 +435,10 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     git_server_push_options: &[&str],
     git_server: Option<&str>,
 ) -> Result<Vec<Event>> {
+    if let Some(git_server) = git_server {
+        remote_helper::validate_git_server_argument(git_server)?;
+    }
+
     let mut to_try = vec![];
     let mut tried = vec![];
     let repo_grasps = repo_ref.grasp_servers();

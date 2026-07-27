@@ -24,6 +24,11 @@ pub fn is_git_remote_helper_url(url: &str) -> bool {
     remote_helper::handles_url(url)
 }
 
+/// Reject URL schemes that cannot safely represent repository Git servers.
+pub fn validate_git_server_clone_url(url: &str) -> anyhow::Result<()> {
+    remote_helper::validate_clone_url(url)
+}
+
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
