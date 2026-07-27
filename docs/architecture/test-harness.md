@@ -228,9 +228,12 @@ the announced repo's git data completes. This is fundamental to
 GRASP: the relay is gated on the git-server having the data.
 
 `ngit init`'s subprocess does not return until its internal `git
-push` finishes (or fails). The harness uses `Command::output()` /
-`wait_with_output()` as the natural barrier. For asynchronous
-secondary effects, use `harness.wait_for_event(filter, timeout)`.
+push` finishes (or fails). The pinned ngit-grasp version withholds
+successful push completion until announcement promotion, ref
+alignment, database persistence, and subscriber notification have
+finished. The harness therefore uses `Command::output()` /
+`wait_with_output()` as the barrier and immediately asserts on the
+resulting GRASP events and refs; it must not poll for them.
 
 ### Event ordering and asynchronous effects
 
@@ -271,12 +274,12 @@ explicit timestamp later than that coordinate's current state event,
 without sleeping. Its `created_at_offset_secs` option remains the
 escape hatch for tests that intentionally need an older event.
 
-This does not remove waits for genuine asynchronous work. A relay ACK
-or completed subprocess does not guarantee that GRASP's asynchronous
-policy has materialized a bare repository, or that a subsequent relay
-query observes the expected event. In those cases, poll the observable
-condition with a bounded timeout (for example, an event with the
-expected ref or a created filesystem path); do not use a fixed sleep.
+This does not remove waits for genuinely asynchronous work outside a
+completed push. In particular, GRASP process startup and effects not
+covered by the push completion contract can still require a bounded
+readiness check. Once `Repo::nostr_push` succeeds, however, its GRASP
+events and refs must be asserted immediately; polling would hide a
+regression in the server boundary. Never use a fixed sleep.
 
 ## ngit-grasp dependency
 

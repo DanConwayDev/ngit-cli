@@ -587,35 +587,31 @@ async fn find_merge_status_event(
     proposal: &MergedProposal,
     signer_pubkey: PublicKey,
 ) -> Result<Event> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let events = harness
-            .grasp("repo")
-            .events(
-                Filter::new()
-                    .author(signer_pubkey)
-                    .kind(Kind::GitStatusApplied),
-            )
-            .await?;
-        let mut matches: Vec<Event> = events
-            .into_iter()
-            .filter(|e| event_root_e_tag(e) == Some(proposal.root_event_id))
-            .collect();
-        match matches.len() {
-            1 => return Ok(matches.pop().unwrap()),
-            0 if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(50)).await,
-            0 => anyhow::bail!(
-                "no Kind::GitStatusApplied event from {signer_pubkey} found on grasp `repo` \
-                 whose root `e` tag matches proposal.root_event_id={}",
-                proposal.root_event_id,
-            ),
-            _ => anyhow::bail!(
-                "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for \
-                 proposal.root_event_id={}; found {}",
-                proposal.root_event_id,
-                matches.len(),
-            ),
-        }
+    let events = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .author(signer_pubkey)
+                .kind(Kind::GitStatusApplied),
+        )
+        .await?;
+    let mut matches: Vec<Event> = events
+        .into_iter()
+        .filter(|e| event_root_e_tag(e) == Some(proposal.root_event_id))
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.pop().unwrap()),
+        0 => anyhow::bail!(
+            "no Kind::GitStatusApplied event from {signer_pubkey} found on grasp `repo` \
+             whose root `e` tag matches proposal.root_event_id={}",
+            proposal.root_event_id,
+        ),
+        _ => anyhow::bail!(
+            "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for \
+             proposal.root_event_id={}; found {}",
+            proposal.root_event_id,
+            matches.len(),
+        ),
     }
 }
 
@@ -645,31 +641,27 @@ async fn find_issue_resolved_status_event(
     issue_id: EventId,
     signer_pubkey: PublicKey,
 ) -> Result<Event> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let events = harness
-            .grasp("repo")
-            .events(
-                Filter::new()
-                    .author(signer_pubkey)
-                    .kind(Kind::GitStatusApplied),
-            )
-            .await?;
-        let mut matches: Vec<Event> = events
-            .into_iter()
-            .filter(|e| event_root_e_tag(e) == Some(issue_id))
-            .collect();
-        match matches.len() {
-            1 => return Ok(matches.pop().unwrap()),
-            0 if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(50)).await,
-            0 => anyhow::bail!(
-                "no Kind::GitStatusApplied event from {signer_pubkey} found for issue {issue_id}"
-            ),
-            _ => anyhow::bail!(
-                "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for issue {issue_id}; found {}",
-                matches.len(),
-            ),
-        }
+    let events = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .author(signer_pubkey)
+                .kind(Kind::GitStatusApplied),
+        )
+        .await?;
+    let mut matches: Vec<Event> = events
+        .into_iter()
+        .filter(|e| event_root_e_tag(e) == Some(issue_id))
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.pop().unwrap()),
+        0 => anyhow::bail!(
+            "no Kind::GitStatusApplied event from {signer_pubkey} found for issue {issue_id}"
+        ),
+        _ => anyhow::bail!(
+            "expected exactly 1 Kind::GitStatusApplied event from {signer_pubkey} for issue {issue_id}; found {}",
+            matches.len(),
+        ),
     }
 }
 
