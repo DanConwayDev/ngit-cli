@@ -24,7 +24,7 @@ use crate::{
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
-        oid_to_shorthand_string,
+        oid_to_shorthand_string, remote_helper,
     },
     git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
     login::user::UserRef,
@@ -48,6 +48,19 @@ pub fn push_to_remote(
     is_grasp_server: bool,
     git_server_push_options: &[&str],
 ) -> Result<HashMap<String, Option<String>>> {
+    remote_helper::validate_clone_url(git_server_url)?;
+
+    if remote_helper::handles_url(git_server_url) {
+        term.write_line(&format!("push: {git_server_url} via Git remote helper..."))?;
+        return remote_helper::push(
+            git_repo,
+            git_server_url,
+            remote_refspecs,
+            term,
+            git_server_push_options,
+        );
+    }
+
     let server_url = git_server_url.parse::<CloneUrl>()?;
     let protocols_to_attempt =
         get_write_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
@@ -422,6 +435,10 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     git_server_push_options: &[&str],
     git_server: Option<&str>,
 ) -> Result<Vec<Event>> {
+    if let Some(git_server) = git_server {
+        remote_helper::validate_git_server_argument(git_server)?;
+    }
+
     let mut to_try = vec![];
     let mut tried = vec![];
     let repo_grasps = repo_ref.grasp_servers();
@@ -429,7 +446,9 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     // Determine whether the user-supplied server is a direct clone URL
     // (ends with .git or an SSH URL) or a GRASP server base URL.
     let user_server_is_direct_url = git_server
-        .map(|s| s.ends_with(".git") || s.starts_with("git@"))
+        .map(|s| {
+            s.ends_with(".git") || s.starts_with("git@") || remote_helper::is_direct_pr_clone_url(s)
+        })
         .unwrap_or(false);
 
     // If the user specified a server, put it first in to_try so it is tried
@@ -636,6 +655,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
 
     let mut unsigned_pr_event: Option<UnsignedEvent> = None;
     for clone_url in servers {
+        let display_url = git_server_display_url(clone_url);
         let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
             unsigned_pr_event.clone()
         } else {
@@ -711,22 +731,20 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
 
         match res {
             Err(error) => {
-                let normalized_url = normalize_grasp_server_url(clone_url)?;
                 term.write_line(&format!(
-                    "push: error sending commit data to {normalized_url}: {error}"
+                    "push: error sending commit data to {display_url}: {error}"
                 ))?;
                 responses.push((clone_url.clone(), Err(anyhow!(error))));
             }
             Ok(ref_updates) => {
-                let normalized_url = normalize_grasp_server_url(clone_url)?;
                 if let Some((_, Some(error))) = ref_updates.iter().next() {
                     term.write_line(&format!(
-                        "push: error sending commit data to {normalized_url}: {error}"
+                        "push: error sending commit data to {display_url}: {error}"
                     ))?;
                     responses.push((clone_url.clone(), Err(anyhow!(error.clone()))));
                 } else {
                     responses.push((clone_url.clone(), Ok(())));
-                    term.write_line(&format!("push: commit data sent to {normalized_url}"))?;
+                    term.write_line(&format!("push: commit data sent to {display_url}"))?;
                     unsigned_pr_event = Some(draft_pr_event);
                 }
             }
@@ -764,6 +782,14 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
         }
     } else {
         Ok((None, responses))
+    }
+}
+
+fn git_server_display_url(url: &str) -> String {
+    if remote_helper::handles_url(url) {
+        url.to_string()
+    } else {
+        normalize_grasp_server_url(url).unwrap_or_else(|_| get_short_git_server_name(url))
     }
 }
 
@@ -811,4 +837,20 @@ async fn create_close_status_for_original_patch(
         "close status for original patch".to_string(),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_server_display_url;
+
+    #[test]
+    fn helper_urls_do_not_require_grasp_normalization() {
+        for url in [
+            "htree://npub1example/project",
+            "ext::%S /tmp/project.git",
+            "file:///tmp/project.git",
+        ] {
+            assert_eq!(git_server_display_url(url), url);
+        }
+    }
 }

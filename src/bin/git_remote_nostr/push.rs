@@ -406,7 +406,7 @@ fn push_git_state_refspecs(
                 is_grasp_server_clone_url(git_server_url),
                 &push_options_refs,
             )
-            .is_ok()
+            .is_ok_and(|ref_updates| all_ref_updates_accepted(&ref_updates))
             {
                 any_push_succeeded = true;
             }
@@ -418,6 +418,10 @@ fn push_git_state_refspecs(
     } else {
         GitStatePushOutcome::AllPushesFailed
     }
+}
+
+fn all_ref_updates_accepted(ref_updates: &HashMap<String, Option<String>>) -> bool {
+    ref_updates.values().all(Option::is_none)
 }
 
 fn servers_with_accepted_grasp_state(
@@ -2761,6 +2765,30 @@ mod tests {
         fn trailing_plus_stripped() {
             let (from, _) = refspec_to_from_to("+testing:testingb").unwrap();
             assert_eq!(from, "testing");
+        }
+    }
+
+    mod all_ref_updates_accepted {
+        use super::*;
+
+        #[test]
+        fn accepts_empty_or_successful_statuses() {
+            assert!(super::all_ref_updates_accepted(&HashMap::new()));
+            assert!(super::all_ref_updates_accepted(&HashMap::from([
+                ("refs/heads/main".to_string(), None),
+                ("refs/tags/v1".to_string(), None),
+            ])));
+        }
+
+        #[test]
+        fn rejects_any_failed_status() {
+            assert!(!super::all_ref_updates_accepted(&HashMap::from([
+                ("refs/heads/main".to_string(), None),
+                (
+                    "refs/tags/v1".to_string(),
+                    Some("hook declined".to_string()),
+                ),
+            ])));
         }
     }
 

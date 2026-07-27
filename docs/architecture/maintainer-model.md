@@ -64,6 +64,14 @@ The key architectural distinction is between **consuming** repository data (fetc
 
 When consuming repo data, `relays`, `clone` (git server URLs), and `blossoms` are **unioned** across all maintainers' announcement events. This means any maintainer can add a mirror git server or relay and all users benefit automatically.
 
+Clone URLs may use installed Git remote helpers. Installing a
+`git-remote-<scheme>` executable is treated as consent for clone URLs in signed
+maintainer announcements to invoke it, subject to Git's
+`protocol.<scheme>.allow` policy. Because infrastructure is unioned, this trust
+applies to helper URLs published by any discovered maintainer. ngit blocks
+recursive `nostr` URLs and Git's internal `fd` transport, while `ws` and `wss`
+remain reserved for GRASP bases.
+
 ### Publishing: Personal Infrastructure, Shared Metadata
 
 When publishing via `ngit init`, fields are sourced differently depending on their type:

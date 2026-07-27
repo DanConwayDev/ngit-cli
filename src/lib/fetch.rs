@@ -15,6 +15,7 @@ use crate::{
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
+        remote_helper,
         utils::check_ssh_keys,
     },
     repo_ref::{RepoRef, is_grasp_server_in_list},
@@ -94,6 +95,8 @@ pub fn fetch_from_git_server(
     term: &console::Term,
     is_grasp_server: bool,
 ) -> Result<()> {
+    remote_helper::validate_clone_url(git_server_url)?;
+
     // Check which OIDs are missing, invalid, or annotated tags
     let mut missing_oids: Vec<&String> = Vec::new();
 
@@ -112,6 +115,13 @@ pub fn fetch_from_git_server(
 
     if missing_oids.is_empty() {
         return Ok(());
+    }
+
+    if remote_helper::handles_url(git_server_url) {
+        term.write_line(&format!(
+            "fetching {git_server_url} via Git remote helper..."
+        ))?;
+        return remote_helper::fetch(git_repo, git_server_url, oids, term);
     }
 
     let server_url = git_server_url.parse::<CloneUrl>()?;
