@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "files": [
+    {
+      "path": ".agents/skills/ngit/SKILL.md",
+      "sha256": "c08d1e3925dec756beefc25815494771f93c5c121267b2f3fb135a3063a3c907"
+    },
+    {
+      "path": ".claude/skills/ngit/SKILL.md",
+      "sha256": "c08d1e3925dec756beefc25815494771f93c5c121267b2f3fb135a3063a3c907"
+    }
+  ]
+}

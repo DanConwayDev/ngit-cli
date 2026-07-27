@@ -1,9 +1,9 @@
 ---
 name: ngit
-description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, submitting or reviewing pull requests (PRs) or patches over Nostr, creating or viewing Nostr git issues, cloning a nostr:// URL, publishing a repository with ngit init, or any task involving the ngit CLI or git-remote-nostr.
+description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.0"
+  version: "1.1"
 ---
 
 # ngit — Nostr Plugin for Git

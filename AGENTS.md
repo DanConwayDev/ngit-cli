@@ -374,3 +374,15 @@ For questions about the codebase or contributions:
 **Last Updated**: 2025-10-20  
 **Version**: 1.7.4  
 **Maintainer**: DanConwayDev
+
+<!-- ngit-agent-guidance:start -->
+## Repository collaboration
+
+This repository uses ngit and Nostr for issues, pull requests, reviews, comments, merges, and repository state.
+
+- Do not use GitHub or GitLab issues, pull requests, APIs, or the `gh`/`glab` CLIs for repository collaboration.
+- For issue, pull request, review, comment, merge, push, clone, or repository metadata tasks, load and follow `.agents/skills/ngit/SKILL.md`.
+- Treat a `nostr://` remote as authoritative.
+- Pull request branches must use the `pr/` prefix.
+- If ngit is unavailable, report that it is required rather than falling back to GitHub or GitLab.
+<!-- ngit-agent-guidance:end -->
