@@ -789,7 +789,7 @@ async fn create_events_and_proposals(
             }
         }
 
-        if let Ok(issue_resolution_events) = get_issue_resolution_status_events(
+        match get_issue_resolution_status_events(
             term,
             &repo_ref.to_nostr_git_url(&None),
             repo_ref,
@@ -800,8 +800,16 @@ async fn create_events_and_proposals(
         )
         .await
         {
-            for event in issue_resolution_events {
-                events.push(event);
+            Ok(issue_resolution_events) => {
+                for event in issue_resolution_events {
+                    events.push(event);
+                }
+            }
+            Err(err) => {
+                term.write_line(
+                    format!("warning: unable to build issue resolution status events: {err:#}")
+                        .as_str(),
+                )?;
             }
         }
 
