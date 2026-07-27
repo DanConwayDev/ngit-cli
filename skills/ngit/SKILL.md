@@ -3,7 +3,7 @@ name: ngit
 description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.1"
+  version: "1.2"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -141,6 +141,12 @@ git push origin main                      # publishes the merge event
 `ngit merge` creates a no-ff merge commit on the default branch with the
 standard `Merge #<8-hex>: <PR title>` message. If conflicts occur, resolve them
 and run `git commit`; ngit has already prepared the commit message.
+
+Before adding maintainer fixes or merging, inspect PR-only merge commits with
+`git log --merges --oneline origin/<default>..HEAD`. If it shows a prior
+`Merge #...`, stop: `ngit merge` would create nested merge history. Unless that
+history is intentional, rebase or cherry-pick the PR commits onto the current
+default branch before updating the PR.
 
 ### Lifecycle
 
