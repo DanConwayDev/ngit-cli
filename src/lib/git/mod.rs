@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use git2::{DiffOptions, Oid, Revwalk};
+use git2::{DiffOptions, Oid, Sort};
 pub use identify_ahead_behind::identify_ahead_behind;
 use nostr::{
     Tags,
@@ -745,59 +745,39 @@ impl RepoActions for Repo {
         base_commit: &Sha1Hash,
         latest_commit: &Sha1Hash,
     ) -> Result<(Vec<Sha1Hash>, Vec<Sha1Hash>)> {
-        let mut ahead: Vec<Sha1Hash> = vec![];
-        let mut behind: Vec<Sha1Hash> = vec![];
+        let base_oid = sha1_to_oid(base_commit)?;
+        let latest_oid = sha1_to_oid(latest_commit)?;
+        self.git_repo
+            .merge_base(base_oid, latest_oid)
+            .context("commits should share an ancestor")?;
 
-        let get_revwalk = |commit: &Sha1Hash| -> Result<Revwalk> {
+        let walk_difference = |tip: Oid, hidden: Oid| -> Result<Vec<Sha1Hash>> {
             let mut revwalk = self
                 .git_repo
                 .revwalk()
                 .context("revwalk should be created from git repo")?;
             revwalk
-                .push(sha1_to_oid(commit)?)
+                .set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
+                .context("revwalk should accept topological time sorting")?;
+            revwalk
+                .push(tip)
                 .context("revwalk should accept commit oid")?;
-            Ok(revwalk)
+            revwalk
+                .hide(hidden)
+                .context("revwalk should hide the other tip and its ancestors")?;
+            revwalk
+                .map(|result| {
+                    result
+                        .map(|oid| oid_to_sha1(&oid))
+                        .context("revwalk failed to reveal commit")
+                })
+                .collect()
         };
 
-        // scan through the base commit ancestory until a common ancestor is found
-        let most_recent_shared_commit = match get_revwalk(base_commit)
-            .context("failed to get revwalk for base_commit")?
-            .find(|base_res| {
-                let base_oid = base_res.as_ref().unwrap();
-
-                if get_revwalk(latest_commit)
-                    .unwrap()
-                    .any(|latest_res| base_oid.eq(latest_res.as_ref().unwrap()))
-                {
-                    true
-                } else {
-                    // add commits not found in latest ancestory to 'behind' vector
-                    behind.push(oid_to_sha1(base_oid));
-                    false
-                }
-            }) {
-            None => {
-                bail!(format!(
-                    "{latest_commit} is not an ancestor of {base_commit}"
-                ));
-            }
-            Some(res) => res.context("revwalk failed to reveal commit")?,
-        };
-
-        // scan through the latest commits until shared commit is reached
-        get_revwalk(latest_commit)
-            .context("failed to get revwalk for latest_commit")?
-            .any(|latest_res| {
-                let latest_oid = latest_res.as_ref().unwrap();
-                if latest_oid.eq(&most_recent_shared_commit) {
-                    true
-                } else {
-                    // add commits not found in base to 'ahead' vector
-                    ahead.push(oid_to_sha1(latest_oid));
-                    false
-                }
-            });
-        Ok((ahead, behind))
+        Ok((
+            walk_difference(latest_oid, base_oid)?,
+            walk_difference(base_oid, latest_oid)?,
+        ))
     }
 
     fn checkout(&self, ref_name: &str) -> Result<Sha1Hash> {
@@ -1538,7 +1518,7 @@ mod tests {
     use nostr::Tag;
 
     use super::*;
-    use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event};
+    use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event, joe_signature};
 
     mod normalize_diff_prefix {
         use super::*;
@@ -2318,6 +2298,64 @@ index ce01362..a21e91c 100644\n\
                     behind,
                     vec![oid_to_sha1(&behind_2_oid), oid_to_sha1(&behind_1_oid)],
                 );
+                Ok(())
+            }
+
+            #[test]
+            fn includes_every_parent_of_multiple_same_timestamp_merges() -> Result<()> {
+                let test_repo = GitTestRepo::default();
+                let base_oid = test_repo.populate()?;
+
+                test_repo.create_branch("feature-one")?;
+                test_repo.checkout("feature-one")?;
+                std::fs::write(test_repo.dir.join("one.md"), "one")?;
+                let source_one = test_repo.stage_and_commit("source one")?;
+
+                test_repo.checkout("main")?;
+                test_repo.create_branch("feature-two")?;
+                test_repo.checkout("feature-two")?;
+                std::fs::write(test_repo.dir.join("two.md"), "two")?;
+                let source_two = test_repo.stage_and_commit("source two")?;
+
+                test_repo.checkout("main")?;
+                let signature = joe_signature();
+                let base = test_repo.git_repo.find_commit(base_oid)?;
+                let source_one_commit = test_repo.git_repo.find_commit(source_one)?;
+                let source_one_tree = source_one_commit.tree()?;
+                let merge_one = test_repo.git_repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "merge one",
+                    &source_one_tree,
+                    &[&base, &source_one_commit],
+                )?;
+
+                let merge_one_commit = test_repo.git_repo.find_commit(merge_one)?;
+                let source_two_commit = test_repo.git_repo.find_commit(source_two)?;
+                let merge_one_tree = merge_one_commit.tree()?;
+                let merge_two = test_repo.git_repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "merge two",
+                    &merge_one_tree,
+                    &[&merge_one_commit, &source_two_commit],
+                )?;
+
+                let git_repo = Repo::from_path(&test_repo.dir)?;
+                let (ahead, behind) = git_repo
+                    .get_commits_ahead_behind(&oid_to_sha1(&base_oid), &oid_to_sha1(&merge_two))?;
+
+                assert_eq!(ahead.first(), Some(&oid_to_sha1(&merge_two)));
+                assert_eq!(
+                    ahead.into_iter().collect::<std::collections::HashSet<_>>(),
+                    [merge_two, merge_one, source_one, source_two]
+                        .into_iter()
+                        .map(|oid| oid_to_sha1(&oid))
+                        .collect()
+                );
+                assert!(behind.is_empty());
                 Ok(())
             }
         }

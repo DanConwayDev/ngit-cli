@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make ahead/behind commit walks topology-complete so merged side-branch commits with equal timestamps are not skipped, restoring every issue-resolution status generated from a multi-merge push.
+- Update the integration-test ngit-grasp pin to the v2.0.0 release, where completed pushes guarantee their promoted announcement and repository state are queryable while long finalization remains protected by sideband keepalives.
 - Fast successive repository and proposal updates now order reliably despite Nostr's whole-second timestamps. Repository state, announcements, and statuses use bounded nonce grinding with a timestamp fallback; GRASP now honors the lower-event-ID tie-break for same-second state replacements. Patch revisions and pull-request upgrades or updates remain strictly ordered by timestamp.
 - Fix silent mis-targeting of repo-scoped events (`ngit send`, `ngit issue create`, `ngit pr *`, `ngit repo`, etc.) when a repository had multiple `nostr://` remotes with disagreeing coordinates. Previously the resolver iterated a `HashMap` and picked the first key it saw, ignored `nostr.repo`, and printed no diagnostic; the effect was that PRs and issues could be published against the wrong repository coordinate without warning. See the documented priority under "Changed".
 
