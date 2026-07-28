@@ -41,10 +41,10 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
         String::from_utf8_lossy(&setup.stderr)
     );
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
+    assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
     assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());
     assert!(!repo.dir().join("AGENTS.md").exists());
     assert!(!repo.dir().join("CLAUDE.md").exists());
-    assert!(!repo.dir().join(".claude/skills/ngit/SKILL.md").exists());
 
     let status = repo.ngit(["skill", "status", "--json"]).output().await?;
     assert!(status.status.success());
@@ -53,7 +53,10 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
     assert_eq!(json["update_available"], false);
     assert_eq!(
         json["managed_files"],
-        serde_json::json!([".agents/skills/ngit/SKILL.md"])
+        serde_json::json!([
+            ".agents/skills/ngit/SKILL.md",
+            ".claude/skills/ngit/SKILL.md"
+        ])
     );
 
     let custom = "# Maintainer wording\n\nUse ngit for collaboration.\n";
@@ -82,10 +85,10 @@ async fn install_updates_existing_claude_without_creating_agents_files() -> Resu
         String::from_utf8_lossy(&install.stderr)
     );
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
-    assert!(!repo.dir().join(".claude/skills/ngit/SKILL.md").exists());
+    assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
     assert!(!repo.dir().join("AGENTS.md").exists());
     assert!(
-        fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains(".agents/skills/ngit/SKILL.md")
+        fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains(".claude/skills/ngit/SKILL.md")
     );
     Ok(())
 }

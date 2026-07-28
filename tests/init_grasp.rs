@@ -254,10 +254,10 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
         String::from_utf8_lossy(&skill.stderr)
     );
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
+    assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
     assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());
     assert!(!repo.dir().join("AGENTS.md").exists());
     assert!(!repo.dir().join("CLAUDE.md").exists());
-    assert!(!repo.dir().join(".claude/skills/ngit/SKILL.md").exists());
     let skill_oid = repo
         .snapshot()?
         .refs
