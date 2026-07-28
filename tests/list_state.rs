@@ -246,59 +246,43 @@ async fn ls_remote(repo: &Repo, remote: &str) -> Result<LsRemoteOutput> {
     Ok(LsRemoteOutput { symrefs, refs })
 }
 
-/// Poll the grasp's relay until a kind-30618 maintainer-signed event
-/// shows up advertising `ref_name == expected_oid`. Under parallel test
-/// load the `git push` subprocess driving the remote helper can exit a
-/// few milliseconds before the auto-generated state event has finished
-/// propagating across the websocket inside the helper, so the bare
-/// `push.await?` is not a strong enough barrier for a follow-up
-/// `ls-remote` to observe the new ref. Tests that publish their own
-/// state events via [`Harness::publish_state_event`] do not need this —
-/// that helper waits for the publish's ACK before returning.
-async fn wait_for_state_event_covering(
+/// Find the completed push's immediately-queryable kind-30618 event covering
+/// `ref_name == expected_oid`.
+async fn find_state_event_covering(
     harness: &Harness,
     repo: &PublishedRepo,
     ref_name: &str,
     expected_oid: &str,
 ) -> Result<Event> {
-    use std::time::{Duration, Instant};
-
-    let deadline = Instant::now() + Duration::from_secs(10);
     let kind = nostr::Kind::Custom(30618);
-    loop {
-        let events = harness
-            .grasp("repo")
-            .events(
-                nostr::Filter::new()
-                    .kind(kind)
-                    .author(repo.maintainer_keys.public_key()),
-            )
-            .await?;
-        // Newest-first; once any candidate carries the right oid for the
-        // ref we care about we're done. `list.rs` walks newest-first and
-        // takes the first resolvable hit, so this matches the live
-        // selection contract.
-        let mut sorted = events.clone();
-        sorted.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-        let matching = sorted.iter().find(|e| {
-            e.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.first().map(String::as_str) == Some(ref_name)
-                    && s.get(1).map(String::as_str) == Some(expected_oid)
+    let events = harness
+        .grasp("repo")
+        .events(
+            nostr::Filter::new()
+                .kind(kind)
+                .author(repo.maintainer_keys.public_key()),
+        )
+        .await?;
+    // Newest-first matches `list.rs`, which takes the first resolvable hit.
+    let mut sorted = events;
+    sorted.sort_by_key(|event| std::cmp::Reverse(event.created_at));
+    sorted
+        .iter()
+        .find(|event| {
+            event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some(ref_name)
+                    && values.get(1).map(String::as_str) == Some(expected_oid)
             })
-        });
-        if let Some(event) = matching {
-            return Ok((*event).clone());
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "timed out waiting for kind-30618 from maintainer to advertise {ref_name}={expected_oid}; \
-                 last seen {} events",
+        })
+        .cloned()
+        .with_context(|| {
+            format!(
+                "successful push returned before kind-30618 advertised \
+                 {ref_name}={expected_oid}; observed {} event(s)",
                 sorted.len()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -324,13 +308,7 @@ async fn lists_head_and_branches_from_git_server_when_state_event_matches() -> R
     push_branch(&publisher, "vnext").await?;
     let main_oid = published.initial_oid.clone();
 
-    // Wait for the auto-generated kind-30618 to actually surface on the
-    // grasp's relay before we ls-remote against it. Under parallel test
-    // load the `git push` subprocess can exit a few ms before the
-    // `nostr-sdk` client inside `git-remote-nostr` finishes ACKing
-    // the relay; without this barrier the subsequent clone races the
-    // publish and `vnext` doesn't appear.
-    wait_for_state_event_covering(&harness, &published, "refs/heads/vnext", &vnext_oid).await?;
+    find_state_event_covering(&harness, &published, "refs/heads/vnext", &vnext_oid).await?;
 
     let ls = ls_remote_via_clone(&harness, &published).await?;
 
@@ -361,7 +339,7 @@ async fn lists_head_and_branches_from_git_server_when_state_event_matches() -> R
 #[tokio::test]
 async fn immediate_second_push_orders_state_from_cached_first_push() -> Result<()> {
     let (harness, publisher, published) = setup().await?;
-    let first = wait_for_state_event_covering(
+    let first = find_state_event_covering(
         &harness,
         &published,
         "refs/heads/main",
@@ -381,7 +359,7 @@ async fn immediate_second_push_orders_state_from_cached_first_push() -> Result<(
     );
 
     let second =
-        wait_for_state_event_covering(&harness, &published, "refs/heads/vnext", &vnext_oid).await?;
+        find_state_event_covering(&harness, &published, "refs/heads/vnext", &vnext_oid).await?;
     assert!(
         second.created_at > first.created_at
             || (second.created_at == first.created_at && second.id < first.id),
@@ -400,7 +378,7 @@ async fn immediate_second_push_orders_state_from_cached_first_push() -> Result<(
 #[tokio::test]
 async fn grasp_exposes_same_second_lower_id_state_replacement() -> Result<()> {
     let (harness, _publisher, published) = setup().await?;
-    let current = wait_for_state_event_covering(
+    let current = find_state_event_covering(
         &harness,
         &published,
         "refs/heads/main",

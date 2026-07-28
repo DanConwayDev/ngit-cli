@@ -169,10 +169,9 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
         String::from_utf8_lossy(&push_out.stderr),
     );
 
-    // The remote helper has received a publish acknowledgement, but GRASP
-    // still applies the state event asynchronously. Wait for the observable
-    // state needed by the clone rather than relying on a fixed delay.
-    wait_for_state_event_ref(
+    // Successful push completion is the readiness barrier for both the state
+    // event and its GRASP ref.
+    assert_state_event_ref(
         harness.grasp("repo"),
         pubkey,
         "refs/heads/vnext",
@@ -257,11 +256,13 @@ async fn fetch_advances_remote_tracking_refs_after_publisher_pushes() -> Result<
         "second commit did not advance refs/heads/main",
     );
 
-    // Wait for the kind-30618 state event on the grasp's relay to reflect
-    // the new oid before issuing the fetch. The relay has a finite
-    // publish-and-ack pipeline, so poll the observable state rather than
-    // guessing how long it takes.
-    wait_for_state_event_main(harness.grasp("repo"), pubkey, &main_oid_v2).await?;
+    assert_state_event_ref(
+        harness.grasp("repo"),
+        pubkey,
+        "refs/heads/main",
+        &main_oid_v2,
+    )
+    .await?;
 
     // --- step 7: cloner fetches, sees the advance ----------------------------
     //
@@ -338,55 +339,36 @@ where
     Ok(())
 }
 
-/// Poll the grasp's relay surface until a kind-30618 state event for `pubkey`
-/// lists `ref_name` with `expected_oid`. Times out after a few seconds with a
-/// context-rich error.
-async fn wait_for_state_event_main(
-    grasp: &test_harness::GraspServer,
-    pubkey: PublicKey,
-    expected_oid: &str,
-) -> Result<()> {
-    wait_for_state_event_ref(grasp, pubkey, "refs/heads/main", expected_oid).await
-}
-
-async fn wait_for_state_event_ref(
+/// Assert that the completed push's kind-30618 state event is immediately
+/// queryable with `ref_name == expected_oid`.
+async fn assert_state_event_ref(
     grasp: &test_harness::GraspServer,
     pubkey: PublicKey,
     ref_name: &str,
     expected_oid: &str,
 ) -> Result<()> {
-    const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-    let deadline = std::time::Instant::now() + POLL_TIMEOUT;
-
-    loop {
-        let events = grasp
-            .events(Filter::new().author(pubkey).kind(Kind::Custom(30618)))
-            .await?;
-        // The relay is supposed to keep at most one replaceable event per
-        // address, but defensive: pick the highest-timestamped one.
-        let latest = events.iter().max_by_key(|e| e.created_at);
-        if let Some(event) = latest {
-            let oid_in_event = event.tags.iter().find_map(|t| {
-                let s = t.as_slice();
-                if s.first().map(String::as_str) == Some(ref_name) {
-                    s.get(1).cloned()
-                } else {
-                    None
-                }
-            });
-            if oid_in_event.as_deref() == Some(expected_oid) {
-                return Ok(());
+    let events = grasp
+        .events(Filter::new().author(pubkey).kind(Kind::Custom(30618)))
+        .await?;
+    // The relay is supposed to keep at most one replaceable event per
+    // address, but remain defensive when reporting a readiness failure.
+    let latest = events.iter().max_by_key(|event| event.created_at);
+    let oid_in_event = latest.and_then(|event| {
+        event.tags.iter().find_map(|tag| {
+            let values = tag.as_slice();
+            if values.first().map(String::as_str) == Some(ref_name) {
+                values.get(1).cloned()
+            } else {
+                None
             }
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "timed out after {POLL_TIMEOUT:?} waiting for kind-30618 state event to list \
-                 {ref_name} {expected_oid}. latest event: {latest:?}"
-            );
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
+        })
+    });
+    anyhow::ensure!(
+        oid_in_event.as_deref() == Some(expected_oid),
+        "successful push returned before kind-30618 listed {ref_name}={expected_oid}; \
+         latest event: {latest:?}",
+    );
+    Ok(())
 }
 
 /// Pull the first `nostr://...` URL printed after a `clone url:` /

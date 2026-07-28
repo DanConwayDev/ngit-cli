@@ -281,8 +281,11 @@ exactly these patterns. They are non-negotiable:
   auto-generated kind-30618 state event from its cached predecessor using
   NIP-01's lower-ID tie-break with bounded grinding and a next-timestamp
   fallback. Rapid proposal revisions remain strictly newer by timestamp.
-  Do not add wall-clock sleeps for event ordering; use bounded polling only
-  for genuinely asynchronous relay, GRASP, or ref visibility. See
+  A successful push against the pinned ngit-grasp version does not return
+  until its events and refs are queryable, so assert on them immediately
+  instead of polling. Do not add wall-clock sleeps for event ordering; use
+  bounded polling only for genuinely asynchronous work outside that push
+  completion contract. See
   `docs/architecture/test-harness.md` § "Event ordering and asynchronous
   effects".
 
