@@ -54,6 +54,9 @@ async fn main() {
     }
 
     print_update_notice_if_available_at_startup().await;
+    if !matches!(cli.command, Some(Commands::Init(_) | Commands::Skill(_))) {
+        print_skill_notice_if_available().await;
+    }
 
     let result = if let Some(command) = &cli.command {
         match command {
@@ -285,6 +288,9 @@ async fn main() {
                 }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args).await,
+            Commands::Skill(args) => {
+                sub_commands::skill::launch(&args.skill_command, cli.force).await
+            }
             Commands::Merge(args) => {
                 sub_commands::merge::launch(
                     args.id.as_deref(),
@@ -321,4 +327,20 @@ async fn print_update_notice_if_available_at_startup() {
     let _ = set_git_timeout(git_repo.as_ref());
     let git_repo_path = git_repo.as_ref().and_then(|repo| repo.get_path().ok());
     let _ = ngit::version_check::print_update_notice_if_available(git_repo_path).await;
+}
+
+async fn print_skill_notice_if_available() {
+    let Ok(repo) = git::Repo::discover() else {
+        return;
+    };
+    let Ok(root) = repo.get_path() else {
+        return;
+    };
+    let Ok(Some((_, remote))) = repo.get_first_nostr_remote_when_in_ngit_binary().await else {
+        return;
+    };
+    let Ok(repo_ref) = client::get_repo_ref_from_cache(Some(root), &remote.coordinate).await else {
+        return;
+    };
+    let _ = ngit::agent_guidance::warn_if_maintainer(&repo, &repo_ref).await;
 }

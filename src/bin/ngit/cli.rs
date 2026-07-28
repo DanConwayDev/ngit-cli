@@ -107,6 +107,10 @@ Values are semicolon-separated URLs without spaces.
     they are fast-forward ahead of nostr state, without `--trust-server`.
     Example: {trust_server_example}
 
+  {skill_reminders}
+    Set to false to disable repository skill setup and update reminders.
+    For one repository, run: {skill_opt_out}
+
   {http_connect_timeout:<39} {http_connect_timeout_env:<32}
     HTTP connect timeout for libgit2 fetch/push operations in milliseconds.
     Default: {http_connect_timeout_default}. Example: {http_connect_timeout_example}
@@ -153,6 +157,8 @@ implementation details used for efficiency.
         trust_server_domains = key("nostr.trust-server-domains"),
         trust_server_example =
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
+        skill_reminders = key("nostr.skill-reminders true"),
+        skill_opt_out = cmd("ngit skill opt-out --local"),
         http_connect_timeout = key("nostr.http-connect-timeout-ms"),
         http_connect_timeout_env = env("NGIT_HTTP_CONNECT_TIMEOUT_MS"),
         http_connect_timeout_default = key("3000"),
@@ -227,8 +233,43 @@ pub enum Commands {
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
+    /// install and update ngit's repository skill for coding agents
+    Skill(SkillArgs),
     /// create account, login, logout or export keys
     Account(AccountSubCommandArgs),
+}
+
+#[derive(clap::Parser)]
+pub struct SkillArgs {
+    #[command(subcommand)]
+    pub skill_command: SkillCommands,
+}
+
+#[derive(Subcommand)]
+pub enum SkillCommands {
+    /// Install the bundled repository skill
+    Install,
+    /// Upgrade the repository skill to the version bundled with ngit
+    Upgrade,
+    /// Show installed and bundled skill versions without changing files
+    Status {
+        /// Output status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable repository skill reminders
+    OptOut(SkillOptOutArgs),
+}
+
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+pub struct SkillOptOutArgs {
+    /// Disable reminders in this repository
+    #[arg(long)]
+    pub local: bool,
+    /// Disable reminders for all repositories by default
+    #[arg(long)]
+    pub global: bool,
 }
 
 #[derive(Subcommand)]

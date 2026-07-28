@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    path::Path,
     process::{Command, Stdio},
     str::FromStr,
     sync::Arc,
@@ -11,6 +12,7 @@ use console::{Style, Term};
 use git2::Oid;
 use ngit::{
     accept_maintainership::{grasp_servers_from_user_or_fallback, wait_for_grasp_servers},
+    agent_guidance,
     cli_interactor::{
         PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
         show_multi_input_prompt_success,
@@ -71,6 +73,16 @@ enum InitState {
         coordinate: Nip19Coordinate,
         repo_ref: RepoRef,
     },
+}
+
+fn may_suggest_skill(state: &InitState) -> bool {
+    matches!(
+        state,
+        InitState::Fresh
+            | InitState::CoordinateOnly { .. }
+            | InitState::MyAnnouncement { .. }
+            | InitState::CoMaintainer { .. }
+    )
 }
 
 impl InitState {
@@ -1640,7 +1652,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     }
 
     // Phase 7: Build and publish
-    publish_and_finalize(
+    let suggest_skill = may_suggest_skill(&state);
+    let result = publish_and_finalize(
         fields,
         signer,
         &user_ref,
@@ -1651,7 +1664,28 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         is_co_maintainer_first_acceptance,
         resolved_repo_coordinate.as_ref(),
     )
-    .await
+    .await;
+    if result.is_ok() && suggest_skill && should_suggest_skill(&git_repo, git_repo_path) {
+        print_skill_suggestion();
+    }
+    result
+}
+
+fn should_suggest_skill(git_repo: &Repo, git_repo_path: &Path) -> bool {
+    agent_guidance::reminders_enabled(git_repo).unwrap_or(false)
+        && agent_guidance::status(git_repo_path).is_ok_and(|status| !status.installed)
+}
+
+fn print_skill_suggestion() {
+    eprintln!(
+        "{}",
+        Style::new()
+            .fg(console::Color::Color256(214))
+            .apply_to(
+                "tip: help coding agents collaborate through ngit by running `ngit skill install` (or `ngit skill opt-out --local` to stop reminders here)",
+            )
+            .for_stderr()
+    );
 }
 
 fn parse_relay_url(s: &str) -> Result<RelayUrl> {

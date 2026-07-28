@@ -109,6 +109,12 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
         String::from_utf8_lossy(&commit_output.stdout),
         String::from_utf8_lossy(&commit_output.stderr),
     );
+    let initial_oid = repo
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after initial commit")?
+        .clone();
 
     // --- step 3: ngit init ----------------------------------------------------
     //
@@ -138,6 +144,34 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
         init_output.status,
         String::from_utf8_lossy(&init_output.stdout),
         String::from_utf8_lossy(&init_output.stderr),
+    );
+
+    // `-d` selects init defaults; adopting repository guidance remains an
+    // explicit follow-up action.
+    for path in [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/skills/ngit/SKILL.md",
+        ".claude/skills/ngit/SKILL.md",
+        ".agents/ngit-guidance.json",
+    ] {
+        assert!(
+            !repo.dir().join(path).exists(),
+            "ngit init -d unexpectedly installed {path}"
+        );
+    }
+    let init_stderr = String::from_utf8_lossy(&init_output.stderr);
+    assert!(
+        init_stderr.contains("ngit skill"),
+        "init did not suggest explicit guidance setup: {init_stderr}"
+    );
+    assert_eq!(
+        repo.snapshot()?
+            .refs
+            .get("refs/heads/main")
+            .context("refs/heads/main missing after init")?,
+        &initial_oid,
+        "ngit init -d unexpectedly changed Git history"
     );
 
     // --- assertion 1: the announcement reached the user's relay --------------
@@ -211,6 +245,190 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
                 .map(|e| e.file_name())
                 .collect::<Vec<_>>())
             .unwrap_or_default(),
+    );
+
+    let skill = repo.ngit(["skill", "install"]).output().await?;
+    assert!(
+        skill.status.success(),
+        "maintainer skill install failed: {}",
+        String::from_utf8_lossy(&skill.stderr)
+    );
+    assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
+    assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
+    assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());
+    assert!(!repo.dir().join("AGENTS.md").exists());
+    assert!(!repo.dir().join("CLAUDE.md").exists());
+    let skill_oid = repo
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after skill install")?
+        .clone();
+    assert_ne!(
+        skill_oid, initial_oid,
+        "maintainer skill install did not create its dedicated commit"
+    );
+
+    let second_init = repo
+        .ngit([
+            "init",
+            "--name",
+            display_name,
+            "--identifier",
+            identifier,
+            "--grasp-server",
+            &grasp_url,
+            "-d",
+        ])
+        .output()
+        .await?;
+    assert!(
+        second_init.status.success(),
+        "repeat init failed: {}",
+        String::from_utf8_lossy(&second_init.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&second_init.stderr).contains("ngit skill"),
+        "repeat init suggested an already installed repository skill"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn init_defaults_preserves_staged_changes_without_installing_guidance() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+
+    let create = repo
+        .ngit(["account", "create", "--local", "--name", "staged init"])
+        .output()
+        .await?;
+    assert!(
+        create.status.success(),
+        "account creation failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let commit = repo
+        .git(["commit", "--allow-empty", "-m", "init", "--no-gpg-sign"])
+        .output()
+        .await?;
+    assert!(
+        commit.status.success(),
+        "initial commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let initial_oid = repo
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after initial commit")?
+        .clone();
+
+    std::fs::write(repo.dir().join("pending.txt"), "keep staged\n")?;
+    let add = repo.git(["add", "pending.txt"]).output().await?;
+    assert!(add.status.success(), "failed to stage pending.txt");
+
+    let grasp_url = harness.grasp("repo").url().to_string();
+    let init = repo
+        .ngit([
+            "init",
+            "--name",
+            "staged init",
+            "--identifier",
+            "staged-init",
+            "--grasp-server",
+            &grasp_url,
+            "-d",
+        ])
+        .output()
+        .await?;
+    assert!(
+        init.status.success(),
+        "ngit init should leave guidance as an explicit follow-up: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let suggestion = String::from_utf8_lossy(&init.stderr);
+    assert!(
+        suggestion.contains("ngit skill"),
+        "missing explicit guidance setup suggestion: {suggestion}"
+    );
+    assert!(
+        !repo.dir().join(".agents/ngit-guidance.json").exists(),
+        "guidance state was written despite the staged-index preflight failure"
+    );
+    assert_eq!(
+        repo.snapshot()?
+            .refs
+            .get("refs/heads/main")
+            .context("refs/heads/main missing after init")?,
+        &initial_oid,
+        "init created a guidance commit despite staged changes"
+    );
+    let cached = repo.git(["diff", "--cached", "--quiet"]).output().await?;
+    assert!(
+        !cached.status.success(),
+        "the pre-existing staged change was unexpectedly cleared"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn init_honors_repository_skill_reminder_opt_out() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+
+    let create = repo
+        .ngit(["account", "create", "--local", "--name", "opted out"])
+        .output()
+        .await?;
+    assert!(create.status.success());
+    let commit = repo
+        .git(["commit", "--allow-empty", "-m", "init", "--no-gpg-sign"])
+        .output()
+        .await?;
+    assert!(commit.status.success());
+    let opt_out = repo.ngit(["skill", "opt-out", "--local"]).output().await?;
+    assert!(opt_out.status.success());
+
+    let grasp_url = harness.grasp("repo").url().to_string();
+    let init = repo
+        .ngit([
+            "init",
+            "--name",
+            "opted out",
+            "--identifier",
+            "opted-out",
+            "--grasp-server",
+            &grasp_url,
+            "-d",
+        ])
+        .output()
+        .await?;
+    assert!(
+        init.status.success(),
+        "ngit init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&init.stderr).contains("ngit skill"),
+        "init ignored the repository skill reminder opt-out"
     );
 
     Ok(())
