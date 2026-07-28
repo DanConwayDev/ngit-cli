@@ -95,11 +95,7 @@
 //! - `fresh_clone_does_not_advertise_pr_event_shorthand_branch` — negative
 //!   companion: no `pr/<branch>(<pr_event_8>)` advertisement in any namespace.
 
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use nostr_sdk::prelude::*;
@@ -121,197 +117,152 @@ const IDENTIFIER: &str = "git-push-pr-patch-update-force-to-pr";
 /// accounting for the small patch header overhead.
 const BIG_FILE_BYTES: usize = 100 * 1024;
 
-const EVENT_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(10);
-const EVENT_VISIBILITY_POLL: Duration = Duration::from_millis(25);
-
-async fn wait_for_patch_event(harness: &Harness, commit_oid: &str) -> Result<()> {
-    let deadline = Instant::now() + EVENT_VISIBILITY_TIMEOUT;
-    loop {
-        let events = harness
-            .grasp("repo")
-            .events(Filter::new().kind(Kind::GitPatch))
-            .await?;
-        if events
+async fn assert_patch_event(harness: &Harness, commit_oid: &str) -> Result<()> {
+    let events = harness
+        .grasp("repo")
+        .events(Filter::new().kind(Kind::GitPatch))
+        .await?;
+    anyhow::ensure!(
+        events
             .iter()
-            .any(|event| tag_value(event, "commit").as_deref() == Some(commit_oid))
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for GitPatch commit={commit_oid}; observed event ids: {:?}",
-                events
-                    .iter()
-                    .map(|event| event.id.to_hex())
-                    .collect::<Vec<_>>(),
-            ));
-        }
-        tokio::time::sleep(EVENT_VISIBILITY_POLL).await;
-    }
+            .any(|event| tag_value(event, "commit").as_deref() == Some(commit_oid)),
+        "successful push returned before GitPatch commit={commit_oid} was queryable; \
+         observed event ids: {:?}",
+        events
+            .iter()
+            .map(|event| event.id.to_hex())
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
 }
 
 /// The remote helper discovers proposal events through the repository relay,
-/// while GRASP owns the matching git ref. Wait for the former explicitly.
-async fn wait_for_default_relay_event(
+/// while GRASP owns the matching git ref. Assert both surfaces immediately.
+async fn assert_default_relay_event(
     harness: &Harness,
     kind: Kind,
     event_id: EventId,
     commit_oid: &str,
 ) -> Result<()> {
-    let deadline = Instant::now() + EVENT_VISIBILITY_TIMEOUT;
-    loop {
-        let events = harness
-            .relay("default")
-            .events(Filter::new().kind(kind))
-            .await?;
-        if events.iter().any(|event| {
+    let events = harness
+        .relay("default")
+        .events(Filter::new().kind(kind))
+        .await?;
+    anyhow::ensure!(
+        events.iter().any(|event| {
             event.id == event_id && tag_value(event, "c").as_deref() == Some(commit_oid)
-        }) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for default relay {kind} event {event_id} with commit={commit_oid}; \
-                 observed events: {:?}",
-                events
-                    .iter()
-                    .map(|event| format!("id={} commit={:?}", event.id, tag_value(event, "c"),))
-                    .collect::<Vec<_>>(),
-            ));
-        }
-        tokio::time::sleep(EVENT_VISIBILITY_POLL).await;
-    }
+        }),
+        "successful push returned before default relay {kind} event {event_id} with \
+         commit={commit_oid} was queryable; observed events: {:?}",
+        events
+            .iter()
+            .map(|event| format!("id={} commit={:?}", event.id, tag_value(event, "c"),))
+            .collect::<Vec<_>>(),
+    );
+    Ok(())
 }
 
-/// Wait until both the Nostr event and its corresponding GRASP git ref are
-/// observable. The next push reads both surfaces, so either alone is an
-/// insufficient readiness signal.
-async fn wait_for_pr_ref(
+/// Assert that both the Nostr event and its corresponding GRASP git ref are
+/// observable after the successful push.
+async fn find_pr_ref(
     harness: &Harness,
     published: &test_harness::PublishedRepo,
     kind: Kind,
     branch_name: Option<&str>,
     expected_oid: &str,
 ) -> Result<Event> {
-    let deadline = Instant::now() + EVENT_VISIBILITY_TIMEOUT;
-    let mut observed_events = vec![];
-    let mut observed_ref = None;
-    loop {
-        let events = harness
-            .grasp("repo")
-            .events(Filter::new().kind(kind))
-            .await?;
-        observed_events = events
-            .iter()
-            .map(|event| {
-                format!(
-                    "id={} branch={:?} commit={:?}",
-                    event.id,
-                    event_branch_name_tag(event),
-                    tag_value(event, "c"),
-                )
-            })
-            .collect();
-        if let Some(event) = events
-            .into_iter()
-            .find(|event| tag_value(event, "c").as_deref() == Some(expected_oid))
-        {
-            if branch_name.is_none() || event_branch_name_tag(&event).as_deref() == branch_name {
-                match harness
-                    .grasp("repo")
-                    .read_nostr_ref(&published.maintainer_npub, IDENTIFIER, &event.id.to_hex())
-                    .await
-                {
-                    Ok(ref_oid) => {
-                        observed_ref = Some(ref_oid.to_string());
-                        if ref_oid == expected_oid {
-                            return Ok(event);
-                        }
-                    }
-                    Err(error) => observed_ref = Some(format!("error: {error:#}")),
-                }
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for {kind} event and GRASP ref for branch={branch_name:?}, \
-                 commit={expected_oid}; observed events: {observed_events:?}; last matching ref: \
-                 {observed_ref:?}",
-            ));
-        }
-        tokio::time::sleep(EVENT_VISIBILITY_POLL).await;
-    }
-}
-
-/// Fetch until the remote-tracking proposal ref represents the event just
-/// materialised by GRASP. The next non-force push uses this ref for its
-/// fast-forward check.
-async fn wait_for_remote_ref(repo: &Repo, remote_ref: &str, expected_oid: &str) -> Result<()> {
-    let deadline = Instant::now() + EVENT_VISIBILITY_TIMEOUT;
-    loop {
-        repo.git_ok(
-            ["fetch", "origin"],
-            "git fetch origin while waiting for proposal ref",
-        )
+    let events = harness
+        .grasp("repo")
+        .events(Filter::new().kind(kind))
         .await?;
-        let snapshot = repo.snapshot()?;
-        if snapshot.refs.get(remote_ref).map(String::as_str) == Some(expected_oid) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for {remote_ref} to resolve to {expected_oid}; got {:?}",
-                snapshot.refs.get(remote_ref),
-            ));
-        }
-        tokio::time::sleep(EVENT_VISIBILITY_POLL).await;
-    }
+    let observed_events = events
+        .iter()
+        .map(|event| {
+            format!(
+                "id={} branch={:?} commit={:?}",
+                event.id,
+                event_branch_name_tag(event),
+                tag_value(event, "c"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let event = events
+        .into_iter()
+        .find(|event| {
+            tag_value(event, "c").as_deref() == Some(expected_oid)
+                && (branch_name.is_none() || event_branch_name_tag(event).as_deref() == branch_name)
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "successful push returned before {kind} event for branch={branch_name:?}, \
+                 commit={expected_oid} was queryable; observed events: {observed_events:?}",
+            )
+        })?;
+    let ref_oid = harness
+        .grasp("repo")
+        .read_nostr_ref(&published.maintainer_npub, IDENTIFIER, &event.id.to_hex())
+        .await
+        .with_context(|| {
+            format!(
+                "successful push returned before GRASP ref for {kind} event {} was queryable",
+                event.id
+            )
+        })?;
+    anyhow::ensure!(
+        ref_oid == expected_oid,
+        "successful push returned with GRASP ref for {kind} event {} at {ref_oid}, \
+         expected {expected_oid}",
+        event.id,
+    );
+    Ok(event)
 }
 
-/// Wait for a fresh helper invocation to advertise the proposal ref at the
-/// update's tip. This is the exact state consumed by the final clone check.
-async fn wait_for_ls_remote_ref(
+/// Fetch once and assert that the remote-tracking proposal ref represents the
+/// completed push.
+async fn assert_remote_ref(repo: &Repo, remote_ref: &str, expected_oid: &str) -> Result<()> {
+    repo.git_ok(["fetch", "origin"], "git fetch origin for proposal ref")
+        .await?;
+    let snapshot = repo.snapshot()?;
+    anyhow::ensure!(
+        snapshot.refs.get(remote_ref).map(String::as_str) == Some(expected_oid),
+        "successful push returned with {remote_ref} at {:?}, expected {expected_oid}",
+        snapshot.refs.get(remote_ref),
+    );
+    Ok(())
+}
+
+/// Assert that a fresh helper invocation advertises the proposal ref at the
+/// update's tip.
+async fn ls_remote_ref(
     harness: &Harness,
     published: &test_harness::PublishedRepo,
     expected_ref: &str,
     expected_oid: &str,
 ) -> Result<BTreeMap<String, String>> {
-    let deadline = Instant::now() + EVENT_VISIBILITY_TIMEOUT;
-    loop {
-        let clone = harness
-            .clone_published_repo(published, CloneLogin::None)
-            .await
-            .context("failed to create fresh clone while waiting for proposal ref")?;
-        let output = clone
-            .git(["ls-remote", "origin"])
-            .output()
-            .await
-            .context("failed to spawn git ls-remote origin while waiting for proposal ref")?;
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let refs = stdout
-            .lines()
-            .filter(|line| !line.is_empty() && !line.starts_with("ref: "))
-            .filter_map(|line| line.split_once('\t'))
-            .map(|(oid, name)| (name.to_string(), oid.to_string()))
-            .collect::<BTreeMap<_, _>>();
-        if output.status.success()
-            && refs.get(expected_ref).map(String::as_str) == Some(expected_oid)
-        {
-            return Ok(refs);
-        }
-        let observation = format!(
-            "status={:?}; refs={refs:?}; stderr={}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
-        );
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for ls-remote ref {expected_ref} to resolve to {expected_oid}; \
-                 last observation: {observation}",
-            ));
-        }
-        tokio::time::sleep(EVENT_VISIBILITY_POLL).await;
-    }
+    let clone = harness
+        .clone_published_repo(published, CloneLogin::None)
+        .await
+        .context("failed to create fresh clone for proposal ref")?;
+    let output = clone
+        .git(["ls-remote", "origin"])
+        .output()
+        .await
+        .context("failed to spawn git ls-remote origin for proposal ref")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let refs = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with("ref: "))
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(oid, name)| (name.to_string(), oid.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    anyhow::ensure!(
+        output.status.success() && refs.get(expected_ref).map(String::as_str) == Some(expected_oid),
+        "successful push returned before ls-remote advertised {expected_ref}={expected_oid}; \
+         status={:?}; refs={refs:?}; stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    Ok(refs)
 }
 
 // ---------------------------------------------------------------------------
@@ -541,13 +492,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 7. First push (fast-forward, patch-kind) ----------------------------
     //
-    // Adds one `Kind::GitPatch` event covering the new commit. Wait for GRASP
-    // to expose it before the force push needs to discover this proposal.
+    // Adds one `Kind::GitPatch` event covering the new commit.
     maintainer_clone
         .nostr_push(["origin", &remote_branch])
         .await
         .context("nostr_push of maintainer follow-up (first push) failed")?;
-    wait_for_patch_event(&harness, &first_push_tip_oid).await?;
+    assert_patch_event(&harness, &first_push_tip_oid).await?;
 
     // --- 8. Amend the tip commit with >64 KiB content ------------------------
     //
@@ -603,7 +553,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await
         .context("nostr_push -f (force push after big-content amend) failed")?;
 
-    let pr_event_after_upgrade = wait_for_pr_ref(
+    let pr_event_after_upgrade = find_pr_ref(
         &harness,
         &published,
         KIND_PULL_REQUEST,
@@ -611,7 +561,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         &amended_tip_oid,
     )
     .await?;
-    wait_for_default_relay_event(
+    assert_default_relay_event(
         &harness,
         KIND_PULL_REQUEST,
         pr_event_after_upgrade.id,
@@ -619,7 +569,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     )
     .await?;
     let remote_ref = format!("refs/remotes/origin/{remote_branch}");
-    wait_for_remote_ref(&maintainer_clone, &remote_ref, &amended_tip_oid).await?;
+    assert_remote_ref(&maintainer_clone, &remote_ref, &amended_tip_oid).await?;
 
     // --- 10. Stage-1 query: confirm no PR-update yet -------------------------
     //
@@ -666,36 +616,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await
         .context("rev-parse HEAD after follow-up commit")?;
 
-    // A fetch proves the local remote-tracking ref has advanced, but GRASP's
-    // `list for-push` response may lag its Nostr and per-event-ref surfaces.
-    // Retry only while the already-verified PR event/ref and local tracking
-    // ref remain the expected upgrade state.
-    let followup_push_deadline = Instant::now() + EVENT_VISIBILITY_TIMEOUT;
-    loop {
-        match maintainer_clone
-            .nostr_push(["origin", &remote_branch])
-            .await
-        {
-            Ok(_) => break,
-            Err(_) if Instant::now() < followup_push_deadline => {
-                wait_for_pr_ref(
-                    &harness,
-                    &published,
-                    KIND_PULL_REQUEST,
-                    Some(&series.branch_name),
-                    &amended_tip_oid,
-                )
-                .await?;
-                wait_for_remote_ref(&maintainer_clone, &remote_ref, &amended_tip_oid).await?;
-                tokio::time::sleep(EVENT_VISIBILITY_POLL).await;
-            }
-            Err(error) => {
-                return Err(error).context("nostr_push of follow-up commit (post-upgrade) failed");
-            }
-        }
-    }
+    maintainer_clone
+        .nostr_push(["origin", &remote_branch])
+        .await
+        .context("nostr_push of follow-up commit (post-upgrade) failed")?;
 
-    let pr_update_event = wait_for_pr_ref(
+    let pr_update_event = find_pr_ref(
         &harness,
         &published,
         KIND_PULL_REQUEST_UPDATE,
@@ -713,7 +639,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         pr_update_event.id,
         pr_update_event.created_at,
     );
-    wait_for_default_relay_event(
+    assert_default_relay_event(
         &harness,
         KIND_PULL_REQUEST_UPDATE,
         pr_update_event.id,
@@ -811,7 +737,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // must equal `original_root_patch_id[..8]`, never the PR event's
     // shorthand.
     let expected_advertised_ref = format!("refs/heads/{remote_branch}");
-    let nostr_clone_ls_refs = wait_for_ls_remote_ref(
+    let nostr_clone_ls_refs = ls_remote_ref(
         &harness,
         &published,
         &expected_advertised_ref,

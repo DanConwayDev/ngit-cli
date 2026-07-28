@@ -281,6 +281,15 @@ readiness check. Once `Repo::nostr_push` succeeds, however, its GRASP
 events and refs must be asserted immediately; polling would hide a
 regression in the server boundary. Never use a fixed sleep.
 
+The retained harness waits have two deliberately narrower scopes:
+
+- probing GRASP and vanilla-git subprocesses until their network services are
+  ready;
+- observing bare-repository creation after a test publishes a raw repository
+  announcement directly, without completing a git push.
+
+Neither wait can use `Repo::nostr_push` as its synchronization boundary.
+
 ## ngit-grasp dependency
 
 We need the `ngit-grasp` **binary**, not its library. The harness

@@ -61,8 +61,6 @@
 //! AsMaintainer)`. Either repo would hit the same `get_merged_status_events`
 //! code path on push; the choice is purely setup-cost.
 
-use std::time::{Duration, Instant};
-
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use test_harness::{
@@ -665,32 +663,6 @@ async fn find_issue_resolved_status_event(
     }
 }
 
-/// Wait until an event observed on GRASP is in an earlier NIP-01 second than
-/// the next event this scenario will publish. Merge selects the latest update
-/// by event ordering, so equal timestamps would make this test ambiguous.
-async fn wait_for_event_ordering(harness: &Harness, event_id: EventId) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let event = harness
-            .grasp("repo")
-            .events(Filter::new().id(event_id))
-            .await?
-            .into_iter()
-            .next()
-            .with_context(|| format!("event {event_id} disappeared from GRASP"))?;
-        if event.created_at < Timestamp::now() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "timed out waiting for event {event_id} created at {} to enter an earlier NIP-01 second",
-                event.created_at,
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
 /// EventId carried by the `e` tag with marker `root`. `create_merge_status`
 /// emits exactly one such tag pointing at the merged proposal (see
 /// `push.rs:1428-1434`); when a revision is involved a second `e/root` tag
@@ -997,8 +969,6 @@ async fn ngit_merge_of_updated_pr_publishes_status_event_for_original_pr() -> Re
         Some(original_tip.as_str()),
         "original PR event should point at the initial feature tip",
     );
-
-    wait_for_event_ordering(&harness, original_pr_event.id).await?;
 
     std::fs::write(contributor.dir().join("c.md"), "gamma\n").context("failed to write c.md")?;
     git_ok(&contributor, ["add", "c.md"], "git add c.md").await?;
