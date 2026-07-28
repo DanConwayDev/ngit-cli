@@ -72,6 +72,8 @@ eg self-hosted, github, codeberg, etc.
 ## Repository-managed skill
 
 Run `ngit skill install` to add repository guidance that teaches coding agents
-to use ngit. Use `ngit skill upgrade` to update it.
+to use ngit. The command installs one canonical skill and adds a compact pointer
+to existing `AGENTS.md` or `CLAUDE.md` files without creating either file. Use
+`ngit skill upgrade` to update it from the version in the skill metadata.
 
 Run `ngit skill --help` for status and reminder opt-out commands.

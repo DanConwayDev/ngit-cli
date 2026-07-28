@@ -40,9 +40,9 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
         "skill install failed: {}",
         String::from_utf8_lossy(&setup.stderr)
     );
-    assert!(repo.dir().join(".agents/ngit-guidance.json").is_file());
-    assert!(repo.dir().join("AGENTS.md").is_file());
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
+    assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());
+    assert!(!repo.dir().join("AGENTS.md").exists());
     assert!(!repo.dir().join("CLAUDE.md").exists());
     assert!(!repo.dir().join(".claude/skills/ngit/SKILL.md").exists());
 
@@ -69,7 +69,7 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
 }
 
 #[tokio::test]
-async fn install_uses_existing_claude_without_creating_agents_files() -> Result<()> {
+async fn install_updates_existing_claude_without_creating_agents_files() -> Result<()> {
     let harness = harness().await?;
     let repo = harness.fresh_repo()?;
     fs::write(repo.dir().join("CLAUDE.md"), "# Existing Claude policy\n")?;
@@ -81,11 +81,11 @@ async fn install_uses_existing_claude_without_creating_agents_files() -> Result<
         "skill install failed: {}",
         String::from_utf8_lossy(&install.stderr)
     );
-    assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
+    assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
+    assert!(!repo.dir().join(".claude/skills/ngit/SKILL.md").exists());
     assert!(!repo.dir().join("AGENTS.md").exists());
-    assert!(!repo.dir().join(".agents/skills/ngit/SKILL.md").exists());
     assert!(
-        fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains(".claude/skills/ngit/SKILL.md")
+        fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains(".agents/skills/ngit/SKILL.md")
     );
     Ok(())
 }

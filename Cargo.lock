@@ -1712,7 +1712,6 @@ dependencies = [
  "serde_yaml",
  "serial_test",
  "tempfile",
- "sha2",
  "test_harness",
  "tokio",
  "urlencoding",

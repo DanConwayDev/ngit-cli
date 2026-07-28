@@ -1,11 +1,12 @@
 //! Repository-managed coding-agent guidance.
 //!
-//! The state file is deliberately separate from the files it verifies: storing
-//! hashes in a managed file would make the hash self-referential.
-//! `AGENTS.md` or `CLAUDE.md` may receive an install-time skill pointer, but
-//! instruction documents remain user-owned and are never tracked or upgraded.
+//! The installed `SKILL.md` is the source of truth for status and upgrades.
+//! Existing `AGENTS.md` and `CLAUDE.md` files may receive a compact
+//! install-time pointer, but instruction documents remain user-owned and are
+//! never created, tracked, or upgraded.
 
 use std::{
+    cmp::Ordering,
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
@@ -13,28 +14,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use console::{Color, Style};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 
 pub const SKILL_PATH: &str = ".agents/skills/ngit/SKILL.md";
-pub const CLAUDE_SKILL_PATH: &str = ".claude/skills/ngit/SKILL.md";
 pub const AGENTS_PATH: &str = "AGENTS.md";
 pub const CLAUDE_PATH: &str = "CLAUDE.md";
-pub const STATE_PATH: &str = ".agents/ngit-guidance.json";
 pub const REMINDERS_CONFIG_KEY: &str = "nostr.skill-reminders";
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManagedState {
-    pub version: String,
-    pub skill: ManagedFile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManagedFile {
-    pub path: String,
-    pub sha256: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuidanceStatus {
@@ -58,38 +44,28 @@ pub fn bundled_skill() -> &'static str {
 }
 
 pub fn bundled_version() -> Result<String> {
-    CANONICAL_SKILL
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("version:").map(str::trim))
-        .map(|value| value.trim_matches('"').to_string())
-        .filter(|value| !value.is_empty())
-        .context("bundled ngit skill is missing metadata.version")
+    skill_version(CANONICAL_SKILL).context("bundled ngit skill is missing metadata.version")
 }
 
-fn hash(content: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(content.as_bytes());
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+fn skill_version(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
     }
-    encoded
+    for line in lines {
+        let line = line.trim();
+        if line == "---" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("version:").map(str::trim) {
+            return Some(value.trim_matches('"').to_string()).filter(|value| !value.is_empty());
+        }
+    }
+    None
 }
 
-fn allowed_paths() -> [&'static str; 5] {
-    [
-        AGENTS_PATH,
-        CLAUDE_PATH,
-        SKILL_PATH,
-        CLAUDE_SKILL_PATH,
-        STATE_PATH,
-    ]
-}
-
-fn skill_paths() -> [&'static str; 2] {
-    [SKILL_PATH, CLAUDE_SKILL_PATH]
+fn allowed_paths() -> [&'static str; 3] {
+    [AGENTS_PATH, CLAUDE_PATH, SKILL_PATH]
 }
 
 fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -205,16 +181,6 @@ fn create_managed_parent_dirs(root: &Path, relative: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_state_files(state: &ManagedState) -> Result<()> {
-    if !skill_paths().contains(&state.skill.path.as_str()) {
-        bail!(
-            "ngit repository skill state contains unexpected managed path `{}`",
-            state.skill.path
-        );
-    }
-    Ok(())
-}
-
 fn read_optional_text(path: &Path) -> Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(content) => Ok(Some(content)),
@@ -225,91 +191,44 @@ fn read_optional_text(path: &Path) -> Result<Option<String>> {
     }
 }
 
-fn policy(skill_path: &str) -> String {
-    format!(
-        "## Repository collaboration\n\nThis repository uses ngit and Nostr for issues, pull requests, reviews, comments, merges, and repository state.\n\n- Do not use GitHub or GitLab issues, pull requests, APIs, or the `gh`/`glab` CLIs for repository collaboration.\n- For issue, pull request, review, comment, merge, push, clone, or repository metadata tasks, load and follow `{skill_path}`.\n- Treat a `nostr://` remote as authoritative.\n- Pull request branches must use the `pr/` prefix.\n- If ngit is unavailable, report that it is required rather than falling back to GitHub or GitLab."
-    )
+fn policy() -> String {
+    format!("- For repository collaboration, use ngit and follow `{SKILL_PATH}`.")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Ecosystem {
-    instruction_path: &'static str,
-    skill_path: &'static str,
-}
-
-const AGENT_ECOSYSTEM: Ecosystem = Ecosystem {
-    instruction_path: AGENTS_PATH,
-    skill_path: SKILL_PATH,
-};
-const CLAUDE_ECOSYSTEM: Ecosystem = Ecosystem {
-    instruction_path: CLAUDE_PATH,
-    skill_path: CLAUDE_SKILL_PATH,
-};
-
-fn select_ecosystem(root: &Path) -> Ecosystem {
-    if root.join(AGENTS_PATH).exists() {
-        AGENT_ECOSYSTEM
-    } else if root.join(CLAUDE_PATH).exists() {
-        CLAUDE_ECOSYSTEM
-    } else if root.join(SKILL_PATH).exists() {
-        AGENT_ECOSYSTEM
-    } else if root.join(CLAUDE_SKILL_PATH).exists() {
-        CLAUDE_ECOSYSTEM
-    } else {
-        AGENT_ECOSYSTEM
+fn append_policy(existing: &str) -> String {
+    if existing.to_ascii_lowercase().contains("ngit") {
+        return existing.to_string();
     }
-}
-
-fn append_policy(existing: Option<&str>, skill_path: &str) -> String {
-    if let Some(content) = existing.filter(|content| content.contains(skill_path)) {
-        return content.to_string();
-    }
-    let policy = policy(skill_path);
+    let policy = policy();
     match existing {
-        None | Some("") => format!("{policy}\n"),
-        Some(content) if content.ends_with('\n') => format!("{content}\n{policy}\n"),
-        Some(content) => format!("{content}\n\n{policy}\n"),
+        "" => format!("{policy}\n"),
+        content if content.ends_with('\n') => format!("{content}\n{policy}\n"),
+        content => format!("{content}\n\n{policy}\n"),
     }
 }
 
-fn expected_files(root: &Path, state: Option<&ManagedState>) -> Result<Vec<(String, String)>> {
-    if let Some(state) = state {
-        return Ok(vec![(
-            state.skill.path.clone(),
-            CANONICAL_SKILL.to_string(),
-        )]);
+fn expected_files(root: &Path, first_install: bool) -> Result<Vec<(String, String)>> {
+    let mut files = vec![(SKILL_PATH.to_string(), CANONICAL_SKILL.to_string())];
+    if !first_install {
+        return Ok(files);
     }
-
-    let ecosystem = select_ecosystem(root);
-    let instruction_path = validate_managed_path(root, ecosystem.instruction_path)?;
-    let existing = read_optional_text(&instruction_path)?;
-    let instruction = append_policy(existing.as_deref(), ecosystem.skill_path);
-    let mut files = vec![(
-        ecosystem.skill_path.to_string(),
-        CANONICAL_SKILL.to_string(),
-    )];
-    if existing.as_deref() != Some(instruction.as_str()) {
-        files.push((ecosystem.instruction_path.to_string(), instruction));
+    for relative in [AGENTS_PATH, CLAUDE_PATH] {
+        let path = validate_managed_path(root, relative)?;
+        let Some(existing) = read_optional_text(&path)? else {
+            continue;
+        };
+        let instruction = append_policy(&existing);
+        if instruction != existing {
+            files.push((relative.to_string(), instruction));
+        }
     }
     Ok(files)
 }
 
-pub fn load_state(root: &Path) -> Result<Option<ManagedState>> {
-    let path = validate_managed_path(root, STATE_PATH)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let state: ManagedState = serde_json::from_str(
-        &fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?,
-    )
-    .context("failed to parse ngit repository skill state")?;
-    validate_state_files(&state)?;
-    Ok(Some(state))
-}
-
 pub fn status(root: &Path) -> Result<GuidanceStatus> {
     let bundled_version = bundled_version()?;
-    let Some(state) = load_state(root)? else {
+    let path = validate_managed_path(root, SKILL_PATH)?;
+    let Some(content) = read_optional_text(&path)? else {
         return Ok(GuidanceStatus {
             installed: false,
             installed_version: None,
@@ -319,20 +238,23 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
             managed_files: vec![],
         });
     };
-    let path = validate_managed_path(root, &state.skill.path)?;
-    let modified_files =
-        if read_optional_text(&path)?.is_some_and(|content| hash(&content) == state.skill.sha256) {
-            vec![]
-        } else {
-            vec![state.skill.path.clone()]
-        };
+    let installed_version = skill_version(&content);
+    let update_available = installed_version
+        .as_deref()
+        .and_then(|version| compare_versions(version, &bundled_version))
+        == Some(Ordering::Less);
+    let modified_files = if content == CANONICAL_SKILL || update_available {
+        vec![]
+    } else {
+        vec![SKILL_PATH.to_string()]
+    };
     Ok(GuidanceStatus {
         installed: true,
-        update_available: version_is_newer(&state.version, &bundled_version),
-        installed_version: Some(state.version),
+        update_available,
+        installed_version,
         bundled_version,
         modified_files,
-        managed_files: vec![state.skill.path],
+        managed_files: vec![SKILL_PATH.to_string()],
     })
 }
 
@@ -346,41 +268,40 @@ pub fn update(root: &Path, force: bool) -> Result<GuidanceStatus> {
 }
 
 fn write_guidance(root: &Path, force: bool) -> Result<()> {
-    let existing_state = load_state(root)?;
-    let files = expected_files(root, existing_state.as_ref())?;
-    let skill_path = existing_state
-        .as_ref()
-        .map(|state| state.skill.path.clone())
-        .or_else(|| files.first().map(|(path, _)| path.clone()))
-        .context("repository skill plan has no skill file")?;
-    for relative in files
-        .iter()
-        .map(|(path, _)| path.as_str())
-        .chain(std::iter::once(STATE_PATH))
-    {
+    let skill_path = validate_managed_path(root, SKILL_PATH)?;
+    let existing = read_optional_text(&skill_path)?;
+    let files = expected_files(root, existing.is_none())?;
+    for relative in files.iter().map(|(path, _)| path.as_str()) {
         let _ = validate_managed_path(root, relative)?;
     }
-    if let Some(state) = &existing_state {
+    if let Some(content) = &existing {
         let bundled = bundled_version()?;
-        if !force && version_is_newer(&bundled, &state.version) {
-            bail!(
-                "refusing to downgrade ngit repository skill from {} to {}; rerun with --force to override",
-                state.version,
-                bundled
-            );
-        }
         if !force {
-            let current = status(root)?;
-            if let Some(path) = current.modified_files.first() {
+            let Some(installed) = skill_version(content) else {
                 bail!(
-                    "refusing to overwrite locally modified managed file `{path}`; rerun with --force to replace it"
+                    "refusing to overwrite unrecognized repository skill `{SKILL_PATH}`; rerun with --force to replace it"
                 );
+            };
+            match compare_versions(&installed, &bundled) {
+                Some(Ordering::Less) => {}
+                Some(Ordering::Equal) if content == CANONICAL_SKILL => {}
+                Some(Ordering::Equal) => {
+                    bail!(
+                        "refusing to overwrite locally modified managed file `{SKILL_PATH}`; rerun with --force to replace it"
+                    );
+                }
+                Some(Ordering::Greater) => {
+                    bail!(
+                        "refusing to downgrade ngit repository skill from {installed} to {bundled}; rerun with --force to override"
+                    );
+                }
+                None => {
+                    bail!(
+                        "refusing to overwrite repository skill `{SKILL_PATH}` with invalid metadata.version `{installed}`; rerun with --force to replace it"
+                    );
+                }
             }
         }
-    } else if !force && root.join(&skill_path).exists() {
-        bail!(
-            "refusing to overwrite unmanaged file `{skill_path}`; rerun with --force to install the ngit repository skill"
-        );
     }
     for (relative, content) in &files {
         create_managed_parent_dirs(root, relative)?;
@@ -391,43 +312,14 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
                 .with_context(|| format!("failed to write {}", path.display()))?;
         }
     }
-    let state = ManagedState {
-        version: bundled_version()?,
-        skill: ManagedFile {
-            path: skill_path,
-            sha256: hash(CANONICAL_SKILL),
-        },
-    };
-    create_managed_parent_dirs(root, STATE_PATH)?;
-    let state_path = validate_managed_path(root, STATE_PATH)?;
-    let _ = validate_managed_path(root, STATE_PATH)?;
-    fs::write(
-        state_path,
-        format!("{}\n", serde_json::to_string_pretty(&state)?),
-    )?;
     Ok(())
 }
 
 fn expected_changes(root: &Path) -> Result<Vec<(String, String)>> {
-    let existing_state = load_state(root)?;
-    let files = expected_files(root, existing_state.as_ref())?;
-    let skill_path = existing_state
-        .as_ref()
-        .map(|state| state.skill.path.clone())
-        .or_else(|| files.first().map(|(path, _)| path.clone()))
-        .context("repository skill plan has no skill file")?;
-    let state = ManagedState {
-        version: bundled_version()?,
-        skill: ManagedFile {
-            path: skill_path,
-            sha256: hash(CANONICAL_SKILL),
-        },
-    };
+    let skill_path = validate_managed_path(root, SKILL_PATH)?;
+    let files = expected_files(root, read_optional_text(&skill_path)?.is_none())?;
     let mut changes = vec![];
-    for (relative, expected) in files.into_iter().chain(std::iter::once((
-        STATE_PATH.into(),
-        format!("{}\n", serde_json::to_string_pretty(&state)?),
-    ))) {
+    for (relative, expected) in files {
         let path = validate_managed_path(root, &relative)?;
         let actual = read_optional_text(&path)?.unwrap_or_default();
         if actual != expected {
@@ -439,20 +331,24 @@ fn expected_changes(root: &Path) -> Result<Vec<(String, String)>> {
 
 #[must_use]
 pub fn version_is_newer(installed: &str, bundled: &str) -> bool {
+    compare_versions(installed, bundled) == Some(Ordering::Less)
+}
+
+fn compare_versions(installed: &str, bundled: &str) -> Option<Ordering> {
     fn parts(value: &str) -> Option<Vec<u64>> {
         value
             .split('.')
             .map(str::parse)
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<_, _>>()
             .ok()
     }
     match (parts(installed), parts(bundled)) {
         (Some(mut old), Some(mut new)) => {
             old.resize(3, 0);
             new.resize(3, 0);
-            new > old
+            Some(old.cmp(&new))
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -724,13 +620,6 @@ mod tests {
         assert!(!version_is_newer("1.1", "1.0"));
     }
     #[test]
-    fn managed_content_hashes_use_sha256_hex() {
-        assert_eq!(
-            hash("abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-    #[test]
     fn warning_messages_are_exact() {
         let status = GuidanceStatus {
             installed: true,
@@ -748,46 +637,34 @@ mod tests {
         );
     }
     #[test]
-    fn setup_defaults_to_agents_without_creating_claude_files() {
+    fn setup_does_not_create_instruction_files() {
         let root = temp_root();
         setup(&root, false).unwrap();
 
-        assert!(root.join(AGENTS_PATH).is_file());
         assert!(root.join(SKILL_PATH).is_file());
+        assert!(!root.join(AGENTS_PATH).exists());
         assert!(!root.join(CLAUDE_PATH).exists());
-        assert!(!root.join(CLAUDE_SKILL_PATH).exists());
-        assert!(
-            fs::read_to_string(root.join(AGENTS_PATH))
-                .unwrap()
-                .contains(SKILL_PATH)
-        );
-        let state = load_state(&root).unwrap().unwrap();
-        assert_eq!(state.skill.path, SKILL_PATH);
         assert_eq!(status(&root).unwrap().managed_files, vec![SKILL_PATH]);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn setup_uses_existing_claude_without_creating_agents_files() {
+    fn setup_adds_pointer_to_existing_claude_without_creating_agents() {
         let root = temp_root();
         fs::write(root.join(CLAUDE_PATH), "# Claude instructions\n").unwrap();
         setup(&root, false).unwrap();
 
         let claude = fs::read_to_string(root.join(CLAUDE_PATH)).unwrap();
         assert!(claude.contains("# Claude instructions"));
-        assert!(claude.contains(CLAUDE_SKILL_PATH));
-        assert!(root.join(CLAUDE_SKILL_PATH).is_file());
+        assert!(claude.contains(SKILL_PATH));
+        assert!(!claude.contains("<!--"));
+        assert!(root.join(SKILL_PATH).is_file());
         assert!(!root.join(AGENTS_PATH).exists());
-        assert!(!root.join(SKILL_PATH).exists());
-        assert_eq!(
-            load_state(&root).unwrap().unwrap().skill.path,
-            CLAUDE_SKILL_PATH
-        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn setup_prefers_agents_and_leaves_existing_claude_untouched() {
+    fn setup_adds_pointer_to_each_existing_instruction_file() {
         let root = temp_root();
         fs::write(
             root.join(AGENTS_PATH),
@@ -803,17 +680,25 @@ mod tests {
                 .unwrap()
                 .contains("Keep this text.")
         );
-        assert_eq!(fs::read_to_string(root.join(CLAUDE_PATH)).unwrap(), claude);
+        assert!(
+            fs::read_to_string(root.join(AGENTS_PATH))
+                .unwrap()
+                .contains(SKILL_PATH)
+        );
+        assert!(
+            fs::read_to_string(root.join(CLAUDE_PATH))
+                .unwrap()
+                .contains(SKILL_PATH)
+        );
         assert!(root.join(SKILL_PATH).is_file());
-        assert!(!root.join(CLAUDE_SKILL_PATH).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn setup_preserves_custom_instruction_wording_that_points_to_skill() {
+    fn setup_preserves_instruction_wording_that_already_mentions_ngit() {
         let root = temp_root();
-        let custom = format!("# Local policy\n\nRead `{SKILL_PATH}` before collaborating.\n");
-        fs::write(root.join(AGENTS_PATH), &custom).unwrap();
+        let custom = "# Local policy\n\nUse NGIT for collaboration.\n";
+        fs::write(root.join(AGENTS_PATH), custom).unwrap();
 
         setup(&root, false).unwrap();
 
@@ -822,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_refuses_unmanaged_skill_files_without_force() {
+    fn setup_refuses_unrecognized_skill_files_without_force() {
         let root = temp_root();
         let skill = root.join(SKILL_PATH);
         fs::create_dir_all(skill.parent().unwrap()).unwrap();
@@ -831,7 +716,7 @@ mod tests {
             setup(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("unmanaged file")
+                .contains("unrecognized repository skill")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -929,54 +814,6 @@ mod tests {
         fs::remove_dir_all(outside).unwrap();
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn status_refuses_symlinked_state_file() {
-        let root = temp_root();
-        fs::create_dir_all(root.join(".agents")).unwrap();
-        let outside = root.with_extension("outside-state");
-        fs::write(&outside, "{}\n").unwrap();
-        symlink(&outside, root.join(STATE_PATH)).unwrap();
-
-        assert!(
-            status(&root)
-                .unwrap_err()
-                .to_string()
-                .contains("is a symlink")
-        );
-        assert_eq!(fs::read_to_string(&outside).unwrap(), "{}\n");
-
-        fs::remove_dir_all(root).unwrap();
-        fs::remove_file(outside).unwrap();
-    }
-
-    #[test]
-    fn status_rejects_unexpected_paths_from_state() {
-        let root = temp_root();
-        fs::create_dir_all(root.join(".agents")).unwrap();
-        let state = ManagedState {
-            version: "1.0".into(),
-            skill: ManagedFile {
-                path: "../../outside".into(),
-                sha256: "unused".into(),
-            },
-        };
-        fs::write(
-            root.join(STATE_PATH),
-            format!("{}\n", serde_json::to_string_pretty(&state).unwrap()),
-        )
-        .unwrap();
-
-        assert!(
-            status(&root)
-                .unwrap_err()
-                .to_string()
-                .contains("unexpected managed path")
-        );
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn modified_managed_files_refuse_update_without_force() {
         let root = temp_root();
@@ -1003,13 +840,11 @@ mod tests {
     fn newer_installed_guidance_refuses_downgrade_without_force() {
         let root = temp_root();
         setup(&root, false).unwrap();
-        let mut state = load_state(&root).unwrap().unwrap();
-        state.version = "999.0.0".into();
-        fs::write(
-            root.join(STATE_PATH),
-            format!("{}\n", serde_json::to_string_pretty(&state).unwrap()),
-        )
-        .unwrap();
+        let newer = bundled_skill().replace(
+            &format!("version: \"{}\"", bundled_version().unwrap()),
+            "version: \"999.0.0\"",
+        );
+        fs::write(root.join(SKILL_PATH), newer).unwrap();
         assert!(
             update(&root, false)
                 .unwrap_err()
@@ -1017,6 +852,27 @@ mod tests {
                 .contains("refusing to downgrade")
         );
         update(&root, true).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn older_installed_guidance_is_upgraded_from_its_version() {
+        let root = temp_root();
+        setup(&root, false).unwrap();
+        let older = bundled_skill().replace(
+            &format!("version: \"{}\"", bundled_version().unwrap()),
+            "version: \"0.1\"",
+        );
+        fs::write(root.join(SKILL_PATH), older).unwrap();
+
+        let before = status(&root).unwrap();
+        assert!(before.update_available);
+        assert!(before.modified_files.is_empty());
+        update(&root, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(SKILL_PATH)).unwrap(),
+            bundled_skill()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
