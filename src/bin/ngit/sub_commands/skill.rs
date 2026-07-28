@@ -76,13 +76,12 @@ fn reconcile_for_account(
     let before = agent_guidance::status(&context.root)?;
     let paths_for_commit = agent_guidance::paths_for_commit(&context.root)?;
     let changes_needed = !paths_for_commit.is_empty();
-    let commit = changes_needed && is_maintainer == Some(true);
     let commit_kind = if before.installed {
         agent_guidance::GuidanceCommitKind::Upgrade
     } else {
         agent_guidance::GuidanceCommitKind::Install
     };
-    let commit_preflight = commit.then(|| {
+    let commit_preflight = changes_needed.then(|| {
         agent_guidance::preflight_dedicated_commit(&context.repo, &context.root, &paths_for_commit)
     });
     agent_guidance::update(&context.root, force)?;
@@ -113,8 +112,11 @@ fn reconcile_for_account(
     };
     if commit_created {
         eprintln!("created repository skill commit");
-    } else if changes_needed && is_maintainer != Some(true) {
-        eprintln!("no commit created because the current account is not a repository maintainer");
+        if is_maintainer == Some(false) {
+            eprintln!(
+                "tip: you are not a repository maintainer; push this commit from a `pr/` branch to open a pull request"
+            );
+        }
     }
     let after = agent_guidance::status(&context.root)?;
     if !before.installed {
@@ -321,7 +323,34 @@ mod tests {
     }
 
     #[test]
-    fn maintainer_install_leaves_changes_when_index_is_dirty() {
+    fn non_maintainer_install_creates_a_dedicated_commit() {
+        let (repo, root) = repository();
+        let original_head = repo.git_repo.head().unwrap().peel_to_commit().unwrap().id();
+        let context = SkillContext {
+            repo,
+            root: root.clone(),
+        };
+
+        reconcile_for_account(&context, false, Some(false)).unwrap();
+
+        let head = context
+            .repo
+            .git_repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        assert_ne!(head.id(), original_head);
+        assert_eq!(
+            head.message().unwrap(),
+            "chore: install ngit repository skill\n\n\
+             Add repository guidance for supported coding agents."
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn non_maintainer_install_leaves_changes_when_index_is_dirty() {
         let (repo, root) = repository();
         fs::write(root.join("staged.txt"), "staged\n").unwrap();
         let mut index = repo.git_repo.index().unwrap();
@@ -332,7 +361,7 @@ mod tests {
             root: root.clone(),
         };
 
-        reconcile_for_account(&context, false, Some(true)).unwrap();
+        reconcile_for_account(&context, false, Some(false)).unwrap();
 
         assert!(root.join(agent_guidance::SKILL_PATH).is_file());
         assert!(

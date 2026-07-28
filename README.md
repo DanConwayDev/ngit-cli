@@ -76,6 +76,8 @@ to use ngit. The command installs the skill in the Codex and Claude discovery
 locations and adds a compact pointer to existing `AGENTS.md` or `CLAUDE.md`
 files without creating either file. Use `ngit skill upgrade` to update existing
 copies from the version in the skill metadata; it does not restore a copy that
-was removed after installation.
+was removed after installation. Install and upgrade create a dedicated commit;
+contributors who are not maintainers should push it from a `pr/` branch to
+propose the change as a pull request.
 
 Run `ngit skill --help` for status and reminder opt-out commands.
