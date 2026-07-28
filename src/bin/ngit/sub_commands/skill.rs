@@ -77,13 +77,23 @@ fn reconcile_for_account(
     let paths_for_commit = agent_guidance::paths_for_commit(&context.root)?;
     let changes_needed = !paths_for_commit.is_empty();
     let commit = changes_needed && is_maintainer == Some(true);
+    let commit_kind = if before.installed {
+        agent_guidance::GuidanceCommitKind::Upgrade
+    } else {
+        agent_guidance::GuidanceCommitKind::Install
+    };
     let commit_preflight = commit.then(|| {
         agent_guidance::preflight_dedicated_commit(&context.repo, &context.root, &paths_for_commit)
     });
     agent_guidance::update(&context.root, force)?;
     let commit_created = match commit_preflight {
         Some(Ok(())) => {
-            match agent_guidance::commit_guidance(&context.repo, &context.root, &paths_for_commit) {
+            match agent_guidance::commit_guidance(
+                &context.repo,
+                &context.root,
+                &paths_for_commit,
+                commit_kind,
+            ) {
                 Ok(created) => created,
                 Err(error) => {
                     eprintln!(
@@ -235,11 +245,24 @@ mod tests {
         let paths = agent_guidance::paths_for_commit(&root).unwrap();
         agent_guidance::setup(&root, false).unwrap();
 
-        assert!(agent_guidance::commit_guidance(&repo, &root, &paths).unwrap());
+        assert!(
+            agent_guidance::commit_guidance(
+                &repo,
+                &root,
+                &paths,
+                agent_guidance::GuidanceCommitKind::Install,
+            )
+            .unwrap()
+        );
 
         let mut index = repo.git_repo.index().unwrap();
         let head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(index.write_tree().unwrap(), head.tree_id());
+        assert_eq!(
+            head.message().unwrap(),
+            "chore: install ngit repository skill\n\n\
+             Add repository guidance for supported coding agents."
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -254,7 +277,15 @@ mod tests {
         fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
         fs::write(&lock_path, "locked\n").unwrap();
 
-        assert!(agent_guidance::commit_guidance(&repo, &root, &paths).is_err());
+        assert!(
+            agent_guidance::commit_guidance(
+                &repo,
+                &root,
+                &paths,
+                agent_guidance::GuidanceCommitKind::Install,
+            )
+            .is_err()
+        );
 
         let reopened = git2::Repository::open(&root).unwrap();
         let head = reopened.head().unwrap().peel_to_commit().unwrap();

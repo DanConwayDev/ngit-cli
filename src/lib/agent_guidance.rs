@@ -542,7 +542,26 @@ pub fn paths_for_commit(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-const COMMIT_MESSAGE: &str = "chore: update ngit repository skill";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuidanceCommitKind {
+    Install,
+    Upgrade,
+}
+
+impl GuidanceCommitKind {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Install => {
+                "chore: install ngit repository skill\n\n\
+                 Add repository guidance for supported coding agents."
+            }
+            Self::Upgrade => {
+                "chore: upgrade ngit repository skill\n\n\
+                 Update repository guidance for supported coding agents."
+            }
+        }
+    }
+}
 
 fn validate_target_path(root: &Path, path: &Path) -> Result<PathBuf> {
     let relative = path
@@ -623,6 +642,7 @@ pub fn commit_guidance(
     repo: &crate::git::Repo,
     root: &Path,
     target_paths: &[PathBuf],
+    kind: GuidanceCommitKind,
 ) -> Result<bool> {
     let index_path = repo.git_repo.path().join("index");
     let original_index = if index_path.exists() {
@@ -633,7 +653,7 @@ pub fn commit_guidance(
     } else {
         None
     };
-    let result = commit_guidance_inner(repo, root, target_paths);
+    let result = commit_guidance_inner(repo, root, target_paths, kind);
     if let Err(error) = result {
         match original_index {
             Some(contents) => fs::write(&index_path, contents).map(|_| ()),
@@ -650,6 +670,7 @@ fn commit_guidance_inner(
     repo: &crate::git::Repo,
     root: &Path,
     target_paths: &[PathBuf],
+    kind: GuidanceCommitKind,
 ) -> Result<bool> {
     let head = repo
         .git_repo
@@ -681,7 +702,7 @@ fn commit_guidance_inner(
         Some("HEAD"),
         &signature,
         &signature,
-        COMMIT_MESSAGE,
+        kind.message(),
         &repo.git_repo.find_tree(tree_id)?,
         &[&parent],
     )?;
@@ -744,6 +765,19 @@ mod tests {
     fn newer_versions_are_decided_without_io() {
         assert!(version_is_newer("1.0", "1.1"));
         assert!(!version_is_newer("1.1", "1.0"));
+    }
+    #[test]
+    fn generated_commit_messages_have_distinct_subjects_and_bodies() {
+        assert_eq!(
+            GuidanceCommitKind::Install.message(),
+            "chore: install ngit repository skill\n\n\
+             Add repository guidance for supported coding agents."
+        );
+        assert_eq!(
+            GuidanceCommitKind::Upgrade.message(),
+            "chore: upgrade ngit repository skill\n\n\
+             Update repository guidance for supported coding agents."
+        );
     }
     #[test]
     fn warning_messages_are_exact() {
