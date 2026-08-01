@@ -19,9 +19,10 @@ use git2::{Oid, Repository};
 use ngit::{
     accept_maintainership::accept_maintainership_with_defaults,
     client::{
-        self, get_event_from_cache_by_id, get_filter_state_events, save_event_in_local_cache,
+        self, Client, get_event_from_cache_by_id, get_filter_state_events,
+        save_event_in_local_cache,
     },
-    git::{self, nostr_url::NostrUrlDecoded},
+    git::{self, Repo, nostr_url::NostrUrlDecoded},
     git_events::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
         get_status, sign_ordered_status_event, status_kinds,
@@ -54,8 +55,6 @@ use nostr::{
 };
 use repo_ref::RepoRef;
 use repo_state::RepoState;
-
-use crate::{client::Client, git::Repo};
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
@@ -2719,6 +2718,7 @@ fn reference_to_commit(git_repo: &Repository, reference: &str) -> Result<Oid> {
 }
 
 // this maybe a commit id or a ref: pointer
+#[allow(dead_code)] // currently unused; kept as-is by the executable consolidation
 fn reference_to_ref_value(git_repo: &Repository, reference: &str) -> Result<String> {
     let reference_obj = git_repo
         .find_reference(reference)

@@ -68,9 +68,13 @@ vendored-openssl = ["git2/vendored-openssl"]
 name = "ngit"
 path = "src/bin/ngit/main.rs"
 
+# Compatibility launcher: git discovers remote helpers by executable
+# name, but the implementation lives in the `ngit` binary (invoked via
+# a hidden internal command). Both names must keep installing so
+# `cargo install ngit` provides a working remote helper.
 [[bin]]
 name = "git-remote-nostr"
-path = "src/bin/git_remote_nostr/main.rs"
+path = "src/bin/git_remote_nostr.rs"
 
 # `git push` against a nostr:// remote — one submodule per scenario under
 # `tests/git_push_state/`. The directory layout means Cargo doesn't
