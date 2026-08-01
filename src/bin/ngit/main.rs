@@ -15,11 +15,31 @@ use ngit::{
     git_events, login, repo_ref,
 };
 
+mod git_remote_helper;
 mod sub_commands;
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {
+    // The remote-helper entry point must dispatch before anything that
+    // could write to stdout (update notices, skill notices, clap
+    // output): stray stdout would corrupt git's remote-helper protocol.
+    // The token check uses args_os so a non-unicode argument still
+    // reaches clap's graceful error path instead of panicking here.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(OsStr::new(git_remote_helper::INTERNAL_COMMAND))
+    {
+        let helper_args: Vec<String> = std::env::args().skip(2).collect();
+        if let Err(err) = git_remote_helper::run(&helper_args).await {
+            // Match the exit behavior of the pre-consolidation
+            // `git-remote-nostr` binary, whose `main` returned a
+            // `Result` (std prints `Error: {err:?}`, exit code 1).
+            eprintln!("Error: {err:?}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if version_flag_requested() {
         print_update_notice_if_available_at_startup().await;
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));

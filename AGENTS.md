@@ -8,7 +8,7 @@ Documentation for AI agents and automated tools working with the ngit codebase.
 
 - **Language**: Rust
 - **Type**: Command-line tool with git integration
-- **Architecture**: Two main binaries (`ngit` and `git-remote-nostr`) with shared library code
+- **Architecture**: One implementation-bearing binary (`ngit`) plus a thin `git-remote-nostr` compatibility launcher, with shared library code
 - **Key Dependencies**: nostr-sdk, git2, clap, tokio
 
 ### Core Concepts
@@ -24,13 +24,13 @@ Documentation for AI agents and automated tools working with the ngit codebase.
 ngit/
 ├── src/
 │   ├── bin/
-│   │   ├── git_remote_nostr/    # Git remote helper implementation
-│   │   │   ├── capabilities.rs
-│   │   │   ├── fetch.rs
-│   │   │   ├── list.rs
-│   │   │   ├── main.rs
-│   │   │   └── push.rs
+│   │   ├── git_remote_nostr.rs  # Compatibility launcher (re-invokes ngit)
 │   │   └── ngit/                # Main CLI tool
+│   │       ├── git_remote_helper/  # Git remote helper implementation
+│   │       │   ├── fetch.rs
+│   │       │   ├── list.rs
+│   │       │   ├── mod.rs
+│   │       │   └── push.rs
 │   │       ├── main.rs
 │   │       └── sub_commands/
 │   └── lib/                     # Shared library code
@@ -68,8 +68,8 @@ ngit/
 
 ### Binaries
 
-- **`git-remote-nostr`**: Git remote helper that enables git to work with nostr:// URLs
-- **`ngit`**: Main CLI tool for managing nostr repositories
+- **`git-remote-nostr`**: Compatibility launcher that git discovers by name; it re-invokes `ngit`'s hidden remote-helper entry point so git can work with nostr:// URLs
+- **`ngit`**: Main CLI tool for managing nostr repositories; also hosts the remote-helper implementation (`src/bin/ngit/git_remote_helper/`)
 
 ## Development Guidelines
 
@@ -127,7 +127,7 @@ cargo build --release
    - Git operations → `src/lib/git/`
    - Nostr operations → `src/lib/client.rs`, `src/lib/git_events.rs`
    - CLI commands → `src/bin/ngit/sub_commands/`
-   - Remote helper → `src/bin/git_remote_nostr/`
+   - Remote helper → `src/bin/ngit/git_remote_helper/`
 
 2. **Add tests**: Always add tests for new functionality
 
@@ -346,7 +346,8 @@ src/lib/repo_ref.rs           # URL handling, grasp server detection
 src/lib/client.rs             # Nostr client
 src/lib/git_events.rs         # Git event handling
 src/bin/ngit/main.rs          # Main CLI entry point
-src/bin/git_remote_nostr/     # Git remote helper
+src/bin/ngit/git_remote_helper/ # Git remote helper implementation
+src/bin/git_remote_nostr.rs   # Compatibility launcher for the helper
 tests/                        # Integration tests
 ```
 

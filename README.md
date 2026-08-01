@@ -19,7 +19,7 @@ install options:
 4. **install with nix**: add `ngit.url = "github:DanConwayDev/ngit-cli";` as a flake input and then include `inputs.ngit.packages."${pkgs.system}".default` in packages.
 5. download the latest release binaries from [gitworkshop.dev/ngit](https://gitworkshop.dev/ngit) and add to PATH
 
-run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in your PATH.
+run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in your PATH. `git-remote-nostr` is a small compatibility launcher that git discovers by name; the implementation lives in `ngit`, so both need installing together.
 
 ## configuration
 

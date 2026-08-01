@@ -1,13 +1,15 @@
-#![cfg_attr(not(test), warn(clippy::pedantic))]
-#![allow(clippy::large_futures, clippy::module_name_repetitions)]
-// better solution to dead_code error on multiple binaries than https://stackoverflow.com/a/66196291
-#![allow(dead_code)]
-#![cfg_attr(not(test), warn(clippy::expect_used))]
+//! Implementation of the `git-remote-nostr` remote helper.
+//!
+//! Git discovers remote helpers by executable name, so a separate
+//! `git-remote-nostr` executable still exists — but it is a thin
+//! launcher (`src/bin/git_remote_nostr.rs`) that re-invokes `ngit`
+//! with the hidden [`INTERNAL_COMMAND`] entry point handled here.
+#![allow(clippy::module_name_repetitions)]
 
 use core::str;
 use std::{
     collections::HashSet,
-    env, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -18,14 +20,17 @@ use client::{
 };
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
-    client::{self, Params},
-    git::{self, utils::set_git_timeout},
+    client::{self, Client, Params},
+    git::{self, Repo, utils::set_git_timeout},
     login::existing::load_existing_login,
     utils::read_line,
 };
 use nostr::nips::nip19::Nip19Coordinate;
 
-use crate::{client::Client, git::Repo};
+/// Hidden entry point through which the `git-remote-nostr` launcher
+/// re-invokes `ngit`. Deliberately absent from the clap CLI so it
+/// never appears in user-facing help.
+pub const INTERNAL_COMMAND: &str = "__git-remote-nostr";
 
 #[derive(Default, Clone)]
 struct PushOptions {
@@ -122,14 +127,20 @@ mod fetch;
 mod list;
 mod push;
 
-#[tokio::main]
+/// Run the remote-helper protocol. `args` are the arguments following
+/// [`INTERNAL_COMMAND`], matching what git passes to a remote helper:
+/// `<remote-name> <url>`, a single `<url>`, or `--version`.
+///
+/// Dispatched from `main` before any normal ngit startup output
+/// (update notices, skill notices, clap output) — stray stdout would
+/// corrupt git's remote-helper protocol.
 #[allow(clippy::too_many_lines)]
-async fn main() -> Result<()> {
+pub async fn run(args: &[String]) -> Result<()> {
     if std::env::var("NGITTEST").is_ok() {
         std::env::set_var("NGIT_VERBOSE", "1");
     }
 
-    let Some((remote_name, decoded_nostr_url, git_repo)) = process_args().await? else {
+    let Some((remote_name, decoded_nostr_url, git_repo)) = process_args(args).await? else {
         return Ok(());
     };
 
@@ -253,19 +264,18 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn process_args() -> Result<Option<(Option<String>, NostrUrlDecoded, Repo)>> {
-    let args = env::args();
-    let args = args.skip(1).take(2).collect::<Vec<_>>();
-
-    if env::args().nth(1).as_deref() == Some("--version") {
+async fn process_args(args: &[String]) -> Result<Option<(Option<String>, NostrUrlDecoded, Repo)>> {
+    if args.first().map(String::as_str) == Some("--version") {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
         println!("v{VERSION}");
         return Ok(None);
     }
 
+    let args = args.iter().take(2).collect::<Vec<_>>();
+
     let (remote_name, nostr_remote_url) = match args.as_slice() {
-        [remote_name, nostr_remote_url] => (Some(remote_name.clone()), nostr_remote_url),
-        [nostr_remote_url] => (None, nostr_remote_url),
+        [remote_name, nostr_remote_url] => (Some((*remote_name).clone()), *nostr_remote_url),
+        [nostr_remote_url] => (None, *nostr_remote_url),
         _ => {
             println!("nostr plugin for git");
             println!("Usage:");

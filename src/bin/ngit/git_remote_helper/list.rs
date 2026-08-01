@@ -6,7 +6,7 @@ use git::RepoActions;
 use ngit::{
     client::{self, FetchReport, is_verbose},
     fetch::fetch_from_git_server,
-    git::{self},
+    git::{self, Repo},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
     list::list_from_remotes,
     login::get_curent_user,
@@ -16,7 +16,7 @@ use ngit::{
 };
 use repo_ref::RepoRef;
 
-use crate::{fetch::make_commits_for_proposal, git::Repo};
+use super::fetch::make_commits_for_proposal;
 
 #[allow(clippy::too_many_lines)]
 pub async fn run_list(
