@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use client::{
-    STATE_KIND, delete_event_from_local_cache, get_events_from_local_cache, get_issues_from_cache,
-    get_state_from_cache, send_events, sign_event,
+    STATE_KIND, get_events_from_local_cache, get_issues_from_cache, get_state_from_cache,
+    sign_event,
 };
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
@@ -29,11 +29,8 @@ use ngit::{
     },
     list::list_from_remotes,
     login::{existing::load_existing_login, user::UserRef},
-    push::{push_to_remote, select_servers_push_refs_and_generate_pr_or_pr_update_event},
-    repo_ref::{
-        self, format_grasp_server_url_as_relay_url, get_repo_config_from_yaml,
-        is_grasp_server_clone_url,
-    },
+    push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
+    repo_ref::{self, get_repo_config_from_yaml},
     repo_state,
     signer::NgitSigner,
     utils::{
@@ -55,6 +52,11 @@ use nostr::{
 };
 use repo_ref::RepoRef;
 use repo_state::RepoState;
+
+use crate::state_transaction::{
+    GitStatePushOutcome, LiveOps, StateTransaction, StateTransactionFailure, StateTransactionOps,
+    publish_events_to_relays,
+};
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
@@ -166,12 +168,19 @@ pub async fn run_push(
                 .into_iter()
                 .partition(|event| event.kind.eq(&STATE_KIND));
 
+            let mut ops = LiveOps {
+                client,
+                git_repo,
+                repo_ref,
+                term: &term,
+                git_server_push_options: &git_server_push_options,
+            };
+
             if git_state_refspecs.is_empty() {
                 if !other_events.is_empty() {
                     publish_events_to_relays(
-                        client,
-                        git_repo,
-                        repo_ref,
+                        &mut ops,
+                        &repo_ref.relays,
                         other_events,
                         &my_write_relays,
                         repo_relay_only,
@@ -191,19 +200,17 @@ pub async fn run_push(
                 return Ok(());
             }
 
-            // GRASP relays that support purgatory hold repo state events until the
-            // matching git data arrives at the paired git server. Publishing to
-            // them before the git push is therefore safe: if the later git push
-            // fails, the relay never broadcasts the unreachable state.
-            //
-            // This intentionally makes state publication a two-stage process.
-            // First seed purgatory on the GRASP relays we are about to push to,
-            // then push git data, and only after at least one git server accepts
-            // the data fan out the state to any remaining relays. The extra
-            // round-trip prevents us reporting `ok` or broadcasting state for
-            // commits that no git server has.
-            let initial_state_publish =
-                publish_state_to_grasps_first(client, git_repo, repo_ref, &state_events).await?;
+            let mut transaction = StateTransaction::new(
+                repo_ref,
+                state_events,
+                new_state_event_id,
+                previous_state_event,
+            );
+
+            // Seed purgatory on the GRASP relays we are about to push to
+            // before any git data moves; see the state_transaction module
+            // docs for the transaction ordering rationale.
+            transaction.publish_state_to_grasps_first(&mut ops).await?;
 
             for refspec in &proposal_refspecs {
                 if rejected_proposal_refspecs.contains(refspec) {
@@ -212,53 +219,42 @@ pub async fn run_push(
                 mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
             }
 
-            match push_git_state_refspecs(
-                git_repo,
-                repo_ref,
-                &term,
+            match transaction.push_git_state_refspecs(
+                &mut ops,
                 remote_refspecs,
                 &git_state_refspecs,
-                &initial_state_publish,
-                &git_server_push_options,
             ) {
                 GitStatePushOutcome::NoEligibleServers => {
                     report_state_push_failure(
-                        git_repo,
+                        &transaction,
+                        &mut ops,
                         &git_state_refspecs,
-                        "state event failed to reach any git server relay",
-                        new_state_event_id,
-                        previous_state_event.as_ref(),
+                        &StateTransactionFailure::NoEligibleGitServers,
                     )
                     .await?;
                 }
                 GitStatePushOutcome::AllPushesFailed => {
                     report_state_push_failure(
-                        git_repo,
+                        &transaction,
+                        &mut ops,
                         &git_state_refspecs,
-                        "failed to push to any git server",
-                        new_state_event_id,
-                        previous_state_event.as_ref(),
+                        &StateTransactionFailure::AllGitServerPushesFailed,
                     )
                     .await?;
                 }
                 GitStatePushOutcome::AcceptedByGitServer => {
-                    let has_state_event = !state_events.is_empty();
-                    let remaining_state_relay_results = publish_state_to_remaining_relays(
-                        client,
-                        git_repo,
-                        repo_ref,
-                        state_events,
-                        &my_write_relays,
-                        repo_relay_only,
-                        &initial_state_publish.grasp_relays,
-                    )
-                    .await?;
+                    transaction
+                        .publish_state_to_remaining_relays(
+                            &mut ops,
+                            &my_write_relays,
+                            repo_relay_only,
+                        )
+                        .await?;
 
                     if !other_events.is_empty() {
                         publish_events_to_relays(
-                            client,
-                            git_repo,
-                            repo_ref,
+                            &mut ops,
+                            &repo_ref.relays,
                             other_events,
                             &my_write_relays,
                             repo_relay_only,
@@ -272,13 +268,8 @@ pub async fn run_push(
                         repo_ref,
                         &git_state_refspecs,
                         remote_name,
-                        state_relay_accepted(
-                            has_state_event,
-                            initial_state_publish.results.iter(),
-                            remaining_state_relay_results.iter(),
-                        ),
-                        new_state_event_id,
-                        previous_state_event.as_ref(),
+                        &transaction,
+                        &mut ops,
                     )
                     .await?;
                 }
@@ -300,17 +291,6 @@ struct PushEventsPlan {
     repo_relay_only: bool,
 }
 
-struct InitialStatePublish {
-    grasp_relays: Vec<RelayUrl>,
-    results: Vec<(String, bool)>,
-}
-
-enum GitStatePushOutcome {
-    NoEligibleServers,
-    AllPushesFailed,
-    AcceptedByGitServer,
-}
-
 fn mark_refspec_pushed(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -328,192 +308,24 @@ fn mark_refspec_pushed(
     .context("could not update remote_ref locally")
 }
 
-/// Publish state events to GRASP relays before pushing git data.
-///
-/// This relies on GRASP purgatory: the relay accepts the event but withholds
-/// broadcast until the paired git server receives the referenced objects. That
-/// lets us target GRASP servers first without leaking a state event for data
-/// that later fails to push.
-async fn publish_state_to_grasps_first(
-    client: &mut Client,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    state_events: &[Event],
-) -> Result<InitialStatePublish> {
-    let grasp_relays = if state_events.is_empty() {
-        vec![]
-    } else {
-        grasp_server_relay_urls(repo_ref)
-    };
-
-    let results = if state_events.is_empty() || grasp_relays.is_empty() {
-        vec![]
-    } else {
-        send_events(
-            client,
-            Some(git_repo.get_path()?),
-            state_events.to_vec(),
-            vec![],
-            grasp_relays.clone(),
-            true,
-            false,
-        )
-        .await?
-    };
-
-    Ok(InitialStatePublish {
-        grasp_relays,
-        results,
-    })
-}
-
-fn push_git_state_refspecs(
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    term: &Term,
-    remote_refspecs: HashMap<String, Vec<String>>,
-    git_state_refspecs: &[String],
-    initial_state_publish: &InitialStatePublish,
-    git_server_push_options: &[String],
-) -> GitStatePushOutcome {
-    if git_state_refspecs.is_empty() {
-        return GitStatePushOutcome::AcceptedByGitServer;
-    }
-
-    let servers_to_push = servers_with_accepted_grasp_state(
-        remote_refspecs,
-        git_state_refspecs,
-        !initial_state_publish.grasp_relays.is_empty(),
-        &initial_state_publish.results,
-    );
-
-    if servers_to_push.is_empty() {
-        return GitStatePushOutcome::NoEligibleServers;
-    }
-
-    let mut any_push_succeeded = false;
-    for (git_server_url, server_refspecs) in &servers_to_push {
-        if !server_refspecs.is_empty() {
-            let push_options_refs: Vec<&str> =
-                git_server_push_options.iter().map(String::as_str).collect();
-            if push_to_remote(
-                git_repo,
-                git_server_url,
-                &repo_ref.to_nostr_git_url(&None),
-                server_refspecs,
-                term,
-                is_grasp_server_clone_url(git_server_url),
-                &push_options_refs,
-            )
-            .is_ok_and(|ref_updates| all_ref_updates_accepted(&ref_updates))
-            {
-                any_push_succeeded = true;
-            }
-        }
-    }
-
-    if any_push_succeeded {
-        GitStatePushOutcome::AcceptedByGitServer
-    } else {
-        GitStatePushOutcome::AllPushesFailed
-    }
-}
-
-fn all_ref_updates_accepted(ref_updates: &HashMap<String, Option<String>>) -> bool {
-    ref_updates.values().all(Option::is_none)
-}
-
-fn servers_with_accepted_grasp_state(
-    remote_refspecs: HashMap<String, Vec<String>>,
-    git_state_refspecs: &[String],
-    has_state_event: bool,
-    initial_state_relay_results: &[(String, bool)],
-) -> Vec<(String, Vec<String>)> {
-    let mut servers_to_push = vec![];
-    for (git_server_url, server_refspecs) in remote_refspecs {
-        let server_refspecs = server_refspecs
-            .iter()
-            .filter(|refspec| git_state_refspecs.contains(refspec))
-            .cloned()
-            .collect::<Vec<String>>();
-        if is_grasp_server_clone_url(&git_server_url)
-            && has_state_event
-            && !initial_state_relay_results.is_empty()
-        {
-            if let Ok(relay_url) = format_grasp_server_url_as_relay_url(&git_server_url) {
-                let relay_failed = initial_state_relay_results
-                    .iter()
-                    .any(|(url, succeeded)| url == &relay_url && !succeeded);
-                if relay_failed {
-                    let short_name = get_short_git_server_name(&git_server_url);
-                    eprintln!(
-                        "WARNING: skipping {short_name} - state event failed to reach its relay"
-                    );
-                    continue;
-                }
-            }
-        }
-        servers_to_push.push((git_server_url, server_refspecs));
-    }
-    servers_to_push
-}
-
-async fn publish_state_to_remaining_relays(
-    client: &mut Client,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    state_events: Vec<Event>,
-    my_write_relays: &[String],
-    repo_relay_only: bool,
-    grasp_relays: &[RelayUrl],
-) -> Result<Vec<(String, bool)>> {
-    if state_events.is_empty() {
-        return Ok(vec![]);
-    }
-
-    publish_events_to_relays(
-        client,
-        git_repo,
-        repo_ref,
-        state_events,
-        my_write_relays,
-        repo_relay_only,
-        Some(grasp_relays),
-    )
-    .await
-}
-
-fn state_relay_accepted<'a>(
-    has_state_event: bool,
-    initial_results: impl Iterator<Item = &'a (String, bool)>,
-    remaining_results: impl Iterator<Item = &'a (String, bool)>,
-) -> bool {
-    !has_state_event
-        || initial_results
-            .chain(remaining_results)
-            .any(|(_, succeeded)| *succeeded)
-}
-
 async fn report_state_push_result(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     git_state_refspecs: &[String],
     remote_name: Option<&str>,
-    state_relay_accepted: bool,
-    new_state_event_id: Option<EventId>,
-    previous_state_event: Option<&Event>,
+    transaction: &StateTransaction<'_>,
+    ops: &mut impl StateTransactionOps,
 ) -> Result<()> {
-    if state_relay_accepted {
+    if transaction.state_relay_accepted() {
         for refspec in git_state_refspecs {
             mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
         }
     } else {
         report_state_push_failure(
-            git_repo,
+            transaction,
+            ops,
             git_state_refspecs,
-            "state event failed to reach any relay",
-            new_state_event_id,
-            previous_state_event,
+            &StateTransactionFailure::StateNotAcceptedByAnyRelay,
         )
         .await?;
     }
@@ -522,140 +334,17 @@ async fn report_state_push_result(
 }
 
 async fn report_state_push_failure(
-    git_repo: &Repo,
+    transaction: &StateTransaction<'_>,
+    ops: &mut impl StateTransactionOps,
     git_state_refspecs: &[String],
-    message: &str,
-    new_state_event_id: Option<EventId>,
-    previous_state_event: Option<&Event>,
+    failure: &StateTransactionFailure,
 ) -> Result<()> {
     for refspec in git_state_refspecs {
         let (_, to) = refspec_to_from_to(refspec)?;
-        println!("error {to} {message}");
+        println!("error {to} {}", failure.user_message());
     }
-    if let Some(new_id) = new_state_event_id {
-        rollback_state_event(git_repo.get_path()?, new_id, previous_state_event).await;
-    }
+    transaction.rollback(ops).await;
     Ok(())
-}
-
-fn grasp_server_relay_urls(repo_ref: &RepoRef) -> Vec<RelayUrl> {
-    repo_ref
-        .git_server
-        .iter()
-        .filter_map(|git_server_url| {
-            if !is_grasp_server_clone_url(git_server_url) {
-                return None;
-            }
-            format_grasp_server_url_as_relay_url(git_server_url)
-                .ok()
-                .and_then(|relay_url| RelayUrl::parse(&relay_url).ok())
-        })
-        .fold(Vec::new(), |mut relays, relay| {
-            if !relays.iter().any(|existing| existing == &relay) {
-                relays.push(relay);
-            }
-            relays
-        })
-}
-
-async fn publish_events_to_relays(
-    client: &mut Client,
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    events: Vec<Event>,
-    my_write_relays: &[String],
-    repo_relay_only: bool,
-    excluded_relays: Option<&[RelayUrl]>,
-) -> Result<Vec<(String, bool)>> {
-    if events.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let (repo_relays, write_relays) = relay_publish_targets(
-        &repo_ref.relays,
-        my_write_relays,
-        repo_relay_only,
-        excluded_relays,
-    );
-
-    if should_skip_empty_relay_publish(&repo_relays, &write_relays, excluded_relays) {
-        return Ok(vec![]);
-    }
-
-    send_events(
-        client,
-        Some(git_repo.get_path()?),
-        events,
-        write_relays,
-        repo_relays,
-        true,
-        false,
-    )
-    .await
-}
-
-fn relay_publish_targets(
-    repo_relays: &[RelayUrl],
-    my_write_relays: &[String],
-    repo_relay_only: bool,
-    excluded_relays: Option<&[RelayUrl]>,
-) -> (Vec<RelayUrl>, Vec<String>) {
-    let is_excluded = |relay: &str| {
-        excluded_relays.is_some_and(|excluded| {
-            excluded
-                .iter()
-                .any(|excluded| relay_urls_match(relay, excluded.as_str()))
-        })
-    };
-
-    let repo_relays = repo_relays
-        .iter()
-        .filter(|relay| !is_excluded(relay.as_str()))
-        .cloned()
-        .collect::<Vec<RelayUrl>>();
-    let write_relays = if repo_relay_only {
-        vec![]
-    } else {
-        my_write_relays
-            .iter()
-            .filter(|relay| !is_excluded(relay))
-            .cloned()
-            .collect::<Vec<String>>()
-    };
-
-    (repo_relays, write_relays)
-}
-
-fn should_skip_empty_relay_publish(
-    repo_relays: &[RelayUrl],
-    write_relays: &[String],
-    excluded_relays: Option<&[RelayUrl]>,
-) -> bool {
-    let excluded_any_relays = excluded_relays.is_some_and(|relays| !relays.is_empty());
-    excluded_any_relays && repo_relays.is_empty() && write_relays.is_empty()
-}
-
-fn relay_urls_match(left: &str, right: &str) -> bool {
-    left.trim_end_matches('/') == right.trim_end_matches('/')
-}
-
-/// Remove the newly-published state event from the local nostr cache and
-/// restore the previous state event (if any). This prevents a subsequent
-/// `ngit sync` or push from using a state that no git server ever accepted.
-async fn rollback_state_event(
-    git_repo_path: &std::path::Path,
-    new_state_event_id: EventId,
-    old_state_event: Option<&Event>,
-) {
-    if let Err(e) = delete_event_from_local_cache(git_repo_path, new_state_event_id).await {
-        eprintln!("WARNING: failed to roll back state event from local cache: {e}");
-        return;
-    }
-    if let Some(old_event) = old_state_event {
-        if let Err(e) = save_event_in_local_cache(git_repo_path, old_event).await {
-            eprintln!("WARNING: failed to restore previous state event in local cache: {e}");
-        }
-    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2765,108 +2454,6 @@ mod tests {
         fn trailing_plus_stripped() {
             let (from, _) = refspec_to_from_to("+testing:testingb").unwrap();
             assert_eq!(from, "testing");
-        }
-    }
-
-    mod all_ref_updates_accepted {
-        use super::*;
-
-        #[test]
-        fn accepts_empty_or_successful_statuses() {
-            assert!(super::all_ref_updates_accepted(&HashMap::new()));
-            assert!(super::all_ref_updates_accepted(&HashMap::from([
-                ("refs/heads/main".to_string(), None),
-                ("refs/tags/v1".to_string(), None),
-            ])));
-        }
-
-        #[test]
-        fn rejects_any_failed_status() {
-            assert!(!super::all_ref_updates_accepted(&HashMap::from([
-                ("refs/heads/main".to_string(), None),
-                (
-                    "refs/tags/v1".to_string(),
-                    Some("hook declined".to_string()),
-                ),
-            ])));
-        }
-    }
-
-    mod relay_publish_targets {
-        use super::*;
-
-        #[test]
-        fn excludes_grasp_relays_and_returns_empty_when_none_remain() {
-            let grasp_relay = RelayUrl::parse("ws://grasp.example").unwrap();
-            let (repo_relays, write_relays) = super::relay_publish_targets(
-                std::slice::from_ref(&grasp_relay),
-                &[],
-                false,
-                Some(std::slice::from_ref(&grasp_relay)),
-            );
-
-            assert!(repo_relays.is_empty());
-            assert!(write_relays.is_empty());
-            assert!(super::should_skip_empty_relay_publish(
-                &repo_relays,
-                &write_relays,
-                Some(std::slice::from_ref(&grasp_relay)),
-            ));
-        }
-
-        #[test]
-        fn excludes_matching_write_relays_before_fallback_decision() {
-            let excluded = RelayUrl::parse("ws://grasp.example").unwrap();
-            let write_relays = vec!["ws://grasp.example/".to_string()];
-            let (repo_relays, write_relays) = super::relay_publish_targets(
-                &[],
-                &write_relays,
-                false,
-                Some(std::slice::from_ref(&excluded)),
-            );
-
-            assert!(repo_relays.is_empty());
-            assert!(write_relays.is_empty());
-            assert!(super::should_skip_empty_relay_publish(
-                &repo_relays,
-                &write_relays,
-                Some(std::slice::from_ref(&excluded)),
-            ));
-        }
-
-        #[test]
-        fn allows_send_events_fallback_when_no_grasp_relays_were_excluded() {
-            let (repo_relays, write_relays) =
-                super::relay_publish_targets(&[], &[], false, Some(&[]));
-
-            assert!(repo_relays.is_empty());
-            assert!(write_relays.is_empty());
-            assert!(!super::should_skip_empty_relay_publish(
-                &repo_relays,
-                &write_relays,
-                Some(&[]),
-            ));
-            assert!(!super::should_skip_empty_relay_publish(
-                &repo_relays,
-                &write_relays,
-                None,
-            ));
-        }
-
-        #[test]
-        fn keeps_non_excluded_relays() {
-            let excluded = RelayUrl::parse("ws://grasp.example").unwrap();
-            let repo_relay = RelayUrl::parse("ws://relay.example").unwrap();
-            let write_relays = vec!["ws://write.example".to_string()];
-            let (repo_relays, write_relays) = super::relay_publish_targets(
-                std::slice::from_ref(&repo_relay),
-                &write_relays,
-                false,
-                Some(std::slice::from_ref(&excluded)),
-            );
-
-            assert_eq!(repo_relays, vec![repo_relay]);
-            assert_eq!(write_relays, vec!["ws://write.example".to_string()]);
         }
     }
 

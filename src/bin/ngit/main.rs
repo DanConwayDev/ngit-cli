@@ -16,6 +16,7 @@ use ngit::{
 };
 
 mod git_remote_helper;
+mod state_transaction;
 mod sub_commands;
 
 #[tokio::main]
