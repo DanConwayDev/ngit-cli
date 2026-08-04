@@ -17,10 +17,7 @@ use git_events::{
 use git2::{Oid, Repository};
 use ngit::{
     accept_maintainership::accept_maintainership_with_defaults,
-    client::{
-        self, Client, get_event_from_cache_by_id, get_filter_state_events,
-        save_event_in_local_cache,
-    },
+    client::{self, Client, get_event_from_cache_by_id, get_filter_state_events},
     git::{self, Repo, nostr_url::NostrUrlDecoded},
     git_events::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
@@ -145,7 +142,6 @@ pub async fn run_push(
             rejected,
             state,
             other_events,
-            previous_state_event,
             my_write_relays,
             repo_relay_only,
         } = create_events_and_proposals(
@@ -195,7 +191,7 @@ pub async fn run_push(
                 return Ok(());
             }
 
-            let mut transaction = StateTransaction::new(repo_ref, state, previous_state_event);
+            let mut transaction = StateTransaction::new(repo_ref, state);
 
             // Seed purgatory on the GRASP relays we are about to push to
             // before any git data moves; see the state_transaction module
@@ -216,21 +212,15 @@ pub async fn run_push(
             ) {
                 GitStatePushOutcome::NoEligibleServers => {
                     report_state_push_failure(
-                        &transaction,
-                        &mut ops,
                         &git_state_refspecs,
                         &StateTransactionFailure::NoEligibleGitServers,
-                    )
-                    .await?;
+                    )?;
                 }
                 GitStatePushOutcome::AllPushesFailed => {
                     report_state_push_failure(
-                        &transaction,
-                        &mut ops,
                         &git_state_refspecs,
                         &StateTransactionFailure::AllGitServerPushesFailed,
-                    )
-                    .await?;
+                    )?;
                 }
                 GitStatePushOutcome::AcceptedByGitServer => {
                     transaction
@@ -280,7 +270,6 @@ struct PushEventsPlan {
     /// proposal, status and announcement events published alongside the
     /// state event
     other_events: Vec<Event>,
-    previous_state_event: Option<Event>,
     my_write_relays: Vec<String>,
     repo_relay_only: bool,
 }
@@ -311,25 +300,26 @@ async fn report_state_push_result(
     ops: &mut impl StateTransactionOps,
 ) -> Result<()> {
     if transaction.state_relay_accepted() {
+        // The commit point: only now does the accepted candidate become
+        // the authoritative cached state.
+        transaction.commit(ops).await?;
         for refspec in git_state_refspecs {
             mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
         }
     } else {
         report_state_push_failure(
-            transaction,
-            ops,
             git_state_refspecs,
             &StateTransactionFailure::StateNotAcceptedByAnyRelay,
-        )
-        .await?;
+        )?;
     }
 
     Ok(())
 }
 
-async fn report_state_push_failure(
-    transaction: &StateTransaction<'_>,
-    ops: &mut impl StateTransactionOps,
+/// Report per-ref `error` lines for a failed state push. The local cache
+/// is deliberately left untouched: the candidate was never cached, so the
+/// previously committed state remains authoritative.
+fn report_state_push_failure(
     git_state_refspecs: &[String],
     failure: &StateTransactionFailure,
 ) -> Result<()> {
@@ -337,7 +327,6 @@ async fn report_state_push_failure(
         let (_, to) = refspec_to_from_to(refspec)?;
         println!("error {to} {}", failure.user_message());
     }
-    transaction.rollback(ops).await;
     Ok(())
 }
 
@@ -384,7 +373,6 @@ async fn create_events_and_proposals(
                 rejected: true,
                 state: None,
                 other_events: vec![],
-                previous_state_event: None,
                 my_write_relays: vec![],
                 repo_relay_only: false,
             });
@@ -406,7 +394,6 @@ async fn create_events_and_proposals(
 
     let mut events = vec![];
     let mut state: Option<RepoState> = None;
-    let mut old_state_event: Option<Event> = None;
     // The nostr repo-state event's HEAD tag is the maintainer-declared default
     // branch — the most authoritative source for default-branch
     // identification when deciding whether commit-message issue keywords
@@ -424,9 +411,9 @@ async fn create_events_and_proposals(
             };
 
         if store_state {
-            // Capture the existing state event before publishing the new one,
-            // so we can restore it if all git server pushes fail.
-            old_state_event = get_events_from_local_cache(
+            // The latest cached state event is the NIP-01 ordering
+            // reference for the candidate replacement.
+            let old_state_event = get_events_from_local_cache(
                 git_repo.get_path()?,
                 vec![get_filter_state_events(&repo_ref.coordinates(), true)],
             )
@@ -434,21 +421,24 @@ async fn create_events_and_proposals(
             .ok()
             .and_then(|events| ngit::event_ordering::latest_event(&events).cloned());
 
-            let new_repo_state = RepoState::build(
-                repo_ref.identifier.clone(),
-                new_state,
-                &signer,
-                old_state_event.as_ref(),
-            )
-            .await?;
-            // A subsequent remote-helper process can start before this
-            // replacement has propagated through relay queries. Cache the
-            // planned event now so it is available as that process's NIP-01
-            // ordering reference.
-            save_event_in_local_cache(git_repo.get_path()?, &new_repo_state.event)
-                .await
-                .context("failed to cache planned repository state event")?;
-            state = Some(new_repo_state);
+            // The candidate is ordered after the cached predecessor here
+            // but only cached by StateTransaction::commit once a git
+            // server and a relay accepted it. Until then the predecessor
+            // remains the NIP-01 ordering reference:
+            // this helper process does not report success (or exit) before
+            // the commit point, so a subsequent push orders from the
+            // committed event, while a concurrent process ordering from
+            // the predecessor is resolved by NIP-01 replacement ordering
+            // exactly like two independent machines pushing at once.
+            state = Some(
+                RepoState::build(
+                    repo_ref.identifier.clone(),
+                    new_state,
+                    &signer,
+                    old_state_event.as_ref(),
+                )
+                .await?,
+            );
         }
 
         let merge_status_context = MergeStatusContext {
@@ -550,7 +540,6 @@ async fn create_events_and_proposals(
         rejected: false,
         state,
         other_events: events,
-        previous_state_event: old_state_event,
         my_write_relays,
         repo_relay_only,
     })

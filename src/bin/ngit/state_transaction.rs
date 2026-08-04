@@ -7,44 +7,60 @@
 //! push is therefore safe: if the later git push fails, the relay never
 //! broadcasts the unreachable state.
 //!
-//! This intentionally makes state publication a two-stage process. First
+//! This intentionally makes state publication a staged process. First
 //! seed purgatory on the GRASP relays we are about to push to, then push
 //! git data, and only after at least one git server accepts the data fan
 //! out the state to any remaining relays. The extra round-trip prevents
-//! us reporting `ok` or broadcasting state for commits that no git server
-//! has.
+//! us reporting `ok` or broadcasting state for commits that no git
+//! server has.
 //!
-//! [`StateTransaction`] owns those phases plus the failure path: rolling
-//! the local state-event cache back to its predecessor when no git server
-//! or relay accepted the replacement. The caller builds, signs and caches
-//! the planned state event before the transaction begins and keeps
-//! ownership of user-facing reporting; [`StateTransactionFailure`] keeps
-//! the failure reasons typed in between.
+//! [`StateTransaction`] owns those phases plus the commit point: the
+//! candidate state event is published without touching the local event
+//! cache ([`StateTransactionOps::publish_state_events`]) and becomes
+//! locally authoritative only via [`StateTransaction::commit`], after a
+//! git server accepted the pushed data and at least one relay accepted
+//! the event. Failure at any earlier point leaves the
+//! previously cached state untouched — there is nothing to roll back.
+//! The caller keeps ownership of user-facing reporting;
+//! [`StateTransactionFailure`] keeps the failure reasons typed in
+//! between.
 //!
 //! `ngit sync` and `ngit init` still run their own divergent copies of
 //! this flow; migrating them onto this module is planned follow-up work.
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use console::Term;
 use ngit::{
-    client::{Client, delete_event_from_local_cache, save_event_in_local_cache, send_events},
+    client::{Client, save_event_in_local_cache, send_events, send_events_without_caching},
     git::{Repo, RepoActions},
     push::push_to_remote,
     repo_ref::{RepoRef, format_grasp_server_url_as_relay_url, is_grasp_server_clone_url},
     repo_state::RepoState,
     utils::get_short_git_server_name,
 };
-use nostr::{Event, EventId, RelayUrl};
+use nostr::{Event, RelayUrl};
 
 /// Side-effecting operations used by [`StateTransaction`]. Injected so the
 /// transaction phases can be exercised deterministically in tests; the
 /// production implementation is [`LiveOps`].
 pub trait StateTransactionOps {
     /// Publish `events` to the given relays and report per-relay
-    /// acceptance.
+    /// acceptance. Successfully sent events are also written into the
+    /// local event cache.
     async fn publish_events(
+        &mut self,
+        events: Vec<Event>,
+        my_write_relays: Vec<String>,
+        repo_relays: Vec<RelayUrl>,
+    ) -> Result<Vec<(String, bool)>>;
+
+    /// Publish candidate state `events` to the given relays and report
+    /// per-relay acceptance, guaranteeing no write to the local event
+    /// cache: an unverified candidate must not become locally
+    /// authoritative as a publication side effect.
+    async fn publish_state_events(
         &mut self,
         events: Vec<Event>,
         my_write_relays: Vec<String>,
@@ -61,9 +77,6 @@ pub trait StateTransactionOps {
 
     /// Store `event` in the local nostr event cache.
     async fn save_event_in_cache(&mut self, event: &Event) -> Result<()>;
-
-    /// Remove the event with `event_id` from the local nostr event cache.
-    async fn delete_event_from_cache(&mut self, event_id: EventId) -> Result<()>;
 }
 
 /// [`StateTransactionOps`] implementation backed by the nostr client, the
@@ -84,6 +97,24 @@ impl StateTransactionOps for LiveOps<'_> {
         repo_relays: Vec<RelayUrl>,
     ) -> Result<Vec<(String, bool)>> {
         send_events(
+            self.client,
+            Some(self.git_repo.get_path()?),
+            events,
+            my_write_relays,
+            repo_relays,
+            true,
+            false,
+        )
+        .await
+    }
+
+    async fn publish_state_events(
+        &mut self,
+        events: Vec<Event>,
+        my_write_relays: Vec<String>,
+        repo_relays: Vec<RelayUrl>,
+    ) -> Result<Vec<(String, bool)>> {
+        send_events_without_caching(
             self.client,
             Some(self.git_repo.get_path()?),
             events,
@@ -120,10 +151,6 @@ impl StateTransactionOps for LiveOps<'_> {
         save_event_in_local_cache(self.git_repo.get_path()?, event)
             .await
             .map(|_| ())
-    }
-
-    async fn delete_event_from_cache(&mut self, event_id: EventId) -> Result<()> {
-        delete_event_from_local_cache(self.git_repo.get_path()?, event_id).await
     }
 }
 
@@ -171,34 +198,25 @@ struct InitialStatePublish {
 /// A single repository-state publication transaction (see the module docs
 /// for the phase ordering rationale).
 ///
-/// The caller currently builds, signs and caches the planned state event
-/// before the transaction begins, making the local cache authoritative
-/// before any server has accepted the state. That premature caching is a
-/// known issue slated for follow-up correctness work; the transaction
-/// carries enough information to roll the cache mutation back if no git
-/// server or relay accepts the replacement.
+/// The caller builds and signs the candidate state event — ordered after
+/// the previous cached event under NIP-01 — but must not cache it: the
+/// previous event remains the authoritative ordering reference until
+/// [`Self::commit`] performs the transaction's single cache write after
+/// git server and relay acceptance.
 pub struct StateTransaction<'a> {
     repo_ref: &'a RepoRef,
     /// the candidate replacement state (`None` when the push publishes no
     /// state event, e.g. `nostr.nostate`)
     state: Option<RepoState>,
-    /// the state event the local cache held before the planned one was
-    /// stored; restored on rollback
-    previous_state_event: Option<Event>,
     initial_state_publish: InitialStatePublish,
     remaining_relay_results: Vec<(String, bool)>,
 }
 
 impl<'a> StateTransaction<'a> {
-    pub fn new(
-        repo_ref: &'a RepoRef,
-        state: Option<RepoState>,
-        previous_state_event: Option<Event>,
-    ) -> Self {
+    pub fn new(repo_ref: &'a RepoRef, state: Option<RepoState>) -> Self {
         Self {
             repo_ref,
             state,
-            previous_state_event,
             initial_state_publish: InitialStatePublish::default(),
             remaining_relay_results: vec![],
         }
@@ -235,7 +253,7 @@ impl<'a> StateTransaction<'a> {
             vec![]
         } else {
             match ops
-                .publish_events(state_events, vec![], grasp_relays.clone())
+                .publish_state_events(state_events, vec![], grasp_relays.clone())
                 .await
             {
                 Ok(results) => results,
@@ -320,15 +338,20 @@ impl<'a> StateTransaction<'a> {
             return Ok(());
         }
 
-        self.remaining_relay_results = publish_events_to_relays(
-            ops,
+        let excluded_relays = Some(self.initial_state_publish.grasp_relays.as_slice());
+        let (repo_relays, write_relays) = relay_publish_targets(
             &self.repo_ref.relays,
-            state_events,
             my_write_relays,
             repo_relay_only,
-            Some(&self.initial_state_publish.grasp_relays),
-        )
-        .await?;
+            excluded_relays,
+        );
+        if should_skip_empty_relay_publish(&repo_relays, &write_relays, excluded_relays) {
+            return Ok(());
+        }
+
+        self.remaining_relay_results = ops
+            .publish_state_events(state_events, write_relays, repo_relays)
+            .await?;
         Ok(())
     }
 
@@ -343,23 +366,18 @@ impl<'a> StateTransaction<'a> {
         )
     }
 
-    /// Remove the newly-published state event from the local nostr cache
-    /// and restore the previous state event (if any). This prevents a
-    /// subsequent `ngit sync` or push from using a state that no git
-    /// server ever accepted.
-    pub async fn rollback(&self, ops: &mut impl StateTransactionOps) {
-        let Some(new_state_event_id) = self.state.as_ref().map(|state| state.event.id) else {
-            return;
-        };
-        if let Err(e) = ops.delete_event_from_cache(new_state_event_id).await {
-            eprintln!("WARNING: failed to roll back state event from local cache: {e}");
-            return;
+    /// Persist the accepted candidate state event as the authoritative
+    /// local state. This is the transaction's only cache write; every
+    /// failure path before it leaves the previously cached state
+    /// untouched, so a subsequent push or `ngit sync` keeps working from
+    /// the last state a git server accepted.
+    pub async fn commit(&self, ops: &mut impl StateTransactionOps) -> Result<()> {
+        if let Some(state) = &self.state {
+            ops.save_event_in_cache(&state.event)
+                .await
+                .context("failed to cache the accepted repository state event")?;
         }
-        if let Some(old_event) = &self.previous_state_event {
-            if let Err(e) = ops.save_event_in_cache(old_event).await {
-                eprintln!("WARNING: failed to restore previous state event in local cache: {e}");
-            }
-        }
+        Ok(())
     }
 }
 
@@ -523,7 +541,7 @@ fn relay_urls_match(left: &str, right: &str) -> bool {
 mod tests {
     use ngit::client::STATE_KIND;
     use nostr::{
-        EventBuilder, Keys, Tag,
+        EventBuilder, EventId, Keys, Tag,
         event::{FinalizeUnsignedEvent, SignEvent},
         nips::nip19::ToBech32,
     };
@@ -544,10 +562,6 @@ mod tests {
                 .finalize_unsigned(keys.public_key()),
         )
         .unwrap()
-    }
-
-    fn state_event() -> Event {
-        signed_state_event(&[("refs/heads/main", MAIN_OID)])
     }
 
     /// Build a [`RepoState`] through the production parser.
@@ -595,7 +609,15 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     enum FakeCall {
+        /// caching publication (`publish_events`) — other events only
         Publish {
+            event_ids: Vec<EventId>,
+            my_write_relays: Vec<String>,
+            repo_relays: Vec<String>,
+        },
+        /// non-caching publication (`publish_state_events`) — the state
+        /// candidate during staging and fanout
+        PublishState {
             event_ids: Vec<EventId>,
             my_write_relays: Vec<String>,
             repo_relays: Vec<String>,
@@ -605,7 +627,6 @@ mod tests {
             refspecs: Vec<String>,
         },
         SaveToCache(EventId),
-        DeleteFromCache(EventId),
     }
 
     enum FakePushResult {
@@ -623,7 +644,6 @@ mod tests {
         omit_relay_results: Vec<String>,
         publish_error: bool,
         push_results: HashMap<String, FakePushResult>,
-        fail_cache_removal: bool,
         calls: Vec<FakeCall>,
     }
 
@@ -638,8 +658,35 @@ mod tests {
         fn publish_calls(&self) -> Vec<&FakeCall> {
             self.calls
                 .iter()
-                .filter(|call| matches!(call, FakeCall::Publish { .. }))
+                .filter(|call| {
+                    matches!(
+                        call,
+                        FakeCall::Publish { .. } | FakeCall::PublishState { .. }
+                    )
+                })
                 .collect()
+        }
+
+        fn relay_results(
+            &self,
+            my_write_relays: &[String],
+            repo_relays: &[String],
+        ) -> Result<Vec<(String, bool)>> {
+            if self.publish_error {
+                anyhow::bail!("relay publish failed")
+            }
+            // like the real send_events, report results against
+            // trailing-slash-trimmed relay urls
+            Ok(repo_relays
+                .iter()
+                .chain(my_write_relays.iter())
+                .map(|relay| {
+                    let relay = relay.trim_end_matches('/').to_string();
+                    let accepted = self.accepts(&relay);
+                    (relay, accepted)
+                })
+                .filter(|(relay, _)| !self.omit_relay_results.contains(relay))
+                .collect())
         }
 
         fn pushed_servers(&self) -> Vec<&str> {
@@ -666,21 +713,22 @@ mod tests {
                 my_write_relays: my_write_relays.clone(),
                 repo_relays: repo_relays.clone(),
             });
-            if self.publish_error {
-                anyhow::bail!("relay publish failed")
-            }
-            // like the real send_events, report results against
-            // trailing-slash-trimmed relay urls
-            Ok(repo_relays
-                .iter()
-                .chain(my_write_relays.iter())
-                .map(|relay| {
-                    let relay = relay.trim_end_matches('/').to_string();
-                    let accepted = self.accepts(&relay);
-                    (relay, accepted)
-                })
-                .filter(|(relay, _)| !self.omit_relay_results.contains(relay))
-                .collect())
+            self.relay_results(&my_write_relays, &repo_relays)
+        }
+
+        async fn publish_state_events(
+            &mut self,
+            events: Vec<Event>,
+            my_write_relays: Vec<String>,
+            repo_relays: Vec<RelayUrl>,
+        ) -> Result<Vec<(String, bool)>> {
+            let repo_relays: Vec<String> = repo_relays.iter().map(ToString::to_string).collect();
+            self.calls.push(FakeCall::PublishState {
+                event_ids: events.iter().map(|event| event.id).collect(),
+                my_write_relays: my_write_relays.clone(),
+                repo_relays: repo_relays.clone(),
+            });
+            self.relay_results(&my_write_relays, &repo_relays)
         }
 
         fn push_to_git_server(
@@ -704,14 +752,6 @@ mod tests {
             self.calls.push(FakeCall::SaveToCache(event.id));
             Ok(())
         }
-
-        async fn delete_event_from_cache(&mut self, event_id: EventId) -> Result<()> {
-            self.calls.push(FakeCall::DeleteFromCache(event_id));
-            if self.fail_cache_removal {
-                anyhow::bail!("cache removal failed")
-            }
-            Ok(())
-        }
     }
 
     mod publish_state_to_grasps_first {
@@ -721,7 +761,7 @@ mod tests {
         async fn no_state_event_skips_grasp_staging() {
             let repo_ref = test_repo_ref(vec![grasp_clone_url("grasp.example")], vec![]);
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, None, None);
+            let mut transaction = StateTransaction::new(&repo_ref, None);
 
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
@@ -735,7 +775,7 @@ mod tests {
                 vec!["wss://relay.example"],
             );
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
 
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
@@ -748,13 +788,13 @@ mod tests {
             let state = main_state();
             let event = state.event.clone();
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(state), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(state));
 
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             assert_eq!(
                 ops.calls,
-                vec![FakeCall::Publish {
+                vec![FakeCall::PublishState {
                     event_ids: vec![event.id],
                     my_write_relays: vec![],
                     repo_relays: vec!["wss://grasp.example".to_string()],
@@ -774,13 +814,13 @@ mod tests {
             let state = main_state();
             let event = state.event.clone();
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(state), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(state));
 
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             assert_eq!(
                 ops.calls,
-                vec![FakeCall::Publish {
+                vec![FakeCall::PublishState {
                     event_ids: vec![event.id],
                     my_write_relays: vec![],
                     repo_relays: vec!["wss://grasp.example".to_string()],
@@ -807,7 +847,7 @@ mod tests {
         async fn no_state_refspecs_is_vacuously_accepted() {
             let repo_ref = test_repo_ref(vec![grasp_clone_url("grasp.example")], vec![]);
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, None, None);
+            let mut transaction = StateTransaction::new(&repo_ref, None);
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(&mut ops, HashMap::new(), &[]);
@@ -826,7 +866,7 @@ mod tests {
                 push_results: HashMap::from([(vanilla_url.clone(), successful_push())]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -850,7 +890,7 @@ mod tests {
                 relay_acceptance: HashMap::from([("wss://grasp.example".to_string(), false)]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -871,7 +911,7 @@ mod tests {
                 push_results: HashMap::from([(grasp_url.clone(), successful_push())]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -892,7 +932,7 @@ mod tests {
                 push_results: HashMap::from([(grasp_url.clone(), successful_push())]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, None, None);
+            let mut transaction = StateTransaction::new(&repo_ref, None);
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -917,7 +957,7 @@ mod tests {
                 ]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -940,7 +980,7 @@ mod tests {
             let vanilla_url = "https://vanilla.example/repo.git".to_string();
             let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec![]);
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -961,7 +1001,7 @@ mod tests {
             let vanilla_url = "https://vanilla.example/repo.git".to_string();
             let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec![]);
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, None, None);
+            let mut transaction = StateTransaction::new(&repo_ref, None);
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -988,7 +1028,7 @@ mod tests {
                 push_results: HashMap::from([(vanilla_url.clone(), successful_push())]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -1019,7 +1059,7 @@ mod tests {
             let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec![]);
             let delete_refspec = ":refs/heads/gone".to_string();
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -1076,7 +1116,7 @@ mod tests {
                 push_results: HashMap::from([(vanilla_url.clone(), successful_push())]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -1102,7 +1142,7 @@ mod tests {
                 push_results: HashMap::from([(grasp_a.clone(), successful_push())]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -1130,7 +1170,7 @@ mod tests {
                 ]),
                 ..Default::default()
             };
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             let outcome = transaction.push_git_state_refspecs(
@@ -1153,7 +1193,7 @@ mod tests {
         async fn no_state_event_publishes_nothing() {
             let repo_ref = test_repo_ref(vec![], vec!["wss://relay.example"]);
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, None, None);
+            let mut transaction = StateTransaction::new(&repo_ref, None);
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             transaction
@@ -1173,7 +1213,7 @@ mod tests {
             let state = main_state();
             let event = state.event.clone();
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(state), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(state));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             transaction
@@ -1191,12 +1231,12 @@ mod tests {
             assert_eq!(
                 ops.publish_calls(),
                 vec![
-                    &FakeCall::Publish {
+                    &FakeCall::PublishState {
                         event_ids: vec![event.id],
                         my_write_relays: vec![],
                         repo_relays: vec!["wss://grasp.example".to_string()],
                     },
-                    &FakeCall::Publish {
+                    &FakeCall::PublishState {
                         event_ids: vec![event.id],
                         my_write_relays: vec!["wss://write.relay".to_string()],
                         repo_relays: vec!["wss://other.relay".to_string()],
@@ -1211,7 +1251,7 @@ mod tests {
             let state = main_state();
             let event = state.event.clone();
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(state), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(state));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             transaction
@@ -1225,7 +1265,7 @@ mod tests {
 
             assert_eq!(
                 ops.calls,
-                vec![FakeCall::Publish {
+                vec![FakeCall::PublishState {
                     event_ids: vec![event.id],
                     my_write_relays: vec![],
                     repo_relays: vec!["wss://relay.example".to_string()],
@@ -1240,7 +1280,7 @@ mod tests {
                 vec!["wss://grasp.example"],
             );
             let mut ops = FakeOps::default();
-            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()), None);
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
             transaction.publish_state_to_grasps_first(&mut ops).await;
 
             transaction
@@ -1263,7 +1303,7 @@ mod tests {
             ops: &mut FakeOps,
             my_write_relays: &[String],
         ) -> bool {
-            let mut transaction = StateTransaction::new(repo_ref, state, None);
+            let mut transaction = StateTransaction::new(repo_ref, state);
             transaction.publish_state_to_grasps_first(ops).await;
             transaction
                 .publish_state_to_remaining_relays(ops, my_write_relays, false)
@@ -1334,54 +1374,136 @@ mod tests {
         }
     }
 
-    mod rollback {
+    mod commit {
         use super::*;
 
+        /// Drive the full happy path against a single accepting GRASP
+        /// pair and return the transaction ready for
+        /// [`StateTransaction::commit`].
+        async fn run_accepted_push<'a>(
+            repo_ref: &'a RepoRef,
+            grasp_url: &str,
+            ops: &mut FakeOps,
+        ) -> StateTransaction<'a> {
+            let mut transaction = StateTransaction::new(repo_ref, Some(main_state()));
+            transaction.publish_state_to_grasps_first(ops).await;
+            let outcome = transaction.push_git_state_refspecs(
+                ops,
+                HashMap::from([(grasp_url.to_string(), vec![refspec()])]),
+                &[refspec()],
+            );
+            assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+            transaction
+                .publish_state_to_remaining_relays(ops, &[], false)
+                .await
+                .unwrap();
+            transaction
+        }
+
         #[tokio::test]
-        async fn removes_planned_event_and_restores_previous() {
-            let repo_ref = test_repo_ref(vec![], vec![]);
-            let state = main_state();
-            let new_event_id = state.event.id;
-            let previous = state_event();
-            let mut ops = FakeOps::default();
-            let transaction = StateTransaction::new(&repo_ref, Some(state), Some(previous.clone()));
+        async fn candidate_is_cached_exactly_once_and_only_at_the_commit_point() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let repo_ref = test_repo_ref(
+                vec![grasp_url.clone()],
+                vec!["wss://grasp.example", "wss://other.relay"],
+            );
+            let mut ops = FakeOps {
+                push_results: HashMap::from([(
+                    grasp_url.clone(),
+                    FakePushResult::Refs(HashMap::new()),
+                )]),
+                ..Default::default()
+            };
 
-            transaction.rollback(&mut ops).await;
+            let transaction = run_accepted_push(&repo_ref, &grasp_url, &mut ops).await;
 
-            assert_eq!(
-                ops.calls,
-                vec![
-                    FakeCall::DeleteFromCache(new_event_id),
-                    FakeCall::SaveToCache(previous.id),
-                ]
+            // staging, push and fanout must not have touched the cache
+            assert!(
+                !ops.calls
+                    .iter()
+                    .any(|call| matches!(call, FakeCall::SaveToCache(_)))
+            );
+
+            assert!(transaction.state_relay_accepted());
+            transaction.commit(&mut ops).await.unwrap();
+
+            let expected_id = transaction.state.as_ref().unwrap().event.id;
+            let cached: Vec<_> = ops
+                .calls
+                .iter()
+                .filter(|call| matches!(call, FakeCall::SaveToCache(_)))
+                .collect();
+            assert_eq!(cached, vec![&FakeCall::SaveToCache(expected_id)]);
+        }
+
+        #[tokio::test]
+        async fn staging_and_fanout_use_non_caching_publication() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let repo_ref = test_repo_ref(
+                vec![grasp_url.clone()],
+                vec!["wss://grasp.example", "wss://other.relay"],
+            );
+            let mut ops = FakeOps {
+                push_results: HashMap::from([(
+                    grasp_url.clone(),
+                    FakePushResult::Refs(HashMap::new()),
+                )]),
+                ..Default::default()
+            };
+
+            run_accepted_push(&repo_ref, &grasp_url, &mut ops).await;
+
+            // both publish calls (staging + fanout) went through the
+            // non-caching path
+            assert_eq!(ops.publish_calls().len(), 2);
+            assert!(
+                ops.calls
+                    .iter()
+                    .filter(|call| matches!(
+                        call,
+                        FakeCall::Publish { .. } | FakeCall::PublishState { .. }
+                    ))
+                    .all(|call| matches!(call, FakeCall::PublishState { .. }))
             );
         }
 
         #[tokio::test]
-        async fn does_nothing_without_a_candidate_state() {
-            let repo_ref = test_repo_ref(vec![], vec![]);
-            let mut ops = FakeOps::default();
-            let transaction = StateTransaction::new(&repo_ref, None, Some(state_event()));
+        async fn grasp_staging_acceptance_with_failed_fanout_still_commits() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let repo_ref = test_repo_ref(
+                vec![grasp_url.clone()],
+                vec!["wss://grasp.example", "wss://other.relay"],
+            );
+            let mut ops = FakeOps {
+                relay_acceptance: HashMap::from([("wss://other.relay".to_string(), false)]),
+                push_results: HashMap::from([(
+                    grasp_url.clone(),
+                    FakePushResult::Refs(HashMap::new()),
+                )]),
+                ..Default::default()
+            };
 
-            transaction.rollback(&mut ops).await;
+            let transaction = run_accepted_push(&repo_ref, &grasp_url, &mut ops).await;
 
-            assert!(ops.calls.is_empty());
+            // GRASP staging acceptance alone satisfies relay acceptance
+            assert!(transaction.state_relay_accepted());
+            transaction.commit(&mut ops).await.unwrap();
+            assert!(
+                ops.calls
+                    .iter()
+                    .any(|call| matches!(call, FakeCall::SaveToCache(_)))
+            );
         }
 
         #[tokio::test]
-        async fn does_not_restore_previous_when_removal_fails() {
+        async fn commit_without_a_candidate_state_does_nothing() {
             let repo_ref = test_repo_ref(vec![], vec![]);
-            let state = main_state();
-            let new_event_id = state.event.id;
-            let mut ops = FakeOps {
-                fail_cache_removal: true,
-                ..Default::default()
-            };
-            let transaction = StateTransaction::new(&repo_ref, Some(state), Some(state_event()));
+            let mut ops = FakeOps::default();
+            let transaction = StateTransaction::new(&repo_ref, None);
 
-            transaction.rollback(&mut ops).await;
+            transaction.commit(&mut ops).await.unwrap();
 
-            assert_eq!(ops.calls, vec![FakeCall::DeleteFromCache(new_event_id)]);
+            assert!(ops.calls.is_empty());
         }
     }
 

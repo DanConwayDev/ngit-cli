@@ -264,9 +264,10 @@ policy.
 Tests must not add wall-clock sleeps to make an update win. **Push to a nostr
 remote via `Repo::nostr_push`, never `repo.git(["push", …])`**; it supplies the
 harness environment and error context, while ngit orders the auto-generated
-kind-30618 state event and proposal events produced by the remote helper. The
-planned state is cached before publication, so immediate pushes can order from
-that handoff without waiting for relay visibility.
+kind-30618 state event and proposal events produced by the remote helper. A
+successful push caches its state event at the transaction's commit point,
+before the helper reports success and exits, so an immediately following push
+orders from that cached predecessor without waiting for relay visibility.
 
 `Harness::publish_state_event` is a fixture that deliberately creates
 raw kind-30618 events. It queries the target relay and assigns an

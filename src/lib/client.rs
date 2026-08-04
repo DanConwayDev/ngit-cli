@@ -3000,7 +3000,6 @@ pub async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> 
 }
 
 #[allow(clippy::module_name_repetitions)]
-#[allow(clippy::too_many_lines)]
 pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
@@ -3011,8 +3010,69 @@ pub async fn send_events(
     animate: bool,
     silent: bool,
 ) -> Result<Vec<(String, bool)>> {
+    send_events_with_cache_path(
+        client,
+        git_repo_path,
+        git_repo_path,
+        events,
+        my_write_relays,
+        repo_read_relays,
+        animate,
+        silent,
+    )
+    .await
+}
+
+/// Publish events without writing them into the repository's local event
+/// cache on success. `git_repo_path` still drives repository
+/// configuration lookups (`nostr.repo-relay-only`); only the cache side
+/// effect of [`send_events`] is suppressed. Use this when an event must
+/// not become locally authoritative until the caller explicitly commits
+/// it — e.g. an unverified repository-state candidate.
+#[allow(clippy::module_name_repetitions)]
+pub async fn send_events_without_caching(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: Option<&Path>,
+    events: Vec<nostr::Event>,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<RelayUrl>,
+    animate: bool,
+    silent: bool,
+) -> Result<Vec<(String, bool)>> {
+    send_events_with_cache_path(
+        client,
+        None,
+        git_repo_path,
+        events,
+        my_write_relays,
+        repo_read_relays,
+        animate,
+        silent,
+    )
+    .await
+}
+
+/// Shared implementation of [`send_events`] /
+/// [`send_events_without_caching`]. `cache_path` controls whether
+/// successfully-sent events are saved into the repository's local event
+/// cache; `config_repo_path` locates the repository configuration
+/// consulted for `nostr.repo-relay-only`.
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+async fn send_events_with_cache_path(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    cache_path: Option<&Path>,
+    config_repo_path: Option<&Path>,
+    events: Vec<nostr::Event>,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<RelayUrl>,
+    animate: bool,
+    silent: bool,
+) -> Result<Vec<(String, bool)>> {
     let repo_relay_only = std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
-        || git_repo_path.is_some_and(|path| {
+        || config_repo_path.is_some_and(|path| {
             git2::Repository::open(path)
                 .ok()
                 .and_then(|repo| repo.config().ok())
@@ -3247,10 +3307,7 @@ pub async fn send_events(
             pb.inc(0); // need to make pb display intially
             let mut failed = false;
             for event in &events {
-                match client
-                    .send_event_to(git_repo_path, relay, event.clone())
-                    .await
-                {
+                match client.send_event_to(cache_path, relay, event.clone()).await {
                     Ok(_) => pb.inc(1),
                     Err(e) => {
                         pb.set_style(pb_after_style_failed.clone());
