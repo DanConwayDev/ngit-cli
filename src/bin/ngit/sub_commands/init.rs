@@ -1445,7 +1445,12 @@ async fn publish_and_finalize(
 
     // Step 7: Set origin remote
     let nostr_url = nostr_url_decoded.to_string();
-    if git_repo.git_repo.find_remote("origin").is_ok() {
+    if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
+        let previous_url = remote.url().ok().map(std::string::ToString::to_string);
+        drop(remote);
+        if let Some(previous_url) = previous_url {
+            preserve_replaced_origin_remote(git_repo, &previous_url);
+        }
         git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
     } else {
         git_repo.git_repo.remote("origin", &nostr_url)?;
@@ -2062,6 +2067,134 @@ async fn publish_origin_state(
         );
     }
     Ok(())
+}
+
+/// Best-effort: keep the git server URL that `origin` pointed at before
+/// init under a domain-derived remote name (e.g. `github` for
+/// github.com), instead of silently discarding it when origin is
+/// repointed at the nostr URL. Skipped when another remote already
+/// carries the URL; failures only mean the URL isn't preserved.
+fn preserve_replaced_origin_remote(git_repo: &Repo, previous_url: &str) {
+    if previous_url.starts_with("nostr://") {
+        return;
+    }
+    if let Ok(remotes) = git_repo.git_repo.remotes() {
+        for name in remotes.iter().flatten() {
+            let Some(name) = name else {
+                continue;
+            };
+            if name == "origin" {
+                continue;
+            }
+            let url = git_repo
+                .git_repo
+                .find_remote(name)
+                .ok()
+                .and_then(|r| r.url().ok().map(std::string::ToString::to_string));
+            if url.is_some_and(|u| u.trim_end_matches('/') == previous_url.trim_end_matches('/')) {
+                return;
+            }
+        }
+    }
+    let Some(base_name) = derive_remote_name_from_url(previous_url) else {
+        return;
+    };
+    for attempt in 0..10 {
+        let name = if attempt == 0 {
+            base_name.clone()
+        } else {
+            format!("{base_name}-{}", attempt + 1)
+        };
+        // Taken names (with a different URL, per the scan above) fall
+        // through to the next suffix.
+        if git_repo.git_repo.find_remote(&name).is_err() {
+            if git_repo.git_repo.remote(&name, previous_url).is_ok() {
+                println!("kept the previous origin url as remote '{name}'");
+            }
+            return;
+        }
+    }
+}
+
+/// `github.com` → `github`; deeper hosts drop the public suffix and
+/// dash-join the rest (`git.fiatjaf.com` → `git-fiatjaf`); IP hosts
+/// keep every octet (`127.0.0.1` → `127-0-0-1`). Dots are avoided:
+/// they read as hostnames rather than remote names. `None` when no
+/// usable name can be derived.
+fn derive_remote_name_from_url(url: &str) -> Option<String> {
+    let domain = url.parse::<CloneUrl>().ok()?.domain();
+    let sanitized: String = domain
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let labels: Vec<&str> = sanitized.split('.').filter(|l| !l.is_empty()).collect();
+    let is_ip_address =
+        !labels.is_empty() && labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()));
+    let name = if is_ip_address || labels.len() <= 1 {
+        labels.join("-")
+    } else {
+        labels[..labels.len() - 1].join("-")
+    };
+    if name.is_empty() || name == "origin" {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+#[cfg(test)]
+mod derive_remote_name_from_url_tests {
+    use super::derive_remote_name_from_url;
+
+    #[test]
+    fn two_label_domains_use_the_first_label() {
+        assert_eq!(
+            derive_remote_name_from_url("https://github.com/foo/bar.git").as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            derive_remote_name_from_url("https://codeberg.org/foo/bar").as_deref(),
+            Some("codeberg")
+        );
+    }
+
+    #[test]
+    fn multi_label_domains_drop_the_suffix_and_dash_join_the_rest() {
+        assert_eq!(
+            derive_remote_name_from_url("https://git.fiatjaf.com/ngit").as_deref(),
+            Some("git-fiatjaf")
+        );
+    }
+
+    #[test]
+    fn ip_hosts_keep_every_octet() {
+        assert_eq!(
+            derive_remote_name_from_url("http://127.0.0.1:8080/repo.git").as_deref(),
+            Some("127-0-0-1")
+        );
+    }
+
+    #[test]
+    fn single_label_hosts_are_used_as_is() {
+        assert_eq!(
+            derive_remote_name_from_url("http://localhost:8080/repo.git").as_deref(),
+            Some("localhost")
+        );
+    }
+
+    #[test]
+    fn ssh_scp_style_urls_derive_from_the_host() {
+        assert_eq!(
+            derive_remote_name_from_url("git@github.com:foo/bar.git").as_deref(),
+            Some("github")
+        );
+    }
 }
 
 #[cfg(test)]
