@@ -9,7 +9,7 @@ use git2::Oid;
 use ngit::{
     client::{
         Client, Connect, Params, fetching_with_report, get_repo_ref_from_cache,
-        get_state_from_cache, send_events, warn_if_invited_as_maintainer,
+        get_state_from_cache, warn_if_invited_as_maintainer,
     },
     fetch::fetch_from_git_server,
     git::{
@@ -132,7 +132,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
-    let mut nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
+    let nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
 
     delete_legacy_tag_tracking_refs(&git_repo.git_repo, &nostr_remote_name, &nostr_state.state);
 
@@ -161,6 +161,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         &decoded_nostr_url,
         &term,
     );
+
+    // Ahead refs to adopt into a candidate replacement state (via
+    // --trust-server or nostr.trust-server-domains), with the login that
+    // will sign it.
+    let mut trust_login = None;
+    let mut refs_to_adopt: Vec<&AheadRef> = vec![];
 
     if !ahead_refs.is_empty() {
         term.write_line("git server(s) ahead of nostr state:")?;
@@ -206,75 +212,8 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 Ok((signer, user_ref, _)) => {
                     client.set_signer(signer.clone()).await;
                     client_has_signer = true;
-
-                    // Build the updated state map.
-                    let mut new_state_map = nostr_state.state.clone();
-                    for r in &refs_to_trust {
-                        new_state_map.insert(r.ref_name.clone(), r.ahead_oid.clone());
-                    }
-
-                    match RepoState::build(
-                        repo_ref.identifier.clone(),
-                        new_state_map,
-                        &signer,
-                        Some(&nostr_state.event),
-                    )
-                    .await
-                    {
-                        Ok(new_state) => {
-                            let publish_result = send_events(
-                                &client,
-                                Some(git_repo_path),
-                                vec![new_state.event.clone()],
-                                user_ref.relays.write(),
-                                repo_ref.relays.clone(),
-                                true,
-                                false,
-                            )
-                            .await;
-
-                            if publish_result.is_ok() {
-                                term.write_line("nostr state updated")?;
-                            } else {
-                                term.write_line("WARNING: failed to publish updated nostr state")?;
-                            }
-
-                            // Update the nostr-remote tracking refs so the
-                            // push loop below can push the new commits to all
-                            // other servers using normal fast-forward refspecs.
-                            //
-                            // Tags are excluded: they're not tracked per-remote
-                            // (that namespace collides with remote-tracking
-                            // branches — see the `<oid>:refs/tags/<name>` path
-                            // in the push refspec builder below).
-                            for r in &refs_to_trust {
-                                if r.ref_name.starts_with("refs/tags/") {
-                                    continue;
-                                }
-                                let tracking_name = r
-                                    .ref_name
-                                    .strip_prefix("refs/heads/")
-                                    .unwrap_or(&r.ref_name);
-                                let tracking_refname =
-                                    format!("refs/remotes/{nostr_remote_name}/{tracking_name}");
-                                if let Ok(oid) = git2::Oid::from_str(&r.ahead_oid) {
-                                    let _ = git_repo.git_repo.reference(
-                                        &tracking_refname,
-                                        oid,
-                                        true,
-                                        "ngit sync: update tracking ref from ahead server",
-                                    );
-                                }
-                            }
-
-                            nostr_state = new_state;
-                        }
-                        Err(e) => {
-                            term.write_line(&format!(
-                                "WARNING: failed to build updated nostr state: {e}"
-                            ))?;
-                        }
-                    }
+                    trust_login = Some((signer, user_ref));
+                    refs_to_adopt = refs_to_trust;
                 }
                 Err(_) => {
                     term.write_line(
@@ -329,33 +268,83 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         .map(|r| (r.source_url.as_str(), r.ref_name.as_str()))
         .collect();
 
-    // When --force is given, rebuild the state event even if nothing has
-    // changed.  This lets users repair repos whose state event is missing
-    // ^{} peeled refs for annotated tags (or any other corruption) without
-    // needing to push a new ref.  The fresh event is a transaction
-    // candidate: it is staged on grasp relays, pushed, fanned out to all
-    // repo relays and the user's write relays, and cached only once a git
-    // server and at least one relay accepted it.
-    let force_candidate = if args.force {
-        let (signer, user_ref) = force_login.context("missing force-login preflight result")?;
-        // Backfill any missing ^{} peeled refs before rebuilding — the
-        // existing state event may predate the fix that started storing
-        // them.
+    // Build the candidate replacement state when this run changes it:
+    // --force rebuilds the event even if nothing changed (its repair
+    // semantic — this lets users fix corrupted state events, e.g. missing
+    // ^{} peeled refs for annotated tags, without pushing a new ref) and
+    // trusted ahead servers get their tips adopted. The fresh event is a
+    // transaction candidate: it is staged on grasp relays, pushed, fanned
+    // out to all repo relays and the user's write relays, and cached only
+    // once a git server and at least one relay accepted it.
+    let candidate = if args.force || !refs_to_adopt.is_empty() {
+        let (signer, user_ref) = force_login
+            .or(trust_login)
+            .context("missing login for state rebuild")?;
         let mut state = nostr_state.state.clone();
-        backfill_peeled_tag_refs(&git_repo, &mut state);
-        let candidate = RepoState::build(
+        if args.force {
+            // Backfill any missing ^{} peeled refs before rebuilding — the
+            // existing state event may predate the fix that started
+            // storing them.
+            backfill_peeled_tag_refs(&git_repo, &mut state);
+        }
+        for r in &refs_to_adopt {
+            state.insert(r.ref_name.clone(), r.ahead_oid.clone());
+        }
+        match RepoState::build(
             repo_ref.identifier.clone(),
             state,
             &signer,
             Some(&nostr_state.event),
         )
-        .await?;
-        Some((candidate, user_ref))
+        .await
+        {
+            Ok(candidate) => {
+                // Update the nostr-remote tracking refs so the push plans
+                // can propagate the adopted commits to the other servers
+                // using normal fast-forward refspecs.
+                //
+                // Tags are excluded: they're not tracked per-remote (that
+                // namespace collides with remote-tracking branches — see
+                // the `<oid>:refs/tags/<name>` path in the plan builder).
+                for r in &refs_to_adopt {
+                    if r.ref_name.starts_with("refs/tags/") {
+                        continue;
+                    }
+                    let tracking_name = r
+                        .ref_name
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&r.ref_name);
+                    let tracking_refname =
+                        format!("refs/remotes/{nostr_remote_name}/{tracking_name}");
+                    if let Ok(oid) = Oid::from_str(&r.ahead_oid) {
+                        let _ = git_repo.git_repo.reference(
+                            &tracking_refname,
+                            oid,
+                            true,
+                            "ngit sync: update tracking ref from ahead server",
+                        );
+                    }
+                }
+                Some((candidate, user_ref))
+            }
+            Err(error) => {
+                if args.force {
+                    bail!("failed to build replacement nostr state: {error}");
+                }
+                // fall back to propagating the existing canonical state;
+                // the un-adopted ahead refs stay protected from downgrade
+                // pushes by ahead_ref_skip
+                term.write_line(&format!(
+                    "WARNING: failed to build updated nostr state: {error}"
+                ))?;
+                None
+            }
+        }
     } else {
         None
     };
 
-    let state_for_plans = force_candidate
+    let state_for_plans = candidate
         .as_ref()
         .map_or(&nostr_state.state, |(candidate, _)| &candidate.state);
     let (per_server_plans, state_refspecs) = build_state_push_plans(
@@ -437,13 +426,16 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         decoded_nostr_url: &decoded_nostr_url,
     };
 
-    // Without --force, propagate the already-canonical state event: seed
-    // the grasp relays missing it before any git data reaches their
+    // Without a candidate, propagate the already-canonical state event:
+    // seed the grasp relays missing it before any git data reaches their
     // servers (grasp servers reject git pushes unless the state event is
     // already present on their relay), then execute the per-server push
-    // plans. With --force, the fresh candidate is staged on every grasp
-    // relay instead and committed to the cache only after acceptance.
-    let (candidate_state, my_write_relays) = match force_candidate {
+    // plans. With a candidate (--force or trusted adoption), the fresh
+    // event is staged on every grasp relay instead and committed to the
+    // cache only after acceptance.
+    let has_candidate = candidate.is_some();
+    let adopted_ahead_refs = has_candidate && !refs_to_adopt.is_empty();
+    let (candidate_state, my_write_relays) = match candidate {
         Some((candidate, user_ref)) => (Some(candidate), user_ref.relays.write()),
         None => (None, vec![]),
     };
@@ -471,7 +463,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             term.write_line(
                 "WARNING: no git server was pushed - the state event failed to reach the grasp server relays",
             )?;
-            if args.force {
+            if has_candidate {
                 term.write_line(
                     "WARNING: the fresh state event was not published; the previously cached state remains authoritative",
                 )?;
@@ -480,7 +472,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         GitStatePushOutcome::AllPushesFailed => {
             // individual server failures were reported above; sync stays
             // lenient and still exits successfully
-            if args.force {
+            if has_candidate {
                 term.write_line(
                     "WARNING: the fresh state event was not published because no git server accepted the push",
                 )?;
@@ -493,9 +485,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                 .publish_state_to_remaining_relays(&mut ops, &my_write_relays, false)
                 .await?;
             if transaction.state_relay_accepted() {
-                // The commit point: with --force the fresh state event
-                // only now becomes the authoritative cached state.
+                // The commit point: the fresh state event only now
+                // becomes the authoritative cached state.
                 transaction.commit(&mut ops).await?;
+                if adopted_ahead_refs {
+                    term.write_line("nostr state updated")?;
+                }
                 if args.force {
                     println!("state event republished");
                 }
