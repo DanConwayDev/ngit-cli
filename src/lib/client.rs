@@ -36,6 +36,7 @@ use nostr::{
     Alphabet, Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
     Url,
     event::UnsignedEvent,
+    message::MachineReadablePrefix,
     nips::{
         nip01::Coordinate,
         nip05::{Nip05Address, Nip05Profile},
@@ -47,6 +48,7 @@ use nostr_lmdb::NostrLmdb;
 use nostr_sdk::{
     authenticator::SignerAuthenticator,
     client::ClientBuilder,
+    error::{Error as NostrSdkError, ErrorKind as NostrSdkErrorKind},
     relay::{RelayLimits, ReqExitPolicy},
 };
 use serde_json::Value;
@@ -289,12 +291,20 @@ impl Connect for Client {
         self.client.add_relay(url).await?;
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
-        self.client
+        match self
+            .client
             .relay(url)
             .await?
             .ok_or_else(|| anyhow!("relay not found: {url}"))?
             .send_event(&event)
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            // the relay already holds this event, which is delivery
+            // success, not failure
+            Err(error) if event_rejection_is_duplicate(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
         if let Some(git_repo_path) = git_repo_path {
             save_event_in_local_cache(git_repo_path, &event).await?;
         }
@@ -2999,6 +3009,20 @@ pub async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> 
     .clone())
 }
 
+/// Whether a relay send failure is an `OK: false` response whose
+/// machine-readable prefix is `duplicate:` (NIP-01): the relay refused
+/// the resend because it already holds the event. Callers treat this as
+/// successful delivery — most importantly the GRASP staging gate, which
+/// must not skip a git server whose paired relay demonstrably holds the
+/// current state event.
+fn event_rejection_is_duplicate(error: &NostrSdkError) -> bool {
+    error.kind() == NostrSdkErrorKind::Rejected
+        && matches!(
+            MachineReadablePrefix::parse(&error.to_string()),
+            Some(MachineReadablePrefix::Duplicate)
+        )
+}
+
 #[allow(clippy::module_name_repetitions)]
 pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
@@ -3495,5 +3519,46 @@ mod tests {
     #[test]
     fn announcement_only_filters_are_empty_without_coordinates() {
         assert!(get_announcement_only_fetch_filters(&HashSet::new()).is_empty());
+    }
+
+    mod event_rejection_is_duplicate {
+        use super::*;
+
+        /// An `OK: false` relay response surfaces from the SDK as a
+        /// `Rejected`-kind error whose display is the raw relay message.
+        fn rejection(message: &str) -> NostrSdkError {
+            NostrSdkError::new(NostrSdkErrorKind::Rejected, message.to_string())
+        }
+
+        #[test]
+        fn duplicate_rejection_is_detected() {
+            assert!(event_rejection_is_duplicate(&rejection(
+                "duplicate: already have this event"
+            )));
+            assert!(event_rejection_is_duplicate(&rejection("duplicate:")));
+        }
+
+        #[test]
+        fn other_rejections_are_not_duplicates() {
+            assert!(!event_rejection_is_duplicate(&rejection(
+                "invalid: event signature check failed"
+            )));
+            assert!(!event_rejection_is_duplicate(&rejection(
+                "blocked: pubkey not welcome"
+            )));
+            assert!(!event_rejection_is_duplicate(&rejection(
+                "rejected without machine-readable prefix"
+            )));
+        }
+
+        #[test]
+        fn duplicate_message_on_a_non_rejection_error_is_not_a_duplicate() {
+            // e.g. a transport failure must never be promoted to
+            // delivery success, whatever its message says
+            assert!(!event_rejection_is_duplicate(&NostrSdkError::new(
+                NostrSdkErrorKind::Transport,
+                "duplicate: already have this event".to_string(),
+            )));
+        }
     }
 }
