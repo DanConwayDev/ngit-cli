@@ -18,7 +18,8 @@ use ngit::{
     push::push_to_remote,
     repo_ref::{
         format_grasp_server_url_as_relay_url, get_nostr_remote_for_resolved_coordinate,
-        get_resolved_repo_coordinate_for_publishing, is_grasp_server_clone_url,
+        get_resolved_repo_coordinate_for_publishing, grasp_server_relay_urls,
+        is_grasp_server_clone_url,
     },
     repo_state::RepoState,
     utils::{get_short_git_server_name, join_with_and},
@@ -190,15 +191,8 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     // We use the per-relay state events captured during the fetch rather than
     // the local database, because the database only stores the canonical latest
     // event and cannot tell us what each individual relay holds.
-    let grasp_relays_needing_state: Vec<RelayUrl> = repo_ref
-        .git_server
-        .iter()
-        .filter(|url| is_grasp_server_clone_url(url))
-        .filter_map(|url| {
-            format_grasp_server_url_as_relay_url(url)
-                .ok()
-                .and_then(|relay_str| RelayUrl::parse(&relay_str).ok())
-        })
+    let grasp_relays_needing_state: Vec<RelayUrl> = grasp_server_relay_urls(&repo_ref.git_server)
+        .into_iter()
         .filter(|relay_url| {
             // Include this relay if it was absent from the fetch results, had
             // no state event, or had a state event older than the canonical one.

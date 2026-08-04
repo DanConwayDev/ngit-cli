@@ -36,7 +36,10 @@ use ngit::{
     client::{Client, save_event_in_local_cache, send_events, send_events_without_caching},
     git::{Repo, RepoActions},
     push::push_to_remote,
-    repo_ref::{RepoRef, format_grasp_server_url_as_relay_url, is_grasp_server_clone_url},
+    repo_ref::{
+        RepoRef, format_grasp_server_url_as_relay_url, grasp_server_relay_urls,
+        is_grasp_server_clone_url,
+    },
     repo_state::RepoState,
     utils::get_short_git_server_name,
 };
@@ -246,7 +249,7 @@ impl<'a> StateTransaction<'a> {
         let grasp_relays = if state_events.is_empty() {
             vec![]
         } else {
-            grasp_server_relay_urls(self.repo_ref)
+            grasp_server_relay_urls(&self.repo_ref.git_server)
         };
 
         let results = if state_events.is_empty() || grasp_relays.is_empty() {
@@ -441,26 +444,6 @@ fn state_relay_accepted<'a>(
         || initial_results
             .chain(remaining_results)
             .any(|(_, succeeded)| *succeeded)
-}
-
-fn grasp_server_relay_urls(repo_ref: &RepoRef) -> Vec<RelayUrl> {
-    repo_ref
-        .git_server
-        .iter()
-        .filter_map(|git_server_url| {
-            if !is_grasp_server_clone_url(git_server_url) {
-                return None;
-            }
-            format_grasp_server_url_as_relay_url(git_server_url)
-                .ok()
-                .and_then(|relay_url| RelayUrl::parse(&relay_url).ok())
-        })
-        .fold(Vec::new(), |mut relays, relay| {
-            if !relays.iter().any(|existing| existing == &relay) {
-                relays.push(relay);
-            }
-            relays
-        })
 }
 
 /// Publish `events` to the repository relays and the user's write relays,

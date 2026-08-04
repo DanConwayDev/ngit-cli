@@ -1335,6 +1335,28 @@ pub fn format_grasp_server_url_as_relay_url(url: &str) -> Result<String> {
     Ok(format!("wss://{grasp_server_url}"))
 }
 
+/// Relay URLs paired with the GRASP servers in `git_servers`,
+/// deduplicated while preserving order. Non-GRASP entries and URLs
+/// whose relay form cannot be derived are skipped.
+pub fn grasp_server_relay_urls(git_servers: &[String]) -> Vec<RelayUrl> {
+    git_servers
+        .iter()
+        .filter_map(|git_server_url| {
+            if !is_grasp_server_clone_url(git_server_url) {
+                return None;
+            }
+            format_grasp_server_url_as_relay_url(git_server_url)
+                .ok()
+                .and_then(|relay_url| RelayUrl::parse(&relay_url).ok())
+        })
+        .fold(Vec::new(), |mut relays, relay| {
+            if !relays.iter().any(|existing| existing == &relay) {
+                relays.push(relay);
+            }
+            relays
+        })
+}
+
 pub fn format_grasp_server_url_as_clone_url(
     grasp_server: &str,
     public_key: &PublicKey,
@@ -2088,6 +2110,63 @@ mod tests {
                     "https://relay.ngit.dev/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/example-repo2.git".to_string(),
                 ],
             ))
+        }
+    }
+
+    mod grasp_server_relay_urls {
+        use super::*;
+
+        const NPUB: &str = "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr";
+
+        #[test]
+        fn derives_relay_scheme_from_clone_url_scheme() {
+            let git_servers = vec![
+                format!("https://relay.ngit.dev/{NPUB}/my-repo.git"),
+                format!("http://localhost:8080/{NPUB}/my-repo.git"),
+            ];
+
+            assert_eq!(
+                grasp_server_relay_urls(&git_servers),
+                vec![
+                    RelayUrl::parse("wss://relay.ngit.dev").unwrap(),
+                    RelayUrl::parse("ws://localhost:8080").unwrap(),
+                ]
+            );
+        }
+
+        #[test]
+        fn skips_non_grasp_git_servers() {
+            let git_servers = vec![
+                "https://github.com/user/my-repo.git".to_string(),
+                format!("https://relay.ngit.dev/{NPUB}/my-repo.git"),
+            ];
+
+            assert_eq!(
+                grasp_server_relay_urls(&git_servers),
+                vec![RelayUrl::parse("wss://relay.ngit.dev").unwrap()]
+            );
+        }
+
+        #[test]
+        fn dedupes_servers_sharing_a_relay_preserving_order() {
+            let git_servers = vec![
+                format!("https://b.example/{NPUB}/my-repo.git"),
+                format!("https://a.example/{NPUB}/my-repo.git"),
+                format!("https://b.example/{NPUB}/other-repo.git"),
+            ];
+
+            assert_eq!(
+                grasp_server_relay_urls(&git_servers),
+                vec![
+                    RelayUrl::parse("wss://b.example").unwrap(),
+                    RelayUrl::parse("wss://a.example").unwrap(),
+                ]
+            );
+        }
+
+        #[test]
+        fn empty_input_yields_no_relays() {
+            assert!(grasp_server_relay_urls(&[]).is_empty());
         }
     }
 
