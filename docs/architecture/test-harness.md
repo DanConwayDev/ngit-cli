@@ -227,8 +227,8 @@ events appear on its relay surface only **after** the `git push` of
 the announced repo's git data completes. This is fundamental to
 GRASP: the relay is gated on the git-server having the data.
 
-`ngit init`'s subprocess does not return until its internal `git
-push` finishes (or fails). The pinned ngit-grasp version withholds
+`ngit init`'s subprocess does not return until its in-process push of
+the initial branch finishes (or fails). The pinned ngit-grasp version withholds
 successful push completion until announcement promotion, ref
 alignment, database persistence, and subscriber notification have
 finished. The harness therefore uses `Command::output()` /
