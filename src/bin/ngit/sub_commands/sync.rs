@@ -46,9 +46,26 @@ pub struct SubCommandArgs {
     trust_server: bool,
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    sync_with_client(args, &git_repo, &mut client, false).await
+}
+
+/// Run `ngit sync` against an already-discovered repository and an
+/// already-created client. `client_has_signer` tells sync whether the
+/// caller configured a signer on the client (needed for NIP-42 auth
+/// when seeding grasp relays), letting it skip the silent login
+/// re-load. `ngit init` calls this directly so its post-announcement
+/// sync runs in-process instead of re-doing login and relay
+/// connections in a subprocess.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn sync_with_client(
+    args: &SubCommandArgs,
+    git_repo: &Repo,
+    client: &mut Client,
+    client_has_signer: bool,
+) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
 
     // Read the optional semicolon-separated list of selected git-server domains
@@ -59,7 +76,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     // Example: git config --global nostr.trust-server-domains
     // 'github.com;codeberg.org'
     let selected_domains: Vec<String> =
-        get_git_config_item(&Some(&git_repo), "nostr.trust-server-domains")
+        get_git_config_item(&Some(git_repo), "nostr.trust-server-domains")
             .unwrap_or(None)
             .map(|v| {
                 v.split(';')
@@ -96,15 +113,13 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         None
     };
 
-    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-
     let force_login = if args.force {
         let (signer, user_ref, _) = load_existing_login(
-            &Some(&git_repo),
+            &Some(git_repo),
             &None,
             &None,
             &None,
-            Some(&client),
+            Some(&*client),
             false,
             false,
             false,
@@ -117,8 +132,8 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         None
     };
 
-    let resolved_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &client).await?;
-    let selected_remote = get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo)
+    let resolved_repo = get_resolved_repo_coordinate_for_publishing(git_repo, &*client).await?;
+    let selected_remote = get_nostr_remote_for_resolved_coordinate(git_repo, &resolved_repo)
         .await?
         .context(
             "selected repository is not represented by a configured `nostr://` remote; add a matching remote or select one with `--repo <REMOTE>`",
@@ -127,7 +142,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let decoded_nostr_url = selected_remote.decoded_url;
     let repo_coordinate = resolved_repo.coordinate;
 
-    let fetch_report = fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;
+    let fetch_report = fetching_with_report(git_repo_path, &*client, &repo_coordinate).await?;
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
@@ -138,13 +153,13 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     // Whether a signer is already configured on the client — needed later
     // for NIP-42 auth when grasp relays are seeded with the state event.
-    let mut client_has_signer = args.force;
+    let mut client_has_signer = client_has_signer || args.force;
 
     let term = console::Term::stderr();
 
     let remote_states = list_from_remotes(
         &term,
-        &git_repo,
+        git_repo,
         &repo_ref.git_server,
         &decoded_nostr_url,
         Some(&nostr_state),
@@ -152,10 +167,10 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     .await;
 
     let missing_refs =
-        fetch_missing_refs(&git_repo, &nostr_state, &remote_states, &decoded_nostr_url);
+        fetch_missing_refs(git_repo, &nostr_state, &remote_states, &decoded_nostr_url);
 
     let (ahead_refs, diverging_refs) = find_ahead_and_diverging_refs(
-        &git_repo,
+        git_repo,
         &nostr_state,
         &remote_states,
         &decoded_nostr_url,
@@ -198,11 +213,11 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
         if !refs_to_trust.is_empty() {
             match load_existing_login(
-                &Some(&git_repo),
+                &Some(git_repo),
                 &None,
                 &None,
                 &None,
-                Some(&client),
+                Some(&*client),
                 false,
                 false,
                 false,
@@ -285,7 +300,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             // Backfill any missing ^{} peeled refs before rebuilding — the
             // existing state event may predate the fix that started
             // storing them.
-            backfill_peeled_tag_refs(&git_repo, &mut state);
+            backfill_peeled_tag_refs(git_repo, &mut state);
         }
         for r in &refs_to_adopt {
             state.insert(r.ref_name.clone(), r.ahead_oid.clone());
@@ -348,7 +363,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         .as_ref()
         .map_or(&nostr_state.state, |(candidate, _)| &candidate.state);
     let (per_server_plans, state_refspecs) = build_state_push_plans(
-        &git_repo,
+        git_repo,
         &nostr_remote_name,
         state_for_plans,
         &remote_states,
@@ -383,11 +398,11 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             .any(|relay_url| !relays_already_holding.contains(relay_url))
     {
         if let Ok((signer, _, _)) = load_existing_login(
-            &Some(&git_repo),
+            &Some(git_repo),
             &None,
             &None,
             &None,
-            Some(&client),
+            Some(&*client),
             true,  // silent
             false, // prompt_for_password
             false, // fetch_profile_updates
@@ -419,8 +434,8 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     };
 
     let mut ops = LiveOps {
-        client: &client,
-        git_repo: &git_repo,
+        client,
+        git_repo,
         term: &term,
         git_server_push_options: &[],
         decoded_nostr_url: &decoded_nostr_url,
