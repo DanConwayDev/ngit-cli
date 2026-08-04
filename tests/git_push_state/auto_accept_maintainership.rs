@@ -6,7 +6,12 @@
 //! allowed only for maintainers, but publishing state under the invited user's
 //! pubkey is safe only after they have their own announcement. The push path
 //! therefore auto-accepts: it publishes the invited user's announcement with
-//! defaults, updates local repo config, then continues with the branch push.
+//! defaults, then continues with the branch push.
+//!
+//! Auto-accepting must NOT re-root local resolution on the accepter's own
+//! coordinate: `nostr.repo` and the origin remote stay exactly as they were,
+//! so the repo keeps resolving from the inviter's coordinate and a later
+//! removal of the accepter remains observable.
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
@@ -41,7 +46,6 @@ async fn invited_co_maintainer_pushes_branch_and_auto_accepts() -> Result<()> {
         .context("publish_repo did not mint a co-maintainer key")?;
     let co_maintainer_pubkey = co_maintainer_keys.public_key();
     let co_maintainer_nsec = co_maintainer_keys.secret_key().to_bech32()?;
-    let co_maintainer_npub = co_maintainer_pubkey.to_bech32()?;
 
     let co_maintainer = harness
         .clone_published_repo(&published, CloneLogin::None)
@@ -77,6 +81,12 @@ async fn invited_co_maintainer_pushes_branch_and_auto_accepts() -> Result<()> {
         .await
         .context("resolve co-maintainer branch tip")?;
 
+    let origin_url_before = co_maintainer
+        .config("remote.origin.url")
+        .await?
+        .context("remote.origin.url missing before auto-accept push")?;
+    let nostr_repo_before = co_maintainer.config("nostr.repo").await?;
+
     co_maintainer
         .nostr_push(["-u", "origin", BRANCH])
         .await
@@ -105,17 +115,20 @@ async fn invited_co_maintainer_pushes_branch_and_auto_accepts() -> Result<()> {
         "auto-published announcement should retain the inviting maintainer; got {maintainers:?}",
     );
 
-    let origin_url = co_maintainer
+    let origin_url_after = co_maintainer
         .config("remote.origin.url")
         .await?
         .context("remote.origin.url missing after auto-accept")?;
-    assert!(
-        origin_url.contains(&co_maintainer_npub),
-        "origin should be rewritten to the co-maintainer nostr URL; got {origin_url}",
+    assert_eq!(
+        origin_url_after, origin_url_before,
+        "auto-accept must leave the origin remote untouched so resolution \
+         stays rooted on the inviter's coordinate",
     );
-    assert!(
-        origin_url.ends_with(&published.identifier),
-        "origin should still point at the same identifier; got {origin_url}",
+    let nostr_repo_after = co_maintainer.config("nostr.repo").await?;
+    assert_eq!(
+        nostr_repo_after, nostr_repo_before,
+        "auto-accept must not write nostr.repo; re-rooting resolution on the \
+         accepter's own coordinate would hide a later removal",
     );
 
     let state_events = grasp

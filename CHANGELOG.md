@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Accepting co-maintainership (`ngit repo accept`, and the auto-accept that runs during push and status commands) no longer rewrites `nostr.repo` or the `origin` remote to point at the accepter's own coordinate. The coordinate a repository resolves from is the root of trust; re-rooting it on your own announcement — which always lists you as a maintainer — would make it impossible to observe the inviter removing you later. Resolution stays on the inviter's coordinate, so a removal surfaces naturally (for example as a refused push); only `ngit repo edit` / `ngit init` change the resolved coordinate deliberately. When `origin` is not a `nostr://` remote, `ngit repo accept` now prints how to add a nostr remote for the inviter's coordinate instead of claiming pushes will work.
 - Repository-coordinate resolution now follows a documented priority: (1) explicit `--repo`, (2) `git config nostr.repo`, (3) current branch's tracked upstream if a `nostr://` remote, (4) `origin` if a `nostr://` remote, (5) sole remaining distinct nostr coordinate. When multiple distinct coordinates remain and none of the earlier rules match, ngit errors by default and prints how to disambiguate, instead of silently picking one at HashMap-iteration random. Interactive selection is offered only when `-i` is explicitly requested and uses deterministic (name-sorted) ordering.
 
 ### Fixed

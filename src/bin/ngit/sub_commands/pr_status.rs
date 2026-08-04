@@ -108,11 +108,9 @@ async fn launch_status(
         .is_some_and(|ms| ms.contains(&user_pubkey))
     {
         Some(
-            build_maintainership_acceptance_with_defaults(
-                &git_repo, &repo_ref, &user_ref, &client, &signer,
-            )
-            .await
-            .context("failed to auto-accept co-maintainership")?,
+            build_maintainership_acceptance_with_defaults(&repo_ref, &user_ref, &client, &signer)
+                .await
+                .context("failed to auto-accept co-maintainership")?,
         )
     } else {
         None

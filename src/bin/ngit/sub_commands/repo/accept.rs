@@ -5,13 +5,11 @@ use ngit::{
     accept_maintainership::{accept_maintainership_with_defaults, wait_for_grasp_servers},
     cli_interactor::cli_error,
     client::{Params, fetching_with_report, get_repo_ref_from_cache, send_events},
+    git::nostr_url::NostrUrlDecoded,
     repo_ref::{RepoRef, apply_grasp_infrastructure, latest_event_repo_ref},
     signer::NgitSigner,
 };
-use nostr::{
-    Kind, RelayUrl, ToBech32,
-    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
-};
+use nostr::{RelayUrl, ToBech32, nips::nip19::Nip19Coordinate};
 
 use crate::{
     cli::{Cli, extract_signer_cli_arguments},
@@ -127,15 +125,43 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
         .await?;
     }
 
-    println!("co-maintainership accepted.");
-    println!("your announcement has been published to nostr. you can now push updates.");
-    println!("run `ngit repo edit` at any time to update your announcement.");
+    print_completion_message(&git_repo, repo_coordinate);
 
     Ok(())
 }
 
+/// Report success and, when origin is not a `nostr://` remote, explain how
+/// to get pushes flowing through nostr — suggesting the coordinate accept
+/// ran against (the inviter's), never the accepter's own npub. See
+/// `accept_with_grasp_servers` for why resolution must stay rooted on the
+/// inviter's coordinate.
+fn print_completion_message(git_repo: &Repo, repo_coordinate: Nip19Coordinate) {
+    println!("co-maintainership accepted.");
+    let origin_is_nostr = git_repo
+        .git_repo
+        .find_remote("origin")
+        .ok()
+        .and_then(|r| r.url().map(std::string::ToString::to_string).ok())
+        .is_some_and(|url| url.starts_with("nostr://"));
+    if origin_is_nostr {
+        println!("your announcement has been published to nostr. you can now push updates.");
+    } else {
+        let inviter_url = NostrUrlDecoded {
+            original_string: String::new(),
+            coordinate: repo_coordinate,
+            protocol: None,
+            ssh_key_file: None,
+            nip05: None,
+        };
+        println!("your announcement has been published to nostr.");
+        println!(
+            "pushes go through nostr only via a nostr remote; add one with `git remote add nostr {inviter_url}`"
+        );
+    }
+    println!("run `ngit repo edit` at any time to update your announcement.");
+}
+
 /// Accept co-maintainership with explicitly specified grasp servers.
-#[allow(clippy::too_many_lines)]
 async fn accept_with_grasp_servers(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -234,36 +260,13 @@ async fn accept_with_grasp_servers(
         wait_for_grasp_servers(git_repo, grasp_servers, my_pubkey, identifier).await?;
     }
 
-    // Update nostr.repo git config
-    git_repo
-        .save_git_config_item(
-            "nostr.repo",
-            &Nip19Coordinate {
-                coordinate: Coordinate {
-                    kind: Kind::GitRepoAnnouncement,
-                    public_key: *my_pubkey,
-                    identifier: identifier.clone(),
-                },
-                relays: vec![],
-            }
-            .to_bech32()?,
-            false,
-        )
-        .context("failed to update nostr.repo git config")?;
-
-    // Update origin remote
-    let nostr_url = my_repo_ref.to_nostr_git_url(&Some(git_repo)).to_string();
-    if git_repo.git_repo.find_remote("origin").is_ok() {
-        git_repo
-            .git_repo
-            .remote_set_url("origin", &nostr_url)
-            .context("failed to update origin remote")?;
-    } else {
-        git_repo
-            .git_repo
-            .remote("origin", &nostr_url)
-            .context("failed to set origin remote")?;
-    }
+    // Deliberately leave `nostr.repo` and the origin remote untouched: the
+    // coordinate the repo resolves from is the root of trust. Re-rooting
+    // resolution on the accepter's own announcement — which always lists
+    // them as a maintainer — would make it impossible to observe the
+    // inviter removing them later. Keeping resolution on the inviter's
+    // coordinate means removal surfaces naturally; only `ngit repo edit` /
+    // `ngit init` may change the resolved coordinate deliberately.
 
     Ok(())
 }

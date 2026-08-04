@@ -21,10 +21,7 @@ use std::{
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use nostr::{
-    Event, Kind, PublicKey, RelayUrl, ToBech32,
-    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
-};
+use nostr::{Event, PublicKey, RelayUrl};
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -52,7 +49,6 @@ pub struct MaintainerAcceptance {
     selected_grasp_servers: Vec<String>,
     public_key: PublicKey,
     identifier: String,
-    nostr_url: String,
 }
 
 /// Build the co-maintainer's own Kind:30617 announcement with defaults.
@@ -61,7 +57,6 @@ pub struct MaintainerAcceptance {
 /// `MaintainerAcceptance::relays`, optionally batched with another event, and
 /// then calling `finalize_maintainership_acceptance`.
 pub async fn build_maintainership_acceptance_with_defaults(
-    git_repo: &Repo,
     repo_ref: &RepoRef,
     user_ref: &UserRef,
     #[cfg(test)] client: &MockConnect,
@@ -158,7 +153,6 @@ pub async fn build_maintainership_acceptance_with_defaults(
     );
 
     let event = my_repo_ref.to_event(signer).await?;
-    let nostr_url = my_repo_ref.to_nostr_git_url(&Some(git_repo)).to_string();
 
     Ok(MaintainerAcceptance {
         event,
@@ -166,12 +160,11 @@ pub async fn build_maintainership_acceptance_with_defaults(
         selected_grasp_servers,
         public_key: *my_pubkey,
         identifier: identifier.clone(),
-        nostr_url,
     })
 }
 
-/// Update local repository state after a prepared co-maintainer announcement
-/// has been published.
+/// Wait for grasp servers to provision the bare repository after a prepared
+/// co-maintainer announcement has been published.
 pub async fn finalize_maintainership_acceptance(
     git_repo: &Repo,
     acceptance: &MaintainerAcceptance,
@@ -186,41 +179,24 @@ pub async fn finalize_maintainership_acceptance(
         .await?;
     }
 
-    git_repo
-        .save_git_config_item(
-            "nostr.repo",
-            &Nip19Coordinate {
-                coordinate: Coordinate {
-                    kind: Kind::GitRepoAnnouncement,
-                    public_key: acceptance.public_key,
-                    identifier: acceptance.identifier.clone(),
-                },
-                relays: vec![],
-            }
-            .to_bech32()?,
-            false,
-        )
-        .context("failed to update nostr.repo git config")?;
-
-    if git_repo.git_repo.find_remote("origin").is_ok() {
-        git_repo
-            .git_repo
-            .remote_set_url("origin", &acceptance.nostr_url)
-            .context("failed to update origin remote")?;
-    } else {
-        git_repo
-            .git_repo
-            .remote("origin", &acceptance.nostr_url)
-            .context("failed to set origin remote")?;
-    }
+    // Deliberately leave `nostr.repo` and the origin remote untouched: the
+    // coordinate the repo resolves from is the root of trust. Re-rooting
+    // resolution on the accepter's own announcement — which always lists
+    // them as a maintainer — would make it impossible to observe the
+    // inviter removing them later. Keeping resolution on the inviter's
+    // coordinate means removal surfaces naturally; only `ngit repo edit` /
+    // `ngit init` may change the resolved coordinate deliberately.
 
     eprintln!("info: co-maintainership accepted. run `ngit init` to customise your announcement.");
 
     Ok(())
 }
 
-/// Publish the co-maintainer's own Kind:30617 announcement with defaults and
-/// update the local git config / origin remote to point to it.
+/// Publish the co-maintainer's own Kind:30617 announcement with defaults.
+///
+/// The local `nostr.repo` config and remotes are left untouched so the
+/// repository keeps resolving from the inviter's coordinate (see
+/// `finalize_maintainership_acceptance`).
 ///
 /// This is called automatically from the push path when the pushing user is
 /// listed as a maintainer but has not yet published their own announcement.
@@ -235,8 +211,7 @@ pub async fn accept_maintainership_with_defaults(
     signer: &Arc<crate::signer::NgitSigner>,
 ) -> Result<()> {
     let acceptance =
-        build_maintainership_acceptance_with_defaults(git_repo, repo_ref, user_ref, client, signer)
-            .await?;
+        build_maintainership_acceptance_with_defaults(repo_ref, user_ref, client, signer).await?;
     eprintln!("info: publishing your repository announcement to nostr...");
 
     client.set_signer(signer.clone()).await;
