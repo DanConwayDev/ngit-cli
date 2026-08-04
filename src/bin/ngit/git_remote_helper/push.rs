@@ -210,7 +210,7 @@ pub async fn run_push(
             // Seed purgatory on the GRASP relays we are about to push to
             // before any git data moves; see the state_transaction module
             // docs for the transaction ordering rationale.
-            transaction.publish_state_to_grasps_first(&mut ops).await?;
+            transaction.publish_state_to_grasps_first(&mut ops).await;
 
             for refspec in &proposal_refspecs {
                 if rejected_proposal_refspecs.contains(refspec) {
