@@ -20,6 +20,7 @@ use ngit::{
         send_events,
     },
     event_ordering,
+    fetch::fetch_refs_from_git_server,
     git::{
         is_git_remote_helper_url,
         nostr_url::{CloneUrl, NostrUrlDecoded},
@@ -1237,10 +1238,14 @@ enum StateAction {
     /// republished or re-signed).
     SyncCachedState,
     /// No canonical state, but the pre-existing `origin` remote was
-    /// listable: build a candidate state event from its listing
-    /// (carried here) and establish it through a candidate state
-    /// transaction.
-    PublishOriginState(HashMap<String, String>),
+    /// listable: build a candidate state event from its listing and
+    /// establish it through a candidate state transaction. The listing
+    /// travels with the origin's URL — the one server guaranteed to
+    /// serve the objects it advertised.
+    PublishOriginState {
+        origin_url: String,
+        origin_state: HashMap<String, String>,
+    },
     /// Fresh repository: push the local main/master branch and its
     /// state through the state transaction.
     PushInitialBranch,
@@ -1400,7 +1405,10 @@ async fn publish_and_finalize(
                         || key.starts_with("refs/tags/")
                         || key.starts_with("HEAD")
                 });
-                StateAction::PublishOriginState(origin_state)
+                StateAction::PublishOriginState {
+                    origin_url: url.to_string(),
+                    origin_state,
+                }
             } else {
                 // cant reach existing origin so just try push
                 StateAction::PushInitialBranch
@@ -1512,7 +1520,10 @@ async fn publish_and_finalize(
                 "your repository announcement was published to nostr but syncing your repository's git servers with its nostr state failed. fix the reported issue and run `ngit sync`",
             )?;
         }
-        StateAction::PublishOriginState(origin_state) => {
+        StateAction::PublishOriginState {
+            origin_url,
+            origin_state,
+        } => {
             if !fields.selected_grasp_servers.is_empty() {
                 wait_for_grasp_servers(
                     git_repo,
@@ -1533,6 +1544,7 @@ async fn publish_and_finalize(
                 client,
                 &signer,
                 &nostr_url_decoded,
+                &origin_url,
                 origin_state,
             )
             .await
@@ -1928,12 +1940,14 @@ async fn push_initial_branch(
 }
 
 /// Establish the state event built from the pre-existing `origin`'s
-/// listing through a candidate state transaction: stage it on the grasp
-/// relays, push the origin-derived refs to the repository's git servers
-/// (fetching any objects missing locally first), fan the event out to
-/// the remaining relays and cache it only after a git server and at
-/// least one relay accepted it.
-#[allow(clippy::too_many_lines)]
+/// listing through a candidate state transaction: fetch listed objects
+/// missing locally from the origin itself, prune refs whose objects
+/// could not be obtained so the signed state never advertises objects no
+/// server holds, stage the event on the grasp relays, push the
+/// origin-derived refs to the repository's git servers, fan the event
+/// out to the remaining relays and cache it only after a git server and
+/// at least one relay accepted it.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn publish_origin_state(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -1941,9 +1955,38 @@ async fn publish_origin_state(
     client: &Client,
     signer: &Arc<ngit::signer::NgitSigner>,
     nostr_url_decoded: &NostrUrlDecoded,
-    origin_state: HashMap<String, String>,
+    origin_url: &str,
+    mut origin_state: HashMap<String, String>,
 ) -> Result<()> {
     let term = Term::stderr();
+
+    // The origin is the only server guaranteed to hold the objects its
+    // listing advertised. Fetch the missing ones by ref name before
+    // signing, so refs never fetched locally (e.g. tags after a
+    // --no-tags or single-branch clone) can be pushed to the repo's git
+    // servers.
+    let refs_to_fetch = origin_refs_with_missing_objects(git_repo, &origin_state);
+    if !refs_to_fetch.is_empty() {
+        println!("fetching git data listed on the existing origin but missing locally...");
+        if let Err(error) = fetch_refs_from_git_server(
+            git_repo,
+            &refs_to_fetch,
+            origin_url,
+            nostr_url_decoded,
+            &term,
+            is_grasp_server_clone_url(origin_url),
+        ) {
+            println!("failed to fetch from the existing origin: {error}");
+        }
+    }
+
+    let skipped_origin_refs = prune_refs_with_missing_objects(git_repo, &mut origin_state);
+    if !skipped_origin_refs.is_empty() {
+        println!(
+            "skipping refs listed on the existing origin whose git data could not be fetched: {}",
+            join_with_and(&skipped_origin_refs)
+        );
+    }
 
     // Ordered after the newest cached state event across maintainer
     // coordinates. Normally none exists in this branch — a cached event
@@ -2146,6 +2189,60 @@ fn derive_remote_name_from_url(url: &str) -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+/// `(ref name, listed oid)` pairs from an origin listing whose objects
+/// are not in the local repository. Peeled `^{}` entries resolve to
+/// their base ref: fetching the base ref delivers the peeled object too.
+fn origin_refs_with_missing_objects(
+    git_repo: &Repo,
+    origin_state: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut missing: Vec<(String, String)> = vec![];
+    for (key, value) in origin_state {
+        if object_exists_locally(git_repo, value) {
+            continue;
+        }
+        let base = key.trim_end_matches("^{}").to_string();
+        let oid = origin_state
+            .get(&base)
+            .cloned()
+            .unwrap_or_else(|| value.clone());
+        if !missing.iter().any(|(name, _)| name == &base) {
+            missing.push((base, oid));
+        }
+    }
+    missing.sort();
+    missing
+}
+
+/// Remove refs whose objects are still missing locally, together with
+/// their peeled `^{}` twins, so the candidate state never advertises
+/// objects that cannot be pushed to any git server. Returns the pruned
+/// base ref names.
+fn prune_refs_with_missing_objects(
+    git_repo: &Repo,
+    origin_state: &mut HashMap<String, String>,
+) -> Vec<String> {
+    let mut pruned: HashSet<String> = HashSet::new();
+    for (key, value) in origin_state.iter() {
+        if !object_exists_locally(git_repo, value) {
+            pruned.insert(key.trim_end_matches("^{}").to_string());
+        }
+    }
+    origin_state.retain(|key, _| !pruned.contains(key.trim_end_matches("^{}")));
+    let mut pruned: Vec<String> = pruned.into_iter().collect();
+    pruned.sort();
+    pruned
+}
+
+/// Whether the odb holds the object, of any type. Values that aren't
+/// oids (nothing fetchable) count as present.
+fn object_exists_locally(git_repo: &Repo, oid: &str) -> bool {
+    let Ok(parsed) = git2::Oid::from_str(oid) else {
+        return true;
+    };
+    git_repo.git_repo.find_object(parsed, None).is_ok()
 }
 
 #[cfg(test)]

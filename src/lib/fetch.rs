@@ -186,9 +186,98 @@ pub fn fetch_from_git_server(
     }
 }
 
+/// Fetch the objects behind specific refs by name from a git server so
+/// they are available locally. No local refs are created or updated —
+/// server refs are dynamic in ngit, never tracked — the wants are
+/// negotiated by ref name and the objects land in the odb only.
+///
+/// `refs` pairs each ref name with the oid the server listed for it. The
+/// oids drive the local-presence check (refs whose objects are already
+/// local are skipped; short-circuits without network traffic when
+/// nothing is missing) and let remote-helper transports, which fetch by
+/// oid, participate. Fetching by ref name rather than oid matters for
+/// vanilla servers: most reject wants for arbitrary oids
+/// (`uploadpack.allowAnySHA1InWant` defaults to off) but always serve
+/// their advertised refs.
+pub fn fetch_refs_from_git_server(
+    git_repo: &Repo,
+    refs: &[(String, String)],
+    git_server_url: &str,
+    decoded_nostr_url: &NostrUrlDecoded,
+    term: &console::Term,
+    is_grasp_server: bool,
+) -> Result<()> {
+    remote_helper::validate_clone_url(git_server_url)?;
+
+    let missing: Vec<&(String, String)> = refs
+        .iter()
+        .filter(|(_, oid)| {
+            git2::Oid::from_str(oid)
+                .is_ok_and(|oid| git_repo.git_repo.find_object(oid, None).is_err())
+        })
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    if remote_helper::handles_url(git_server_url) {
+        term.write_line(&format!(
+            "fetching {git_server_url} via Git remote helper..."
+        ))?;
+        let oids: Vec<String> = missing.iter().map(|(_, oid)| oid.clone()).collect();
+        return remote_helper::fetch(git_repo, git_server_url, &oids, term);
+    }
+
+    let ref_names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
+    let server_url = git_server_url.parse::<CloneUrl>()?;
+    let protocols_to_attempt =
+        get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
+
+    let mut failed_protocols = vec![];
+    let mut success = false;
+    for protocol in &protocols_to_attempt {
+        term.write_line(
+            format!("fetching {} over {protocol}...", server_url.short_name()).as_str(),
+        )?;
+        let formatted_url = server_url.format_as(protocol)?;
+        let res = fetch_from_git_server_url(
+            &git_repo.git_repo,
+            &ref_names,
+            &formatted_url,
+            [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol),
+            decoded_nostr_url.ssh_key_file_path().as_ref(),
+            term,
+        );
+        if let Err(error) = res {
+            term.write_line(&format!(
+                "fetch: {formatted_url} failed over {protocol}: {error}"
+            ))?;
+            failed_protocols.push(protocol);
+        } else {
+            success = true;
+            break;
+        }
+    }
+    if success {
+        Ok(())
+    } else {
+        let error = anyhow!(
+            "{} failed over {}",
+            server_url.short_name(),
+            join_with_and(&failed_protocols)
+        );
+        term.write_line(format!("fetch: {error}").as_str())?;
+        Err(error)
+    }
+}
+
+/// `refspecs` entries may be bare oids or ref names: both are valid
+/// wants for `download`, which writes objects to the odb without
+/// creating or updating any local refs.
 fn fetch_from_git_server_url(
     git_repo: &Repository,
-    oids: &[String],
+    refspecs: &[String],
     git_server_url: &str,
     dont_authenticate: bool,
     ssh_key_file: Option<&String>,
@@ -238,7 +327,7 @@ fn fetch_from_git_server_url(
     }
     fetch_options.remote_callbacks(remote_callbacks);
 
-    git_server_remote.download(oids, Some(&mut fetch_options))?;
+    git_server_remote.download(refspecs, Some(&mut fetch_options))?;
 
     git_server_remote.disconnect()?;
     Ok(())
