@@ -1227,6 +1227,24 @@ fn validate_git_server_url(url: &str) -> Result<String> {
     }
 }
 
+/// How `ngit init` establishes the repository state after publishing
+/// the announcement.
+enum StateAction {
+    /// `nostr.nostate`: no state event is created or synced.
+    None,
+    /// A canonical state event is already cached: propagate it
+    /// in-process through `ngit sync`'s authoritative flow (nothing is
+    /// republished or re-signed).
+    SyncCachedState,
+    /// No canonical state, but the pre-existing `origin` remote was
+    /// listable: the origin-built state event is in the eager publish
+    /// batch and `ngit sync` propagates it afterwards.
+    PublishOriginState,
+    /// Fresh repository: push the local main/master branch and its
+    /// state through the state transaction.
+    PushInitialBranch,
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn publish_and_finalize(
     fields: ResolvedFields,
@@ -1354,24 +1372,19 @@ async fn publish_and_finalize(
         }
     }
 
-    let (need_push, need_sync) = if no_state {
+    let state_action = if no_state {
         // user explicitly opted out of state-event creation
-        (false, false)
-    } else if let Ok(nostr_state) =
-        &get_state_from_cache(Some(git_repo.get_path()?), &repo_ref).await
+        StateAction::None
+    } else if get_state_from_cache(Some(git_repo.get_path()?), &repo_ref)
+        .await
+        .is_ok()
     {
-        // issue fresh state event with same state to all (inc. new) repo relays
-        let new_state_event = RepoState::build(
-            repo_ref.identifier.clone(),
-            nostr_state.state.clone(),
-            &signer,
-            Some(&nostr_state.event),
-        )
-        .await?
-        .event;
-        events.push(new_state_event);
-        println!("publishing repostory state to nostr...");
-        (false, true)
+        // A canonical state event is already cached: propagate it
+        // in-process via ngit sync's authoritative flow, which seeds
+        // only the relays missing it. Nothing is rebuilt or re-signed —
+        // re-signing cached ref values as a newer event is how stale
+        // state clobbers newer state.
+        StateAction::SyncCachedState
     } else if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
         if let Ok(url) = remote.url() {
             // issue a state event with origin state, to all (inc. new) repo relays
@@ -1416,18 +1429,18 @@ async fn publish_and_finalize(
                         .event;
                 events.push(new_state_event);
                 println!("publishing repostory state to nostr...");
-                (false, true)
+                StateAction::PublishOriginState
             } else {
                 // cant reach existing origin so just try push
-                (true, false)
+                StateAction::PushInitialBranch
             }
         } else {
             // origin never connected so just try push
-            (true, false)
+            StateAction::PushInitialBranch
         }
     } else {
         // no origin so we need to just push
-        (true, false)
+        StateAction::PushInitialBranch
     };
 
     // Step 5: Publish events
@@ -1469,54 +1482,80 @@ async fn publish_and_finalize(
     println!("set remote origin to nostr url");
 
     // Step 8: Push/sync
-    if need_push {
-        let branch_name = main_or_master_branch_name(git_repo)?;
-        if !fields.selected_grasp_servers.is_empty() {
-            wait_for_grasp_servers(
-                git_repo,
-                &fields.selected_grasp_servers,
-                &user_ref.public_key,
-                &fields.identifier,
-            )
-            .await?;
-        }
+    match state_action {
+        StateAction::None => {}
+        StateAction::PushInitialBranch => {
+            let branch_name = main_or_master_branch_name(git_repo)?;
+            if !fields.selected_grasp_servers.is_empty() {
+                wait_for_grasp_servers(
+                    git_repo,
+                    &fields.selected_grasp_servers,
+                    &user_ref.public_key,
+                    &fields.identifier,
+                )
+                .await?;
+            }
 
-        println!("pushing your repository data to your git server(s)...");
-        push_initial_branch(
-            git_repo,
-            &repo_ref,
-            user_ref,
-            client,
-            &signer,
-            &nostr_url_decoded,
-            branch_name,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "your repository announcement was published to nostr but pushing your git data failed. fix the reported issue and run `git push -u origin {branch_name}` to push your git data and publish the repository state"
-            )
-        })?;
-    }
-    if need_sync {
-        if fields.selected_grasp_servers.is_empty() {
-            println!(
-                "running `ngit sync` to ensure your repository data is available on repository git servers"
-            );
-        } else {
-            wait_for_grasp_servers(
+            println!("pushing your repository data to your git server(s)...");
+            push_initial_branch(
                 git_repo,
-                &fields.selected_grasp_servers,
-                &user_ref.public_key,
-                &fields.identifier,
+                &repo_ref,
+                user_ref,
+                client,
+                &signer,
+                &nostr_url_decoded,
+                branch_name,
             )
-            .await?;
+            .await
+            .with_context(|| {
+                format!(
+                    "your repository announcement was published to nostr but pushing your git data failed. fix the reported issue and run `git push -u origin {branch_name}` to push your git data and publish the repository state"
+                )
+            })?;
         }
+        StateAction::SyncCachedState => {
+            if !fields.selected_grasp_servers.is_empty() {
+                wait_for_grasp_servers(
+                    git_repo,
+                    &fields.selected_grasp_servers,
+                    &user_ref.public_key,
+                    &fields.identifier,
+                )
+                .await?;
+            }
 
-        if let Err(err) = run_ngit_sync() {
-            println!(
-                "your repository announcement was published to nostr but 'ngit sync' exited with an error: {err}"
-            );
+            println!("syncing your repository's git servers with its nostr state...");
+            super::sync::sync_with_client(
+                &super::sync::SubCommandArgs::default(),
+                git_repo,
+                client,
+                true,
+            )
+            .await
+            .context(
+                "your repository announcement was published to nostr but syncing your repository's git servers with its nostr state failed. fix the reported issue and run `ngit sync`",
+            )?;
+        }
+        StateAction::PublishOriginState => {
+            if fields.selected_grasp_servers.is_empty() {
+                println!(
+                    "running `ngit sync` to ensure your repository data is available on repository git servers"
+                );
+            } else {
+                wait_for_grasp_servers(
+                    git_repo,
+                    &fields.selected_grasp_servers,
+                    &user_ref.public_key,
+                    &fields.identifier,
+                )
+                .await?;
+            }
+
+            if let Err(err) = run_ngit_sync() {
+                println!(
+                    "your repository announcement was published to nostr but 'ngit sync' exited with an error: {err}"
+                );
+            }
         }
     }
 
