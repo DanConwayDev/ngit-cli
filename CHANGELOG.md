@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `git push` to a nostr remote now treats a git server that already has every requested change as a successful push target, so no-op pushes (re-pushing a tag that is already present, deleting an already-deleted branch) succeed instead of erroring, including under `nostr.nostate`. Git data is no longer pushed to a GRASP server whose paired relay did not accept the staged state event, and the locally cached repository state is only updated after a git server accepted the pushed data and a relay accepted the state event, so a failed or interrupted push leaves the previous state authoritative instead of caching an unpublished replacement.
 - Make ahead/behind commit walks topology-complete so merged side-branch commits with equal timestamps are not skipped, restoring every issue-resolution status generated from a multi-merge push.
 - Update the integration-test ngit-grasp pin to the v2.0.0 release, where completed pushes guarantee their promoted announcement and repository state are queryable while long finalization remains protected by sideband keepalives.
 - Fast successive repository and proposal updates now order reliably despite Nostr's whole-second timestamps. Repository state, announcements, and statuses use bounded nonce grinding with a timestamp fallback; GRASP now honors the lower-event-ID tie-break for same-second state replacements. Patch revisions and pull-request upgrades or updates remain strictly ordered by timestamp.

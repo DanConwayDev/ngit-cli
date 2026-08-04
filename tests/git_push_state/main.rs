@@ -46,6 +46,10 @@
 //!   pushes a normal branch. Asserts the push path auto-publishes their
 //!   co-maintainer announcement and records the branch in a state event signed
 //!   by that co-maintainer.
+//! - [`vanilla_server_noop`] — a no-op push against a vanilla (non-GRASP) git
+//!   server whose bare repo can be mutated out-of-band: a tag already pushed to
+//!   the server directly produces an empty per-server plan, and the nostr push
+//!   must succeed and still publish the updated state event.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -59,3 +63,4 @@ mod delete_branch;
 mod fresh_repo;
 mod grasp_accepts_remaining_relay_down;
 mod push_tag;
+mod vanilla_server_noop;
