@@ -157,6 +157,49 @@ impl StateTransactionOps for LiveOps<'_> {
     }
 }
 
+/// Which git servers a push may realign destructively.
+///
+/// The plan builder marks a refspec that cannot fast-forward with a
+/// leading `+` and encodes a ref deletion as an empty push source
+/// (`:refs/...`). The policy decides per server whether such destructive
+/// refspecs are executed or dropped from that server's plan; dropped
+/// refspecs are recorded on the transaction for the caller's reporting.
+pub enum ServerForcePolicy {
+    /// Execute destructive refspecs on every server. This is the default
+    /// and the remote helper's behaviour: any out-of-sync server is
+    /// realigned to the pushed state.
+    ForceRealignAll,
+    /// Execute destructive refspecs only on the listed git servers
+    /// (compared ignoring a trailing slash); every other server is pushed
+    /// fast-forward-only. `ngit sync` realigns GRASP servers but leaves
+    /// vanilla servers untouched unless `--force`.
+    // No production caller until `ngit sync` migrates onto the
+    // transaction.
+    #[allow(dead_code)]
+    ForceOnlyOn(Vec<String>),
+}
+
+impl ServerForcePolicy {
+    fn allows_force(&self, git_server_url: &str) -> bool {
+        match self {
+            Self::ForceRealignAll => true,
+            Self::ForceOnlyOn(git_servers) => git_servers
+                .iter()
+                .any(|url| url.trim_end_matches('/') == git_server_url.trim_end_matches('/')),
+        }
+    }
+}
+
+/// Whether pushing `refspec` can discard existing server-side work: a
+/// forced update (`+` prefix) or a ref deletion (empty push source).
+fn is_destructive_refspec(refspec: &str) -> bool {
+    refspec.starts_with('+') || refspec.starts_with(':')
+}
+
+/// Destructive refspecs dropped from per-server plans by the
+/// [`ServerForcePolicy`], keyed by git server URL.
+type DroppedRefspecs = HashMap<String, Vec<String>>;
+
 /// Outcome of executing the per-server git push plans.
 pub enum GitStatePushOutcome {
     /// No git server remained eligible for a push (e.g. every paired GRASP
@@ -211,8 +254,10 @@ pub struct StateTransaction<'a> {
     /// the candidate replacement state (`None` when the push publishes no
     /// state event, e.g. `nostr.nostate`)
     state: Option<RepoState>,
+    force_policy: ServerForcePolicy,
     initial_state_publish: InitialStatePublish,
     remaining_relay_results: Vec<(String, bool)>,
+    refspecs_dropped_by_policy: HashMap<String, Vec<String>>,
 }
 
 impl<'a> StateTransaction<'a> {
@@ -220,9 +265,30 @@ impl<'a> StateTransaction<'a> {
         Self {
             repo_ref,
             state,
+            force_policy: ServerForcePolicy::ForceRealignAll,
             initial_state_publish: InitialStatePublish::default(),
             remaining_relay_results: vec![],
+            refspecs_dropped_by_policy: HashMap::new(),
         }
+    }
+
+    /// Replace the default [`ServerForcePolicy::ForceRealignAll`] policy.
+    // No production caller until `ngit sync` migrates onto the
+    // transaction.
+    #[allow(dead_code)]
+    pub fn with_force_policy(mut self, force_policy: ServerForcePolicy) -> Self {
+        self.force_policy = force_policy;
+        self
+    }
+
+    /// Destructive refspecs dropped per git server by the
+    /// [`ServerForcePolicy`] during [`Self::push_git_state_refspecs`],
+    /// for the caller's reporting.
+    // No production caller until `ngit sync` migrates onto the
+    // transaction.
+    #[allow(dead_code)]
+    pub fn refspecs_dropped_by_policy(&self) -> &DroppedRefspecs {
+        &self.refspecs_dropped_by_policy
     }
 
     /// The candidate state events to publish (currently at most one).
@@ -279,13 +345,14 @@ impl<'a> StateTransaction<'a> {
     /// A server whose plan is empty (every requested change is already
     /// applied there, e.g. deleting an already-absent branch or a ref
     /// already at the desired object) is not pushed to but counts as a
-    /// successful push target. Beyond that, a server's report-status
+    /// successful push target — including when the [`ServerForcePolicy`]
+    /// dropped the whole plan. Beyond that, a server's report-status
     /// acknowledgment is trusted as confirmation that the refs are
     /// served, matching git's own trust model; a GRASP server
     /// additionally guarantees its refs and promoted events are
     /// queryable before its push response completes.
     pub fn push_git_state_refspecs(
-        &self,
+        &mut self,
         ops: &mut impl StateTransactionOps,
         remote_refspecs: HashMap<String, Vec<String>>,
         git_state_refspecs: &[String],
@@ -294,12 +361,14 @@ impl<'a> StateTransaction<'a> {
             return GitStatePushOutcome::AcceptedByGitServer;
         }
 
-        let servers_to_push = eligible_git_servers(
+        let (servers_to_push, refspecs_dropped_by_policy) = eligible_git_servers(
             remote_refspecs,
             git_state_refspecs,
             self.state.is_some(),
             &self.initial_state_publish.results,
+            &self.force_policy,
         );
+        self.refspecs_dropped_by_policy = refspecs_dropped_by_policy;
 
         if servers_to_push.is_empty() {
             return GitStatePushOutcome::NoEligibleServers;
@@ -393,8 +462,10 @@ fn eligible_git_servers(
     git_state_refspecs: &[String],
     has_state_event: bool,
     initial_state_relay_results: &[(String, bool)],
-) -> Vec<(String, Vec<String>)> {
+    force_policy: &ServerForcePolicy,
+) -> (Vec<(String, Vec<String>)>, DroppedRefspecs) {
     let mut eligible = vec![];
+    let mut dropped_by_policy = DroppedRefspecs::new();
     for (git_server_url, server_refspecs) in remote_refspecs {
         let server_refspecs = server_refspecs
             .iter()
@@ -409,6 +480,19 @@ fn eligible_git_servers(
             })
             .cloned()
             .collect::<Vec<String>>();
+        let server_refspecs = if force_policy.allows_force(&git_server_url) {
+            server_refspecs
+        } else {
+            // Fast-forward-only server: destructive refspecs are dropped
+            // from the plan and recorded for the caller's reporting.
+            let (kept, dropped): (Vec<String>, Vec<String>) = server_refspecs
+                .into_iter()
+                .partition(|refspec| !is_destructive_refspec(refspec));
+            if !dropped.is_empty() {
+                dropped_by_policy.insert(git_server_url.clone(), dropped);
+            }
+            kept
+        };
         if is_grasp_server_clone_url(&git_server_url) && has_state_event {
             // Fail closed: git data must not reach a paired GRASP server
             // unless its relay explicitly accepted the staged state event.
@@ -432,7 +516,7 @@ fn eligible_git_servers(
         }
         eligible.push((git_server_url, server_refspecs));
     }
-    eligible
+    (eligible, dropped_by_policy)
 }
 
 fn state_relay_accepted<'a>(
@@ -1063,11 +1147,12 @@ mod tests {
             // paired GRASP server whose relay never accepted the state.
             let grasp_url = grasp_clone_url("grasp.example");
 
-            let servers = super::super::eligible_git_servers(
+            let (servers, _) = super::super::eligible_git_servers(
                 HashMap::from([(grasp_url, vec![refspec()])]),
                 &[refspec()],
                 true,
                 &[],
+                &ServerForcePolicy::ForceRealignAll,
             );
 
             assert!(servers.is_empty());
@@ -1077,13 +1162,14 @@ mod tests {
         fn grasp_server_ineligible_when_paired_relay_result_is_missing() {
             let grasp_url = grasp_clone_url("grasp.example");
 
-            let servers = super::super::eligible_git_servers(
+            let (servers, _) = super::super::eligible_git_servers(
                 HashMap::from([(grasp_url, vec![refspec()])]),
                 &[refspec()],
                 true,
                 // staging produced results, but none for this server's
                 // paired relay
                 &[("wss://other.example".to_string(), true)],
+                &ServerForcePolicy::ForceRealignAll,
             );
 
             assert!(servers.is_empty());
@@ -1166,6 +1252,148 @@ mod tests {
             );
 
             assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+        }
+    }
+
+    mod server_force_policy {
+        use super::*;
+
+        fn successful_push() -> FakePushResult {
+            FakePushResult::Refs(HashMap::new())
+        }
+
+        fn forced_refspec() -> String {
+            "+refs/heads/diverged:refs/heads/diverged".to_string()
+        }
+
+        fn delete_refspec() -> String {
+            ":refs/heads/gone".to_string()
+        }
+
+        fn state_refspecs() -> Vec<String> {
+            vec![
+                refspec(),
+                "refs/heads/diverged:refs/heads/diverged".to_string(),
+                delete_refspec(),
+            ]
+        }
+
+        #[test]
+        fn force_only_on_matches_ignoring_trailing_slash() {
+            let policy =
+                ServerForcePolicy::ForceOnlyOn(vec!["https://grasp.example/repo.git/".to_string()]);
+
+            assert!(policy.allows_force("https://grasp.example/repo.git"));
+            assert!(!policy.allows_force("https://vanilla.example/repo.git"));
+        }
+
+        #[tokio::test]
+        async fn fast_forward_only_server_drops_destructive_refspecs_but_forceable_keeps_them() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let vanilla_url = "https://vanilla.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(vec![grasp_url.clone(), vanilla_url.clone()], vec![]);
+            let mut ops = FakeOps {
+                push_results: HashMap::from([
+                    (grasp_url.clone(), successful_push()),
+                    (vanilla_url.clone(), successful_push()),
+                ]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()))
+                .with_force_policy(ServerForcePolicy::ForceOnlyOn(vec![grasp_url.clone()]));
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            let plan = vec![refspec(), forced_refspec(), delete_refspec()];
+            let outcome = transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([
+                    (grasp_url.clone(), plan.clone()),
+                    (vanilla_url.clone(), plan),
+                ]),
+                &state_refspecs(),
+            );
+
+            assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+            let pushed: HashMap<String, Vec<String>> = ops
+                .calls
+                .iter()
+                .filter_map(|call| match call {
+                    FakeCall::Push {
+                        git_server_url,
+                        refspecs,
+                    } => Some((git_server_url.clone(), refspecs.clone())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                pushed.get(&grasp_url),
+                Some(&vec![refspec(), forced_refspec(), delete_refspec()])
+            );
+            assert_eq!(pushed.get(&vanilla_url), Some(&vec![refspec()]));
+            assert_eq!(
+                transaction.refspecs_dropped_by_policy(),
+                &HashMap::from([(vanilla_url, vec![forced_refspec(), delete_refspec()])])
+            );
+        }
+
+        #[tokio::test]
+        async fn fully_dropped_plan_counts_as_success_without_push() {
+            let vanilla_url = "https://vanilla.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec![]);
+            let mut ops = FakeOps::default();
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()))
+                .with_force_policy(ServerForcePolicy::ForceOnlyOn(vec![]));
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            let outcome = transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([(
+                    vanilla_url.clone(),
+                    vec![forced_refspec(), delete_refspec()],
+                )]),
+                &state_refspecs(),
+            );
+
+            assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+            assert!(ops.pushed_servers().is_empty());
+            assert_eq!(
+                transaction.refspecs_dropped_by_policy(),
+                &HashMap::from([(vanilla_url, vec![forced_refspec(), delete_refspec()])])
+            );
+        }
+
+        #[tokio::test]
+        async fn default_policy_keeps_destructive_refspecs_on_vanilla_servers() {
+            let vanilla_url = "https://vanilla.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec![]);
+            let mut ops = FakeOps {
+                push_results: HashMap::from([(vanilla_url.clone(), successful_push())]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            let outcome = transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([(
+                    vanilla_url.clone(),
+                    vec![forced_refspec(), delete_refspec()],
+                )]),
+                &state_refspecs(),
+            );
+
+            assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+            assert_eq!(
+                ops.calls
+                    .iter()
+                    .filter_map(|call| match call {
+                        FakeCall::Push { refspecs, .. } => Some(refspecs.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                vec![vec![forced_refspec(), delete_refspec()]]
+            );
+            assert!(transaction.refspecs_dropped_by_policy().is_empty());
         }
     }
 
