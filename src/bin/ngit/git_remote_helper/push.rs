@@ -7,8 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use client::{
-    STATE_KIND, get_events_from_local_cache, get_issues_from_cache, get_state_from_cache,
-    sign_event,
+    get_events_from_local_cache, get_issues_from_cache, get_state_from_cache, sign_event,
 };
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
@@ -144,9 +143,9 @@ pub async fn run_push(
         let PushEventsPlan {
             rejected_proposal_refspecs,
             rejected,
-            events,
+            state,
+            other_events,
             previous_state_event,
-            new_state_event_id,
             my_write_relays,
             repo_relay_only,
         } = create_events_and_proposals(
@@ -164,10 +163,6 @@ pub async fn run_push(
         .await?;
 
         if !rejected {
-            let (state_events, other_events): (Vec<Event>, Vec<Event>) = events
-                .into_iter()
-                .partition(|event| event.kind.eq(&STATE_KIND));
-
             let mut ops = LiveOps {
                 client,
                 git_repo,
@@ -200,12 +195,7 @@ pub async fn run_push(
                 return Ok(());
             }
 
-            let mut transaction = StateTransaction::new(
-                repo_ref,
-                state_events,
-                new_state_event_id,
-                previous_state_event,
-            );
+            let mut transaction = StateTransaction::new(repo_ref, state, previous_state_event);
 
             // Seed purgatory on the GRASP relays we are about to push to
             // before any git data moves; see the state_transaction module
@@ -284,9 +274,13 @@ pub async fn run_push(
 struct PushEventsPlan {
     rejected_proposal_refspecs: Vec<String>,
     rejected: bool,
-    events: Vec<Event>,
+    /// the candidate replacement repository state (`None` under
+    /// `nostr.nostate` or when no state refspecs are being pushed)
+    state: Option<RepoState>,
+    /// proposal, status and announcement events published alongside the
+    /// state event
+    other_events: Vec<Event>,
     previous_state_event: Option<Event>,
-    new_state_event_id: Option<EventId>,
     my_write_relays: Vec<String>,
     repo_relay_only: bool,
 }
@@ -388,9 +382,9 @@ async fn create_events_and_proposals(
             return Ok(PushEventsPlan {
                 rejected_proposal_refspecs: vec![],
                 rejected: true,
-                events: vec![],
+                state: None,
+                other_events: vec![],
                 previous_state_event: None,
-                new_state_event_id: None,
                 my_write_relays: vec![],
                 repo_relay_only: false,
             });
@@ -411,8 +405,8 @@ async fn create_events_and_proposals(
     }
 
     let mut events = vec![];
+    let mut state: Option<RepoState> = None;
     let mut old_state_event: Option<Event> = None;
-    let mut new_state_event_id: Option<EventId> = None;
     // The nostr repo-state event's HEAD tag is the maintainer-declared default
     // branch — the most authoritative source for default-branch
     // identification when deciding whether commit-message issue keywords
@@ -454,8 +448,7 @@ async fn create_events_and_proposals(
             save_event_in_local_cache(git_repo.get_path()?, &new_repo_state.event)
                 .await
                 .context("failed to cache planned repository state event")?;
-            new_state_event_id = Some(new_repo_state.event.id);
-            events.push(new_repo_state.event);
+            state = Some(new_repo_state);
         }
 
         let merge_status_context = MergeStatusContext {
@@ -555,9 +548,9 @@ async fn create_events_and_proposals(
     Ok(PushEventsPlan {
         rejected_proposal_refspecs,
         rejected: false,
-        events,
+        state,
+        other_events: events,
         previous_state_event: old_state_event,
-        new_state_event_id,
         my_write_relays,
         repo_relay_only,
     })
@@ -1074,9 +1067,11 @@ fn create_rejected_refspecs_and_remotes_refspecs(
                 refspecs_for_remote.push(refspec.clone());
             }
         }
-        if !refspecs_for_remote.is_empty() {
-            refspecs_for_remotes.insert(url.clone(), refspecs_for_remote);
-        }
+        // An empty plan is kept: it means every requested change is
+        // already applied on this server (e.g. deleting an already-absent
+        // branch), so the server counts as a successful push target
+        // without anything being pushed.
+        refspecs_for_remotes.insert(url.clone(), refspecs_for_remote);
     }
 
     // remove rejected refspecs so they dont get pushed to some remotes
