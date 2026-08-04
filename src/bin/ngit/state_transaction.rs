@@ -25,12 +25,13 @@
 //! [`StateTransactionFailure`] keeps the failure reasons typed in
 //! between.
 //!
-//! Both the remote helper and `ngit sync` run their state publication
-//! through this module: the helper pushes candidate states, while sync
-//! additionally uses the authoritative mode to propagate the canonical
-//! cached state and a [`ServerForcePolicy`] to keep vanilla servers
-//! fast-forward-only. `ngit init` still runs its own divergent copy of
-//! this flow; migrating it onto this module is planned follow-up work.
+//! The remote helper, `ngit sync` and `ngit init` all run their state
+//! publication through this module: the helper pushes candidate states,
+//! sync additionally uses the authoritative mode to propagate the
+//! canonical cached state and a [`ServerForcePolicy`] to keep vanilla
+//! servers fast-forward-only, and init pushes its initial-branch and
+//! origin-derived candidates (its cached-state case delegates to the
+//! in-process sync flow).
 
 use std::collections::HashMap;
 

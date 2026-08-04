@@ -1,15 +1,13 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     path::Path,
-    process::{Command, Stdio},
     str::FromStr,
     sync::Arc,
 };
 
 use anyhow::{Context, Result, bail};
 use console::{Style, Term};
-use git2::Oid;
 use ngit::{
     accept_maintainership::{grasp_servers_from_user_or_fallback, wait_for_grasp_servers},
     agent_guidance,
@@ -22,7 +20,6 @@ use ngit::{
         send_events,
     },
     event_ordering,
-    fetch::fetch_from_git_server,
     git::{
         is_git_remote_helper_url,
         nostr_url::{CloneUrl, NostrUrlDecoded},
@@ -35,6 +32,7 @@ use ngit::{
         normalize_grasp_server_url, save_repo_config_to_yaml,
     },
     repo_state::RepoState,
+    utils::join_with_and,
 };
 use nostr::{
     FromBech32, Kind, PublicKey, RelayUrl, ToBech32, Url,
@@ -55,7 +53,9 @@ use crate::{
         RepoCoordinateSource, RepoRef, ResolvedRepoCoordinate, get_repo_config_from_yaml,
         print_selected_repo, try_resolve_repo_coordinate,
     },
-    state_transaction::{GitStatePushOutcome, LiveOps, StateTransaction, StateTransactionFailure},
+    state_transaction::{
+        GitStatePushOutcome, LiveOps, ServerForcePolicy, StateTransaction, StateTransactionFailure,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -1237,9 +1237,10 @@ enum StateAction {
     /// republished or re-signed).
     SyncCachedState,
     /// No canonical state, but the pre-existing `origin` remote was
-    /// listable: the origin-built state event is in the eager publish
-    /// batch and `ngit sync` propagates it afterwards.
-    PublishOriginState,
+    /// listable: build a candidate state event from its listing
+    /// (carried here) and establish it through a candidate state
+    /// transaction.
+    PublishOriginState(HashMap<String, String>),
     /// Fresh repository: push the local main/master branch and its
     /// state through the state transaction.
     PushInitialBranch,
@@ -1336,7 +1337,7 @@ async fn publish_and_finalize(
     // Step 3: Build nostr URL
     let nostr_url_decoded = repo_ref.to_nostr_git_url(&Some(git_repo));
 
-    let mut events = vec![repo_event];
+    let events = vec![repo_event];
 
     // Step 4: Handle state events and push/sync logic
     let no_state = if let Ok(Some(s)) = git_repo.get_git_config_item("nostr.nostate", None) {
@@ -1387,7 +1388,10 @@ async fn publish_and_finalize(
         StateAction::SyncCachedState
     } else if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
         if let Ok(url) = remote.url() {
-            // issue a state event with origin state, to all (inc. new) repo relays
+            // Build a state event from the pre-existing origin's
+            // listing. It is a transaction candidate: pushed to the
+            // repo's git servers, fanned out to the relays and cached
+            // only after acceptance (see publish_origin_state).
             if let Ok(mut origin_state) =
                 list_from_remote(&Term::stdout(), git_repo, url, &nostr_url_decoded, false)
             {
@@ -1396,40 +1400,7 @@ async fn publish_and_finalize(
                         || key.starts_with("refs/tags/")
                         || key.starts_with("HEAD")
                 });
-                let mut required_oids = vec![];
-                for tip in origin_state.values() {
-                    if let Ok(exist) = git_repo.does_commit_exist(tip) {
-                        let oid_exists_as_tag = Oid::from_str(tip).is_ok_and(|tip| {
-                            git_repo
-                                .git_repo
-                                .find_object(tip, Some(git2::ObjectType::Tag))
-                                .is_ok()
-                        });
-                        if !exist && !oid_exists_as_tag {
-                            required_oids.push(tip.clone());
-                        }
-                    }
-                }
-                if required_oids.is_empty() {
-                    println!("fetching refs missing locally from existing origin...");
-                    if let Err(error) = fetch_from_git_server(
-                        git_repo,
-                        &required_oids,
-                        url,
-                        &nostr_url_decoded,
-                        &Term::stdout(),
-                        false,
-                    ) {
-                        println!("error fetching refs which will make ngit sync fail: {error}");
-                    }
-                }
-                let new_state_event =
-                    RepoState::build(repo_ref.identifier.clone(), origin_state, &signer, None)
-                        .await?
-                        .event;
-                events.push(new_state_event);
-                println!("publishing repostory state to nostr...");
-                StateAction::PublishOriginState
+                StateAction::PublishOriginState(origin_state)
             } else {
                 // cant reach existing origin so just try push
                 StateAction::PushInitialBranch
@@ -1536,12 +1507,8 @@ async fn publish_and_finalize(
                 "your repository announcement was published to nostr but syncing your repository's git servers with its nostr state failed. fix the reported issue and run `ngit sync`",
             )?;
         }
-        StateAction::PublishOriginState => {
-            if fields.selected_grasp_servers.is_empty() {
-                println!(
-                    "running `ngit sync` to ensure your repository data is available on repository git servers"
-                );
-            } else {
+        StateAction::PublishOriginState(origin_state) => {
+            if !fields.selected_grasp_servers.is_empty() {
                 wait_for_grasp_servers(
                     git_repo,
                     &fields.selected_grasp_servers,
@@ -1551,11 +1518,22 @@ async fn publish_and_finalize(
                 .await?;
             }
 
-            if let Err(err) = run_ngit_sync() {
-                println!(
-                    "your repository announcement was published to nostr but 'ngit sync' exited with an error: {err}"
-                );
-            }
+            println!(
+                "publishing your repository state and syncing your git server(s) with the existing origin's state..."
+            );
+            publish_origin_state(
+                git_repo,
+                &repo_ref,
+                user_ref,
+                client,
+                &signer,
+                &nostr_url_decoded,
+                origin_state,
+            )
+            .await
+            .context(
+                "your repository announcement was published to nostr but publishing its repository state failed. fix the reported issue and run `ngit sync`",
+            )?;
         }
     }
 
@@ -1944,35 +1922,146 @@ async fn push_initial_branch(
     Ok(())
 }
 
-fn run_ngit_sync() -> Result<()> {
-    println!("========================================");
-    println!("            NGIT SYNC COMMAND            ");
-    println!("========================================");
+/// Establish the state event built from the pre-existing `origin`'s
+/// listing through a candidate state transaction: stage it on the grasp
+/// relays, push the origin-derived refs to the repository's git servers
+/// (fetching any objects missing locally first), fan the event out to
+/// the remaining relays and cache it only after a git server and at
+/// least one relay accepted it.
+#[allow(clippy::too_many_lines)]
+async fn publish_origin_state(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    user_ref: &ngit::login::user::UserRef,
+    client: &Client,
+    signer: &Arc<ngit::signer::NgitSigner>,
+    nostr_url_decoded: &NostrUrlDecoded,
+    origin_state: HashMap<String, String>,
+) -> Result<()> {
+    let term = Term::stderr();
 
-    let command = "ngit";
-    let args = ["sync"];
+    // Ordered after the newest cached state event across maintainer
+    // coordinates. Normally none exists in this branch — a cached event
+    // routes through the in-process sync instead — but the ordering
+    // discipline keeps an unexpected predecessor authoritative.
+    let old_state_event = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![get_filter_state_events(&repo_ref.coordinates(), true)],
+    )
+    .await
+    .ok()
+    .and_then(|events| event_ordering::latest_event(&events).cloned());
 
-    // Spawn the process
-    let mut child = Command::new(command)
-        .args(args)
-        .stdout(Stdio::inherit()) // Redirect stdout to the console
-        .stderr(Stdio::inherit()) // Redirect stderr to the console
-        .spawn()
-        .context("Failed to start ngit sync process")?;
+    let candidate = RepoState::build(
+        repo_ref.identifier.clone(),
+        origin_state,
+        signer,
+        old_state_event.as_ref(),
+    )
+    .await?;
 
-    // Wait for the process to finish
-    let exit_status = child.wait().context("Failed to start ngit sync process")?;
+    // Git-server reality must come from a same-invocation listing;
+    // refs/remotes/* may hold stale values from the pre-nostr origin.
+    let remote_states = list_from_remotes(
+        &term,
+        git_repo,
+        &repo_ref.git_server,
+        nostr_url_decoded,
+        None,
+    )
+    .await;
 
-    println!("========================================");
-    println!("        END OF NGIT SYNC OUTPUT");
-    println!("========================================");
+    // Fetch state objects missing locally from whichever listed server
+    // has them, so they can be pushed to the servers that don't.
+    let missing_refs =
+        super::sync::fetch_missing_refs(git_repo, &candidate, &remote_states, nostr_url_decoded);
 
-    // Check the exit status
-    if exit_status.success() {
-        Ok(())
+    // Plans source branch pushes from the candidate's own oids: the
+    // nostr remote has no tracking refs yet.
+    let (per_server_plans, state_refspecs) = super::sync::build_state_push_plans(
+        git_repo,
+        &super::sync::BranchPushSource::StateOids,
+        &candidate.state,
+        &remote_states,
+        None,
+        &missing_refs,
+        &HashSet::new(),
+    );
+
+    // Match the `ngit sync` (without --force) that init used to spawn
+    // here: grasp servers are realigned to the state, vanilla servers
+    // stay fast-forward-only.
+    let force_policy = ServerForcePolicy::ForceOnlyOn(
+        remote_states
+            .iter()
+            .filter_map(|(url, (_, is_grasp_server))| {
+                if *is_grasp_server {
+                    Some(url.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    );
+
+    let repo_relay_only = git_repo
+        .get_git_config_item("nostr.repo-relay-only", None)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "true");
+    let my_write_relays = if repo_relay_only {
+        vec![]
     } else {
-        bail!("ngit sync process exited with an error: {exit_status}");
+        user_ref.relays.write()
+    };
+
+    let mut ops = LiveOps {
+        client,
+        git_repo,
+        term: &term,
+        git_server_push_options: &[],
+        decoded_nostr_url: nostr_url_decoded,
+    };
+    let mut transaction =
+        StateTransaction::new(repo_ref, Some(candidate)).with_force_policy(force_policy);
+    transaction.publish_state_to_grasps_first(&mut ops).await;
+    match transaction.push_git_state_refspecs(&mut ops, per_server_plans, &state_refspecs) {
+        GitStatePushOutcome::NoEligibleServers => {
+            bail!(
+                "{}",
+                StateTransactionFailure::NoEligibleGitServers.user_message()
+            )
+        }
+        GitStatePushOutcome::AllPushesFailed => {
+            bail!(
+                "{}",
+                StateTransactionFailure::AllGitServerPushesFailed.user_message()
+            )
+        }
+        GitStatePushOutcome::AcceptedByGitServer => {
+            transaction
+                .publish_state_to_remaining_relays(&mut ops, &my_write_relays, repo_relay_only)
+                .await?;
+            if !transaction.state_relay_accepted() {
+                bail!(
+                    "{}",
+                    StateTransactionFailure::StateNotAcceptedByAnyRelay.user_message()
+                );
+            }
+            // The commit point: the origin-derived state only now
+            // becomes the authoritative cached state.
+            transaction.commit(&mut ops).await?;
+            println!("published repository state from the existing origin's refs");
+        }
     }
+
+    if !missing_refs.is_empty() {
+        println!(
+            "skipped the following refs as could not find them locally or on any git servers: {}",
+            join_with_and(&missing_refs)
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

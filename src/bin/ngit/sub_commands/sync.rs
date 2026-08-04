@@ -364,7 +364,7 @@ pub(crate) async fn sync_with_client(
         .map_or(&nostr_state.state, |(candidate, _)| &candidate.state);
     let (per_server_plans, state_refspecs) = build_state_push_plans(
         git_repo,
-        &nostr_remote_name,
+        &BranchPushSource::TrackingRefs(&nostr_remote_name),
         state_for_plans,
         &remote_states,
         full_ref_name.as_deref(),
@@ -555,6 +555,20 @@ fn backfill_peeled_tag_refs(git_repo: &Repo, state: &mut HashMap<String, String>
     }
 }
 
+/// Where [`build_state_push_plans`] sources the git objects for branch
+/// push refspecs.
+pub(crate) enum BranchPushSource<'a> {
+    /// `refs/remotes/<remote>/<branch>` tracking refs — sync's normal
+    /// mode, where previous pushes (or the ahead-adoption path) keep
+    /// the nostr remote's tracking refs aligned with the state event.
+    TrackingRefs(&'a str),
+    /// The state map's own oids (`<oid>:refs/heads/<branch>`) — used by
+    /// `ngit init`'s origin-derived candidate, where no tracking refs
+    /// for the nostr remote exist yet and stale `refs/remotes/*`
+    /// entries from the pre-nostr origin must not be trusted.
+    StateOids,
+}
+
 /// Build the desired per-server push plans from the nostr state:
 /// deletions for server refs absent from the state, updates and
 /// additions for state refs. Destructive refspecs — forced updates
@@ -562,9 +576,10 @@ fn backfill_peeled_tag_refs(git_repo: &Repo, state: &mut HashMap<String, String>
 /// server; the transaction's [`ServerForcePolicy`] decides where they
 /// execute. Returns the per-server plans and the deduplicated union
 /// (force prefixes stripped) used as the transaction's state refspecs.
-fn build_state_push_plans(
+#[allow(clippy::too_many_lines)]
+pub(crate) fn build_state_push_plans(
     git_repo: &Repo,
-    nostr_remote_name: &str,
+    branch_source: &BranchPushSource,
     state: &HashMap<String, String>,
     remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
     full_ref_name: Option<&str>,
@@ -643,6 +658,16 @@ fn build_state_push_plans(
             } else {
                 None
             };
+            // The push source for a branch, per the caller's
+            // [`BranchPushSource`]; also the local commit-ish compared
+            // against the server's value to decide whether an update
+            // needs forcing.
+            let branch_push_source = match branch_source {
+                BranchPushSource::TrackingRefs(nostr_remote_name) => Some(format!(
+                    "refs/remotes/{nostr_remote_name}/{tracking_ref_name}"
+                )),
+                BranchPushSource::StateOids => state.get(nostr_ref_name).cloned(),
+            };
             let build_refspec = |force: bool| -> Option<String> {
                 let prefix = if force { "+" } else { "" };
                 if is_tag {
@@ -650,9 +675,9 @@ fn build_state_push_plans(
                         .as_ref()
                         .map(|oid| format!("{prefix}{oid}:{nostr_ref_name}"))
                 } else {
-                    Some(format!(
-                        "{prefix}refs/remotes/{nostr_remote_name}/{tracking_ref_name}:{nostr_ref_name}",
-                    ))
+                    branch_push_source
+                        .as_ref()
+                        .map(|source| format!("{prefix}{source}:{nostr_ref_name}"))
                 }
             };
             let refspec = if let Some(remote_ref_value) = remote_state.get(nostr_ref_name) {
@@ -668,11 +693,22 @@ fn build_state_push_plans(
                     build_refspec(true)
                 } else {
                     // update ref; forced when the server holds commits the
-                    // nostr state does not
-                    let force_required = if let Ok((ahead, _)) =
-                        get_ahead_behind(git_repo, nostr_ref_name, remote_ref_value)
-                    {
-                        !ahead.is_empty()
+                    // nostr state does not. In tracking-refs mode the
+                    // comparison base is the local view of the state ref
+                    // (matching pre-seam behaviour); in state-oids mode
+                    // it is the state oid itself.
+                    let comparison_base = match branch_source {
+                        BranchPushSource::TrackingRefs(_) => Some(nostr_ref_name.clone()),
+                        BranchPushSource::StateOids => state.get(nostr_ref_name).cloned(),
+                    };
+                    let force_required = if let Some(comparison_base) = comparison_base {
+                        if let Ok((ahead, _)) =
+                            get_ahead_behind(git_repo, &comparison_base, remote_ref_value)
+                        {
+                            !ahead.is_empty()
+                        } else {
+                            true
+                        }
                     } else {
                         true
                     };
@@ -1017,7 +1053,7 @@ fn identify_missing_refs(git_repo: &Repo, state: &HashMap<String, String>) -> Ve
 }
 
 /// returns refs that are still missing
-fn fetch_missing_refs(
+pub(crate) fn fetch_missing_refs(
     git_repo: &Repo,
     nostr_state: &RepoState,
     remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
@@ -1790,7 +1826,7 @@ mod tests {
 
         let (plans, state_refspecs) = build_state_push_plans(
             &git_repo,
-            "origin",
+            &BranchPushSource::TrackingRefs("origin"),
             &state,
             &remote_states,
             None,
@@ -1822,7 +1858,7 @@ mod tests {
 
         let (plans, _) = build_state_push_plans(
             &git_repo,
-            "origin",
+            &BranchPushSource::TrackingRefs("origin"),
             &state,
             &remote_states,
             None,
@@ -1863,7 +1899,7 @@ mod tests {
 
         let (plans, state_refspecs) = build_state_push_plans(
             &git_repo,
-            "origin",
+            &BranchPushSource::TrackingRefs("origin"),
             &state,
             &remote_states,
             None,
@@ -1900,7 +1936,7 @@ mod tests {
 
         let (plans, _) = build_state_push_plans(
             &git_repo,
-            "origin",
+            &BranchPushSource::TrackingRefs("origin"),
             &state,
             &remote_states,
             None,
@@ -1937,7 +1973,7 @@ mod tests {
 
         let (plans, state_refspecs) = build_state_push_plans(
             &git_repo,
-            "origin",
+            &BranchPushSource::TrackingRefs("origin"),
             &state,
             &remote_states,
             None,
@@ -1950,6 +1986,139 @@ mod tests {
             "an ahead-skipped ref and a locally missing ref must produce no refspecs",
         );
         assert!(state_refspecs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // build_state_push_plans — BranchPushSource::StateOids (the seam used
+    // by `ngit init`'s origin-derived candidate, where no tracking refs
+    // for the nostr remote exist and refs/remotes/* must not be trusted)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn state_oids_source_pushes_missing_branch_from_the_state_oid() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        let oid = test_repo.populate().unwrap();
+
+        let state = HashMap::from([("refs/heads/main".to_string(), oid.to_string())]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states = remote_states_from(url, vec![], false);
+
+        let (plans, state_refspecs) = build_state_push_plans(
+            &git_repo,
+            &BranchPushSource::StateOids,
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            plans.get(url).unwrap(),
+            &vec![format!("{oid}:refs/heads/main")],
+            "branch pushes must be sourced from the state oid, never from \
+             refs/remotes/*",
+        );
+        assert_eq!(state_refspecs, vec![format!("{oid}:refs/heads/main")]);
+    }
+
+    #[test]
+    fn state_oids_source_skips_in_sync_branch() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        let oid = test_repo.populate().unwrap();
+
+        let state = HashMap::from([("refs/heads/main".to_string(), oid.to_string())]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states =
+            remote_states_from(url, vec![("refs/heads/main", &oid.to_string())], false);
+
+        let (plans, state_refspecs) = build_state_push_plans(
+            &git_repo,
+            &BranchPushSource::StateOids,
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert!(plans.get(url).unwrap().is_empty());
+        assert!(state_refspecs.is_empty());
+    }
+
+    #[test]
+    fn state_oids_source_fast_forward_update_is_not_forced() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        let oid_a = test_repo.populate().unwrap();
+        std::fs::write(test_repo.dir.join("b.md"), "b").unwrap();
+        let oid_b = test_repo.stage_and_commit("b").unwrap();
+
+        let state = HashMap::from([("refs/heads/main".to_string(), oid_b.to_string())]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states =
+            remote_states_from(url, vec![("refs/heads/main", &oid_a.to_string())], false);
+
+        let (plans, _) = build_state_push_plans(
+            &git_repo,
+            &BranchPushSource::StateOids,
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            plans.get(url).unwrap(),
+            &vec![format!("{oid_b}:refs/heads/main")],
+        );
+    }
+
+    #[test]
+    fn state_oids_source_forces_update_when_server_holds_unknown_commits() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        test_repo.populate().unwrap();
+
+        // server diverged: a commit on a side branch off the shared base
+        test_repo.create_branch("server_side").unwrap();
+        test_repo.checkout("server_side").unwrap();
+        std::fs::write(test_repo.dir.join("server.md"), "server side").unwrap();
+        let server_oid = test_repo.stage_and_commit("server commit").unwrap();
+
+        // state on main, which moved forward independently
+        test_repo.checkout("main").unwrap();
+        std::fs::write(test_repo.dir.join("nostr.md"), "nostr side").unwrap();
+        let state_oid = test_repo.stage_and_commit("nostr commit").unwrap();
+
+        let state = HashMap::from([("refs/heads/main".to_string(), state_oid.to_string())]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states = remote_states_from(
+            url,
+            vec![("refs/heads/main", &server_oid.to_string())],
+            false,
+        );
+
+        let (plans, state_refspecs) = build_state_push_plans(
+            &git_repo,
+            &BranchPushSource::StateOids,
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            plans.get(url).unwrap(),
+            &vec![format!("+{state_oid}:refs/heads/main")],
+            "divergence is detected against the state oid itself, not a \
+             local branch or tracking ref",
+        );
+        assert_eq!(state_refspecs, vec![format!("{state_oid}:refs/heads/main")]);
     }
 
     // -----------------------------------------------------------------------
