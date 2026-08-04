@@ -1,4 +1,7 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 use anyhow::{Context, Result, bail};
 use console::Term;
@@ -15,16 +18,18 @@ use ngit::{
     },
     list::{get_ahead_behind, list_from_remotes},
     login::{self, existing::load_existing_login},
-    push::push_to_remote,
     repo_ref::{
-        format_grasp_server_url_as_relay_url, get_nostr_remote_for_resolved_coordinate,
-        get_resolved_repo_coordinate_for_publishing, grasp_server_relay_urls,
-        is_grasp_server_clone_url,
+        get_nostr_remote_for_resolved_coordinate, get_resolved_repo_coordinate_for_publishing,
+        grasp_server_relay_urls, is_grasp_server_clone_url,
     },
     repo_state::RepoState,
     utils::{get_short_git_server_name, join_with_and},
 };
 use nostr::RelayUrl;
+
+use crate::state_transaction::{
+    GitStatePushOutcome, LiveOps, ServerForcePolicy, ServerPushOutcome, StateTransaction,
+};
 
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
@@ -183,70 +188,9 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         println!("state event republished");
     }
 
-    // Publish the current state event to any grasp server relays that are
-    // missing it or have a stale version.  Grasp servers reject git pushes
-    // unless the state event is already present on their relay, so we must
-    // do this before attempting any git push.
-    //
-    // We use the per-relay state events captured during the fetch rather than
-    // the local database, because the database only stores the canonical latest
-    // event and cannot tell us what each individual relay holds.
-    let grasp_relays_needing_state: Vec<RelayUrl> = grasp_server_relay_urls(&repo_ref.git_server)
-        .into_iter()
-        .filter(|relay_url| {
-            // Include this relay if it was absent from the fetch results, had
-            // no state event, or had a state event older than the canonical one.
-            match fetch_report.state_per_relay.get(relay_url) {
-                // relay wasn't queried, or returned no state event
-                None | Some(None) => true,
-                Some(Some(relay_event)) => relay_event.id != nostr_state.event.id,
-            }
-        })
-        .collect();
-
-    // relay URL -> whether the state event was successfully published to it.
-    // Only populated for grasp relays that needed the state event; grasp
-    // relays that already had the current state event are considered succeeded.
-    let mut grasp_relay_publish_results: HashMap<String, bool> = HashMap::new();
-
-    if !grasp_relays_needing_state.is_empty() {
-        // Attempt to load an existing login silently so the signer is
-        // available for NIP-42 auth if a relay requests it.  We do not
-        // prompt the user, do not fetch profile updates, and ignore any
-        // failure — the events are already signed so publishing works
-        // without a signer.
-        if let Ok((signer, _, _)) = load_existing_login(
-            &Some(&git_repo),
-            &None,
-            &None,
-            &None,
-            Some(&client),
-            true,  // silent
-            false, // prompt_for_password
-            false, // fetch_profile_updates
-        )
-        .await
-        {
-            client.set_signer(signer.clone()).await;
-        }
-        // Send only to the specific grasp relays that are missing or have a
-        // stale state event — no user write relays.
-        if let Ok(results) = send_events(
-            &client,
-            Some(git_repo_path),
-            vec![nostr_state.event.clone()],
-            vec![], // no user write relays
-            grasp_relays_needing_state,
-            true,
-            false,
-        )
-        .await
-        {
-            for (relay_url, succeeded) in results {
-                grasp_relay_publish_results.insert(relay_url, succeeded);
-            }
-        }
-    }
+    // Whether a signer is already configured on the client — needed later
+    // for NIP-42 auth when grasp relays are seeded with the state event.
+    let mut client_has_signer = args.force;
 
     let term = console::Term::stderr();
 
@@ -313,6 +257,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             {
                 Ok((signer, user_ref, _)) => {
                     client.set_signer(signer.clone()).await;
+                    client_has_signer = true;
 
                     // Build the updated state map.
                     let mut new_state_map = nostr_state.state.clone();
@@ -374,14 +319,6 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                                 }
                             }
 
-                            // After updating the state the grasp-relay
-                            // publish results are stale.  Clearing the map
-                            // means the push loop will attempt all grasp
-                            // servers without the safety-skip logic; if a
-                            // server's relay didn't receive the new state the
-                            // push will simply be rejected and reported.
-                            grasp_relay_publish_results.clear();
-
                             nostr_state = new_state;
                         }
                         Err(e) => {
@@ -439,23 +376,172 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     // state.  These refs must not be pushed: the server already has commits
     // that nostr state doesn't, so pushing the (older) nostr-state tracking
     // ref would attempt a non-fast-forward downgrade and fail.
-    let ahead_ref_skip: std::collections::HashSet<(&str, &str)> = ahead_refs
+    let ahead_ref_skip: HashSet<(&str, &str)> = ahead_refs
         .iter()
         .map(|r| (r.source_url.as_str(), r.ref_name.as_str()))
         .collect();
 
-    for (url, (remote_state, is_grasp_server)) in &remote_states {
-        let remote_name = get_short_git_server_name(url);
+    let (per_server_plans, state_refspecs) = build_state_push_plans(
+        &git_repo,
+        &nostr_remote_name,
+        &nostr_state.state,
+        &remote_states,
+        full_ref_name.as_deref(),
+        &missing_refs,
+        &ahead_ref_skip,
+    );
+
+    // Relays that already hold the current state event don't need seeding.
+    // The per-relay state events captured during the fetch are used rather
+    // than the local database, because the database only stores the
+    // canonical latest event and cannot tell us what each relay holds.
+    let relays_already_holding: Vec<RelayUrl> = fetch_report
+        .state_per_relay
+        .iter()
+        .filter_map(|(relay_url, event)| {
+            event
+                .as_ref()
+                .filter(|event| event.id == nostr_state.event.id)
+                .map(|_| relay_url.clone())
+        })
+        .collect();
+
+    // Attempt to load an existing login silently when grasp relays need
+    // seeding so the signer is available for NIP-42 auth if a relay
+    // requests it.  We do not prompt the user, do not fetch profile
+    // updates, and ignore any failure — the event is already signed so
+    // publishing works without a signer.
+    if !client_has_signer
+        && grasp_server_relay_urls(&repo_ref.git_server)
+            .iter()
+            .any(|relay_url| !relays_already_holding.contains(relay_url))
+    {
+        if let Ok((signer, _, _)) = load_existing_login(
+            &Some(&git_repo),
+            &None,
+            &None,
+            &None,
+            Some(&client),
+            true,  // silent
+            false, // prompt_for_password
+            false, // fetch_profile_updates
+        )
+        .await
+        {
+            client.set_signer(signer).await;
+        }
+    }
+
+    // `ngit sync` realigns grasp servers to the nostr state (they can only
+    // be pushed to via nostr) but leaves vanilla servers fast-forward-only
+    // unless --force.
+    let force_policy = if args.force {
+        ServerForcePolicy::ForceRealignAll
+    } else {
+        ServerForcePolicy::ForceOnlyOn(
+            remote_states
+                .iter()
+                .filter_map(|(url, (_, is_grasp_server))| {
+                    if *is_grasp_server {
+                        Some(url.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
+    };
+
+    let mut ops = LiveOps {
+        client: &client,
+        git_repo: &git_repo,
+        term: &term,
+        git_server_push_options: &[],
+        decoded_nostr_url: &decoded_nostr_url,
+    };
+
+    // Propagate the already-canonical state event: seed the grasp relays
+    // missing it before any git data reaches their servers (grasp servers
+    // reject git pushes unless the state event is already present on their
+    // relay), then execute the per-server push plans.
+    let mut transaction =
+        StateTransaction::new_authoritative(&repo_ref, nostr_state, relays_already_holding)
+            .with_force_policy(force_policy);
+
+    transaction.publish_state_to_grasps_first(&mut ops).await;
+
+    let outcome = transaction.push_git_state_refspecs(&mut ops, per_server_plans, &state_refspecs);
+
+    report_per_server_results(
+        &term,
+        &remote_states,
+        &ahead_refs,
+        &transaction,
+        &state_refspecs,
+        args.force,
+    )?;
+
+    match outcome {
+        GitStatePushOutcome::NoEligibleServers => {
+            term.write_line(
+                "WARNING: no git server was pushed - the state event failed to reach the grasp server relays",
+            )?;
+        }
+        GitStatePushOutcome::AllPushesFailed => {
+            // individual server failures were reported above; sync stays
+            // lenient and still exits successfully
+        }
+        GitStatePushOutcome::AcceptedByGitServer => {
+            // No-ops in authoritative mode: the canonical event is neither
+            // fanned out nor re-cached. Kept in phase order for the
+            // candidate-state flows (--force and --trust-server) that are
+            // being migrated onto the transaction.
+            transaction
+                .publish_state_to_remaining_relays(&mut ops, &[], false)
+                .await?;
+            if transaction.state_relay_accepted() {
+                transaction.commit(&mut ops).await?;
+            }
+        }
+    }
+
+    if !missing_refs.is_empty() {
+        println!(
+            "skipped the following refs as could not find them locally or on any git servers: {}",
+            join_with_and(&missing_refs)
+        );
+    }
+    Ok(())
+}
+
+/// Build the desired per-server push plans from the nostr state:
+/// deletions for server refs absent from the state, updates and
+/// additions for state refs. Destructive refspecs — forced updates
+/// (`+`) and deletions (`:`) — are emitted for every out-of-sync
+/// server; the transaction's [`ServerForcePolicy`] decides where they
+/// execute. Returns the per-server plans and the deduplicated union
+/// (force prefixes stripped) used as the transaction's state refspecs.
+fn build_state_push_plans(
+    git_repo: &Repo,
+    nostr_remote_name: &str,
+    state: &HashMap<String, String>,
+    remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
+    full_ref_name: Option<&str>,
+    missing_refs: &[String],
+    ahead_ref_skip: &HashSet<(&str, &str)>,
+) -> (HashMap<String, Vec<String>>, Vec<String>) {
+    let mut per_server_plans = HashMap::new();
+    let mut state_refspecs: Vec<String> = vec![];
+    for (url, (remote_state, _)) in remote_states {
         let mut refspecs = vec![];
-        // delete ref from remote
-        let mut not_deleted = vec![];
+        // delete server refs that are absent from the nostr state
         for remote_ref_name in remote_state.keys() {
             // skip peeled-tag dereference markers — not real refs
             if remote_ref_name.ends_with("^{}") {
                 continue;
             }
             // skip unspecified refs
-            if let Some(full_ref_name) = &full_ref_name {
+            if let Some(full_ref_name) = full_ref_name {
                 if remote_ref_name != full_ref_name {
                     continue;
                 }
@@ -463,29 +549,20 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             if (!remote_ref_name.starts_with("refs/heads/pr/")
                 && (remote_ref_name.starts_with("refs/heads/")
                     || remote_ref_name.starts_with("refs/tags/")))
-                && !nostr_state
-                    .state
-                    .keys()
-                    .any(|nostr_ref| nostr_ref.eq(remote_ref_name))
+                && !state.keys().any(|nostr_ref| nostr_ref.eq(remote_ref_name))
             {
-                if *is_grasp_server || args.force {
-                    // delete branches / tags not on nostr
-                    refspecs.push(format!(":{remote_ref_name}"));
-                } else {
-                    not_deleted.push(remote_ref_name);
-                }
+                refspecs.push(format!(":{remote_ref_name}"));
             }
         }
-        // add or update ref on remote
-        let mut not_updated = vec![];
-        for nostr_ref_name in nostr_state.state.keys() {
+        // add or update state refs on the server
+        for nostr_ref_name in state.keys() {
             // skip peeled-tag dereference markers (e.g. refs/tags/v1.0.0^{})
             // — these are not real git refs and cannot appear in refspecs
             if nostr_ref_name.ends_with("^{}") {
                 continue;
             }
             // skip unspecified refs
-            if let Some(full_ref_name) = &full_ref_name {
+            if let Some(full_ref_name) = full_ref_name {
                 if nostr_ref_name != full_ref_name {
                     continue;
                 }
@@ -498,6 +575,11 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             // the (older) tracking ref would attempt a non-fast-forward
             // downgrade; the user must run with --trust-server first
             if ahead_ref_skip.contains(&(url.as_str(), nostr_ref_name.as_str())) {
+                continue;
+            }
+            // ensure nostr state only supports refs/heads/ and refs/tags/
+            // and not refs/heads/pr/*
+            if invalid_nostr_state_ref(nostr_ref_name) {
                 continue;
             }
             // strip refs/heads/ or refs/tags/ prefix to get the tracking ref segment
@@ -516,7 +598,7 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             // authoritative oid.
             let is_tag = nostr_ref_name.starts_with("refs/tags/");
             let nostr_oid_for_tag = if is_tag {
-                nostr_state.state.get(nostr_ref_name).cloned()
+                state.get(nostr_ref_name).cloned()
             } else {
                 None
             };
@@ -532,126 +614,116 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
                     ))
                 }
             };
-            if invalid_nostr_state_ref(nostr_ref_name) {
-                // ensure nostr_state only supports refs/heads and refs/tags/
-                // and not refs/heads/prs/*
-            } else if let Some(remote_ref_value) = remote_state.get(nostr_ref_name) {
-                // update ref
-                let force_required = {
-                    if let Ok((ahead, _)) =
-                        get_ahead_behind(&git_repo, nostr_ref_name, remote_ref_value)
-                    {
-                        !ahead.is_empty()
-                    } else {
-                        true
-                    }
-                };
-                if nostr_state
-                    .state
+            let refspec = if let Some(remote_ref_value) = remote_state.get(nostr_ref_name) {
+                if state
                     .get(nostr_ref_name)
                     .is_none_or(|nostr_ref_value| nostr_ref_value.eq(remote_ref_value))
                 {
                     // no action if ref in sync
-                } else if remote_ref_value.starts_with("ref ") && !(args.force || *is_grasp_server)
-                {
-                    // dont try and sync push symbolic refs
-                } else if !force_required {
-                    if let Some(rs) = build_refspec(false) {
-                        refspecs.push(rs);
-                    }
-                } else if *is_grasp_server || args.force {
-                    if let Some(rs) = build_refspec(true) {
-                        refspecs.push(rs);
-                    }
+                    None
+                } else if remote_ref_value.starts_with("ref ") {
+                    // a symbolic ref on the server can only be replaced by
+                    // a forced realignment
+                    build_refspec(true)
                 } else {
-                    not_updated.push(nostr_ref_name);
+                    // update ref; forced when the server holds commits the
+                    // nostr state does not
+                    let force_required = if let Ok((ahead, _)) =
+                        get_ahead_behind(git_repo, nostr_ref_name, remote_ref_value)
+                    {
+                        !ahead.is_empty()
+                    } else {
+                        true
+                    };
+                    build_refspec(force_required)
                 }
             } else {
-                // add missing refs
-                if let Some(rs) = build_refspec(false) {
-                    refspecs.push(rs);
-                }
+                // add missing ref
+                build_refspec(false)
+            };
+            if let Some(refspec) = refspec {
+                refspecs.push(refspec);
             }
         }
-
-        // Skip grasp servers whose relay did not receive the state event —
-        // they would reject the git push anyway.
-        if (*is_grasp_server || is_grasp_server_clone_url(url))
-            && !grasp_relay_publish_results.is_empty()
-        {
-            if let Ok(relay_url) = format_grasp_server_url_as_relay_url(url) {
-                if grasp_relay_publish_results
-                    .get(&relay_url)
-                    .is_some_and(|succeeded| !succeeded)
-                {
-                    term.write_line(&format!(
-                        "WARNING: skipping {remote_name} - state event failed to reach its relay"
-                    ))?;
-                    continue;
-                }
+        for refspec in &refspecs {
+            let stripped = refspec.trim_start_matches('+');
+            if !state_refspecs.iter().any(|existing| existing == stripped) {
+                state_refspecs.push(stripped.to_string());
             }
         }
+        per_server_plans.insert(url.clone(), refspecs);
+    }
+    (per_server_plans, state_refspecs)
+}
 
-        if refspecs.is_empty() {
-            let has_ahead_refs = ahead_refs.iter().any(|r| r.source_url == *url);
-            if !not_updated.is_empty() || !not_deleted.is_empty() {
-                term.write_line(&format!("{remote_name} in sync excluding"))?;
-            } else if !has_ahead_refs {
-                term.write_line(&format!("{remote_name} already in sync"))?;
-            }
-            // if the server is ahead, we already reported it above — no
-            // additional message needed here
-            // report already in sync
+/// Report per-server sync results from the transaction's recorded
+/// outcomes, mirroring the lines sync printed before its migration onto
+/// [`StateTransaction`]. Refspecs the [`ServerForcePolicy`] dropped are
+/// listed like the old "not updated" / "not deleted" skips.
+fn report_per_server_results(
+    term: &console::Term,
+    remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
+    ahead_refs: &[AheadRef],
+    transaction: &StateTransaction,
+    state_refspecs: &[String],
+    force: bool,
+) -> Result<()> {
+    let mut any_dropped = false;
+    let mut server_urls: Vec<&String> = remote_states.keys().collect();
+    server_urls.sort();
+    for url in server_urls {
+        let remote_name = get_short_git_server_name(url);
+        let dropped = transaction
+            .refspecs_dropped_by_policy()
+            .get(url)
+            .cloned()
+            .unwrap_or_default();
+        let outcome = if state_refspecs.is_empty() {
+            // the push phase was vacuous: nothing needed pushing anywhere
+            Some(ServerPushOutcome::AlreadyApplied)
         } else {
-            match push_to_remote(
-                &git_repo,
-                url,
-                &decoded_nostr_url,
-                &refspecs,
-                &term,
-                *is_grasp_server || is_grasp_server_clone_url(url),
-                &[],
-            ) {
-                Err(error) => {
-                    term.write_line(&format!(
-                        "error pushing updates to {remote_name}: error: {error}"
-                    ))?;
+            transaction.server_push_outcomes().get(url).copied()
+        };
+        match outcome {
+            None => {
+                // skipped by the grasp staging gate; the transaction
+                // already printed a warning
+            }
+            Some(ServerPushOutcome::AlreadyApplied) => {
+                if !dropped.is_empty() {
+                    term.write_line(&format!("{remote_name} in sync excluding"))?;
+                } else if !ahead_refs.iter().any(|r| r.source_url == *url) {
+                    // if the server is ahead, it was already reported —
+                    // no additional message needed here
+                    term.write_line(&format!("{remote_name} already in sync"))?;
                 }
-                Ok(updated_refs) => {
-                    if updated_refs.values().all(std::option::Option::is_none) {
-                        if *is_grasp_server || args.force {
-                            term.write_line(&format!("{remote_name} sync completed"))?;
-                            // TODO we only know if there was an error but not
-                            // if it rejected any
-                            // updates
-                        } else {
-                            // we should report on refs not force pushed
-                            term.write_line(&format!("{remote_name} sync completed"))?;
-                        }
-                    } else {
-                        term.write_line(&format!(
-                            "{remote_name} sync completed but not all changes were accepted"
-                        ))?;
-                    }
-                    for name in &not_deleted {
-                        term.write_line(&format!("  - {name} not deleted"))?;
-                    }
-                    for name in &not_updated {
-                        term.write_line(&format!("  - {name} not updated due to conflicts"))?;
-                    }
-                    if !not_updated.is_empty() || !not_deleted.is_empty() {
-                        term.write_line("run `ngit sync --force` to delete refs or overwrite conflicts and potentially lose work")?;
-                    }
-                }
+            }
+            Some(ServerPushOutcome::Accepted) => {
+                term.write_line(&format!("{remote_name} sync completed"))?;
+            }
+            Some(ServerPushOutcome::RefsRejected) => {
+                term.write_line(&format!(
+                    "{remote_name} sync completed but not all changes were accepted"
+                ))?;
+            }
+            Some(ServerPushOutcome::Failed) => {
+                term.write_line(&format!("error pushing updates to {remote_name}"))?;
+            }
+        }
+        for refspec in &dropped {
+            any_dropped = true;
+            if let Some(ref_name) = refspec.strip_prefix(':') {
+                term.write_line(&format!("  - {ref_name} not deleted"))?;
+            } else {
+                let ref_name = refspec.rsplit(':').next().unwrap_or(refspec);
+                term.write_line(&format!("  - {ref_name} not updated due to conflicts"))?;
             }
         }
     }
-
-    if !missing_refs.is_empty() {
-        println!(
-            "skipped the following refs as could not find them locally or on any git servers: {}",
-            join_with_and(&missing_refs)
-        );
+    if any_dropped && !force {
+        term.write_line(
+            "run `ngit sync --force` to delete refs or overwrite conflicts and potentially lose work",
+        )?;
     }
     Ok(())
 }
@@ -1652,6 +1724,191 @@ mod tests {
             diverging[0].commits_behind, 1,
             "server is 1 behind nostr state"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_state_push_plans
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stray_server_ref_gets_delete_refspec_on_every_server() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        let oid = test_repo.populate().unwrap();
+
+        let state = HashMap::from([("refs/heads/main".to_string(), oid.to_string())]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states = remote_states_from(
+            url,
+            vec![
+                ("refs/heads/main", &oid.to_string()),
+                ("refs/heads/stray", &oid.to_string()),
+            ],
+            false,
+        );
+
+        let (plans, state_refspecs) = build_state_push_plans(
+            &git_repo,
+            "origin",
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            plans.get(url).unwrap(),
+            &vec![":refs/heads/stray".to_string()],
+            "the delete refspec is emitted even for a vanilla server — the \
+             transaction's force policy decides whether it executes",
+        );
+        assert_eq!(state_refspecs, vec![":refs/heads/stray".to_string()]);
+    }
+
+    #[test]
+    fn fast_forwardable_update_is_not_forced() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        let oid_a = test_repo.populate().unwrap();
+        std::fs::write(test_repo.dir.join("b.md"), "b").unwrap();
+        let oid_b = test_repo.stage_and_commit("b").unwrap();
+
+        let state = HashMap::from([("refs/heads/main".to_string(), oid_b.to_string())]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states =
+            remote_states_from(url, vec![("refs/heads/main", &oid_a.to_string())], false);
+
+        let (plans, _) = build_state_push_plans(
+            &git_repo,
+            "origin",
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            plans.get(url).unwrap(),
+            &vec!["refs/remotes/origin/main:refs/heads/main".to_string()],
+        );
+    }
+
+    #[test]
+    fn diverged_server_ref_is_force_realigned_and_union_strips_the_prefix() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        test_repo.populate().unwrap();
+
+        // server diverged: a commit on a side branch off the shared base
+        test_repo.create_branch("server_side").unwrap();
+        test_repo.checkout("server_side").unwrap();
+        std::fs::write(test_repo.dir.join("server.md"), "server side").unwrap();
+        let server_oid = test_repo.stage_and_commit("server commit").unwrap();
+
+        // nostr state on main, which moved forward independently
+        test_repo.checkout("main").unwrap();
+        std::fs::write(test_repo.dir.join("nostr.md"), "nostr side").unwrap();
+        let nostr_oid = test_repo.stage_and_commit("nostr commit").unwrap();
+
+        let state = HashMap::from([("refs/heads/main".to_string(), nostr_oid.to_string())]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states = remote_states_from(
+            url,
+            vec![("refs/heads/main", &server_oid.to_string())],
+            false,
+        );
+
+        let (plans, state_refspecs) = build_state_push_plans(
+            &git_repo,
+            "origin",
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            plans.get(url).unwrap(),
+            &vec!["+refs/remotes/origin/main:refs/heads/main".to_string()],
+        );
+        assert_eq!(
+            state_refspecs,
+            vec!["refs/remotes/origin/main:refs/heads/main".to_string()],
+            "the union must strip the force prefix so the transaction can \
+             match plan entries regardless of per-server forcing",
+        );
+    }
+
+    #[test]
+    fn tag_refspec_pushes_the_state_oid_directly_and_skips_peeled_markers() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        let oid = test_repo.populate().unwrap();
+
+        let state = HashMap::from([
+            ("refs/heads/main".to_string(), oid.to_string()),
+            ("refs/tags/v1.0.0".to_string(), oid.to_string()),
+            ("refs/tags/v1.0.0^{}".to_string(), oid.to_string()),
+        ]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states =
+            remote_states_from(url, vec![("refs/heads/main", &oid.to_string())], false);
+
+        let (plans, _) = build_state_push_plans(
+            &git_repo,
+            "origin",
+            &state,
+            &remote_states,
+            None,
+            &[],
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            plans.get(url).unwrap(),
+            &vec![format!("{oid}:refs/tags/v1.0.0")],
+            "tags are pushed by state oid, not via a tracking ref, and the \
+             ^{{}} peeled marker must never produce a refspec",
+        );
+    }
+
+    #[test]
+    fn ahead_and_locally_missing_refs_are_excluded_from_the_plan() {
+        let test_repo = GitTestRepo::default();
+        let git_repo = Repo::from_path(&test_repo.dir).unwrap();
+        let oid_a = test_repo.populate().unwrap();
+        std::fs::write(test_repo.dir.join("b.md"), "b").unwrap();
+        let oid_b = test_repo.stage_and_commit("b").unwrap();
+
+        let state = HashMap::from([
+            ("refs/heads/main".to_string(), oid_b.to_string()),
+            ("refs/heads/feature".to_string(), oid_b.to_string()),
+        ]);
+        let url = "https://github.com/user/repo.git";
+        let remote_states =
+            remote_states_from(url, vec![("refs/heads/main", &oid_a.to_string())], false);
+
+        let missing_refs = vec!["refs/heads/feature".to_string()];
+        let ahead_ref_skip = HashSet::from([(url, "refs/heads/main")]);
+
+        let (plans, state_refspecs) = build_state_push_plans(
+            &git_repo,
+            "origin",
+            &state,
+            &remote_states,
+            None,
+            &missing_refs,
+            &ahead_ref_skip,
+        );
+
+        assert!(
+            plans.get(url).unwrap().is_empty(),
+            "an ahead-skipped ref and a locally missing ref must produce no refspecs",
+        );
+        assert!(state_refspecs.is_empty());
     }
 
     // -----------------------------------------------------------------------

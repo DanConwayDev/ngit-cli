@@ -177,9 +177,6 @@ pub enum ServerForcePolicy {
     /// (compared ignoring a trailing slash); every other server is pushed
     /// fast-forward-only. `ngit sync` realigns GRASP servers but leaves
     /// vanilla servers untouched unless `--force`.
-    // No production caller until `ngit sync` migrates onto the
-    // transaction.
-    #[allow(dead_code)]
     ForceOnlyOn(Vec<String>),
 }
 
@@ -323,9 +320,6 @@ impl<'a> StateTransaction<'a> {
     /// before their paired servers are pushed, the remaining-relay
     /// fanout is skipped, relay acceptance is vacuously satisfied and
     /// [`Self::commit`] performs no cache write.
-    // No production caller until `ngit sync` migrates onto the
-    // transaction.
-    #[allow(dead_code)]
     pub fn new_authoritative(
         repo_ref: &'a RepoRef,
         state: RepoState,
@@ -346,9 +340,6 @@ impl<'a> StateTransaction<'a> {
     }
 
     /// Replace the default [`ServerForcePolicy::ForceRealignAll`] policy.
-    // No production caller until `ngit sync` migrates onto the
-    // transaction.
-    #[allow(dead_code)]
     pub fn with_force_policy(mut self, force_policy: ServerForcePolicy) -> Self {
         self.force_policy = force_policy;
         self
@@ -357,9 +348,6 @@ impl<'a> StateTransaction<'a> {
     /// Destructive refspecs dropped per git server by the
     /// [`ServerForcePolicy`] during [`Self::push_git_state_refspecs`],
     /// for the caller's reporting.
-    // No production caller until `ngit sync` migrates onto the
-    // transaction.
-    #[allow(dead_code)]
     pub fn refspecs_dropped_by_policy(&self) -> &DroppedRefspecs {
         &self.refspecs_dropped_by_policy
     }
@@ -367,9 +355,6 @@ impl<'a> StateTransaction<'a> {
     /// Per-git-server outcomes recorded by
     /// [`Self::push_git_state_refspecs`], for the caller's reporting.
     /// Servers skipped by the GRASP staging gate are absent.
-    // No production caller until `ngit sync` migrates onto the
-    // transaction.
-    #[allow(dead_code)]
     pub fn server_push_outcomes(&self) -> &HashMap<String, ServerPushOutcome> {
         &self.server_push_outcomes
     }
