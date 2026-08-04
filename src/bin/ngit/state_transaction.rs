@@ -241,6 +241,20 @@ struct InitialStatePublish {
     results: Vec<(String, bool)>,
 }
 
+/// How the transaction relates to the state event it publishes.
+enum StateMode {
+    /// A candidate replacement state built by the caller; it becomes
+    /// locally authoritative only at [`StateTransaction::commit`].
+    Candidate,
+    /// An already-canonical state event (e.g. loaded from the local
+    /// cache): no cache write is needed and staging only seeds the
+    /// GRASP relays that are missing the event.
+    Authoritative {
+        /// relays known to already hold the current state event
+        relays_already_holding: Vec<RelayUrl>,
+    },
+}
+
 /// A single repository-state publication transaction (see the module docs
 /// for the phase ordering rationale).
 ///
@@ -249,11 +263,16 @@ struct InitialStatePublish {
 /// previous event remains the authoritative ordering reference until
 /// [`Self::commit`] performs the transaction's single cache write after
 /// git server and relay acceptance.
+///
+/// [`Self::new_authoritative`] instead propagates an existing canonical
+/// state event: staging seeds only the GRASP relays missing it and the
+/// transaction performs no cache write at all.
 pub struct StateTransaction<'a> {
     repo_ref: &'a RepoRef,
     /// the candidate replacement state (`None` when the push publishes no
     /// state event, e.g. `nostr.nostate`)
     state: Option<RepoState>,
+    mode: StateMode,
     force_policy: ServerForcePolicy,
     initial_state_publish: InitialStatePublish,
     remaining_relay_results: Vec<(String, bool)>,
@@ -265,6 +284,34 @@ impl<'a> StateTransaction<'a> {
         Self {
             repo_ref,
             state,
+            mode: StateMode::Candidate,
+            force_policy: ServerForcePolicy::ForceRealignAll,
+            initial_state_publish: InitialStatePublish::default(),
+            remaining_relay_results: vec![],
+            refspecs_dropped_by_policy: HashMap::new(),
+        }
+    }
+
+    /// A transaction that propagates an *already-canonical* state event
+    /// rather than a candidate: GRASP relays not listed in
+    /// `relays_already_holding` are seeded with the existing event
+    /// before their paired servers are pushed, the remaining-relay
+    /// fanout is skipped, relay acceptance is vacuously satisfied and
+    /// [`Self::commit`] performs no cache write.
+    // No production caller until `ngit sync` migrates onto the
+    // transaction.
+    #[allow(dead_code)]
+    pub fn new_authoritative(
+        repo_ref: &'a RepoRef,
+        state: RepoState,
+        relays_already_holding: Vec<RelayUrl>,
+    ) -> Self {
+        Self {
+            repo_ref,
+            state: Some(state),
+            mode: StateMode::Authoritative {
+                relays_already_holding,
+            },
             force_policy: ServerForcePolicy::ForceRealignAll,
             initial_state_publish: InitialStatePublish::default(),
             remaining_relay_results: vec![],
@@ -318,11 +365,25 @@ impl<'a> StateTransaction<'a> {
             grasp_server_relay_urls(&self.repo_ref.git_server)
         };
 
-        let results = if state_events.is_empty() || grasp_relays.is_empty() {
+        // In authoritative mode the event is already canonical: only
+        // relays missing it are seeded, and the relays that hold it
+        // count as having accepted it without a publish.
+        let (relays_to_publish, relays_holding) = match &self.mode {
+            StateMode::Candidate => (grasp_relays.clone(), vec![]),
+            StateMode::Authoritative {
+                relays_already_holding,
+            } => grasp_relays.iter().cloned().partition(|relay| {
+                !relays_already_holding
+                    .iter()
+                    .any(|holding| relay_urls_match(holding.as_str(), relay.as_str()))
+            }),
+        };
+
+        let mut results = if state_events.is_empty() || relays_to_publish.is_empty() {
             vec![]
         } else {
             match ops
-                .publish_state_events(state_events, vec![], grasp_relays.clone())
+                .publish_state_events(state_events, vec![], relays_to_publish)
                 .await
             {
                 Ok(results) => results,
@@ -332,6 +393,11 @@ impl<'a> StateTransaction<'a> {
                 }
             }
         };
+        results.extend(
+            relays_holding
+                .into_iter()
+                .map(|relay| (relay.to_string(), true)),
+        );
 
         self.initial_state_publish = InitialStatePublish {
             grasp_relays,
@@ -398,13 +464,18 @@ impl<'a> StateTransaction<'a> {
     }
 
     /// Fan the state events out to the repo/user relays that were not
-    /// already targeted during GRASP staging.
+    /// already targeted during GRASP staging. A no-op in authoritative
+    /// mode: an already-canonical event is only seeded where it is
+    /// missing.
     pub async fn publish_state_to_remaining_relays(
         &mut self,
         ops: &mut impl StateTransactionOps,
         my_write_relays: &[String],
         repo_relay_only: bool,
     ) -> Result<()> {
+        if matches!(self.mode, StateMode::Authoritative { .. }) {
+            return Ok(());
+        }
         let state_events = self.state_events();
         if state_events.is_empty() {
             return Ok(());
@@ -429,8 +500,13 @@ impl<'a> StateTransaction<'a> {
 
     /// Whether at least one relay accepted the state event across the
     /// initial GRASP staging and the remaining-relay fanout (vacuously
-    /// true when the transaction carries no state event).
+    /// true when the transaction carries no state event, or in
+    /// authoritative mode, where the event is already canonical and
+    /// propagation is not gated on further relay acceptance).
     pub fn state_relay_accepted(&self) -> bool {
+        if matches!(self.mode, StateMode::Authoritative { .. }) {
+            return true;
+        }
         state_relay_accepted(
             self.state.is_some(),
             self.initial_state_publish.results.iter(),
@@ -442,8 +518,12 @@ impl<'a> StateTransaction<'a> {
     /// local state. This is the transaction's only cache write; every
     /// failure path before it leaves the previously cached state
     /// untouched, so a subsequent push or `ngit sync` keeps working from
-    /// the last state a git server accepted.
+    /// the last state a git server accepted. A no-op in authoritative
+    /// mode: the event is already the cached authoritative state.
     pub async fn commit(&self, ops: &mut impl StateTransactionOps) -> Result<()> {
+        if matches!(self.mode, StateMode::Authoritative { .. }) {
+            return Ok(());
+        }
         if let Some(state) = &self.state {
             ops.save_event_in_cache(&state.event)
                 .await
@@ -1394,6 +1474,187 @@ mod tests {
                 vec![vec![forced_refspec(), delete_refspec()]]
             );
             assert!(transaction.refspecs_dropped_by_policy().is_empty());
+        }
+    }
+
+    mod authoritative_mode {
+        use super::*;
+
+        fn successful_push() -> FakePushResult {
+            FakePushResult::Refs(HashMap::new())
+        }
+
+        fn relay(url: &str) -> RelayUrl {
+            RelayUrl::parse(url).unwrap()
+        }
+
+        #[tokio::test]
+        async fn seeds_only_grasp_relays_missing_the_event() {
+            let grasp_a = grasp_clone_url("a.example");
+            let grasp_b = grasp_clone_url("b.example");
+            let repo_ref = test_repo_ref(vec![grasp_a.clone(), grasp_b.clone()], vec![]);
+            let state = main_state();
+            let event = state.event.clone();
+            let mut ops = FakeOps::default();
+            let mut transaction = StateTransaction::new_authoritative(
+                &repo_ref,
+                state,
+                vec![relay("wss://a.example")],
+            );
+
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            assert_eq!(
+                ops.calls,
+                vec![FakeCall::PublishState {
+                    event_ids: vec![event.id],
+                    my_write_relays: vec![],
+                    repo_relays: vec!["wss://b.example".to_string()],
+                }]
+            );
+        }
+
+        #[tokio::test]
+        async fn all_relays_holding_means_no_publish_and_all_servers_eligible() {
+            let grasp_a = grasp_clone_url("a.example");
+            let grasp_b = grasp_clone_url("b.example");
+            let repo_ref = test_repo_ref(vec![grasp_a.clone(), grasp_b.clone()], vec![]);
+            let mut ops = FakeOps {
+                push_results: HashMap::from([
+                    (grasp_a.clone(), successful_push()),
+                    (grasp_b.clone(), successful_push()),
+                ]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new_authoritative(
+                &repo_ref,
+                main_state(),
+                vec![relay("wss://a.example"), relay("wss://b.example")],
+            );
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            assert!(ops.publish_calls().is_empty());
+
+            let outcome = transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([
+                    (grasp_a.clone(), vec![refspec()]),
+                    (grasp_b.clone(), vec![refspec()]),
+                ]),
+                &[refspec()],
+            );
+
+            assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+            let mut pushed = ops.pushed_servers();
+            pushed.sort_unstable();
+            let mut expected = vec![grasp_a.as_str(), grasp_b.as_str()];
+            expected.sort_unstable();
+            assert_eq!(pushed, expected);
+        }
+
+        #[tokio::test]
+        async fn seeding_rejection_still_fails_closed_for_that_server() {
+            let grasp_a = grasp_clone_url("a.example");
+            let grasp_b = grasp_clone_url("b.example");
+            let repo_ref = test_repo_ref(vec![grasp_a.clone(), grasp_b.clone()], vec![]);
+            let mut ops = FakeOps {
+                relay_acceptance: HashMap::from([("wss://b.example".to_string(), false)]),
+                push_results: HashMap::from([(grasp_a.clone(), successful_push())]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new_authoritative(
+                &repo_ref,
+                main_state(),
+                vec![relay("wss://a.example")],
+            );
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            let outcome = transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([
+                    (grasp_a.clone(), vec![refspec()]),
+                    (grasp_b, vec![refspec()]),
+                ]),
+                &[refspec()],
+            );
+
+            assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+            assert_eq!(ops.pushed_servers(), vec![grasp_a.as_str()]);
+        }
+
+        #[tokio::test]
+        async fn no_cache_write_through_the_whole_flow() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let repo_ref = test_repo_ref(
+                vec![grasp_url.clone()],
+                vec!["wss://grasp.example", "wss://other.relay"],
+            );
+            let mut ops = FakeOps {
+                push_results: HashMap::from([(grasp_url.clone(), successful_push())]),
+                ..Default::default()
+            };
+            let mut transaction =
+                StateTransaction::new_authoritative(&repo_ref, main_state(), vec![]);
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+            let outcome = transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([(grasp_url, vec![refspec()])]),
+                &[refspec()],
+            );
+            assert!(matches!(outcome, GitStatePushOutcome::AcceptedByGitServer));
+            transaction
+                .publish_state_to_remaining_relays(
+                    &mut ops,
+                    &["wss://write.relay".to_string()],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert!(transaction.state_relay_accepted());
+            transaction.commit(&mut ops).await.unwrap();
+
+            assert!(
+                !ops.calls
+                    .iter()
+                    .any(|call| matches!(call, FakeCall::SaveToCache(_)))
+            );
+        }
+
+        #[tokio::test]
+        async fn fanout_to_remaining_relays_is_skipped() {
+            let repo_ref = test_repo_ref(vec![], vec!["wss://repo.relay"]);
+            let mut ops = FakeOps::default();
+            let mut transaction =
+                StateTransaction::new_authoritative(&repo_ref, main_state(), vec![]);
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            transaction
+                .publish_state_to_remaining_relays(
+                    &mut ops,
+                    &["wss://write.relay".to_string()],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert!(ops.calls.is_empty());
+        }
+
+        #[tokio::test]
+        async fn relay_acceptance_is_vacuous_without_grasp_relays() {
+            // Plain sync propagates canonical state to vanilla servers
+            // without publishing anything; the relay-acceptance gate must
+            // not fail the transaction.
+            let vanilla_url = "https://vanilla.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(vec![vanilla_url], vec![]);
+            let mut ops = FakeOps::default();
+            let mut transaction =
+                StateTransaction::new_authoritative(&repo_ref, main_state(), vec![]);
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            assert!(ops.calls.is_empty());
+            assert!(transaction.state_relay_accepted());
         }
     }
 
