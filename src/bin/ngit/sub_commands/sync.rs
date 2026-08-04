@@ -136,58 +136,6 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
 
     delete_legacy_tag_tracking_refs(&git_repo.git_repo, &nostr_remote_name, &nostr_state.state);
 
-    // When --force is given, rebuild and republish the state event even if
-    // nothing has changed.  This lets users repair repos whose state event is
-    // missing ^{} peeled refs for annotated tags (or any other corruption)
-    // without needing to push a new ref.  A fresh event is signed (new
-    // created_at) and broadcast to all repo relays and the user's write relays.
-    if args.force {
-        let (signer, user_ref) = force_login.context("missing force-login preflight result")?;
-        // Backfill any missing ^{} peeled refs before rebuilding — the existing
-        // state event may predate the fix that started storing them.
-        let mut state = nostr_state.state.clone();
-        let tag_refs: Vec<(String, String)> = state
-            .iter()
-            .filter(|(k, _)| k.starts_with("refs/tags/") && !k.ends_with("^{}"))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        for (ref_name, tag_oid) in tag_refs {
-            let peeled_key = format!("{ref_name}^{{}}");
-            if state.contains_key(&peeled_key) {
-                continue;
-            }
-            if let Ok(oid) = git2::Oid::from_str(&tag_oid) {
-                if git_repo
-                    .git_repo
-                    .find_object(oid, Some(git2::ObjectType::Tag))
-                    .is_ok()
-                {
-                    if let Ok(commit_oid) = git_repo.get_commit_or_tip_of_reference(&ref_name) {
-                        state.insert(peeled_key, commit_oid.to_string());
-                    }
-                }
-            }
-        }
-        let new_state = RepoState::build(
-            repo_ref.identifier.clone(),
-            state,
-            &signer,
-            Some(&nostr_state.event),
-        )
-        .await?;
-        send_events(
-            &client,
-            Some(git_repo_path),
-            vec![new_state.event],
-            user_ref.relays.write(),
-            repo_ref.relays.clone(),
-            true,
-            false,
-        )
-        .await?;
-        println!("state event republished");
-    }
-
     // Whether a signer is already configured on the client — needed later
     // for NIP-42 auth when grasp relays are seeded with the state event.
     let mut client_has_signer = args.force;
@@ -381,10 +329,39 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         .map(|r| (r.source_url.as_str(), r.ref_name.as_str()))
         .collect();
 
+    // When --force is given, rebuild the state event even if nothing has
+    // changed.  This lets users repair repos whose state event is missing
+    // ^{} peeled refs for annotated tags (or any other corruption) without
+    // needing to push a new ref.  The fresh event is a transaction
+    // candidate: it is staged on grasp relays, pushed, fanned out to all
+    // repo relays and the user's write relays, and cached only once a git
+    // server and at least one relay accepted it.
+    let force_candidate = if args.force {
+        let (signer, user_ref) = force_login.context("missing force-login preflight result")?;
+        // Backfill any missing ^{} peeled refs before rebuilding — the
+        // existing state event may predate the fix that started storing
+        // them.
+        let mut state = nostr_state.state.clone();
+        backfill_peeled_tag_refs(&git_repo, &mut state);
+        let candidate = RepoState::build(
+            repo_ref.identifier.clone(),
+            state,
+            &signer,
+            Some(&nostr_state.event),
+        )
+        .await?;
+        Some((candidate, user_ref))
+    } else {
+        None
+    };
+
+    let state_for_plans = force_candidate
+        .as_ref()
+        .map_or(&nostr_state.state, |(candidate, _)| &candidate.state);
     let (per_server_plans, state_refspecs) = build_state_push_plans(
         &git_repo,
         &nostr_remote_name,
-        &nostr_state.state,
+        state_for_plans,
         &remote_states,
         full_ref_name.as_deref(),
         &missing_refs,
@@ -460,13 +437,21 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         decoded_nostr_url: &decoded_nostr_url,
     };
 
-    // Propagate the already-canonical state event: seed the grasp relays
-    // missing it before any git data reaches their servers (grasp servers
-    // reject git pushes unless the state event is already present on their
-    // relay), then execute the per-server push plans.
-    let mut transaction =
-        StateTransaction::new_authoritative(&repo_ref, nostr_state, relays_already_holding)
-            .with_force_policy(force_policy);
+    // Without --force, propagate the already-canonical state event: seed
+    // the grasp relays missing it before any git data reaches their
+    // servers (grasp servers reject git pushes unless the state event is
+    // already present on their relay), then execute the per-server push
+    // plans. With --force, the fresh candidate is staged on every grasp
+    // relay instead and committed to the cache only after acceptance.
+    let (candidate_state, my_write_relays) = match force_candidate {
+        Some((candidate, user_ref)) => (Some(candidate), user_ref.relays.write()),
+        None => (None, vec![]),
+    };
+    let mut transaction = match candidate_state {
+        Some(candidate) => StateTransaction::new(&repo_ref, Some(candidate)),
+        None => StateTransaction::new_authoritative(&repo_ref, nostr_state, relays_already_holding),
+    }
+    .with_force_policy(force_policy);
 
     transaction.publish_state_to_grasps_first(&mut ops).await;
 
@@ -486,21 +471,38 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
             term.write_line(
                 "WARNING: no git server was pushed - the state event failed to reach the grasp server relays",
             )?;
+            if args.force {
+                term.write_line(
+                    "WARNING: the fresh state event was not published; the previously cached state remains authoritative",
+                )?;
+            }
         }
         GitStatePushOutcome::AllPushesFailed => {
             // individual server failures were reported above; sync stays
             // lenient and still exits successfully
+            if args.force {
+                term.write_line(
+                    "WARNING: the fresh state event was not published because no git server accepted the push",
+                )?;
+            }
         }
         GitStatePushOutcome::AcceptedByGitServer => {
-            // No-ops in authoritative mode: the canonical event is neither
-            // fanned out nor re-cached. Kept in phase order for the
-            // candidate-state flows (--force and --trust-server) that are
-            // being migrated onto the transaction.
+            // In authoritative mode both calls are no-ops: the canonical
+            // event is neither fanned out nor re-cached.
             transaction
-                .publish_state_to_remaining_relays(&mut ops, &[], false)
+                .publish_state_to_remaining_relays(&mut ops, &my_write_relays, false)
                 .await?;
             if transaction.state_relay_accepted() {
+                // The commit point: with --force the fresh state event
+                // only now becomes the authoritative cached state.
                 transaction.commit(&mut ops).await?;
+                if args.force {
+                    println!("state event republished");
+                }
+            } else {
+                term.write_line(
+                    "WARNING: state event failed to reach any relay; the fresh state event was not adopted",
+                )?;
             }
         }
     }
@@ -512,6 +514,35 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Backfill missing `^{}` peeled refs for annotated tags already in
+/// `state` — state events published before the fix that started storing
+/// them only carry the tag object oid, which git cannot resolve to a
+/// commit on its own.
+fn backfill_peeled_tag_refs(git_repo: &Repo, state: &mut HashMap<String, String>) {
+    let tag_refs: Vec<(String, String)> = state
+        .iter()
+        .filter(|(k, _)| k.starts_with("refs/tags/") && !k.ends_with("^{}"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (ref_name, tag_oid) in tag_refs {
+        let peeled_key = format!("{ref_name}^{{}}");
+        if state.contains_key(&peeled_key) {
+            continue;
+        }
+        if let Ok(oid) = Oid::from_str(&tag_oid) {
+            if git_repo
+                .git_repo
+                .find_object(oid, Some(git2::ObjectType::Tag))
+                .is_ok()
+            {
+                if let Ok(commit_oid) = git_repo.get_commit_or_tip_of_reference(&ref_name) {
+                    state.insert(peeled_key, commit_oid.to_string());
+                }
+            }
+        }
+    }
 }
 
 /// Build the desired per-server push plans from the nostr state:
