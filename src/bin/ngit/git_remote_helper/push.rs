@@ -835,8 +835,11 @@ async fn generate_patches_or_pr_event_or_pr_updates(
 
 type HashMapUrlRefspecs = HashMap<String, Vec<String>>;
 
+/// Also used by `ngit init`'s in-process initial-branch push so a fresh
+/// init builds exactly the per-server plans a `git push` through the
+/// remote helper would have produced.
 #[allow(clippy::too_many_lines)]
-fn create_rejected_refspecs_and_remotes_refspecs(
+pub(crate) fn create_rejected_refspecs_and_remotes_refspecs(
     term: &console::Term,
     git_repo: &Repo,
     refspecs: &Vec<String>,
@@ -1088,7 +1091,9 @@ fn ensure_force_push_refspec(refspec: &str) -> String {
     }
 }
 
-fn generate_updated_state(
+/// Also used by `ngit init`'s in-process initial-branch push (see
+/// [`create_rejected_refspecs_and_remotes_refspecs`]).
+pub(crate) fn generate_updated_state(
     git_repo: &Repo,
     existing_state: &HashMap<String, String>,
     refspecs: &Vec<String>,

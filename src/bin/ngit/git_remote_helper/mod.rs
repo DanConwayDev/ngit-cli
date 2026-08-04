@@ -125,7 +125,7 @@ impl PushOptions {
 
 mod fetch;
 mod list;
-mod push;
+pub(crate) mod push;
 
 /// Run the remote-helper protocol. `args` are the arguments following
 /// [`INTERNAL_COMMAND`], matching what git passes to a remote helper:

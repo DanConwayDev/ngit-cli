@@ -177,14 +177,16 @@ async fn rapid_force_refresh_uses_nonce_to_order_same_second_update() -> Result<
             .with_context(|| {
                 format!("failed to spawn rapid ngit init --force attempt {attempt}")
             })?;
-        if !output.status.success() {
-            bail!(
-                "rapid ngit init --force attempt {attempt} exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-        }
+        // Each refresh republishes the announcement and then fails its
+        // in-process push against the arrange's unreachable clone URL —
+        // a real error since init migrated onto the state transaction
+        // (push unification phase 3). The republish this test measures
+        // happens before that failure, so require the specific
+        // push-failure error rather than a clean exit.
+        expect_announcement_published_but_push_failed(
+            &format!("rapid ngit init --force attempt {attempt}"),
+            &output,
+        )?;
 
         let current = current_announcement(
             &harness,
@@ -292,14 +294,14 @@ async fn capture_force_refresh() -> Result<ForceRefreshSnapshot> {
         .output()
         .await
         .context("failed to spawn ngit init --force")?;
-    if !init_out.status.success() {
-        bail!(
-            "ngit init --force exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-            init_out.status,
-            String::from_utf8_lossy(&init_out.stdout),
-            String::from_utf8_lossy(&init_out.stderr),
-        );
-    }
+    // The arrange's announcement lists only an unreachable clone URL, so
+    // the post-republish push cannot succeed. Since init migrated onto
+    // the state transaction (push unification phase 3), that failure is
+    // a real error instead of the old warn-and-continue: init exits
+    // non-zero *after* republishing the announcement and reports what
+    // succeeded plus the follow-up command. The republished announcement
+    // on the relay remains the property under test.
+    expect_announcement_published_but_push_failed("ngit init --force", &init_out)?;
 
     let republished = fetch_republished_announcement(
         &harness,
@@ -451,14 +453,10 @@ async fn capture_name_override() -> Result<NameOverrideSnapshot> {
         .output()
         .await
         .context("failed to spawn ngit init --name \"New Name\"")?;
-    if !init_out.status.success() {
-        bail!(
-            "ngit init --name exited non-zero ({:?})\nstdout: {}\nstderr: {}",
-            init_out.status,
-            String::from_utf8_lossy(&init_out.stdout),
-            String::from_utf8_lossy(&init_out.stderr),
-        );
-    }
+    // See capture_force_refresh: the unreachable clone URL makes the
+    // post-republish push fail, which is now a real error after the
+    // announcement was republished.
+    expect_announcement_published_but_push_failed("ngit init --name", &init_out)?;
 
     let republished = fetch_republished_announcement(
         &harness,
@@ -510,6 +508,36 @@ async fn name_override_keeps_identifier(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Assert the expected outcome of `ngit init` when the announcement can
+/// be (re)published but the announced git servers are unreachable: a
+/// non-zero exit whose error reports that the announcement succeeded
+/// and the push did not. Substring-matching a stable error prefix is
+/// the tolerated regression-catching shortcut for "this error arm
+/// fired" (see the error-message-brittleness note above).
+fn expect_announcement_published_but_push_failed(
+    invocation: &str,
+    out: &std::process::Output,
+) -> Result<()> {
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() {
+        bail!(
+            "{invocation} exited zero despite its git servers being unreachable — \
+             the push failure should be a real error\nstdout+stderr: {combined}"
+        );
+    }
+    if !combined.contains("was published to nostr but pushing your git data failed") {
+        bail!(
+            "{invocation} failed for an unexpected reason (wanted the \
+             announcement-published-but-push-failed error)\nstdout+stderr: {combined}"
+        );
+    }
+    Ok(())
+}
 
 /// Query the default relay for the kind-30617 with matching
 /// `(pubkey, d)` whose `created_at` strictly exceeds `not_after` — i.e.

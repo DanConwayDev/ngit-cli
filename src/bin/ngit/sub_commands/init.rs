@@ -17,14 +17,18 @@ use ngit::{
         PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
         show_multi_input_prompt_success,
     },
-    client::{Params, get_state_from_cache, send_events},
+    client::{
+        Params, get_events_from_local_cache, get_filter_state_events, get_state_from_cache,
+        send_events,
+    },
+    event_ordering,
     fetch::fetch_from_git_server,
     git::{
         is_git_remote_helper_url,
         nostr_url::{CloneUrl, NostrUrlDecoded},
         validate_git_server_clone_url,
     },
-    list::list_from_remote,
+    list::{list_from_remote, list_from_remotes},
     repo_ref::{
         apply_grasp_infrastructure, detect_existing_grasp_servers, extract_npub, extract_pks,
         format_grasp_server_url_as_relay_url, is_grasp_server_clone_url, latest_event_repo_ref,
@@ -42,11 +46,16 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
+    git_remote_helper::push::{
+        create_rejected_refspecs_and_remotes_refspecs, generate_updated_state,
+    },
     login,
+    push_bookkeeping::{record_accepted_push_refspecs, set_branch_upstream},
     repo_ref::{
         RepoCoordinateSource, RepoRef, ResolvedRepoCoordinate, get_repo_config_from_yaml,
         print_selected_repo, try_resolve_repo_coordinate,
     },
+    state_transaction::{GitStatePushOutcome, LiveOps, StateTransaction, StateTransactionFailure},
 };
 
 // ---------------------------------------------------------------------------
@@ -1277,6 +1286,16 @@ async fn publish_and_finalize(
         extra_tags: fields.extra_tags,
     };
 
+    // Whether the network fetch in `launch` already covered the
+    // coordinate being announced. The fetch runs only when a repo
+    // coordinate was resolved, and an `--identifier` change announces a
+    // coordinate that fetch never saw. (A co-maintainer's resolved
+    // coordinate names another maintainer, but the fetch discovers and
+    // covers every maintainer coordinate for the identifier, so
+    // matching on the identifier is sufficient.)
+    let announced_coordinate_fetched =
+        selected_repo.is_some_and(|resolved| resolved.coordinate.identifier == repo_ref.identifier);
+
     let selected_repo = selected_repo
         .cloned()
         .unwrap_or_else(|| ResolvedRepoCoordinate {
@@ -1307,6 +1326,33 @@ async fn publish_and_finalize(
     } else {
         false
     };
+
+    // Stale-state protection: a candidate state event must only be
+    // built after this invocation has fetched state events for the
+    // coordinate being announced, otherwise a fresh init could re-sign
+    // ref values older than a state event it never saw. `launch` only
+    // fetches when a repo coordinate was already resolvable, so cover
+    // the announced coordinate here when it didn't.
+    if !no_state && !announced_coordinate_fetched {
+        if let Err(error) = fetching_with_report(
+            git_repo_path,
+            client,
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: user_ref.public_key,
+                    identifier: repo_ref.identifier.clone(),
+                },
+                relays: repo_ref.relays.clone(),
+            },
+        )
+        .await
+        {
+            eprintln!(
+                "WARNING: failed to fetch any existing repository state from relays: {error:#}"
+            );
+        }
+    }
 
     let (need_push, need_sync) = if no_state {
         // user explicitly opted out of state-event creation
@@ -1385,7 +1431,7 @@ async fn publish_and_finalize(
     };
 
     // Step 5: Publish events
-    client.set_signer(signer).await;
+    client.set_signer(signer.clone()).await;
 
     let _ = send_events(
         client,
@@ -1424,9 +1470,8 @@ async fn publish_and_finalize(
 
     // Step 8: Push/sync
     if need_push {
-        if fields.selected_grasp_servers.is_empty() {
-            println!("running `ngit push` to publish your repository data");
-        } else {
+        let branch_name = main_or_master_branch_name(git_repo)?;
+        if !fields.selected_grasp_servers.is_empty() {
             wait_for_grasp_servers(
                 git_repo,
                 &fields.selected_grasp_servers,
@@ -1436,11 +1481,22 @@ async fn publish_and_finalize(
             .await?;
         }
 
-        if let Err(err) = push_main_or_master_branch(git_repo) {
-            println!(
-                "your repository announcement was published to nostr but git push exited with an error: {err}"
-            );
-        }
+        println!("pushing your repository data to your git server(s)...");
+        push_initial_branch(
+            git_repo,
+            &repo_ref,
+            user_ref,
+            client,
+            &signer,
+            &nostr_url_decoded,
+            branch_name,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "your repository announcement was published to nostr but pushing your git data failed. fix the reported issue and run `git push -u origin {branch_name}` to push your git data and publish the repository state"
+            )
+        })?;
     }
     if need_sync {
         if fields.selected_grasp_servers.is_empty() {
@@ -1701,50 +1757,152 @@ fn parse_relay_url(s: &str) -> Result<RelayUrl> {
     .context(format!("failed to parse relay url: {s}"))
 }
 
-fn push_main_or_master_branch(git_repo: &Repo) -> Result<()> {
-    let main_branch_name = {
-        let local_branches = git_repo
-            .get_local_branch_names()
-            .context("failed to find any local branches")?;
-        if local_branches.contains(&"main".to_string()) {
-            "main"
-        } else if local_branches.contains(&"master".to_string()) {
-            "master"
-        } else {
-            bail!(
-                "set remote origin to nostr url and tried to push main or master branch but they dont exist yet"
+fn main_or_master_branch_name(git_repo: &Repo) -> Result<&'static str> {
+    let local_branches = git_repo
+        .get_local_branch_names()
+        .context("failed to find any local branches")?;
+    if local_branches.contains(&"main".to_string()) {
+        Ok("main")
+    } else if local_branches.contains(&"master".to_string()) {
+        Ok("master")
+    } else {
+        bail!(
+            "set remote origin to nostr url and tried to push main or master branch but they dont exist yet"
+        )
+    }
+}
+
+/// Push the local `main`/`master` branch and its repository state to the
+/// repo's git servers through the state transaction — the in-process
+/// equivalent of the `git push -u origin <branch>` subprocess init used
+/// to spawn. The candidate state event is built exactly as the remote
+/// helper would have built it (the first reachable git server's listing
+/// plus the pushed branch) and becomes locally authoritative only after
+/// a git server and at least one relay accepted it.
+async fn push_initial_branch(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    user_ref: &ngit::login::user::UserRef,
+    client: &Client,
+    signer: &Arc<ngit::signer::NgitSigner>,
+    nostr_url_decoded: &NostrUrlDecoded,
+    branch_name: &str,
+) -> Result<()> {
+    let term = Term::stderr();
+    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
+    let refspecs = vec![refspec.clone()];
+
+    // Git-server reality must come from a same-invocation listing; local
+    // remote-tracking refs are only written after a successful push.
+    let list_outputs = list_from_remotes(
+        &term,
+        git_repo,
+        &repo_ref.git_server,
+        nostr_url_decoded,
+        None,
+    )
+    .await;
+
+    // Mirror the remote helper: with no state event on nostr yet, the
+    // baseline state is the first reachable git server's listing.
+    let existing_state = repo_ref
+        .git_server
+        .iter()
+        .find_map(|url| list_outputs.get(url).map(|(state, _)| state.clone()))
+        .with_context(|| {
+            format!(
+                "failed to connect to git servers: {}",
+                repo_ref.git_server.join(" ")
             )
-        }
+        })?;
+
+    let (rejected_refspecs, remote_refspecs) = create_rejected_refspecs_and_remotes_refspecs(
+        &term,
+        git_repo,
+        &refspecs,
+        &existing_state,
+        &list_outputs,
+    )?;
+    if rejected_refspecs.contains_key(&refspec) {
+        bail!("refs/heads/{branch_name} is out of sync with an existing git server");
+    }
+
+    let new_state = generate_updated_state(git_repo, &existing_state, &refspecs)?;
+
+    // The newest cached state event across maintainer coordinates is
+    // the NIP-01 ordering reference for the candidate. A fresh init
+    // just fetched and normally finds none, but keeping the ordering
+    // discipline means this invocation can never re-sign ref values as
+    // an event that loses to a cached predecessor.
+    let old_state_event = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![get_filter_state_events(&repo_ref.coordinates(), true)],
+    )
+    .await
+    .ok()
+    .and_then(|events| event_ordering::latest_event(&events).cloned());
+
+    let state = RepoState::build(
+        repo_ref.identifier.clone(),
+        new_state,
+        signer,
+        old_state_event.as_ref(),
+    )
+    .await?;
+
+    let repo_relay_only = git_repo
+        .get_git_config_item("nostr.repo-relay-only", None)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "true");
+    let my_write_relays = if repo_relay_only {
+        vec![]
+    } else {
+        user_ref.relays.write()
     };
 
-    println!("========================================");
-    println!("            GIT PUSH COMMAND            ");
-    println!("========================================");
-
-    let command = "git";
-    let args = ["push", "origin", "-u", main_branch_name];
-
-    // Spawn the process
-    let mut child = Command::new(command)
-        .args(args)
-        .stdout(Stdio::inherit()) // Redirect stdout to the console
-        .stderr(Stdio::inherit()) // Redirect stderr to the console
-        .spawn()
-        .context("Failed to start git push process")?;
-
-    // Wait for the process to finish
-    let exit_status = child.wait().context("Failed to start git push process")?;
-
-    println!("========================================");
-    println!("        END OF GIT PUSH OUTPUT");
-    println!("========================================");
-
-    // Check the exit status
-    if exit_status.success() {
-        Ok(())
-    } else {
-        bail!("git push process exited with an error: {exit_status}");
+    let mut ops = LiveOps {
+        client,
+        git_repo,
+        term: &term,
+        git_server_push_options: &[],
+        decoded_nostr_url: nostr_url_decoded,
+    };
+    let mut transaction = StateTransaction::new(repo_ref, Some(state));
+    transaction.publish_state_to_grasps_first(&mut ops).await;
+    match transaction.push_git_state_refspecs(&mut ops, remote_refspecs, &refspecs) {
+        GitStatePushOutcome::NoEligibleServers => {
+            bail!(
+                "{}",
+                StateTransactionFailure::NoEligibleGitServers.user_message()
+            )
+        }
+        GitStatePushOutcome::AllPushesFailed => {
+            bail!(
+                "{}",
+                StateTransactionFailure::AllGitServerPushesFailed.user_message()
+            )
+        }
+        GitStatePushOutcome::AcceptedByGitServer => {
+            transaction
+                .publish_state_to_remaining_relays(&mut ops, &my_write_relays, repo_relay_only)
+                .await?;
+            if !transaction.state_relay_accepted() {
+                bail!(
+                    "{}",
+                    StateTransactionFailure::StateNotAcceptedByAnyRelay.user_message()
+                );
+            }
+            // The commit point: the pushed state only now becomes the
+            // authoritative cached state.
+            transaction.commit(&mut ops).await?;
+            record_accepted_push_refspecs(git_repo, "origin", &refspecs)
+                .context("failed to update the origin remote-tracking ref after push")?;
+            set_branch_upstream(git_repo, "origin", branch_name)?;
+            println!("pushed {branch_name} branch and published repository state");
+        }
     }
+    Ok(())
 }
 
 fn run_ngit_sync() -> Result<()> {
