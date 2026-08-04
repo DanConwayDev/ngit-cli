@@ -19,6 +19,8 @@
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
+use serde_json::Value;
+use tempfile::NamedTempFile;
 use test_harness::Harness;
 
 #[tokio::test]
@@ -169,5 +171,189 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
          got entries: {listed_relays:?}",
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn credential_file_stores_pointer_resolves_and_logout_deletes_entry() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+
+    let output = repo
+        .ngit(["account", "create", "--local", "--name", "keyring alice"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "account create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pointer = repo
+        .config("nostr.nsec")
+        .await?
+        .context("nostr.nsec pointer missing")?;
+    assert!(
+        pointer.starts_with("npub1") && pointer.contains('/'),
+        "unexpected pointer: {pointer}"
+    );
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert!(
+        entries.get(format!("ngit/{pointer}")).is_some(),
+        "credential file lacks pointer entry"
+    );
+
+    let output = repo
+        .ngit(["account", "export-keys"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "pointer-backed export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = repo
+        .ngit(["account", "logout"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "logout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(repo.config("nostr.nsec").await?.is_none());
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert!(
+        entries.get(format!("ngit/{pointer}")).is_none(),
+        "logout retained credential entry"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    repo.git_ok(
+        ["config", "--local", "nostr.nsec", &nsec],
+        "seed plaintext nsec",
+    )
+    .await?;
+
+    let _ = repo
+        .ngit(["account", "export-keys"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    let pointer = repo
+        .config("nostr.nsec")
+        .await?
+        .context("plaintext nsec was not migrated")?;
+    assert_ne!(pointer, nsec);
+    let expected_npub = keys.public_key().to_bech32()?;
+    assert_eq!(
+        repo.config("nostr.npub").await?.as_deref(),
+        Some(expected_npub.as_str())
+    );
+
+    std::fs::write(file.path(), b"{}")?;
+    let output = repo
+        .ngit(["account", "export-keys"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("credential") && stderr.contains("ngit account login"),
+        "missing dangling-pointer guidance: {stderr}"
+    );
+    let output = repo
+        .ngit(["account", "logout"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+    assert!(repo.config("nostr.nsec").await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_logins_for_same_key_get_independent_entries() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let first = harness.fresh_repo()?;
+    let second = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let nsec = Keys::generate().secret_key().to_bech32()?;
+    for repo in [&first, &second] {
+        let output = repo
+            .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+            .env("NGIT_CREDENTIAL_STORE", "true")
+            .env("NGIT_KEYRING_FILE", file.path())
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "login failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let first_pointer = first
+        .config("nostr.nsec")
+        .await?
+        .context("first pointer missing")?;
+    let second_pointer = second
+        .config("nostr.nsec")
+        .await?
+        .context("second pointer missing")?;
+    assert_ne!(first_pointer, second_pointer);
+
+    let output = first
+        .ngit(["account", "logout"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+    let output = second
+        .ngit(["account", "export-keys"])
+        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "second login was broken by first logout: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }

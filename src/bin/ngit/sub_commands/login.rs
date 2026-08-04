@@ -4,7 +4,7 @@ use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
     client::Params,
     git::{get_git_config_item, remove_git_config_item},
-    login::{SignerInfoSource, existing::load_existing_login},
+    login::{SignerInfoSource, credential_store, existing::load_existing_login},
 };
 
 use crate::{
@@ -120,6 +120,11 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
         {
             // In non-interactive mode, automatically logout without prompting
             if Interactor::is_non_interactive() {
+                delete_keyring_pointers(if source == SignerInfoSource::GitLocal {
+                    git_repo
+                } else {
+                    None
+                })?;
                 for item in [
                     "nostr.nsec",
                     "nostr.npub",
@@ -179,6 +184,11 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                     }),
             )? {
                 0 => {
+                    delete_keyring_pointers(if source == SignerInfoSource::GitLocal {
+                        git_repo
+                    } else {
+                        None
+                    })?;
                     for item in [
                         "nostr.nsec",
                         "nostr.npub",
@@ -228,6 +238,21 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
         }
     }
     Ok((true, local_only))
+}
+
+fn delete_keyring_pointers(git_repo: Option<&Repo>) -> Result<()> {
+    for item in ["nostr.nsec", "nostr.bunker-app-key"] {
+        if let Some(value) = get_git_config_item(&git_repo, item)? {
+            if credential_store::parse_pointer(&value).is_some() {
+                credential_store::delete(&value).with_context(|| {
+                    format!(
+                        "failed to remove keyring entry {value}; remove it via your OS keychain UI"
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn get_global_login_config_items_set() -> Vec<&'static str> {

@@ -782,6 +782,8 @@ async fn save_to_git_config(
     signer_info: &SignerInfo,
     global: bool,
 ) -> Result<()> {
+    let signer_info = protect_secrets(git_repo, signer_info);
+    let signer_info = &signer_info;
     let global = if std::env::var("NGITTEST").is_ok() {
         false
     } else {
@@ -929,6 +931,60 @@ fn get_pubkey_from_signer_info(signer_info: &SignerInfo) -> Result<PublicKey> {
     }
 }
 
+fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> SignerInfo {
+    if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if nsec.starts_with("ncryptsec1")) {
+        return signer_info.clone();
+    }
+    if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if crate::login::credential_store::parse_pointer(nsec).is_some())
+        || matches!(signer_info, SignerInfo::Bunker { bunker_app_key, .. } if crate::login::credential_store::parse_pointer(bunker_app_key).is_some())
+    {
+        return signer_info.clone();
+    }
+    if !crate::login::credential_store::enabled(git_repo) {
+        eprintln!(
+            "warning: credential-store storage is disabled; saving the plaintext secret in git config"
+        );
+        return signer_info.clone();
+    }
+    let protected = match signer_info {
+        SignerInfo::Nsec {
+            nsec,
+            password,
+            npub,
+        } if !nsec.starts_with("ncryptsec1") => nostr::Keys::parse(nsec).ok().and_then(|keys| {
+            crate::login::credential_store::store(&keys)
+                .ok()
+                .map(|pointer| SignerInfo::Nsec {
+                    nsec: pointer,
+                    password: password.clone(),
+                    npub: Some(
+                        keys.public_key()
+                            .to_bech32()
+                            .expect("public keys always encode as npub"),
+                    ),
+                })
+        }),
+        SignerInfo::Bunker {
+            bunker_uri,
+            bunker_app_key,
+            npub,
+        } => nostr::Keys::parse(bunker_app_key).ok().and_then(|keys| {
+            crate::login::credential_store::store(&keys)
+                .ok()
+                .map(|pointer| SignerInfo::Bunker {
+                    bunker_uri: bunker_uri.clone(),
+                    bunker_app_key: pointer,
+                    npub: npub.clone(),
+                })
+        }),
+        _ => return signer_info.clone(),
+    };
+    protected.unwrap_or_else(|| {
+        eprintln!("warning: OS credential store unavailable; saving the plaintext secret in git config so headless and CI use can continue");
+        signer_info.clone()
+    })
+}
+
 fn silently_save_to_git_config(
     git_repo: &Option<&Repo>,
     signer_info: &SignerInfo,
@@ -1015,7 +1071,10 @@ pub async fn signup_non_interactive(
 
     // Save to git config
     let git_repo = Repo::discover().ok();
-    if let Err(error) = silently_save_to_git_config(&git_repo.as_ref(), &signer_info, !save_local) {
+    let config_signer_info = protect_secrets(&git_repo.as_ref(), &signer_info);
+    if let Err(error) =
+        silently_save_to_git_config(&git_repo.as_ref(), &config_signer_info, !save_local)
+    {
         let is_readonly = error
             .chain()
             .any(|e| e.to_string().contains("Read-only file system"));
@@ -1023,7 +1082,7 @@ pub async fn signup_non_interactive(
         if is_readonly && !save_local {
             use crate::cli_interactor::cli_error;
 
-            let mut cmds: Vec<String> = match &signer_info {
+            let mut cmds: Vec<String> = match &config_signer_info {
                 SignerInfo::Nsec { nsec, npub, .. } => {
                     let mut v = vec![format!("git config --global nostr.nsec {nsec}")];
                     if let Some(npub) = npub {
@@ -1096,7 +1155,7 @@ pub async fn signup_non_interactive(
     Ok((
         Arc::new(crate::NgitSigner::Keys(keys.clone())),
         public_key,
-        signer_info,
+        config_signer_info,
         keys,
     ))
 }

@@ -14,6 +14,7 @@ use crate::{
     git::{Repo, RepoActions},
 };
 
+pub mod credential_store;
 pub mod existing;
 mod key_encryption;
 use existing::{SignerInfoNotFound, load_existing_login};
@@ -43,13 +44,38 @@ pub async fn login_or_signup(
     match res {
         Ok(login) => Ok(login),
         Err(error) if Interactor::is_non_interactive() => Err(require_account(error)),
-        Err(_) => fresh_login_or_signup(git_repo, client, None, false, &[]).await,
+        Err(error) if error.downcast_ref::<SignerInfoNotFound>().is_some() => {
+            fresh_login_or_signup(git_repo, client, None, false, &[]).await
+        }
+        Err(error)
+            if matches!(
+                error.downcast_ref::<credential_store::LookupError>(),
+                Some(credential_store::LookupError::Missing(_))
+            ) =>
+        {
+            eprintln!("{error}; please log in again");
+            fresh_login_or_signup(git_repo, client, None, false, &[]).await
+        }
+        Err(error) => Err(error),
     }
 }
 
 /// Replace a missing-signer error with actionable CLI guidance while preserving
 /// errors from configured but invalid or unavailable signers.
 pub fn require_account(error: anyhow::Error) -> anyhow::Error {
+    if let Some(credential_store::LookupError::Missing(name)) =
+        error.downcast_ref::<credential_store::LookupError>()
+    {
+        return crate::cli_interactor::cli_error(
+            "nostr credential was not found in the OS credential store",
+            &[("entry", name)],
+            &[
+                "ngit account login",
+                "ngit --nsec <your-nsec> <command>",
+                "ngit --bunker-uri <uri> --bunker-app-key <key> <command>",
+            ],
+        );
+    }
     if error.downcast_ref::<SignerInfoNotFound>().is_some() {
         crate::cli_interactor::cli_error(
             "nostr account required; sign in or create an account first",
