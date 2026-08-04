@@ -2801,10 +2801,15 @@ pub async fn fetching_with_report(
         let _ = progress_reporter.clear();
     }
     let report = consolidate_fetch_reports(relay_reports);
+    // Route the summary to stderr so stdout stays clean for JSON-emitting
+    // subcommands (e.g. `ngit issue list --json | jq .`). The progress bars
+    // above also write to stderr, keeping all human-facing fetch chatter off
+    // stdout.
+    let term = console::Term::stderr();
     if report.to_string().is_empty() {
-        println!("no updates");
+        term.write_line("no updates")?;
     } else {
-        println!("updates: {report}");
+        term.write_line(&format!("updates: {report}"))?;
     }
     Ok(report)
 }
