@@ -159,12 +159,13 @@ pub async fn run_push(
         .await?;
 
         if !rejected {
+            let decoded_nostr_url = repo_ref.to_nostr_git_url(&None);
             let mut ops = LiveOps {
                 client,
                 git_repo,
-                repo_ref,
                 term: &term,
                 git_server_push_options: &git_server_push_options,
+                decoded_nostr_url: &decoded_nostr_url,
             };
 
             if git_state_refspecs.is_empty() {

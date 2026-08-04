@@ -34,7 +34,7 @@ use anyhow::{Context, Result};
 use console::Term;
 use ngit::{
     client::{Client, save_event_in_local_cache, send_events, send_events_without_caching},
-    git::{Repo, RepoActions},
+    git::{Repo, RepoActions, nostr_url::NostrUrlDecoded},
     push::push_to_remote,
     repo_ref::{
         RepoRef, format_grasp_server_url_as_relay_url, grasp_server_relay_urls,
@@ -87,9 +87,13 @@ pub trait StateTransactionOps {
 pub struct LiveOps<'a> {
     pub client: &'a Client,
     pub git_repo: &'a Repo,
-    pub repo_ref: &'a RepoRef,
     pub term: &'a Term,
     pub git_server_push_options: &'a [String],
+    /// The decoded `nostr://` URL the git pushes run under. Its protocol
+    /// and ssh-key overrides must come from the caller because they are
+    /// remote-specific: `ngit sync` pushes under the user's configured
+    /// remote URL, which can differ from the repo-ref derived default.
+    pub decoded_nostr_url: &'a NostrUrlDecoded,
 }
 
 impl StateTransactionOps for LiveOps<'_> {
@@ -142,7 +146,7 @@ impl StateTransactionOps for LiveOps<'_> {
         push_to_remote(
             self.git_repo,
             git_server_url,
-            &self.repo_ref.to_nostr_git_url(&None),
+            self.decoded_nostr_url,
             refspecs,
             self.term,
             is_grasp_server_clone_url(git_server_url),
