@@ -218,6 +218,25 @@ pub enum GitStatePushOutcome {
     AcceptedByGitServer,
 }
 
+/// Per-git-server outcome of the git data push phase, recorded during
+/// [`StateTransaction::push_git_state_refspecs`] for the caller's
+/// reporting. Servers the GRASP staging gate skipped are absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerPushOutcome {
+    /// The server's plan was empty — every requested change is already
+    /// applied there (possibly because the [`ServerForcePolicy`] dropped
+    /// the plan's destructive refspecs) — so it counted as a successful
+    /// push target without being contacted.
+    AlreadyApplied,
+    /// The server accepted every ref update pushed to it.
+    Accepted,
+    /// The push completed but the server rejected at least one ref
+    /// update.
+    RefsRejected,
+    /// The push failed outright (e.g. connection or protocol error).
+    Failed,
+}
+
 /// Why the transaction failed to establish the replacement state.
 pub enum StateTransactionFailure {
     /// See [`GitStatePushOutcome::NoEligibleServers`].
@@ -281,6 +300,7 @@ pub struct StateTransaction<'a> {
     initial_state_publish: InitialStatePublish,
     remaining_relay_results: Vec<(String, bool)>,
     refspecs_dropped_by_policy: HashMap<String, Vec<String>>,
+    server_push_outcomes: HashMap<String, ServerPushOutcome>,
 }
 
 impl<'a> StateTransaction<'a> {
@@ -293,6 +313,7 @@ impl<'a> StateTransaction<'a> {
             initial_state_publish: InitialStatePublish::default(),
             remaining_relay_results: vec![],
             refspecs_dropped_by_policy: HashMap::new(),
+            server_push_outcomes: HashMap::new(),
         }
     }
 
@@ -320,6 +341,7 @@ impl<'a> StateTransaction<'a> {
             initial_state_publish: InitialStatePublish::default(),
             remaining_relay_results: vec![],
             refspecs_dropped_by_policy: HashMap::new(),
+            server_push_outcomes: HashMap::new(),
         }
     }
 
@@ -340,6 +362,16 @@ impl<'a> StateTransaction<'a> {
     #[allow(dead_code)]
     pub fn refspecs_dropped_by_policy(&self) -> &DroppedRefspecs {
         &self.refspecs_dropped_by_policy
+    }
+
+    /// Per-git-server outcomes recorded by
+    /// [`Self::push_git_state_refspecs`], for the caller's reporting.
+    /// Servers skipped by the GRASP staging gate are absent.
+    // No production caller until `ngit sync` migrates onto the
+    // transaction.
+    #[allow(dead_code)]
+    pub fn server_push_outcomes(&self) -> &HashMap<String, ServerPushOutcome> {
+        &self.server_push_outcomes
     }
 
     /// The candidate state events to publish (currently at most one).
@@ -450,14 +482,20 @@ impl<'a> StateTransaction<'a> {
                 // Every requested change is already applied on this
                 // server, so it counts as success without a push.
                 any_server_succeeded = true;
+                self.server_push_outcomes
+                    .insert(git_server_url.clone(), ServerPushOutcome::AlreadyApplied);
                 continue;
             }
-            if ops
-                .push_to_git_server(git_server_url, server_refspecs)
-                .is_ok_and(|ref_updates| all_ref_updates_accepted(&ref_updates))
-            {
-                any_server_succeeded = true;
-            }
+            let outcome = match ops.push_to_git_server(git_server_url, server_refspecs) {
+                Ok(ref_updates) if all_ref_updates_accepted(&ref_updates) => {
+                    any_server_succeeded = true;
+                    ServerPushOutcome::Accepted
+                }
+                Ok(_) => ServerPushOutcome::RefsRejected,
+                Err(_) => ServerPushOutcome::Failed,
+            };
+            self.server_push_outcomes
+                .insert(git_server_url.clone(), outcome);
         }
 
         if any_server_succeeded {
@@ -1478,6 +1516,111 @@ mod tests {
                 vec![vec![forced_refspec(), delete_refspec()]]
             );
             assert!(transaction.refspecs_dropped_by_policy().is_empty());
+        }
+    }
+
+    mod server_push_outcomes {
+        use super::*;
+
+        fn successful_push() -> FakePushResult {
+            FakePushResult::Refs(HashMap::new())
+        }
+
+        fn rejected_push() -> FakePushResult {
+            FakePushResult::Refs(HashMap::from([(
+                "refs/heads/main".to_string(),
+                Some("hook declined".to_string()),
+            )]))
+        }
+
+        #[tokio::test]
+        async fn records_one_outcome_per_pushed_or_in_sync_server() {
+            let accepted_url = "https://accepted.example/repo.git".to_string();
+            let rejected_url = "https://rejected.example/repo.git".to_string();
+            let failed_url = "https://failed.example/repo.git".to_string();
+            let in_sync_url = "https://in-sync.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(
+                vec![
+                    accepted_url.clone(),
+                    rejected_url.clone(),
+                    failed_url.clone(),
+                    in_sync_url.clone(),
+                ],
+                vec![],
+            );
+            let mut ops = FakeOps {
+                push_results: HashMap::from([
+                    (accepted_url.clone(), successful_push()),
+                    (rejected_url.clone(), rejected_push()),
+                    (failed_url.clone(), FakePushResult::ConnectionError),
+                ]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([
+                    (accepted_url.clone(), vec![refspec()]),
+                    (rejected_url.clone(), vec![refspec()]),
+                    (failed_url.clone(), vec![refspec()]),
+                    (in_sync_url.clone(), vec![]),
+                ]),
+                &[refspec()],
+            );
+
+            assert_eq!(
+                transaction.server_push_outcomes(),
+                &HashMap::from([
+                    (accepted_url, ServerPushOutcome::Accepted),
+                    (rejected_url, ServerPushOutcome::RefsRejected),
+                    (failed_url, ServerPushOutcome::Failed),
+                    (in_sync_url, ServerPushOutcome::AlreadyApplied),
+                ])
+            );
+        }
+
+        #[tokio::test]
+        async fn gate_skipped_grasp_server_records_no_outcome() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let repo_ref = test_repo_ref(vec![grasp_url.clone()], vec![]);
+            let mut ops = FakeOps {
+                relay_acceptance: HashMap::from([("wss://grasp.example".to_string(), false)]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([(grasp_url, vec![refspec()])]),
+                &[refspec()],
+            );
+
+            assert!(transaction.server_push_outcomes().is_empty());
+        }
+
+        #[tokio::test]
+        async fn policy_dropped_plan_records_already_applied() {
+            let vanilla_url = "https://vanilla.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec![]);
+            let forced_refspec = "+refs/heads/diverged:refs/heads/diverged".to_string();
+            let mut ops = FakeOps::default();
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()))
+                .with_force_policy(ServerForcePolicy::ForceOnlyOn(vec![]));
+            transaction.publish_state_to_grasps_first(&mut ops).await;
+
+            transaction.push_git_state_refspecs(
+                &mut ops,
+                HashMap::from([(vanilla_url.clone(), vec![forced_refspec.clone()])]),
+                &[forced_refspec],
+            );
+
+            assert_eq!(
+                transaction.server_push_outcomes(),
+                &HashMap::from([(vanilla_url, ServerPushOutcome::AlreadyApplied)])
+            );
         }
     }
 
