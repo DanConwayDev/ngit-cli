@@ -2273,6 +2273,17 @@ async fn get_proposal_or_revision_event(git_repo: &Repo, event: &Event) -> Resul
         .cloned()
 }
 
+/// Update the remote-tracking ref for a refspec the helper reported
+/// `ok`, and self-heal legacy tag tracking refs (see below).
+///
+/// Deliberately not converged with
+/// `push_bookkeeping::record_accepted_push_refspecs`, which replicates
+/// git's bookkeeping where ngit pushes in-process and git never runs.
+/// Here git itself also updates the tracking refs for every `ok`
+/// refspec after the helper exits; this function is a belt-and-braces
+/// mirror of that plus the legacy tag cleanup and URL-based remote
+/// name resolution git won't do. See the `push_bookkeeping` module
+/// docs for the full boundary rationale.
 fn update_remote_refs_pushed(
     git_repo: &Repository,
     refspec: &str,

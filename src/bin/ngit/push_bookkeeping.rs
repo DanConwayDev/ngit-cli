@@ -13,9 +13,21 @@
 //!   + `branch.<branch>.merge`.
 //!
 //! The remote helper binary keeps its own equivalent
-//! (`git_remote_helper::push::update_remote_refs_pushed`) because git
-//! itself performs the tracking-ref update after a helper push;
-//! converging the two is follow-up work.
+//! (`git_remote_helper::push::update_remote_refs_pushed`).
+//! Converging the two was attempted and abandoned: they run in
+//! different process contexts with different jobs. This module is the
+//! *only* writer after an in-process push and must replicate git's
+//! semantics exactly (hence the `update by push` reflog message). The
+//! helper's runs where git itself also updates the remote-tracking
+//! refs for every refspec it reported `ok` — its writes are a
+//! belt-and-braces mirror plus work git will never do: deleting legacy
+//! tag tracking refs written by old ngit versions, and resolving the
+//! remote name from the nostr URL when the helper wasn't given one.
+//! Merging them would either change the helper's observable reflog
+//! messages and drop its URL-based remote resolution, or burden this
+//! module with legacy cleanup it cannot need. The refspec parsing they
+//! share is trivial (`split_refspec` here, `refspec_to_from_to`
+//! there).
 
 use anyhow::{Context, Result, bail};
 use ngit::git::{Repo, RepoActions, sha1_to_oid};
