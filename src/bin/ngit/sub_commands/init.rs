@@ -2053,6 +2053,24 @@ async fn publish_origin_state(
         git_server_push_options: &[],
         decoded_nostr_url: nostr_url_decoded,
     };
+
+    // The committed candidate is what the nostr `origin` remote serves:
+    // the transaction only commits once a git server holds every
+    // candidate ref (accepted push or already applied) and the state
+    // event is the remote's source of truth for fetches. Its branches
+    // are therefore the accepted refspecs to record as remote-tracking
+    // refs, mirroring push_initial_branch. `refs/heads/pr/*` never
+    // enters the per-server plans and stale pre-nostr tracking refs for
+    // it must not be reintroduced.
+    let tracking_refspecs: Vec<String> = candidate
+        .state
+        .iter()
+        .filter(|(ref_name, _)| {
+            ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/heads/pr/")
+        })
+        .map(|(ref_name, oid)| format!("{oid}:{ref_name}"))
+        .collect();
+
     let mut transaction =
         StateTransaction::new(repo_ref, Some(candidate)).with_force_policy(force_policy);
     if let Err(failure) = transaction
@@ -2069,6 +2087,8 @@ async fn publish_origin_state(
     }
     // The transaction committed: the origin-derived state is now the
     // authoritative cached state.
+    record_accepted_push_refspecs(git_repo, "origin", &tracking_refspecs)
+        .context("failed to update the origin remote-tracking refs after push")?;
     println!("published repository state from the existing origin's refs");
 
     if !missing_refs.is_empty() {

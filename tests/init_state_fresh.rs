@@ -872,6 +872,27 @@ async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_t
          the existing origin's state (the user never passed the tag on the \
          `ngit init` command line); got ref-name tags: {ref_tag_names:?}",
     );
+
+    // Assertion 3: the origin-derived push records remote-tracking refs
+    // for the branches the committed state now serves, like `git push`
+    // would have. `origin` names the nostr remote at this point, so the
+    // pre-nostr server's stale tracking entries must be replaced by the
+    // committed state's view of `main`.
+    let snapshot = repo.snapshot()?;
+    let local_main = snapshot
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after ngit init")?;
+    let tracking_main = snapshot.refs.get("refs/remotes/origin/main").context(
+        "refs/remotes/origin/main missing after ngit init — the \
+         origin-derived state push should record tracking refs for the \
+         branches it published",
+    )?;
+    assert_eq!(
+        tracking_main, local_main,
+        "expected refs/remotes/origin/main to match the pushed main tip",
+    );
+
     Ok(())
 }
 
