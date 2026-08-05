@@ -56,21 +56,22 @@ use crate::state_transaction::{
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
-pub async fn run_push(
+pub(super) async fn run_push(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     stdin: &Stdin,
     initial_refspec: &str,
     client: &mut Client,
     remote_name: Option<&str>,
-    list_outputs: Option<HashMap<String, (HashMap<String, String>, bool)>>,
+    list_outputs: Option<super::list::ListResult>,
     title_description: Option<(String, String)>,
     git_server_push_options: Vec<String>,
     git_server: Option<String>,
+    force_with_lease: &HashMap<String, Option<String>>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
 
-    let proposal_refspecs = refspecs
+    let mut proposal_refspecs = refspecs
         .iter()
         .filter(|r| r.contains("refs/heads/pr/"))
         .cloned()
@@ -84,18 +85,28 @@ pub async fn run_push(
 
     let term = console::Term::stderr();
 
-    let list_outputs = if let Some(outputs) = list_outputs {
-        outputs
+    let (list_outputs, advertised_refs) = if let Some(outputs) = list_outputs {
+        (outputs.remote_states, outputs.advertised_refs)
     } else {
-        list_from_remotes(
-            &term,
-            git_repo,
-            &repo_ref.git_server,
-            &repo_ref.to_nostr_git_url(&None),
-            None,
+        (
+            list_from_remotes(
+                &term,
+                git_repo,
+                &repo_ref.git_server,
+                &repo_ref.to_nostr_git_url(&None),
+                None,
+            )
+            .await,
+            HashMap::new(),
         )
-        .await
     };
+
+    apply_force_with_lease(
+        &mut git_state_refspecs,
+        &mut proposal_refspecs,
+        force_with_lease,
+        &advertised_refs,
+    )?;
 
     let existing_state = {
         // if no state events - create from first git server listed
@@ -263,6 +274,51 @@ pub async fn run_push(
     }
 
     println!();
+    Ok(())
+}
+
+fn apply_force_with_lease(
+    git_state_refspecs: &mut Vec<String>,
+    proposal_refspecs: &mut Vec<String>,
+    force_with_lease: &HashMap<String, Option<String>>,
+    advertised_refs: &HashMap<String, String>,
+) -> Result<()> {
+    let pushed_targets = git_state_refspecs
+        .iter()
+        .chain(proposal_refspecs.iter())
+        .map(|refspec| refspec_to_from_to(refspec).map(|(_, to)| to.to_string()))
+        .collect::<Result<HashSet<_>>>()?;
+
+    let stale_targets = force_with_lease
+        .iter()
+        .filter(|(ref_name, expected)| {
+            pushed_targets.contains(*ref_name)
+                && advertised_refs
+                    .get(*ref_name)
+                    .filter(|value| !value.starts_with("ref: "))
+                    != expected.as_ref()
+        })
+        .map(|(ref_name, _)| ref_name.clone())
+        .collect::<HashSet<_>>();
+
+    for ref_name in &stale_targets {
+        println!("error {ref_name} stale info");
+    }
+    git_state_refspecs.retain(|refspec| {
+        refspec_to_from_to(refspec).is_ok_and(|(_, to)| !stale_targets.contains(to))
+    });
+    proposal_refspecs.retain(|refspec| {
+        refspec_to_from_to(refspec).is_ok_and(|(_, to)| !stale_targets.contains(to))
+    });
+    for refspec in git_state_refspecs
+        .iter_mut()
+        .chain(proposal_refspecs.iter_mut())
+    {
+        let to = refspec_to_from_to(refspec)?.1.to_string();
+        if force_with_lease.contains_key(&to) {
+            *refspec = ensure_force_push_refspec(refspec);
+        }
+    }
     Ok(())
 }
 
@@ -2440,6 +2496,52 @@ mod tests {
     use nostr::nips::nip19::Nip19Event;
 
     use super::*;
+
+    mod force_with_lease {
+        use super::*;
+
+        const OLD_OID: &str = "0123456789abcdef0123456789abcdef01234567";
+        const OTHER_OID: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+        #[test]
+        fn matching_lease_authorizes_force_update() {
+            let mut state_refspecs = vec!["refs/heads/main:refs/heads/main".to_string()];
+            let mut proposal_refspecs = Vec::new();
+            let leases =
+                HashMap::from([("refs/heads/main".to_string(), Some(OLD_OID.to_string()))]);
+            let advertised = HashMap::from([("refs/heads/main".to_string(), OLD_OID.to_string())]);
+
+            apply_force_with_lease(
+                &mut state_refspecs,
+                &mut proposal_refspecs,
+                &leases,
+                &advertised,
+            )
+            .unwrap();
+
+            assert_eq!(state_refspecs, ["+refs/heads/main:refs/heads/main"]);
+        }
+
+        #[test]
+        fn stale_lease_rejects_update() {
+            let mut state_refspecs = vec!["refs/heads/main:refs/heads/main".to_string()];
+            let mut proposal_refspecs = Vec::new();
+            let leases =
+                HashMap::from([("refs/heads/main".to_string(), Some(OLD_OID.to_string()))]);
+            let advertised =
+                HashMap::from([("refs/heads/main".to_string(), OTHER_OID.to_string())]);
+
+            apply_force_with_lease(
+                &mut state_refspecs,
+                &mut proposal_refspecs,
+                &leases,
+                &advertised,
+            )
+            .unwrap();
+
+            assert!(state_refspecs.is_empty());
+        }
+    }
 
     mod refspec_to_from_to {
         use super::*;

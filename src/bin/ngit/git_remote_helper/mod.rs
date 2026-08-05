@@ -8,7 +8,7 @@
 
 use core::str;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
 };
@@ -38,6 +38,27 @@ struct PushOptions {
     description: Option<String>,
     git_server: Option<String>,
     git_server_extras: Vec<String>,
+    force_with_lease: HashMap<String, Option<String>>,
+}
+
+fn parse_cas_option(value: &str) -> Result<(String, Option<String>)> {
+    let (ref_name, expected) = value
+        .split_once(':')
+        .context("force-with-lease value must be <ref>:<expected-oid>")?;
+    if !ref_name.starts_with("refs/") {
+        bail!("force-with-lease ref must start with refs/");
+    }
+    if !expected.is_empty()
+        && (expected.len() != 40 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        bail!("force-with-lease expected object ID must be 40 hexadecimal characters");
+    }
+    let expected = if expected.is_empty() || expected.bytes().all(|byte| byte == b'0') {
+        None
+    } else {
+        Some(expected.to_ascii_lowercase())
+    };
+    Ok((ref_name.to_string(), expected))
 }
 
 /// Strip git's c-style quoting from a push-option value.
@@ -223,6 +244,13 @@ pub async fn run(args: &[String]) -> Result<()> {
                 }
                 println!("ok");
             }
+            ["option", "cas", value] => match parse_cas_option(value) {
+                Ok((ref_name, expected)) => {
+                    push_options.force_with_lease.insert(ref_name, expected);
+                    println!("ok");
+                }
+                Err(error) => println!("error {error}"),
+            },
             ["option", ..] => {
                 println!("unsupported");
             }
@@ -242,6 +270,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                     title_description,
                     push_options.git_server_extras.clone(),
                     push_options.git_server.clone(),
+                    &push_options.force_with_lease,
                 )
                 .await?;
                 push_options = PushOptions::default();
@@ -345,6 +374,23 @@ async fn fetching_with_report_for_helper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_force_with_lease_cas_option() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            parse_cas_option(&format!("refs/heads/main:{oid}")).unwrap(),
+            ("refs/heads/main".to_string(), Some(oid.to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_force_with_lease_for_missing_ref() {
+        assert_eq!(
+            parse_cas_option("refs/heads/new:0000000000000000000000000000000000000000").unwrap(),
+            ("refs/heads/new".to_string(), None)
+        );
+    }
 
     #[test]
     fn decode_backslash_n_to_newline() {
