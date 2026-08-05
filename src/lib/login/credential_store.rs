@@ -1,20 +1,22 @@
-use std::{any::Any, collections::BTreeMap, fmt, fs, path::PathBuf};
+use std::fmt;
 
 use anyhow::{Context, Result, anyhow, bail};
-use keyring::{
-    Error as KeyringError,
-    credential::{Credential, CredentialApi, CredentialBuilderApi, CredentialPersistence},
-};
+use keyring::Error as KeyringError;
 use nostr::{Keys, PublicKey, ToBech32};
 use nostr_keyring::NostrKeyring;
 
 pub const SERVICE: &str = "ngit";
+/// Debug-build-only override selecting the plaintext file store for tests.
 pub const FILE_ENV: &str = "NGIT_KEYRING_FILE";
 pub const ENABLE_ENV: &str = "NGIT_CREDENTIAL_STORE";
 
 pub fn enabled(git_repo: &Option<&crate::git::Repo>) -> bool {
-    if let Ok(value) = std::env::var(ENABLE_ENV) {
-        return parse_bool(&value).unwrap_or(true);
+    if let Some(value) = std::env::var(ENABLE_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool)
+    {
+        return value;
     }
     if git_repo.is_some() {
         if let Some(value) = crate::git::get_git_config_item(git_repo, "nostr.credential-store")
@@ -101,6 +103,8 @@ pub fn parse_pointer(value: &str) -> Option<(&str, &str)> {
 }
 
 pub fn entry_name(keys: &Keys) -> Result<String> {
+    // 8 hex chars (32 bits) of throwaway-key randomness: unique enough for a
+    // user's handful of logins without adding a rand dependency.
     let random = Keys::generate().secret_key().to_secret_hex();
     Ok(format!(
         "{}/{}",
@@ -160,6 +164,23 @@ pub fn delete(name: &str) -> Result<()> {
     }
 }
 
+/// Delete the keyring entries referenced by any pointer values in the given
+/// config scope's `nostr.nsec` / `nostr.bunker-app-key` items.
+pub fn delete_config_pointers(git_repo: &Option<&crate::git::Repo>) -> Result<()> {
+    for item in ["nostr.nsec", "nostr.bunker-app-key"] {
+        if let Some(value) = crate::git::get_git_config_item(git_repo, item)? {
+            if parse_pointer(&value).is_some() {
+                delete(&value).with_context(|| {
+                    format!(
+                        "failed to remove keyring entry {value}; remove it via your OS keychain UI"
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn is_no_entry(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(err) = current {
@@ -175,106 +196,124 @@ fn is_no_entry(error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 fn configure_test_store() {
+    // Compiled out of release builds so an environment variable can never
+    // redirect production secrets away from the platform store.
+    #[cfg(debug_assertions)]
     if let Ok(path) = std::env::var(FILE_ENV) {
-        keyring::set_default_credential_builder(Box::new(FileBuilder(PathBuf::from(path))));
+        keyring::set_default_credential_builder(Box::new(file_store::FileBuilder(
+            std::path::PathBuf::from(path),
+        )));
     }
 }
 
-#[derive(Debug)]
-struct FileBuilder(PathBuf);
+/// Plaintext JSON-file credential backend used by integration tests via
+/// `NGIT_KEYRING_FILE`. Debug builds only.
+#[cfg(debug_assertions)]
+mod file_store {
+    use std::{any::Any, collections::BTreeMap, fs, path::PathBuf};
 
-impl CredentialBuilderApi for FileBuilder {
-    fn build(
-        &self,
-        _: Option<&str>,
-        service: &str,
-        user: &str,
-    ) -> keyring::Result<Box<Credential>> {
-        Ok(Box::new(FileCredential {
-            path: self.0.clone(),
-            key: format!("{service}/{user}"),
-        }))
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn persistence(&self) -> CredentialPersistence {
-        CredentialPersistence::UntilDelete
-    }
-}
+    use keyring::{
+        Error as KeyringError,
+        credential::{Credential, CredentialApi, CredentialBuilderApi, CredentialPersistence},
+    };
 
-#[derive(Debug)]
-struct FileCredential {
-    path: PathBuf,
-    key: String,
-}
+    #[derive(Debug)]
+    pub struct FileBuilder(pub PathBuf);
 
-impl FileCredential {
-    fn read(&self) -> keyring::Result<BTreeMap<String, String>> {
-        if !self.path.exists() {
-            return Ok(BTreeMap::new());
+    impl CredentialBuilderApi for FileBuilder {
+        fn build(
+            &self,
+            _: Option<&str>,
+            service: &str,
+            user: &str,
+        ) -> keyring::Result<Box<Credential>> {
+            Ok(Box::new(FileCredential {
+                path: self.0.clone(),
+                key: format!("{service}/{user}"),
+            }))
         }
-        let data = fs::read(&self.path).map_err(platform_error)?;
-        if data.is_empty() {
-            return Ok(BTreeMap::new());
+        fn as_any(&self) -> &dyn Any {
+            self
         }
-        serde_json::from_slice(&data).map_err(platform_error)
-    }
-    fn write(&self, values: &BTreeMap<String, String>) -> keyring::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(platform_error)?;
+        fn persistence(&self) -> CredentialPersistence {
+            CredentialPersistence::UntilDelete
         }
-        let data = serde_json::to_vec_pretty(values).map_err(platform_error)?;
-        fs::write(&self.path, data).map_err(platform_error)
     }
-}
 
-impl CredentialApi for FileCredential {
-    fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
-        let mut values = self.read()?;
-        values.insert(self.key.clone(), encode_hex(secret));
-        self.write(&values)
+    #[derive(Debug)]
+    struct FileCredential {
+        path: PathBuf,
+        key: String,
     }
-    fn get_secret(&self) -> keyring::Result<Vec<u8>> {
-        let value = self
-            .read()?
-            .remove(&self.key)
-            .ok_or(KeyringError::NoEntry)?;
-        decode_hex(&value)
-    }
-    fn delete_credential(&self) -> keyring::Result<()> {
-        let mut values = self.read()?;
-        if values.remove(&self.key).is_none() {
-            return Err(KeyringError::NoEntry);
+
+    impl FileCredential {
+        fn read(&self) -> keyring::Result<BTreeMap<String, String>> {
+            if !self.path.exists() {
+                return Ok(BTreeMap::new());
+            }
+            let data = fs::read(&self.path).map_err(platform_error)?;
+            if data.is_empty() {
+                return Ok(BTreeMap::new());
+            }
+            serde_json::from_slice(&data).map_err(platform_error)
         }
-        self.write(&values)
+        fn write(&self, values: &BTreeMap<String, String>) -> keyring::Result<()> {
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent).map_err(platform_error)?;
+            }
+            let data = serde_json::to_vec_pretty(values).map_err(platform_error)?;
+            fs::write(&self.path, data).map_err(platform_error)
+        }
     }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
 
-fn platform_error(error: impl std::error::Error + Send + Sync + 'static) -> KeyringError {
-    KeyringError::PlatformFailure(Box::new(error))
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-fn decode_hex(value: &str) -> keyring::Result<Vec<u8>> {
-    if !value.len().is_multiple_of(2) {
-        return Err(KeyringError::Invalid(
-            "credential".to_string(),
-            "odd-length hex".to_string(),
-        ));
+    impl CredentialApi for FileCredential {
+        fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            let mut values = self.read()?;
+            values.insert(self.key.clone(), encode_hex(secret));
+            self.write(&values)
+        }
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            let value = self
+                .read()?
+                .remove(&self.key)
+                .ok_or(KeyringError::NoEntry)?;
+            decode_hex(&value)
+        }
+        fn delete_credential(&self) -> keyring::Result<()> {
+            let mut values = self.read()?;
+            if values.remove(&self.key).is_none() {
+                return Err(KeyringError::NoEntry);
+            }
+            self.write(&values)
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
     }
-    (0..value.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&value[i..i + 2], 16)
-                .map_err(|error| KeyringError::Invalid("credential".to_string(), error.to_string()))
-        })
-        .collect()
+
+    fn platform_error(error: impl std::error::Error + Send + Sync + 'static) -> KeyringError {
+        KeyringError::PlatformFailure(Box::new(error))
+    }
+
+    fn encode_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    fn decode_hex(value: &str) -> keyring::Result<Vec<u8>> {
+        if !value.len().is_multiple_of(2) {
+            return Err(KeyringError::Invalid(
+                "credential".to_string(),
+                "odd-length hex".to_string(),
+            ));
+        }
+        (0..value.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&value[i..i + 2], 16).map_err(|error| {
+                    KeyringError::Invalid("credential".to_string(), error.to_string())
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -261,12 +261,17 @@ async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<
     )
     .await?;
 
-    let _ = repo
+    let output = repo
         .ngit(["account", "export-keys"])
         .env("NGIT_CREDENTIAL_STORE", "true")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
+    assert!(
+        output.status.success(),
+        "export-keys during migration failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let pointer = repo
         .config("nostr.nsec")
         .await?

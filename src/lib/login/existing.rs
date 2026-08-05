@@ -287,6 +287,10 @@ fn resolve_config_secret(
                 warn_migration(&format!(
                     "could not replace plaintext {config_key} with its credential-store pointer: {error}"
                 ));
+            } else {
+                eprintln!(
+                    "moved {config_key} into the OS credential store as entry '{pointer}' under service 'ngit'; git config now holds only the entry name. If this is a sandboxed or ephemeral environment, the secret now lives only in this environment's credential store; `ngit account export-keys` retrieves it."
+                );
             }
             Ok(value.to_string())
         }
@@ -296,8 +300,12 @@ fn resolve_config_secret(
 fn warn_migration(message: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
-    if !Interactor::is_non_interactive() && !WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!("warning: {message}; continuing with the existing plaintext credential");
+    // Printed even in non-interactive mode so automation can surface that the
+    // secret remains in plaintext git config.
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "warning: {message}; continuing with the existing plaintext credential. Run `git config --global nostr.credential-store false` to stop these attempts and silence this warning."
+        );
     }
 }
 

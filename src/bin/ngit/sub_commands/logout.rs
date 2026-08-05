@@ -33,7 +33,7 @@ async fn logout(git_repo: Option<&Repo>) -> Result<()> {
         )
         .await
         {
-            delete_keyring_pointers(if source == SignerInfoSource::GitLocal {
+            credential_store::delete_config_pointers(&if source == SignerInfoSource::GitLocal {
                 git_repo
             } else {
                 None
@@ -88,6 +88,8 @@ async fn logout(git_repo: Option<&Repo>) -> Result<()> {
     }
     // A dangling pointer cannot be loaded as a signer, but logout must still
     // clear it so the user can recover with a fresh login.
+    // NGITTEST limits the sweep to local config, mirroring the login flow, so
+    // tests never touch the developer's real global git config.
     for scope in if std::env::var("NGITTEST").is_ok() {
         vec![git_repo]
     } else {
@@ -97,7 +99,7 @@ async fn logout(git_repo: Option<&Repo>) -> Result<()> {
             .iter()
             .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()));
         if has_login {
-            delete_keyring_pointers(scope)?;
+            credential_store::delete_config_pointers(&scope)?;
             for item in [
                 "nostr.nsec",
                 "nostr.npub",
@@ -107,21 +109,6 @@ async fn logout(git_repo: Option<&Repo>) -> Result<()> {
                 remove_git_config_item(&scope, item)?;
             }
             return Ok(());
-        }
-    }
-    Ok(())
-}
-
-fn delete_keyring_pointers(git_repo: Option<&Repo>) -> Result<()> {
-    for item in ["nostr.nsec", "nostr.bunker-app-key"] {
-        if let Some(value) = get_git_config_item(&git_repo, item)? {
-            if credential_store::parse_pointer(&value).is_some() {
-                credential_store::delete(&value).with_context(|| {
-                    format!(
-                        "failed to remove keyring entry {value}; remove it via your OS keychain UI"
-                    )
-                })?;
-            }
         }
     }
     Ok(())
