@@ -29,7 +29,7 @@ RUN mkdir -p /out/ && \
 
 FROM docker.io/alpine:${ALPINE_VERSION} AS base
 RUN apk --no-cache add \
-  libcrypto3 libressl
+  git libcrypto3 libressl
 ARG UID=65534
 ARG GID=65534
 RUN mkdir -p /opt/ngit && chown ${UID}:${GID} /opt/ngit
