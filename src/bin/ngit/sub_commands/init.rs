@@ -1231,10 +1231,13 @@ fn validate_git_server_url(url: &str) -> Result<String> {
 enum StateAction {
     /// `nostr.nostate`: no state event is created or synced.
     None,
-    /// A canonical state event is already cached: propagate it
-    /// in-process through `ngit sync`'s authoritative flow (nothing is
-    /// republished or re-signed).
-    SyncCachedState,
+    /// A canonical state event is already cached: re-sign its ref
+    /// values as a fresh candidate ordered after it and establish the
+    /// candidate through a state transaction, so every announced relay
+    /// — including ones this init just added — receives the state and
+    /// the git servers are realigned to it (see
+    /// [`republish_cached_state`]).
+    RepublishCachedState,
     /// No canonical state, but the pre-existing `origin` remote was
     /// listable: build a candidate state event from its listing and
     /// establish it through a candidate state transaction. The listing
@@ -1383,12 +1386,13 @@ async fn publish_and_finalize(
         .await
         .is_ok()
     {
-        // A canonical state event is already cached: propagate it
-        // in-process via ngit sync's authoritative flow, which seeds
-        // only the relays missing it. Nothing is rebuilt or re-signed —
-        // re-signing cached ref values as a newer event is how stale
-        // state clobbers newer state.
-        StateAction::SyncCachedState
+        // A canonical state event is already cached: republish it as a
+        // fresh candidate through the state transaction so relays this
+        // init just announced receive the state immediately. Safe
+        // against stale-state clobbering because this invocation
+        // fetched state events for the coordinate above and the
+        // candidate is ordered after the newest cached event.
+        StateAction::RepublishCachedState
     } else if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
         if let Ok(url) = remote.url() {
             // Build a state event from the pre-existing origin's
@@ -1495,7 +1499,7 @@ async fn publish_and_finalize(
                 )
             })?;
         }
-        StateAction::SyncCachedState => {
+        StateAction::RepublishCachedState => {
             if !fields.selected_grasp_servers.is_empty() {
                 wait_for_grasp_servers(
                     git_repo,
@@ -1506,17 +1510,14 @@ async fn publish_and_finalize(
                 .await?;
             }
 
-            println!("syncing your repository's git servers with its nostr state...");
-            super::sync::sync_with_client(
-                &super::sync::SubCommandArgs::default(),
-                git_repo,
-                client,
-                true,
-            )
-            .await
-            .context(
-                "your repository announcement was published to nostr but syncing your repository's git servers with its nostr state failed. fix the reported issue and run `ngit sync`",
-            )?;
+            println!(
+                "republishing your repository state to nostr and syncing your git server(s) with it..."
+            );
+            republish_cached_state(git_repo, &repo_ref, user_ref, client, &signer, &nostr_url_decoded)
+                .await
+                .context(
+                    "your repository announcement was published to nostr but republishing its repository state failed. fix the reported issue and run `ngit sync`",
+                )?;
         }
         StateAction::PublishOriginState {
             origin_url,
@@ -1919,6 +1920,158 @@ async fn push_initial_branch(
         .context("failed to update the origin remote-tracking ref after push")?;
     set_branch_upstream(git_repo, "origin", branch_name)?;
     println!("pushed {branch_name} branch and published repository state");
+    Ok(())
+}
+
+/// Re-sign the cached repository state's ref values as a fresh
+/// candidate event and establish it through a candidate state
+/// transaction: stage it on the grasp relays, realign the repository's
+/// git servers to it, fan it out to every remaining announced relay and
+/// cache it only after a git server and at least one relay accepted it.
+///
+/// The republish exists because `ngit init` is how relays and git
+/// servers are added to an announcement: a repository whose refs are
+/// unchanged would otherwise leave a newly announced relay without the
+/// state event (and a newly announced git server without the git data)
+/// until the next real `git push`, which a fully synced repository may
+/// not make for a long time.
+///
+/// Safe against stale-state clobbering because the caller only reaches
+/// this arm after fetching state events for the announced coordinate in
+/// this invocation, and the candidate is ordered after the newest
+/// cached kind-30618 across maintainer coordinates.
+async fn republish_cached_state(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    user_ref: &ngit::login::user::UserRef,
+    client: &Client,
+    signer: &Arc<ngit::signer::NgitSigner>,
+    nostr_url_decoded: &NostrUrlDecoded,
+) -> Result<()> {
+    let term = Term::stderr();
+
+    let cached_state = get_state_from_cache(Some(git_repo.get_path()?), repo_ref)
+        .await
+        .context("failed to load the cached repository state event")?;
+
+    // The NIP-01 ordering reference for the fresh candidate: the newest
+    // cached state event across maintainer coordinates, freshly fetched
+    // by this invocation. Re-signing the cached ref values as an event
+    // that loses to its predecessor would leave the relays' view
+    // unchanged; an event ordered after it replaces it everywhere.
+    let old_state_event = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![get_filter_state_events(&repo_ref.coordinates(), true)],
+    )
+    .await
+    .ok()
+    .and_then(|events| event_ordering::latest_event(&events).cloned());
+
+    let candidate = RepoState::build(
+        repo_ref.identifier.clone(),
+        cached_state.state,
+        signer,
+        old_state_event.as_ref(),
+    )
+    .await?;
+
+    // Git-server reality must come from a same-invocation listing;
+    // refs/remotes/* may be stale or absent. Requiring at least one
+    // listable server keeps the acceptance gate meaningful: with no
+    // reachable server every per-server plan would be vacuously empty
+    // and the fresh event would broadcast without any git server
+    // holding its data.
+    let remote_states = list_from_remotes(
+        &term,
+        git_repo,
+        &repo_ref.git_server,
+        nostr_url_decoded,
+        None,
+    )
+    .await;
+    if remote_states.is_empty() {
+        bail!(
+            "failed to connect to git servers: {}",
+            repo_ref.git_server.join(" ")
+        );
+    }
+
+    // Fetch state objects missing locally from whichever listed server
+    // has them, so they can be pushed to the servers that don't.
+    let missing_refs =
+        super::sync::fetch_missing_refs(git_repo, &candidate, &remote_states, nostr_url_decoded);
+
+    // Plans source branch pushes from the candidate's own oids: the
+    // nostr remote's tracking refs may not exist yet on a repository
+    // that was announced elsewhere and only just initialised here.
+    let (per_server_plans, state_refspecs) = super::sync::build_state_push_plans(
+        git_repo,
+        &super::sync::BranchPushSource::StateOids,
+        &candidate.state,
+        &remote_states,
+        None,
+        &missing_refs,
+        &HashSet::new(),
+    );
+
+    // Match the plain `ngit sync` this arm used to run: grasp servers
+    // are realigned to the state, vanilla servers stay
+    // fast-forward-only.
+    let force_policy = ServerForcePolicy::ForceOnlyOn(
+        remote_states
+            .iter()
+            .filter_map(|(url, (_, is_grasp_server))| {
+                if *is_grasp_server {
+                    Some(url.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    );
+
+    let repo_relay_only = git_repo
+        .get_git_config_item("nostr.repo-relay-only", None)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "true");
+    let my_write_relays = if repo_relay_only {
+        vec![]
+    } else {
+        user_ref.relays.write()
+    };
+
+    let mut ops = LiveOps {
+        client,
+        git_repo,
+        term: &term,
+        git_server_push_options: &[],
+        decoded_nostr_url: nostr_url_decoded,
+    };
+    let mut transaction =
+        StateTransaction::new(repo_ref, Some(candidate)).with_force_policy(force_policy);
+    if let Err(failure) = transaction
+        .execute(
+            &mut ops,
+            per_server_plans,
+            &state_refspecs,
+            &my_write_relays,
+            repo_relay_only,
+        )
+        .await?
+    {
+        bail!("{}", failure.user_message());
+    }
+    // The transaction committed: the fresh event is now the
+    // authoritative cached state.
+    println!("republished repository state to nostr");
+
+    if !missing_refs.is_empty() {
+        println!(
+            "skipped the following refs as could not find them locally or on any git servers: {}",
+            join_with_and(&missing_refs)
+        );
+    }
     Ok(())
 }
 

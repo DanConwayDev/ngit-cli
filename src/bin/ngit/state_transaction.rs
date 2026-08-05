@@ -29,9 +29,8 @@
 //! publication through this module: the helper pushes candidate states,
 //! sync additionally uses the authoritative mode to propagate the
 //! canonical cached state and a [`ServerForcePolicy`] to keep vanilla
-//! servers fast-forward-only, and init pushes its initial-branch and
-//! origin-derived candidates (its cached-state case delegates to the
-//! in-process sync flow).
+//! servers fast-forward-only, and init pushes its initial-branch,
+//! origin-derived and cached-state-republish candidates.
 
 use std::collections::HashMap;
 
