@@ -287,13 +287,13 @@ fn mark_refspec_pushed(
 ) -> Result<()> {
     let (_, to) = refspec_to_from_to(refspec)?;
     println!("ok {to}");
-    update_remote_refs_pushed(
+    self_heal_legacy_tag_tracking_ref(
         &git_repo.git_repo,
         refspec,
         remote_name,
         &repo_ref.to_nostr_git_url(&None).to_string(),
     )
-    .context("could not update remote_ref locally")
+    .context("could not remove legacy tag tracking ref")
 }
 
 /// Report per-ref `error` lines for a failed state push. The local cache
@@ -2305,64 +2305,51 @@ async fn get_proposal_or_revision_event(git_repo: &Repo, event: &Event) -> Resul
         .cloned()
 }
 
-/// Update the remote-tracking ref for a refspec the helper reported
-/// `ok`, and self-heal legacy tag tracking refs (see below).
+/// Delete the legacy tracking ref an old ngit version may have written
+/// for a pushed tag. A no-op for non-tag destinations.
+///
+/// This is the only local ref bookkeeping the helper performs. For
+/// every refspec the helper reports `ok`, git's own transport layer
+/// updates (or deletes) the remote-tracking ref after the helper
+/// exits, mapping the destination through `remote.<name>.fetch`
+/// (`transport.c::update_tracking_ref`), so duplicating those writes
+/// here could only match git or diverge from it. Tags are the
+/// exception git never touches: git does not track tags per-remote —
+/// the local `refs/tags/<name>` is the single source of truth and
+/// `ngit sync` sources its push refspecs directly from the nostr state
+/// event oid (`<oid>:refs/tags/<name>`) — but an earlier version of
+/// ngit wrote tag tracking refs to `refs/remotes/<nostr>/<tagname>`,
+/// the namespace git uses for remote-tracking branches, making pushed
+/// tags appear as remote branches in `git branch -r`, IDEs, etc.
+/// Delete any such legacy entry for this tag so the next
+/// `git branch -r` is clean.
+///
+/// Best-effort when the remote name cannot be resolved: a raw-URL push
+/// (`git push <nostr-url>` with no configured remote) has no tracking
+/// namespace to heal — old ngit versions failed those pushes outright,
+/// so no legacy entry can exist.
 ///
 /// Deliberately not converged with
 /// `push_bookkeeping::record_accepted_push_refspecs`, which replicates
 /// git's bookkeeping where ngit pushes in-process and git never runs.
-/// Here git itself also updates the tracking refs for every `ok`
-/// refspec after the helper exits; this function is a belt-and-braces
-/// mirror of that plus the legacy tag cleanup and URL-based remote
-/// name resolution git won't do. See the `push_bookkeeping` module
-/// docs for the full boundary rationale.
-fn update_remote_refs_pushed(
+/// See the `push_bookkeeping` module docs for the boundary rationale.
+fn self_heal_legacy_tag_tracking_ref(
     git_repo: &Repository,
     refspec: &str,
     remote_name: Option<&str>,
     nostr_remote_url: &str,
 ) -> Result<()> {
-    let (from, to) = refspec_to_from_to(refspec)?;
-
-    // Tags are not tracked per-remote in git's data model: the local
-    // `refs/tags/<name>` is the single source of truth and `ngit sync`
-    // sources its push refspecs directly from the nostr state event oid
-    // (`<oid>:refs/tags/<name>`), so no per-remote tracking ref is required.
-    //
-    // Self-heal: an earlier version of ngit wrote tag tracking refs to
-    // `refs/remotes/<nostr>/<tagname>` — the same namespace git uses for
-    // remote-tracking branches — making pushed tags appear as remote
-    // branches in `git branch -r`, IDEs, etc.  Delete any such legacy
-    // entry for this tag so the next `git branch -r` is clean.
-    if to.starts_with("refs/tags/") {
-        let legacy_ref_name =
-            refspec_remote_ref_name(git_repo, refspec, remote_name, nostr_remote_url)?;
-        if let Ok(mut legacy_ref) = git_repo.find_reference(&legacy_ref_name) {
-            let _ = legacy_ref.delete();
-        }
+    let (_, to) = refspec_to_from_to(refspec)?;
+    if !to.starts_with("refs/tags/") {
         return Ok(());
     }
-
-    let target_ref_name =
-        refspec_remote_ref_name(git_repo, refspec, remote_name, nostr_remote_url)?;
-
-    if from.is_empty() {
-        if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
-            remote_ref.delete()?;
-        }
-    } else {
-        let oid = reference_to_commit(git_repo, from)
-            .context(format!("failed to get commit of reference {from}"))?;
-        if let Ok(mut remote_ref) = git_repo.find_reference(&target_ref_name) {
-            remote_ref.set_target(oid, "updated by nostr remote helper")?;
-        } else {
-            git_repo.reference(
-                &target_ref_name,
-                oid,
-                false,
-                "created by nostr remote helper",
-            )?;
-        }
+    let Ok(legacy_ref_name) =
+        refspec_remote_ref_name(git_repo, refspec, remote_name, nostr_remote_url)
+    else {
+        return Ok(());
+    };
+    if let Ok(mut legacy_ref) = git_repo.find_reference(&legacy_ref_name) {
+        let _ = legacy_ref.delete();
     }
     Ok(())
 }
@@ -2411,15 +2398,6 @@ fn refspec_remote_ref_name(
             .context("remote should have a name")?,
         short_name,
     ))
-}
-
-fn reference_to_commit(git_repo: &Repository, reference: &str) -> Result<Oid> {
-    Ok(git_repo
-        .find_reference(reference)
-        .context(format!("failed to find reference: {reference}"))?
-        .peel_to_commit()
-        .context(format!("failed to get commit from reference: {reference}"))?
-        .id())
 }
 
 // this maybe a commit id or a ref: pointer

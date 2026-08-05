@@ -416,7 +416,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .with_context(|| {
             format!(
                 "{remote_tracking_ref} missing from contributor refs after force push — \
-                 update_remote_refs_pushed (push.rs:165-170) did not run"
+                 git did not record the tracking ref after the helper's `ok`"
             )
         })?
         .clone();
@@ -579,7 +579,7 @@ async fn update_c_tag_is_new_tip(#[future] snapshot: Arc<Snapshot>) -> Result<()
 /// Assertion 5: the contributor's `refs/remotes/origin/pr/feature` points at
 /// the new tip OID after the force push.
 ///
-/// `update_remote_refs_pushed` (push.rs:165-170) must advance the
+/// git's own post-`ok` tracking update must advance the
 /// remote-tracking ref even for a force push.  The rebased commits are new
 /// objects so this verifies the ref was updated to reflect the new tip, not
 /// left at the original PR's tip.

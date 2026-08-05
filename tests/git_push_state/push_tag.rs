@@ -12,7 +12,8 @@
 //!
 //! Regression cover for the fix in
 //! `fix: tag pushed via nostr remote appeared as remote branch`
-//! (`src/bin/git_remote_nostr/push.rs` `update_remote_refs_pushed`).
+//! (now `src/bin/ngit/git_remote_helper/push.rs`
+//! `self_heal_legacy_tag_tracking_ref`).
 //! Before that fix the remote helper wrote a per-remote tracking ref at
 //! `refs/remotes/<remote>/<tagname>` — git's remote-tracking *branch*
 //! namespace — so a pushed tag showed up as a remote branch in

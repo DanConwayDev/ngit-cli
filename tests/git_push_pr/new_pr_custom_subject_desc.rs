@@ -227,7 +227,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .with_context(|| {
             format!(
                 "{remote_tracking_ref} missing from contributor refs after push — \
-                 update_remote_refs_pushed (push.rs:165-170) did not run"
+                 git did not record the tracking ref after the helper's `ok`"
             )
         })?
         .clone();

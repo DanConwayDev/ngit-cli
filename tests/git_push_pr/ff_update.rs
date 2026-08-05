@@ -305,7 +305,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .with_context(|| {
             format!(
                 "{remote_tracking_ref} missing from contributor refs after second push — \
-                 update_remote_refs_pushed (push.rs:165-170) did not run"
+                 git did not record the tracking ref after the helper's `ok`"
             )
         })?
         .clone();
@@ -454,8 +454,8 @@ async fn update_c_tag_is_new_tip(#[future] snapshot: Arc<Snapshot>) -> Result<()
 /// Assertion 5: the contributor's `refs/remotes/origin/pr/feature` points at
 /// the new tip OID after the second push.
 ///
-/// `update_remote_refs_pushed` (push.rs:165-170) must run for both the first
-/// push and the FF update push. This assertion verifies that the second push
+/// git's own post-`ok` tracking update runs for both the first push and
+/// the FF update push. This assertion verifies that the second push
 /// advanced the remote-tracking ref rather than leaving it at the first
 /// push's tip.
 #[rstest]

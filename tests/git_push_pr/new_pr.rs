@@ -39,7 +39,7 @@
 //! 3. Zero KIND_PULL_REQUEST_UPDATE events — a brand-new push cannot be an
 //!    update.
 //! 4. Contributor's `refs/remotes/origin/pr/feature` matches the local tip —
-//!    `update_remote_refs_pushed` (push.rs:165-170) ran correctly.
+//!    git's own post-`ok` tracking update ran correctly.
 //! 5. Contributor's upstream tracking config is set (`-u` behaviour):
 //!    `branch.pr/feature.merge = refs/heads/pr/feature`.
 //! 6. GRASP bare repo has `refs/nostr/<pr_event_id>` resolving to the tip — the
@@ -270,9 +270,9 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // --- 6. Capture contributor local state ----------------------------------
     //
     // Snapshot the contributor's refs AFTER the push so that
-    // `refs/remotes/origin/pr/feature` is present (it's written by
-    // `update_remote_refs_pushed` at push.rs:165-170, acknowledged by git
-    // on seeing `ok refs/heads/pr/feature` from the helper).
+    // `refs/remotes/origin/pr/feature` is present (git's own transport
+    // layer writes it on seeing `ok refs/heads/pr/feature` from the
+    // helper, mapping the destination through `remote.origin.fetch`).
     let contributor_snap = contributor
         .snapshot()
         .context("capturing contributor snapshot after push")?;
@@ -283,7 +283,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .with_context(|| {
             format!(
                 "{remote_tracking_ref} missing from contributor refs after push — \
-                 update_remote_refs_pushed (push.rs:165-170) did not run"
+                 git did not record the tracking ref after the helper's `ok`"
             )
         })?
         .clone();
@@ -473,10 +473,10 @@ async fn zero_pr_update_events(#[future] snapshot: Arc<Snapshot>) -> Result<()> 
 /// Case 4: Contributor's `refs/remotes/origin/pr/feature` matches the
 /// pushed tip OID.
 ///
-/// `update_remote_refs_pushed` (push.rs:165-170) is called after the
-/// helper prints `ok refs/heads/pr/feature` and must write the
-/// remote-tracking ref so the contributor's repo reflects what landed on
-/// the server.
+/// After the helper prints `ok refs/heads/pr/feature`, git's own
+/// transport layer writes the remote-tracking ref (mapping the
+/// destination through `remote.origin.fetch`) so the contributor's repo
+/// reflects what landed on the server.
 #[rstest]
 #[tokio::test]
 async fn contributor_pr_remote_tracking_matches_local(
@@ -486,7 +486,7 @@ async fn contributor_pr_remote_tracking_matches_local(
     assert_eq!(
         s.contributor_remote_tracking_oid, s.contributor_tip_oid,
         "contributor refs/remotes/origin/pr/{BRANCH} ({}) does not match local tip ({}); \
-         update_remote_refs_pushed (push.rs:165-170) may not have run",
+         git may not have recorded the tracking ref after the helper's `ok`",
         s.contributor_remote_tracking_oid, s.contributor_tip_oid,
     );
     Ok(())
