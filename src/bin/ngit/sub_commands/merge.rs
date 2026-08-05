@@ -7,10 +7,12 @@ use ngit::{
     fetch::ensure_commit_local,
     git_events::{
         KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, is_event_proposal_root_for_branch,
-        pr_event_clone_tag_urls, process_cover_note, process_subject, tag_value,
+        get_commit_id_from_patch, get_pr_tip_event_or_most_recent_patch_with_ancestors,
+        is_event_proposal_root_for_branch, pr_event_clone_tag_urls, process_cover_note,
+        process_subject, tag_value,
     },
     login::{get_curent_user, user::extract_user_metadata},
+    utils::get_open_or_draft_proposals,
 };
 use nostr::{EventId, PublicKey, RelayUrl, ToBech32, nips::nip19::Nip19Event};
 
@@ -21,7 +23,7 @@ use crate::{
     },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::{RepoRef, get_repo_coordinates_when_remote_unknown},
     sub_commands::id_resolver::{pr_description, proposal_roots, resolve_pr_root_id_or_prefix},
 };
 
@@ -58,7 +60,7 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
     let event_id = if let Some(id) = id {
         resolve_pr_root_id_or_prefix(id, proposals_and_revisions.iter(), pr_description)?
     } else {
-        resolve_event_id_from_current_branch(&git_repo, &proposals_and_revisions)?
+        resolve_event_id_from_current_branch(&git_repo, &repo_ref, &proposals_and_revisions).await?
     };
 
     let proposal = proposal_roots(&proposals_and_revisions)
@@ -95,12 +97,7 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         .iter()
         .any(|e| [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&e.kind));
 
-    let tip_commit_str = if is_pr_kind {
-        tag_value(tip_event, "c").context("PR event missing tip commit tag 'c'")?
-    } else {
-        ngit::git_events::get_commit_id_from_patch(tip_event)
-            .context("failed to get commit id from patch")?
-    };
+    let tip_commit_str = published_tip_commit_str(&tip_chain)?;
 
     // Determine which local branch represents this PR. `ngit pr checkout`
     // creates the canonical `pr/<name>(<shorthand>)` form, but a self-
@@ -364,9 +361,25 @@ fn build_subject(event_id_hex: &str, title: &str) -> (String, bool) {
     (format!("{prefix}{}\u{2026}", truncated.trim_end()), true)
 }
 
+/// The published tip commit id of a proposal, read from its tip event chain
+/// (as returned by `get_pr_tip_event_or_most_recent_patch_with_ancestors`):
+/// the `c` tag of the tip event when the chain carries a PR/PR-update event,
+/// otherwise the commit id recorded in the most recent patch.
+fn published_tip_commit_str(tip_chain: &[nostr::Event]) -> Result<String> {
+    let tip_event = tip_chain.first().context("tip chain is empty")?;
+    if tip_chain
+        .iter()
+        .any(|e| [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&e.kind))
+    {
+        tag_value(tip_event, "c").context("PR event missing tip commit tag 'c'")
+    } else {
+        get_commit_id_from_patch(tip_event).context("failed to get commit id from patch")
+    }
+}
+
 /// When invoked without an id, infer the PR from the checked-out branch.
 ///
-/// Two branch-naming conventions are recognised:
+/// Three matching strategies are tried in order:
 ///
 /// 1. Branches created by `ngit pr checkout` are named
 ///    `pr/<name>(<first-8-hex-of-event-id>)`; the shorthand is extracted and
@@ -377,8 +390,17 @@ fn build_subject(event_id_hex: &str, title: &str) -> (String, bool) {
 ///    a published PR by matching the bare `pr/<name>` against proposals
 ///    authored by the logged-in user — the same mapping `git-remote-nostr` uses
 ///    on push (`is_event_proposal_root_for_branch`).
-fn resolve_event_id_from_current_branch(
+///
+/// 3. When the author-based mapping finds nothing (a PR authored by someone
+///    else, or no logged-in user) or several same-named candidates, a bare
+///    `pr/<name>` branch is resolved by comparing its tip commit against the
+///    published tip of every open/draft proposal. A unique tip match resolves
+///    the PR regardless of login state or authorship. A PR resolved this way
+///    trivially passes the later `ensure_local_branch_matches_published_tip`
+///    drift check: tip equality is exactly the no-drift condition.
+async fn resolve_event_id_from_current_branch(
     git_repo: &Repo,
+    repo_ref: &RepoRef,
     proposals_and_revisions: &[nostr::Event],
 ) -> Result<EventId> {
     let branch = git_repo
@@ -414,22 +436,95 @@ fn resolve_event_id_from_current_branch(
         })
         .collect();
 
-    match matches.as_slice() {
-        [only] => Ok(only.id),
-        [] => {
-            if current_user.is_none() {
-                bail!(
-                    "branch '{branch}' does not encode a PR id and no logged-in user is configured to link it to a published PR; specify a PR event-id or nevent, or run `ngit login`"
-                );
+    if let [only] = matches.as_slice() {
+        return Ok(only.id);
+    }
+
+    // Convention 3 (fallback): the author-based mapping found zero or several
+    // candidates, so match the branch's tip commit against the published tips
+    // of open/draft proposals instead. This resolves the cases convention 2
+    // cannot: a maintainer merging someone else's PR from a bare branch, a
+    // logged-out author merging their own, and same-named PRs told apart by
+    // their tips.
+    let tip_matches = proposals_with_published_tip_at_branch_tip(git_repo, repo_ref, &branch)
+        .await
+        .with_context(|| {
+            format!("failed to match the tip of branch '{branch}' against published PR tips")
+        })?;
+    match tip_matches.as_slice() {
+        [(only, _)] => return Ok(*only),
+        [] => {}
+        multiple => {
+            // Several proposals share the branch's tip commit; the branch
+            // name can still single one out when exactly one of them carries
+            // it as its bare `pr/<name>` form.
+            let named: Vec<&EventId> = multiple
+                .iter()
+                .filter(|(_, bare_branch_name)| bare_branch_name.eq(&branch))
+                .map(|(id, _)| id)
+                .collect();
+            if let [only] = named.as_slice() {
+                return Ok(**only);
             }
             bail!(
-                "branch '{branch}' does not encode a PR id and no PR you authored matches it; specify a PR event-id or nevent"
-            )
+                "branch '{branch}' tip matches more than one open PR; specify the PR event-id or nevent"
+            );
         }
-        _ => bail!(
-            "branch '{branch}' matches more than one of your PRs; specify the PR event-id or nevent"
-        ),
     }
+
+    if matches.is_empty() {
+        if current_user.is_none() {
+            bail!(
+                "branch '{branch}' does not encode a PR id, its tip does not match the published tip of any open PR, and no logged-in user is configured to link it to a PR you authored; specify a PR event-id or nevent, or run `ngit login`"
+            );
+        }
+        bail!(
+            "branch '{branch}' does not encode a PR id, no PR you authored matches it, and its tip does not match the published tip of any open PR; specify a PR event-id or nevent"
+        )
+    }
+    bail!(
+        "branch '{branch}' matches more than one of your PRs and its tip does not identify one of them; specify the PR event-id or nevent"
+    )
+}
+
+/// Open or draft proposals whose published tip commit equals the local tip of
+/// `branch`, as `(proposal root id, bare pr/<name> branch name)` pairs.
+///
+/// The published tip is derived from the same event chain the drift check
+/// uses (`get_open_or_draft_proposals` builds it with
+/// `get_pr_tip_event_or_most_recent_patch_with_ancestors`): the `c` tag of
+/// the latest PR/PR-update event, or the commit id recorded in the most
+/// recent patch. Proposals whose tip cannot be determined or parsed are
+/// skipped — they cannot be what the branch points at.
+async fn proposals_with_published_tip_at_branch_tip(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    branch: &str,
+) -> Result<Vec<(EventId, String)>> {
+    let local_tip = git_repo
+        .get_tip_of_branch(branch)
+        .context(format!("failed to read local tip of branch '{branch}'"))?;
+
+    let open_or_draft = get_open_or_draft_proposals(git_repo, repo_ref)
+        .await
+        .context("failed to load open and draft proposals from cache")?;
+
+    let mut matches = vec![];
+    for (root_id, (proposal, tip_chain, _)) in &open_or_draft {
+        let Ok(tip_commit_str) = published_tip_commit_str(tip_chain) else {
+            continue;
+        };
+        let Ok(published_tip) = str_to_sha1(&tip_commit_str) else {
+            continue;
+        };
+        if published_tip.eq(&local_tip) {
+            let bare_branch_name = event_to_cover_letter(proposal)
+                .map(|cl| format!("pr/{}", cl.branch_name_without_id_or_prefix))
+                .unwrap_or_default();
+            matches.push((*root_id, bare_branch_name));
+        }
+    }
+    Ok(matches)
 }
 
 /// Refuse to merge when the local `pr/...` branch tip has drifted from the

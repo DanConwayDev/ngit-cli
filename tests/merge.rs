@@ -871,3 +871,315 @@ async fn self_submitted_bare_branch_ahead_of_published_tip_aborts_merge() -> Res
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// 9. a maintainer who checked out a *contributor's* PR under a bare `pr/<name>`
+//    local branch (no `(<id>)` shorthand — e.g. created by hand from the
+//    fetched PR tip) resolves the PR by matching the branch tip against the
+//    published PR tips. The author-based bare-branch mapping cannot link it
+//    because the maintainer did not author the PR, so this exercises the
+//    tip-match fallback.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_without_id_resolves_unauthored_bare_branch_by_tip() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    // Fetch so the contributor's PR tip objects are locally available, then
+    // create a bare `pr/<name>` branch at the published tip — what a
+    // maintainer does when checking out a contributor's PR with plain git
+    // under a friendly branch name.
+    publisher
+        .git_ok(["fetch", "origin"], "git fetch origin")
+        .await?;
+    let bare_branch = format!("pr/{}", pr.branch_name);
+    publisher
+        .git_ok(
+            ["checkout", "-b", &bare_branch, &pr.tip],
+            "git checkout -b bare pr branch at published tip",
+        )
+        .await?;
+
+    let out = run_merge(&publisher, &[]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge (no id) on an unauthored bare pr/ branch exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(
+        current_branch(&publisher).await?,
+        "main",
+        "should be left on the default branch after merge",
+    );
+    assert_eq!(
+        parent_count(&publisher, "main").await?,
+        2,
+        "no-ff merge should produce a 2-parent merge commit",
+    );
+
+    // the right PR was merged: the second parent is the published tip and the
+    // subject carries this PR's event-id shorthand.
+    let merged_in = rev_parse(&publisher, "main^2").await?;
+    assert_eq!(
+        merged_in, pr.tip,
+        "the merge commit's second parent should be the published PR tip",
+    );
+    let msg = commit_message(&publisher, "main").await?;
+    let shorthand = &pr.event_id.to_hex()[..8];
+    assert!(
+        msg.starts_with(&format!("Merge #{shorthand}: ")),
+        "merge commit subject should carry the tip-matched PR's shorthand, got:\n{msg}",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 10. a *logged-out* user on their own self-submitted bare `pr/<name>` branch
+//     resolves the PR by tip match. The author-based mapping needs a logged-in
+//     user; after logout only the tip comparison can link the branch to the
+//     published PR.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_without_id_resolves_bare_branch_by_tip_when_logged_out() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("merge maintainer".into()),
+            identifier: Some("merge-tip-logged-out-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    // The PR author clones, logs in and submits a PR via a plain pushed
+    // `pr/<name>` branch (no shorthand), as in test 6.
+    let author = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "soon logged out contributor".into(),
+            },
+        )
+        .await?;
+
+    let branch = "pr/tip-match-feature";
+    author
+        .git_ok(
+            ["checkout", "-b", branch],
+            "git checkout -b pr/tip-match-feature",
+        )
+        .await?;
+    std::fs::write(author.dir().join("feat.md"), "some content\n").context("write feat.md")?;
+    author.git_ok(["add", "feat.md"], "git add feat.md").await?;
+    author
+        .git_ok(
+            ["commit", "-m", "add feat.md", "--no-gpg-sign"],
+            "git commit feat.md",
+        )
+        .await?;
+    let pr_tip = rev_parse(&author, "HEAD").await?;
+    author
+        .nostr_push(["-u", "origin", branch])
+        .await
+        .context("git push -u origin pr/tip-match-feature (PR creation) failed")?;
+    assert_eq!(current_branch(&author).await?, branch);
+
+    // Log out so the author-based mapping has no user to match against.
+    let out = author
+        .ngit(["account", "logout"])
+        .output()
+        .await
+        .context("failed to spawn ngit account logout")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit account logout exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // Precondition for the scenario: without this the author-based arm would
+    // still resolve the PR and the tip-match fallback would go unexercised.
+    let out = author
+        .git(["config", "--get", "nostr.npub"])
+        .output()
+        .await
+        .context("failed to spawn git config --get nostr.npub")?;
+    anyhow::ensure!(
+        !out.status.success(),
+        "nostr.npub should be unset after logout",
+    );
+
+    // Merge with no id — must resolve the PR by matching the branch tip.
+    let out = run_merge(&author, &[]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge (no id) logged out on own bare pr/ branch exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(
+        current_branch(&author).await?,
+        "main",
+        "should be left on the default branch after merge",
+    );
+    assert_eq!(
+        parent_count(&author, "main").await?,
+        2,
+        "no-ff merge should produce a 2-parent merge commit",
+    );
+    let merged_in = rev_parse(&author, "main^2").await?;
+    assert_eq!(
+        merged_in, pr_tip,
+        "the merge commit's second parent should be the pushed PR tip",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 11. two open PRs sharing the same branch name AND the same tip commit cannot
+//     be told apart by the tip-match fallback: merge without an id still bails
+//     asking for an explicit event-id, and main is untouched.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_without_id_ambiguous_name_and_tip_still_errors() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("merge maintainer".into()),
+            identifier: Some("merge-ambiguous-tip-repo".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    // Contributor A submits `pr/dup` the plain-git way.
+    let contributor_a = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "contributor a".into(),
+            },
+        )
+        .await?;
+    contributor_a
+        .git_ok(["checkout", "-b", "pr/dup"], "git checkout -b pr/dup (a)")
+        .await?;
+    std::fs::write(contributor_a.dir().join("dup.md"), "duplicated work\n")
+        .context("write dup.md")?;
+    contributor_a
+        .git_ok(["add", "dup.md"], "git add dup.md")
+        .await?;
+    contributor_a
+        .git_ok(
+            ["commit", "-m", "add dup.md", "--no-gpg-sign"],
+            "git commit dup.md",
+        )
+        .await?;
+    let shared_tip = rev_parse(&contributor_a, "HEAD").await?;
+    contributor_a
+        .nostr_push(["-u", "origin", "pr/dup"])
+        .await
+        .context("git push -u origin pr/dup (contributor a) failed")?;
+
+    // Contributor B clones (contributor A's PR tip arrives via its advertised
+    // canonical `pr/dup(<short>)` ref), recreates the *same* bare branch at
+    // the *same* commit and pushes it. B did not author A's PR, so the push
+    // maps to no existing proposal and publishes a second PR root with an
+    // identical branch name and tip.
+    let contributor_b = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "contributor b".into(),
+            },
+        )
+        .await?;
+    contributor_b
+        .git_ok(
+            ["checkout", "-b", "pr/dup", &shared_tip],
+            "git checkout -b pr/dup at shared tip (b)",
+        )
+        .await?;
+    contributor_b
+        .nostr_push(["-u", "origin", "pr/dup"])
+        .await
+        .context("git push -u origin pr/dup (contributor b) failed")?;
+
+    // Precondition: two distinct PR roots now exist for the repo.
+    let pr_roots = harness
+        .grasp("repo")
+        .events(nostr::Filter::new().kind(ngit::git_events::KIND_PULL_REQUEST))
+        .await?;
+    anyhow::ensure!(
+        pr_roots.len() == 2,
+        "expected two same-named same-tip PR roots on the relay, got {}",
+        pr_roots.len(),
+    );
+
+    // The maintainer checks out the shared tip under the bare name and asks
+    // for a merge with no id.
+    publisher
+        .git_ok(["fetch", "origin"], "git fetch origin")
+        .await?;
+    publisher
+        .git_ok(
+            ["checkout", "-b", "pr/dup", &shared_tip],
+            "git checkout -b pr/dup at shared tip (maintainer)",
+        )
+        .await?;
+    let main_before = rev_parse(&publisher, "main").await?;
+
+    let out = run_merge(&publisher, &[]).await?;
+    assert!(
+        !out.status.success(),
+        "ngit merge must bail when two open PRs share the branch name and tip\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Explicit error-message contract: the failure names the branch and the
+    // remedy (specify an event-id).
+    let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    assert!(
+        stderr.contains("pr/dup") && stderr.contains("event-id"),
+        "error should name the branch and the event-id remedy, got:\n{stderr}",
+    );
+
+    // main must not have advanced and no merge is in progress.
+    assert_eq!(
+        rev_parse(&publisher, "main").await?,
+        main_before,
+        "main must not advance when the merge is refused",
+    );
+
+    Ok(())
+}
