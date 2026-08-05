@@ -128,6 +128,19 @@ impl Harness {
         self.grasps.get_mut(role).and_then(|v| v.pop())
     }
 
+    /// Take ownership of a vanilla git server registered under `role`,
+    /// removing it from the harness. Dropping the returned value shuts the
+    /// listener down — useful for tests that need every git server
+    /// unreachable while relay surfaces stay live.
+    ///
+    /// Vanilla git servers contribute nothing to [`Harness::env`], so the
+    /// take only affects role lookups; clone URLs already recorded in repo
+    /// announcements keep pointing at the now-dead address, which is
+    /// exactly what a downed-server test wants.
+    pub fn take_vanilla_git_server(&mut self, role: &str) -> Option<VanillaGitServer> {
+        self.vanilla_git_servers.get_mut(role).and_then(|v| v.pop())
+    }
+
     /// Take ownership of a vanilla relay registered under `role`, removing
     /// it from the harness. Dropping the returned value shuts the relay down.
     ///

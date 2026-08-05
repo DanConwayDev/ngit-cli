@@ -295,6 +295,44 @@ impl Repo {
         Ok(out)
     }
 
+    /// Push to a nostr remote that is expected to fail, with
+    /// `git push <args...>`.
+    ///
+    /// Same environment plumbing as [`Self::nostr_push`] — this exists so
+    /// failure-path tests still route pushes through the harness's nostr
+    /// push entry point instead of a raw `repo.git(["push", …])`. Bails if
+    /// the push unexpectedly *succeeds*; otherwise returns the captured
+    /// output for exit-status assertions.
+    ///
+    /// A failed push completes no state transaction, so none of
+    /// [`Self::nostr_push`]'s event-ordering or queryability guarantees
+    /// apply: callers assert on the *absence* of side effects (events,
+    /// refs), not on published state.
+    pub async fn nostr_push_expecting_failure<I, S>(&self, args: I) -> Result<std::process::Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut argv: Vec<std::ffi::OsString> = vec!["push".into()];
+        for a in args {
+            argv.push(a.as_ref().to_owned());
+        }
+        let label = format!("git {}", display_argv(&argv));
+        let out = self
+            .git(&argv)
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn {label}"))?;
+        if out.status.success() {
+            anyhow::bail!(
+                "{label} succeeded but the test expected it to fail\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        Ok(out)
+    }
+
     /// Run `git <args>` and bail with `label` plus captured output on
     /// non-zero exit.
     ///

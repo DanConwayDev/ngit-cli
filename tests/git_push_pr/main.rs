@@ -11,6 +11,12 @@
 //!
 //! ## Layout
 //!
+//! - [`all_git_servers_down`] — maintainer pushes `main` + `pr/feature` in one
+//!   batch against a no-GRASP repo whose only git server has been taken
+//!   offline.  Asserts the total-failure reporting contract: the push exits
+//!   non-zero, no proposal events reach the relay, no
+//!   `refs/remotes/origin/pr/feature` tracking ref is recorded, and the `main`
+//!   tracking ref and relay state event still describe the last accepted push.
 //! - [`new_pr`] — contributor pushes a `pr/feature` branch against a
 //!   single-grasp repo for the first time. Asserts that the push fires the
 //!   9e06e7b "GRASP server → default to PR kind" code path: one
@@ -59,6 +65,7 @@
 //! and follow the same fixture / case shape so failures stay
 //! pinpoint-named in `cargo test` output.
 
+mod all_git_servers_down;
 mod ff_update;
 mod force_update_stale_origin_main;
 mod new_pr;

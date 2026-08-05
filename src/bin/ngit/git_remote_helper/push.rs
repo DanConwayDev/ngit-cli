@@ -193,13 +193,6 @@ pub async fn run_push(
 
             let mut transaction = StateTransaction::new(repo_ref, state);
 
-            for refspec in &proposal_refspecs {
-                if rejected_proposal_refspecs.contains(refspec) {
-                    continue;
-                }
-                mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
-            }
-
             // The full phase sequence — GRASP staging, git pushes, relay
             // fanout and the cache commit point — runs inside the
             // transaction driver; see the state_transaction module docs
@@ -218,20 +211,33 @@ pub async fn run_push(
             // once a git server accepted the pushed data — including
             // when the state event subsequently reached no relay; a
             // failed git push publishes nothing.
-            if matches!(
+            let git_data_accepted = matches!(
                 push_result,
                 Ok(()) | Err(StateTransactionFailure::StateNotAcceptedByAnyRelay)
-            ) && !other_events.is_empty()
-            {
-                publish_events_to_relays(
-                    &mut ops,
-                    &repo_ref.relays,
-                    other_events,
-                    &my_write_relays,
-                    repo_relay_only,
-                    None,
-                )
-                .await?;
+            );
+
+            if git_data_accepted {
+                if !other_events.is_empty() {
+                    publish_events_to_relays(
+                        &mut ops,
+                        &repo_ref.relays,
+                        other_events,
+                        &my_write_relays,
+                        repo_relay_only,
+                        None,
+                    )
+                    .await?;
+                }
+                // Proposal refspecs are reported `ok` only now that their
+                // events have been published; reporting them before the
+                // transaction would tell git a proposal exists on nostr
+                // when no relay ever received its events.
+                for refspec in &proposal_refspecs {
+                    if rejected_proposal_refspecs.contains(refspec) {
+                        continue;
+                    }
+                    mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
+                }
             }
 
             match push_result {
@@ -244,6 +250,13 @@ pub async fn run_push(
                 }
                 Err(failure) => {
                     report_state_push_failure(&git_state_refspecs, &failure)?;
+                    if !git_data_accepted {
+                        report_proposal_push_failure(
+                            &proposal_refspecs,
+                            &rejected_proposal_refspecs,
+                            &failure,
+                        )?;
+                    }
                 }
             }
         }
@@ -291,6 +304,25 @@ fn report_state_push_failure(
     failure: &StateTransactionFailure,
 ) -> Result<()> {
     for refspec in git_state_refspecs {
+        let (_, to) = refspec_to_from_to(refspec)?;
+        println!("error {to} {}", failure.user_message());
+    }
+    Ok(())
+}
+
+/// Report per-ref `error` lines for proposal refspecs whose events were
+/// never published because no git server accepted the pushed data.
+/// Refspecs rejected during event creation already printed their own
+/// `error` lines and are skipped.
+fn report_proposal_push_failure(
+    proposal_refspecs: &[String],
+    rejected_proposal_refspecs: &[String],
+    failure: &StateTransactionFailure,
+) -> Result<()> {
+    for refspec in proposal_refspecs {
+        if rejected_proposal_refspecs.contains(refspec) {
+            continue;
+        }
         let (_, to) = refspec_to_from_to(refspec)?;
         println!("error {to} {}", failure.user_message());
     }
