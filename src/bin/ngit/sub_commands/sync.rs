@@ -28,7 +28,7 @@ use ngit::{
 use nostr::RelayUrl;
 
 use crate::state_transaction::{
-    GitStatePushOutcome, LiveOps, ServerForcePolicy, ServerPushOutcome, StateTransaction,
+    LiveOps, ServerForcePolicy, ServerPushOutcome, StateTransaction, StateTransactionFailure,
 };
 
 #[derive(Debug, Default, clap::Args)]
@@ -460,9 +460,19 @@ pub(crate) async fn sync_with_client(
     }
     .with_force_policy(force_policy);
 
-    transaction.publish_state_to_grasps_first(&mut ops).await;
-
-    let outcome = transaction.push_git_state_refspecs(&mut ops, per_server_plans, &state_refspecs);
+    // The full phase sequence — GRASP staging (in authoritative mode:
+    // seeding only the relays missing the canonical event), git pushes,
+    // relay fanout and the cache commit point (both no-ops in
+    // authoritative mode) — runs inside the transaction driver.
+    let push_result = transaction
+        .execute(
+            &mut ops,
+            per_server_plans,
+            &state_refspecs,
+            &my_write_relays,
+            false,
+        )
+        .await?;
 
     report_per_server_results(
         &term,
@@ -473,8 +483,8 @@ pub(crate) async fn sync_with_client(
         args.force,
     )?;
 
-    match outcome {
-        GitStatePushOutcome::NoEligibleServers => {
+    match push_result {
+        Err(StateTransactionFailure::NoEligibleGitServers) => {
             term.write_line(
                 "WARNING: no git server was pushed - the state event failed to reach the grasp server relays",
             )?;
@@ -484,7 +494,7 @@ pub(crate) async fn sync_with_client(
                 )?;
             }
         }
-        GitStatePushOutcome::AllPushesFailed => {
+        Err(StateTransactionFailure::AllGitServerPushesFailed) => {
             // individual server failures were reported above; sync stays
             // lenient and still exits successfully
             if has_candidate {
@@ -493,26 +503,19 @@ pub(crate) async fn sync_with_client(
                 )?;
             }
         }
-        GitStatePushOutcome::AcceptedByGitServer => {
-            // In authoritative mode both calls are no-ops: the canonical
-            // event is neither fanned out nor re-cached.
-            transaction
-                .publish_state_to_remaining_relays(&mut ops, &my_write_relays, false)
-                .await?;
-            if transaction.state_relay_accepted() {
-                // The commit point: the fresh state event only now
-                // becomes the authoritative cached state.
-                transaction.commit(&mut ops).await?;
-                if adopted_ahead_refs {
-                    term.write_line("nostr state updated")?;
-                }
-                if args.force {
-                    println!("state event republished");
-                }
-            } else {
-                term.write_line(
-                    "WARNING: state event failed to reach any relay; the fresh state event was not adopted",
-                )?;
+        Err(StateTransactionFailure::StateNotAcceptedByAnyRelay) => {
+            term.write_line(
+                "WARNING: state event failed to reach any relay; the fresh state event was not adopted",
+            )?;
+        }
+        Ok(()) => {
+            // The transaction committed: a fresh state event is now the
+            // authoritative cached state (a no-op in authoritative mode).
+            if adopted_ahead_refs {
+                term.write_line("nostr state updated")?;
+            }
+            if args.force {
+                println!("state event republished");
             }
         }
     }

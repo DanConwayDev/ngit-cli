@@ -546,6 +546,47 @@ impl<'a> StateTransaction<'a> {
         )
     }
 
+    /// Run the transaction's full phase sequence: stage the state event
+    /// on the GRASP relays, execute the per-server git push plans, fan
+    /// the event out to the remaining relays and — once a git server and
+    /// at least one relay accepted — [`Self::commit`] the candidate as
+    /// the authoritative cached state.
+    ///
+    /// The outer `Result` carries infrastructure errors from the relay
+    /// fanout or the cache write; the inner `Err` is a typed
+    /// [`StateTransactionFailure`] after which the previously cached
+    /// state remains authoritative. In both failure shapes no cache
+    /// write has happened. Callers own all user-facing reporting: the
+    /// per-server outcomes ([`Self::server_push_outcomes`]) and policy
+    /// drops ([`Self::refspecs_dropped_by_policy`]) recorded along the
+    /// way stay readable afterwards.
+    pub async fn execute(
+        &mut self,
+        ops: &mut impl StateTransactionOps,
+        per_server_plans: HashMap<String, Vec<String>>,
+        state_refspecs: &[String],
+        my_write_relays: &[String],
+        repo_relay_only: bool,
+    ) -> Result<Result<(), StateTransactionFailure>> {
+        self.publish_state_to_grasps_first(ops).await;
+        match self.push_git_state_refspecs(ops, per_server_plans, state_refspecs) {
+            GitStatePushOutcome::NoEligibleServers => {
+                return Ok(Err(StateTransactionFailure::NoEligibleGitServers));
+            }
+            GitStatePushOutcome::AllPushesFailed => {
+                return Ok(Err(StateTransactionFailure::AllGitServerPushesFailed));
+            }
+            GitStatePushOutcome::AcceptedByGitServer => {}
+        }
+        self.publish_state_to_remaining_relays(ops, my_write_relays, repo_relay_only)
+            .await?;
+        if !self.state_relay_accepted() {
+            return Ok(Err(StateTransactionFailure::StateNotAcceptedByAnyRelay));
+        }
+        self.commit(ops).await?;
+        Ok(Ok(()))
+    }
+
     /// Persist the accepted candidate state event as the authoritative
     /// local state. This is the transaction's only cache write; every
     /// failure path before it leaves the previously cached state
@@ -2113,6 +2154,156 @@ mod tests {
             transaction.commit(&mut ops).await.unwrap();
 
             assert!(ops.calls.is_empty());
+        }
+    }
+
+    mod execute {
+        use super::*;
+
+        #[tokio::test]
+        async fn accepted_push_commits_the_candidate_exactly_once() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let repo_ref = test_repo_ref(
+                vec![grasp_url.clone()],
+                vec!["wss://grasp.example", "wss://other.relay"],
+            );
+            let mut ops = FakeOps {
+                push_results: HashMap::from([(
+                    grasp_url.clone(),
+                    FakePushResult::Refs(HashMap::new()),
+                )]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
+
+            let result = transaction
+                .execute(
+                    &mut ops,
+                    HashMap::from([(grasp_url, vec![refspec()])]),
+                    &[refspec()],
+                    &[],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert!(result.is_ok());
+            let expected_id = transaction.state.as_ref().unwrap().event.id;
+            let cached: Vec<_> = ops
+                .calls
+                .iter()
+                .filter(|call| matches!(call, FakeCall::SaveToCache(_)))
+                .collect();
+            assert_eq!(cached, vec![&FakeCall::SaveToCache(expected_id)]);
+        }
+
+        #[tokio::test]
+        async fn staging_rejection_returns_no_eligible_servers_without_fanout_or_cache_write() {
+            let grasp_url = grasp_clone_url("grasp.example");
+            let repo_ref = test_repo_ref(
+                vec![grasp_url.clone()],
+                vec!["wss://grasp.example", "wss://other.relay"],
+            );
+            let mut ops = FakeOps {
+                relay_acceptance: HashMap::from([("wss://grasp.example".to_string(), false)]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
+
+            let result = transaction
+                .execute(
+                    &mut ops,
+                    HashMap::from([(grasp_url, vec![refspec()])]),
+                    &[refspec()],
+                    &[],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                result,
+                Err(StateTransactionFailure::NoEligibleGitServers)
+            ));
+            // the driver returned before the remaining-relay fanout: the
+            // only publish is the GRASP staging attempt
+            assert_eq!(ops.publish_calls().len(), 1);
+            assert!(
+                !ops.calls
+                    .iter()
+                    .any(|call| matches!(call, FakeCall::SaveToCache(_)))
+            );
+        }
+
+        #[tokio::test]
+        async fn failed_pushes_return_typed_failure_without_cache_write() {
+            let vanilla_url = "https://vanilla.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec!["wss://relay.example"]);
+            let mut ops = FakeOps {
+                push_results: HashMap::from([(
+                    vanilla_url.clone(),
+                    FakePushResult::ConnectionError,
+                )]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
+
+            let result = transaction
+                .execute(
+                    &mut ops,
+                    HashMap::from([(vanilla_url, vec![refspec()])]),
+                    &[refspec()],
+                    &[],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                result,
+                Err(StateTransactionFailure::AllGitServerPushesFailed)
+            ));
+            assert!(
+                !ops.calls
+                    .iter()
+                    .any(|call| matches!(call, FakeCall::SaveToCache(_)))
+            );
+        }
+
+        #[tokio::test]
+        async fn relay_rejection_after_accepted_push_fails_without_cache_write() {
+            let vanilla_url = "https://vanilla.example/repo.git".to_string();
+            let repo_ref = test_repo_ref(vec![vanilla_url.clone()], vec!["wss://relay.example"]);
+            let mut ops = FakeOps {
+                relay_acceptance: HashMap::from([("wss://relay.example".to_string(), false)]),
+                push_results: HashMap::from([(
+                    vanilla_url.clone(),
+                    FakePushResult::Refs(HashMap::new()),
+                )]),
+                ..Default::default()
+            };
+            let mut transaction = StateTransaction::new(&repo_ref, Some(main_state()));
+
+            let result = transaction
+                .execute(
+                    &mut ops,
+                    HashMap::from([(vanilla_url, vec![refspec()])]),
+                    &[refspec()],
+                    &[],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                result,
+                Err(StateTransactionFailure::StateNotAcceptedByAnyRelay)
+            ));
+            assert!(
+                !ops.calls
+                    .iter()
+                    .any(|call| matches!(call, FakeCall::SaveToCache(_)))
+            );
         }
     }
 

@@ -54,9 +54,7 @@ use crate::{
         RepoCoordinateSource, RepoRef, ResolvedRepoCoordinate, get_repo_config_from_yaml,
         print_selected_repo, try_resolve_repo_coordinate,
     },
-    state_transaction::{
-        GitStatePushOutcome, LiveOps, ServerForcePolicy, StateTransaction, StateTransactionFailure,
-    },
+    state_transaction::{LiveOps, ServerForcePolicy, StateTransaction},
 };
 
 // ---------------------------------------------------------------------------
@@ -1903,39 +1901,24 @@ async fn push_initial_branch(
         decoded_nostr_url: nostr_url_decoded,
     };
     let mut transaction = StateTransaction::new(repo_ref, Some(state));
-    transaction.publish_state_to_grasps_first(&mut ops).await;
-    match transaction.push_git_state_refspecs(&mut ops, remote_refspecs, &refspecs) {
-        GitStatePushOutcome::NoEligibleServers => {
-            bail!(
-                "{}",
-                StateTransactionFailure::NoEligibleGitServers.user_message()
-            )
-        }
-        GitStatePushOutcome::AllPushesFailed => {
-            bail!(
-                "{}",
-                StateTransactionFailure::AllGitServerPushesFailed.user_message()
-            )
-        }
-        GitStatePushOutcome::AcceptedByGitServer => {
-            transaction
-                .publish_state_to_remaining_relays(&mut ops, &my_write_relays, repo_relay_only)
-                .await?;
-            if !transaction.state_relay_accepted() {
-                bail!(
-                    "{}",
-                    StateTransactionFailure::StateNotAcceptedByAnyRelay.user_message()
-                );
-            }
-            // The commit point: the pushed state only now becomes the
-            // authoritative cached state.
-            transaction.commit(&mut ops).await?;
-            record_accepted_push_refspecs(git_repo, "origin", &refspecs)
-                .context("failed to update the origin remote-tracking ref after push")?;
-            set_branch_upstream(git_repo, "origin", branch_name)?;
-            println!("pushed {branch_name} branch and published repository state");
-        }
+    if let Err(failure) = transaction
+        .execute(
+            &mut ops,
+            remote_refspecs,
+            &refspecs,
+            &my_write_relays,
+            repo_relay_only,
+        )
+        .await?
+    {
+        bail!("{}", failure.user_message());
     }
+    // The transaction committed: the pushed state is now the
+    // authoritative cached state.
+    record_accepted_push_refspecs(git_repo, "origin", &refspecs)
+        .context("failed to update the origin remote-tracking ref after push")?;
+    set_branch_upstream(git_repo, "origin", branch_name)?;
+    println!("pushed {branch_name} branch and published repository state");
     Ok(())
 }
 
@@ -2072,36 +2055,21 @@ async fn publish_origin_state(
     };
     let mut transaction =
         StateTransaction::new(repo_ref, Some(candidate)).with_force_policy(force_policy);
-    transaction.publish_state_to_grasps_first(&mut ops).await;
-    match transaction.push_git_state_refspecs(&mut ops, per_server_plans, &state_refspecs) {
-        GitStatePushOutcome::NoEligibleServers => {
-            bail!(
-                "{}",
-                StateTransactionFailure::NoEligibleGitServers.user_message()
-            )
-        }
-        GitStatePushOutcome::AllPushesFailed => {
-            bail!(
-                "{}",
-                StateTransactionFailure::AllGitServerPushesFailed.user_message()
-            )
-        }
-        GitStatePushOutcome::AcceptedByGitServer => {
-            transaction
-                .publish_state_to_remaining_relays(&mut ops, &my_write_relays, repo_relay_only)
-                .await?;
-            if !transaction.state_relay_accepted() {
-                bail!(
-                    "{}",
-                    StateTransactionFailure::StateNotAcceptedByAnyRelay.user_message()
-                );
-            }
-            // The commit point: the origin-derived state only now
-            // becomes the authoritative cached state.
-            transaction.commit(&mut ops).await?;
-            println!("published repository state from the existing origin's refs");
-        }
+    if let Err(failure) = transaction
+        .execute(
+            &mut ops,
+            per_server_plans,
+            &state_refspecs,
+            &my_write_relays,
+            repo_relay_only,
+        )
+        .await?
+    {
+        bail!("{}", failure.user_message());
     }
+    // The transaction committed: the origin-derived state is now the
+    // authoritative cached state.
+    println!("published repository state from the existing origin's refs");
 
     if !missing_refs.is_empty() {
         println!(

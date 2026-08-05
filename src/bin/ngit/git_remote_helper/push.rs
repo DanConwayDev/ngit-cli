@@ -50,8 +50,7 @@ use repo_ref::RepoRef;
 use repo_state::RepoState;
 
 use crate::state_transaction::{
-    GitStatePushOutcome, LiveOps, StateTransaction, StateTransactionFailure, StateTransactionOps,
-    publish_events_to_relays,
+    LiveOps, StateTransaction, StateTransactionFailure, publish_events_to_relays,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -194,11 +193,6 @@ pub async fn run_push(
 
             let mut transaction = StateTransaction::new(repo_ref, state);
 
-            // Seed purgatory on the GRASP relays we are about to push to
-            // before any git data moves; see the state_transaction module
-            // docs for the transaction ordering rationale.
-            transaction.publish_state_to_grasps_first(&mut ops).await;
-
             for refspec in &proposal_refspecs {
                 if rejected_proposal_refspecs.contains(refspec) {
                     continue;
@@ -206,53 +200,50 @@ pub async fn run_push(
                 mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
             }
 
-            match transaction.push_git_state_refspecs(
-                &mut ops,
-                remote_refspecs,
-                &git_state_refspecs,
-            ) {
-                GitStatePushOutcome::NoEligibleServers => {
-                    report_state_push_failure(
-                        &git_state_refspecs,
-                        &StateTransactionFailure::NoEligibleGitServers,
-                    )?;
-                }
-                GitStatePushOutcome::AllPushesFailed => {
-                    report_state_push_failure(
-                        &git_state_refspecs,
-                        &StateTransactionFailure::AllGitServerPushesFailed,
-                    )?;
-                }
-                GitStatePushOutcome::AcceptedByGitServer => {
-                    transaction
-                        .publish_state_to_remaining_relays(
-                            &mut ops,
-                            &my_write_relays,
-                            repo_relay_only,
-                        )
-                        .await?;
+            // The full phase sequence — GRASP staging, git pushes, relay
+            // fanout and the cache commit point — runs inside the
+            // transaction driver; see the state_transaction module docs
+            // for the ordering rationale.
+            let push_result = transaction
+                .execute(
+                    &mut ops,
+                    remote_refspecs,
+                    &git_state_refspecs,
+                    &my_write_relays,
+                    repo_relay_only,
+                )
+                .await?;
 
-                    if !other_events.is_empty() {
-                        publish_events_to_relays(
-                            &mut ops,
-                            &repo_ref.relays,
-                            other_events,
-                            &my_write_relays,
-                            repo_relay_only,
-                            None,
-                        )
-                        .await?;
+            // Proposal, status and announcement events are published
+            // once a git server accepted the pushed data — including
+            // when the state event subsequently reached no relay; a
+            // failed git push publishes nothing.
+            if matches!(
+                push_result,
+                Ok(()) | Err(StateTransactionFailure::StateNotAcceptedByAnyRelay)
+            ) && !other_events.is_empty()
+            {
+                publish_events_to_relays(
+                    &mut ops,
+                    &repo_ref.relays,
+                    other_events,
+                    &my_write_relays,
+                    repo_relay_only,
+                    None,
+                )
+                .await?;
+            }
+
+            match push_result {
+                Ok(()) => {
+                    // The transaction committed: the accepted candidate
+                    // is now the authoritative cached state.
+                    for refspec in &git_state_refspecs {
+                        mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
                     }
-
-                    report_state_push_result(
-                        git_repo,
-                        repo_ref,
-                        &git_state_refspecs,
-                        remote_name,
-                        &transaction,
-                        &mut ops,
-                    )
-                    .await?;
+                }
+                Err(failure) => {
+                    report_state_push_failure(&git_state_refspecs, &failure)?;
                 }
             }
         }
@@ -290,31 +281,6 @@ fn mark_refspec_pushed(
         &repo_ref.to_nostr_git_url(&None).to_string(),
     )
     .context("could not update remote_ref locally")
-}
-
-async fn report_state_push_result(
-    git_repo: &Repo,
-    repo_ref: &RepoRef,
-    git_state_refspecs: &[String],
-    remote_name: Option<&str>,
-    transaction: &StateTransaction<'_>,
-    ops: &mut impl StateTransactionOps,
-) -> Result<()> {
-    if transaction.state_relay_accepted() {
-        // The commit point: only now does the accepted candidate become
-        // the authoritative cached state.
-        transaction.commit(ops).await?;
-        for refspec in git_state_refspecs {
-            mark_refspec_pushed(git_repo, repo_ref, refspec, remote_name)?;
-        }
-    } else {
-        report_state_push_failure(
-            git_state_refspecs,
-            &StateTransactionFailure::StateNotAcceptedByAnyRelay,
-        )?;
-    }
-
-    Ok(())
 }
 
 /// Report per-ref `error` lines for a failed state push. The local cache
