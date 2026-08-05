@@ -7,6 +7,7 @@
 
 use std::{
     cmp::Ordering,
+    ffi::OsStr,
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
@@ -21,6 +22,7 @@ pub const CLAUDE_SKILL_PATH: &str = ".claude/skills/ngit/SKILL.md";
 pub const AGENTS_PATH: &str = "AGENTS.md";
 pub const CLAUDE_PATH: &str = "CLAUDE.md";
 pub const REMINDERS_CONFIG_KEY: &str = "nostr.skill-reminders";
+const SKILL_FILE_NAME: &str = "SKILL.md";
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -129,8 +131,10 @@ fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(root.join(relative_path))
 }
 
-/// Resolve a skill path while allowing one managed skill location to symlink
-/// to the other. The returned path is the real in-repository skill file, so
+/// Resolve a skill path while allowing a managed skill location to symlink to
+/// another skill file in the repository. That covers one managed location
+/// pointing at the other and a repository that keeps a single canonical copy
+/// outside both. The returned path is the real in-repository skill file, so
 /// callers update a shared target only once without replacing the symlink.
 fn validate_skill_path(root: &Path, relative: &str) -> Result<PathBuf> {
     if !skill_paths().contains(&relative) {
@@ -159,19 +163,24 @@ fn validate_skill_path(root: &Path, relative: &str) -> Result<PathBuf> {
             requested.display()
         )
     })?;
-    for allowed in skill_paths() {
-        if resolved == canonical_root.join(allowed) {
-            if !resolved.is_file() {
-                bail!(
-                    "refusing to access repository skill `{relative}` because its target is not a file"
-                );
-            }
-            return Ok(root.join(allowed));
-        }
+    let Ok(target) = resolved.strip_prefix(&canonical_root) else {
+        bail!(
+            "refusing to access repository skill `{relative}` because its symlink target is outside the repository"
+        );
+    };
+    if !resolved.is_file() {
+        bail!("refusing to access repository skill `{relative}` because its target is not a file");
     }
-    bail!(
-        "refusing to access repository skill `{relative}` because its symlink target is outside the managed skill locations"
-    )
+    // Guidance is written through this symlink, so it must only ever land on
+    // another skill file. Without this an unrelated repository file could be
+    // overwritten with skill content by following a symlink pointed at it.
+    if target.file_name() != Some(OsStr::new(SKILL_FILE_NAME)) {
+        bail!(
+            "refusing to access repository skill `{relative}` because its symlink target `{}` is not a {SKILL_FILE_NAME} file",
+            target.display()
+        );
+    }
+    Ok(root.join(target))
 }
 
 fn existing_skill_paths(root: &Path) -> Result<Vec<&'static str>> {
@@ -570,10 +579,20 @@ fn validate_target_path(root: &Path, path: &Path) -> Result<PathBuf> {
     let relative = relative
         .to_str()
         .context("managed guidance path is not valid UTF-8")?;
-    if !allowed_paths().contains(&relative) {
-        bail!("unexpected guidance commit path `{relative}`");
+    if allowed_paths().contains(&relative) {
+        return validate_managed_path(root, relative);
     }
-    validate_managed_path(root, relative)
+    // A managed skill location may symlink to a canonical skill file kept
+    // elsewhere in the repository. Guidance updates that resolved file, so a
+    // guidance commit has to be able to stage it as well.
+    if skill_paths()
+        .iter()
+        .filter_map(|skill| validate_skill_path(root, skill).ok())
+        .any(|resolved| resolved == path)
+    {
+        return Ok(path.to_path_buf());
+    }
+    bail!("unexpected guidance commit path `{relative}`")
 }
 
 /// Validate that a guidance-only commit can be made without absorbing any
@@ -1110,7 +1129,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn upgrade_refuses_a_skill_symlink_outside_managed_locations() {
+    fn upgrade_refuses_a_skill_symlink_outside_the_repository() {
         let root = temp_root();
         let outside = root.with_extension("outside-skill");
         fs::create_dir_all(root.join(".agents/skills/ngit")).unwrap();
@@ -1121,11 +1140,76 @@ mod tests {
             update(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("outside the managed skill locations")
+                .contains("outside the repository")
         );
         assert_eq!(fs::read_to_string(&outside).unwrap(), bundled_skill());
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_file(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upgrade_follows_skill_symlinks_to_a_canonical_repository_copy() {
+        let root = temp_root();
+        let canonical = root.join("skills/ngit/SKILL.md");
+        fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        let older = bundled_skill().replace(
+            &format!("version: \"{}\"", bundled_version().unwrap()),
+            "version: \"0.1\"",
+        );
+        fs::write(&canonical, older).unwrap();
+        for relative in skill_paths() {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            symlink("../../../skills/ngit/SKILL.md", &path).unwrap();
+        }
+
+        let before = status(&root).unwrap();
+        assert!(before.installed);
+        assert!(before.update_available);
+        assert_eq!(before.installed_version.as_deref(), Some("0.1"));
+        assert_eq!(before.managed_files, vec![SKILL_PATH, CLAUDE_SKILL_PATH]);
+        // The shared target is updated once, not once per managed location.
+        assert_eq!(paths_for_commit(&root).unwrap(), vec![canonical.clone()]);
+
+        update(&root, false).unwrap();
+
+        assert_eq!(fs::read_to_string(&canonical).unwrap(), bundled_skill());
+        for relative in skill_paths() {
+            assert!(
+                fs::symlink_metadata(root.join(relative))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "upgrade replaced the `{relative}` symlink"
+            );
+        }
+        let after = status(&root).unwrap();
+        assert!(!after.update_available);
+        assert!(after.modified_files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upgrade_refuses_a_skill_symlink_to_an_unrelated_repository_file() {
+        let root = temp_root();
+        let instructions = "# Local instructions\n";
+        fs::write(root.join(AGENTS_PATH), instructions).unwrap();
+        fs::create_dir_all(root.join(SKILL_PATH).parent().unwrap()).unwrap();
+        symlink(format!("../../../{AGENTS_PATH}"), root.join(SKILL_PATH)).unwrap();
+
+        assert!(
+            update(&root, true)
+                .unwrap_err()
+                .to_string()
+                .contains("is not a SKILL.md file")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(AGENTS_PATH)).unwrap(),
+            instructions
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

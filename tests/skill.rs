@@ -93,6 +93,83 @@ async fn install_updates_existing_claude_without_creating_agents_files() -> Resu
     Ok(())
 }
 
+/// ngit's own repository keeps a single canonical `skills/ngit/SKILL.md` that
+/// the agent-specific discovery locations symlink to, so the copies cannot
+/// drift. Install must follow those symlinks, update the canonical file once,
+/// and commit it.
+#[cfg(unix)]
+#[tokio::test]
+async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+
+    let canonical = repo.dir().join("skills/ngit/SKILL.md");
+    fs::create_dir_all(canonical.parent().context("canonical skill has a parent")?)?;
+    fs::write(
+        &canonical,
+        "---\nname: ngit\nversion: \"0.1\"\n---\n\nolder\n",
+    )?;
+    for relative in [
+        ".agents/skills/ngit/SKILL.md",
+        ".claude/skills/ngit/SKILL.md",
+    ] {
+        let path = repo.dir().join(relative);
+        fs::create_dir_all(path.parent().context("skill path has a parent")?)?;
+        std::os::unix::fs::symlink("../../../skills/ngit/SKILL.md", &path)?;
+    }
+    repo.git_ok(["add", "-A"], "stage the canonical skill layout")
+        .await?;
+    repo.git_ok(
+        ["commit", "-m", "add the canonical skill layout"],
+        "commit the canonical skill layout",
+    )
+    .await?;
+
+    let install = repo.ngit(["skill", "install"]).output().await?;
+    assert!(
+        install.status.success(),
+        "skill install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    assert!(!fs::read_to_string(&canonical)?.contains("older"));
+    for relative in [
+        ".agents/skills/ngit/SKILL.md",
+        ".claude/skills/ngit/SKILL.md",
+    ] {
+        assert!(
+            fs::symlink_metadata(repo.dir().join(relative))?
+                .file_type()
+                .is_symlink(),
+            "install replaced the `{relative}` symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.dir().join(relative))?,
+            fs::read_to_string(&canonical)?
+        );
+    }
+
+    let status = repo.ngit(["skill", "status", "--json"]).output().await?;
+    assert!(status.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(json["installed"], true);
+    assert_eq!(json["installed_version"], json["bundled_version"]);
+    assert_eq!(json["update_available"], false);
+
+    // The update is committed once, against the shared target.
+    let committed = repo
+        .git(["show", "--name-only", "--pretty=format:", "HEAD"])
+        .output()
+        .await?;
+    assert_eq!(
+        String::from_utf8(committed.stdout)?.trim(),
+        "skills/ngit/SKILL.md"
+    );
+    let worktree = repo.git(["status", "--porcelain"]).output().await?;
+    assert!(String::from_utf8(worktree.stdout)?.trim().is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn opt_out_is_reported_by_status() -> Result<()> {
     let harness = harness().await?;
