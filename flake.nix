@@ -54,6 +54,7 @@
             pkg-config # required by git2
             gitlint
             openssl
+            dbus
             ngit-grasp-pkg
           ];
           shellHook = ''
@@ -81,10 +82,12 @@
           buildInputs = [
             pkg-config # required by git2
             openssl
+            dbus
           ];
           nativeBuildInputs = [
             pkg-config # required by git2
             openssl
+            dbus
           ];
           doCheck = false;
         };

@@ -126,7 +126,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     .await?;
 
     // ---------- publisher: account + commit on `main` -------------------
-    let publisher = harness.fresh_repo()?;
+    let mut publisher = harness.fresh_repo()?;
     let display_name = "git push add-branch test";
     let identifier = "git-push-add-branch-test";
 
@@ -146,6 +146,23 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let npub = pubkey
         .to_bech32()
         .context("failed to bech32-encode publisher pubkey")?;
+
+    // Migrate the freshly-created plaintext test login into the file-backed
+    // credential store, then leave that environment in place for the remote
+    // helper spawned by Repo::nostr_push below.
+    let keyring_file = tempfile::NamedTempFile::new()?;
+    publisher.set_env("NGIT_CREDENTIAL_STORE", "true");
+    publisher.set_env(
+        "NGIT_KEYRING_FILE",
+        keyring_file.path().to_string_lossy().into_owned(),
+    );
+    let export = publisher.ngit(["account", "export-keys"]).output().await?;
+    require_success("migrate login to credential store", &export)?;
+    let pointer = publisher
+        .config("nostr.nsec")
+        .await?
+        .context("nostr.nsec missing after migration")?;
+    assert!(pointer.starts_with("npub1") && pointer.contains('/'));
 
     let main_branch_ref = format!("refs/heads/{DEFAULT_BRANCH}");
     let vnext_branch_ref = format!("refs/heads/{SECOND_BRANCH}");

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ngit::{
-    git::remove_git_config_item,
-    login::{SignerInfoSource, existing::load_existing_login},
+    git::{get_git_config_item, remove_git_config_item},
+    login::{SignerInfoSource, credential_store, existing::load_existing_login},
 };
 
 use crate::{
@@ -33,6 +33,11 @@ async fn logout(git_repo: Option<&Repo>) -> Result<()> {
         )
         .await
         {
+            credential_store::delete_config_pointers(&if source == SignerInfoSource::GitLocal {
+                git_repo
+            } else {
+                None
+            })?;
             for item in [
                 "nostr.nsec",
                 "nostr.npub",
@@ -78,6 +83,31 @@ async fn logout(git_repo: Option<&Repo>) -> Result<()> {
                 },
                 user_ref.metadata.name
             );
+            return Ok(());
+        }
+    }
+    // A dangling pointer cannot be loaded as a signer, but logout must still
+    // clear it so the user can recover with a fresh login.
+    // NGITTEST limits the sweep to local config, mirroring the login flow, so
+    // tests never touch the developer's real global git config.
+    for scope in if std::env::var("NGITTEST").is_ok() {
+        vec![git_repo]
+    } else {
+        vec![git_repo, None]
+    } {
+        let has_login = ["nostr.nsec", "nostr.bunker-uri", "nostr.bunker-app-key"]
+            .iter()
+            .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()));
+        if has_login {
+            credential_store::delete_config_pointers(&scope)?;
+            for item in [
+                "nostr.nsec",
+                "nostr.npub",
+                "nostr.bunker-uri",
+                "nostr.bunker-app-key",
+            ] {
+                remove_git_config_item(&scope, item)?;
+            }
             return Ok(());
         }
     }

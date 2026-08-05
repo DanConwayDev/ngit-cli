@@ -30,6 +30,10 @@ git config nostr.repo-relay-only true       # only publish nostr events to repo 
 git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes up to 10 minutes of socket silence
 ```
 
+Secrets are kept in the OS credential store where possible; see
+[docs/credential-storage.md](docs/credential-storage.md) for the storage
+model, plaintext migration, and how to opt out.
+
 ## contributions welcome!
 
 [gitworkshop.dev/danconwaydev.com/ngit](https://gitworkshop.dev/danconwaydev.com/ngit) to report issues and see PRs

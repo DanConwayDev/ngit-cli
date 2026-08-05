@@ -43,6 +43,14 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// Override one environment variable for every subsequently spawned child.
+    /// This remains scoped to this per-test repository fixture.
+    pub fn set_env(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        self.env.retain(|(existing, _)| existing != &key);
+        self.env.push((key, value.into()));
+    }
+
     pub(crate) fn init(harness: &Harness) -> Result<Self> {
         let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
         let dir = tempdir.path().to_path_buf();

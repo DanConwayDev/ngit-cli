@@ -178,7 +178,10 @@ impl Harness {
     /// `NGITTEST=TRUE` so `Params::default()` enters its test branch, plus
     /// each `NGIT_*_SET` populated from the corresponding role.
     pub fn env(&self) -> Vec<(String, String)> {
-        let mut env = vec![("NGITTEST".to_string(), "TRUE".to_string())];
+        let mut env = vec![
+            ("NGITTEST".to_string(), "TRUE".to_string()),
+            ("NGIT_CREDENTIAL_STORE".to_string(), "false".to_string()),
+        ];
 
         let default_urls = self.relay_role_urls("default");
         if !default_urls.is_empty() {
