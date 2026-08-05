@@ -45,7 +45,7 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
-    let proposals_and_revisions: Vec<nostr::Event> =
+    let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
     let proposal = resolve_pr_root_or_prefix(id, proposals_and_revisions.iter(), pr_description)?;
@@ -53,12 +53,13 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
     let cover_letter = event_to_cover_letter(proposal)
         .context("failed to extract proposal details from proposal root event")?;
 
-    let commits_events: Vec<nostr::Event> = get_all_proposal_patch_pr_pr_update_events_from_cache(
-        git_repo_path,
-        &repo_ref,
-        &proposal.id,
-    )
-    .await?;
+    let commits_events: Vec<nostr::prelude::Event> =
+        get_all_proposal_patch_pr_pr_update_events_from_cache(
+            git_repo_path,
+            &repo_ref,
+            &proposal.id,
+        )
+        .await?;
 
     let most_recent_proposal_patch_chain_or_pr_or_pr_update =
         get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
@@ -122,7 +123,7 @@ fn checkout_pr(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,
-    most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
+    most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::prelude::Event],
     nostr_remote_name: Option<&str>,
     force: bool,
 ) -> Result<()> {
@@ -232,7 +233,7 @@ fn checkout_patch(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,
-    most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::Event],
+    most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::prelude::Event],
     nostr_remote_name: Option<&str>,
     force: bool,
 ) -> Result<()> {

@@ -10,9 +10,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
-use nostr::{
-    EventBuilder, Keys, Metadata, PublicKey, RelayUrl, ToBech32, event::FinalizeEvent,
-    key::AsyncGetPublicKey, nips::nip46::NostrConnectUri,
+use nostr::prelude::{
+    Keys, Metadata, PublicKey, RelayList, RelayUrl, ToBech32, event::FinalizeEvent,
+    key::AsyncGetPublicKey, nip46::NostrConnectUri,
 };
 use nostr_connect::client::NostrConnect;
 use qrcode::QrCode;
@@ -239,7 +239,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
                 }
             };
             (keys, signer_info)
-        } else if let Ok(keys) = nostr::Keys::from_str(&input) {
+        } else if let Ok(keys) = nostr::prelude::Keys::from_str(&input) {
             let nsec = keys.secret_key().to_bech32()?;
             show_prompt_success("nsec", &shorten_string(&input));
             let signer_info = SignerInfo::Nsec {
@@ -951,32 +951,36 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Signer
             nsec,
             password,
             npub,
-        } if !nsec.starts_with("ncryptsec1") => nostr::Keys::parse(nsec).ok().and_then(|keys| {
-            crate::login::credential_store::store(&keys)
-                .ok()
-                .map(|pointer| SignerInfo::Nsec {
-                    nsec: pointer,
-                    password: password.clone(),
-                    npub: Some(
-                        keys.public_key()
-                            .to_bech32()
-                            .expect("public keys always encode as npub"),
-                    ),
-                })
-        }),
+        } if !nsec.starts_with("ncryptsec1") => {
+            nostr::prelude::Keys::parse(nsec).ok().and_then(|keys| {
+                crate::login::credential_store::store(&keys)
+                    .ok()
+                    .map(|pointer| SignerInfo::Nsec {
+                        nsec: pointer,
+                        password: password.clone(),
+                        npub: Some(
+                            keys.public_key()
+                                .to_bech32()
+                                .expect("public keys always encode as npub"),
+                        ),
+                    })
+            })
+        }
         SignerInfo::Bunker {
             bunker_uri,
             bunker_app_key,
             npub,
-        } => nostr::Keys::parse(bunker_app_key).ok().and_then(|keys| {
-            crate::login::credential_store::store(&keys)
-                .ok()
-                .map(|pointer| SignerInfo::Bunker {
-                    bunker_uri: bunker_uri.clone(),
-                    bunker_app_key: pointer,
-                    npub: npub.clone(),
-                })
-        }),
+        } => nostr::prelude::Keys::parse(bunker_app_key)
+            .ok()
+            .and_then(|keys| {
+                crate::login::credential_store::store(&keys)
+                    .ok()
+                    .map(|pointer| SignerInfo::Bunker {
+                        bunker_uri: bunker_uri.clone(),
+                        bunker_app_key: pointer,
+                        npub: npub.clone(),
+                    })
+            }),
         _ => return signer_info.clone(),
     };
     protected.unwrap_or_else(|| {
@@ -1059,7 +1063,7 @@ pub async fn signup_non_interactive(
     relay_urls: Vec<String>,
 ) -> Result<(Arc<crate::NgitSigner>, PublicKey, SignerInfo, Keys)> {
     // Generate new keypair
-    let keys = nostr::Keys::generate();
+    let keys = nostr::prelude::Keys::generate();
     let nsec = keys.secret_key().to_bech32()?;
     let public_key = keys.public_key();
 
@@ -1127,7 +1131,7 @@ pub async fn signup_non_interactive(
     // Build events, save to cache, and optionally publish to relays
     if let Some(client) = client {
         let profile = Metadata::new().name(name).finalize(&keys)?;
-        let relay_list = EventBuilder::relay_list(
+        let relay_list = RelayList::new(
             relay_urls
                 .iter()
                 .filter_map(|s| RelayUrl::parse(s).ok().map(|url| (url, None))),

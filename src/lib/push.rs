@@ -8,10 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use auth_git2::GitAuthenticator;
+use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Term;
-use nostr::{
+use nostr::prelude::{
     event::{Event, EventBuilder, Kind, Tag, TagCodec, UnsignedEvent},
-    hashes::sha1::Hash as Sha1Hash,
     key::PublicKey,
 };
 

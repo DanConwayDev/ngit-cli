@@ -67,7 +67,7 @@ pub async fn run_list(
     //
     // filter by maintainers to avoid state events from other remotes with the
     // same identifier being selected when they have a newer created_at
-    let mut candidates: Vec<&nostr::Event> = fetch_report
+    let mut candidates: Vec<&nostr::prelude::Event> = fetch_report
         .state_per_relay
         .values()
         .filter_map(|maybe| maybe.as_ref())

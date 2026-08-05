@@ -12,8 +12,9 @@ http-body-util = "0.1"
 hyper = { version = "1.4", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
 # Pinned exactly, matching the root crate — see the note in ../Cargo.toml.
-nostr = "=0.45.0-alpha.2"
-nostr-relay-builder = "=0.45.0-alpha.2"
-nostr-sdk = "=0.45.0-alpha.2"
+nostr = "=0.45.0-alpha.8"
+# `nostr-relay-builder` was merged into `nostr-sdk` behind the `local-relay`
+# feature; `LocalRelay` now lives at `nostr_sdk::local_relay`.
+nostr-sdk = { version = "=0.45.0-alpha.8", features = ["local-relay"] }
 tempfile = "3.10"
 tokio = { version = "1.52.3", features = ["full"] }

@@ -39,18 +39,19 @@ pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
-    let proposals_and_revisions: Vec<nostr::Event> =
+    let proposals_and_revisions: Vec<nostr::prelude::Event> =
         ngit::client::get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?;
 
     let proposal = resolve_pr_root_or_prefix(id, proposals_and_revisions.iter(), pr_description)?;
 
-    let commits_events: Vec<nostr::Event> = get_all_proposal_patch_pr_pr_update_events_from_cache(
-        git_repo_path,
-        &repo_ref,
-        &proposal.id,
-    )
-    .await?;
+    let commits_events: Vec<nostr::prelude::Event> =
+        get_all_proposal_patch_pr_pr_update_events_from_cache(
+            git_repo_path,
+            &repo_ref,
+            &proposal.id,
+        )
+        .await?;
 
     let patches = get_pr_tip_event_or_most_recent_patch_with_ancestors(commits_events.clone())
         .context("failed to find any PR or patch events on this proposal")?;
@@ -78,7 +79,7 @@ pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
 fn apply_pr(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    pr_event: &nostr::Event,
+    pr_event: &nostr::prelude::Event,
     stdout: bool,
 ) -> Result<()> {
     let tip_oid = tag_value(pr_event, "c").context("PR event is missing 'c' (tip commit) tag")?;
@@ -176,14 +177,14 @@ fn apply_patch_texts(patch_texts: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn output_patches_to_stdout(mut patches: Vec<nostr::Event>) {
+fn output_patches_to_stdout(mut patches: Vec<nostr::prelude::Event>) {
     patches.reverse();
     for patch in patches {
         print!("{}\n\n", patch.content);
     }
 }
 
-fn launch_git_am_with_patches(mut patches: Vec<nostr::Event>) -> Result<()> {
+fn launch_git_am_with_patches(mut patches: Vec<nostr::prelude::Event>) -> Result<()> {
     patches.reverse();
     apply_patch_texts(patches.into_iter().map(|p| p.content).collect())
 }

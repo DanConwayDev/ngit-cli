@@ -14,7 +14,7 @@ use ngit::{
     login::{get_curent_user, user::extract_user_metadata},
     utils::get_open_or_draft_proposals,
 };
-use nostr::{EventId, PublicKey, RelayUrl, ToBech32, nips::nip19::Nip19Event};
+use nostr::prelude::{EventId, PublicKey, RelayUrl, ToBech32, nip19::Nip19Event};
 
 use crate::{
     client::{
@@ -180,7 +180,11 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
     // override, falling back to the root proposal's title.
     let label_events = get_events_from_local_cache(
         git_repo_path,
-        vec![nostr::Filter::default().event(proposal.id).kind(KIND_LABEL)],
+        vec![
+            nostr::prelude::Filter::default()
+                .event(proposal.id)
+                .kind(KIND_LABEL),
+        ],
     )
     .await
     .unwrap_or_default();
@@ -218,7 +222,7 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         let cover_note_events = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .event(proposal.id)
                     .kind(KIND_COVER_NOTE),
             ],
@@ -365,7 +369,7 @@ fn build_subject(event_id_hex: &str, title: &str) -> (String, bool) {
 /// (as returned by `get_pr_tip_event_or_most_recent_patch_with_ancestors`):
 /// the `c` tag of the tip event when the chain carries a PR/PR-update event,
 /// otherwise the commit id recorded in the most recent patch.
-fn published_tip_commit_str(tip_chain: &[nostr::Event]) -> Result<String> {
+fn published_tip_commit_str(tip_chain: &[nostr::prelude::Event]) -> Result<String> {
     let tip_event = tip_chain.first().context("tip chain is empty")?;
     if tip_chain
         .iter()
@@ -401,7 +405,7 @@ fn published_tip_commit_str(tip_chain: &[nostr::Event]) -> Result<String> {
 async fn resolve_event_id_from_current_branch(
     git_repo: &Repo,
     repo_ref: &RepoRef,
-    proposals_and_revisions: &[nostr::Event],
+    proposals_and_revisions: &[nostr::prelude::Event],
 ) -> Result<EventId> {
     let branch = git_repo
         .get_checked_out_branch_name()
@@ -430,7 +434,7 @@ async fn resolve_event_id_from_current_branch(
     let current_user =
         get_curent_user(git_repo).context("failed to read the logged-in user from git config")?;
 
-    let matches: Vec<&nostr::Event> = proposal_roots(proposals_and_revisions)
+    let matches: Vec<&nostr::prelude::Event> = proposal_roots(proposals_and_revisions)
         .filter(|e| {
             is_event_proposal_root_for_branch(e, &branch, current_user.as_ref()).unwrap_or(false)
         })
@@ -629,9 +633,9 @@ async fn author_trailer(author: &PublicKey, git_repo_path: &std::path::Path) -> 
     let metadata_events = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .author(*author)
-                .kind(nostr::Kind::Metadata),
+                .kind(nostr::prelude::Kind::Metadata),
         ],
     )
     .await

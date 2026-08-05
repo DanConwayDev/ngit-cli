@@ -1,7 +1,9 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use nostr::{Alphabet, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag};
+use nostr::prelude::{
+    Alphabet, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag,
+};
 use serde::{self, Deserialize, Serialize};
 
 #[cfg(not(test))]
@@ -58,9 +60,12 @@ pub struct UserGraspList {
 }
 
 impl UserGraspList {
-    pub async fn to_event(&mut self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::Event> {
+    pub async fn to_event(
+        &mut self,
+        signer: &Arc<crate::NgitSigner>,
+    ) -> Result<nostr::prelude::Event> {
         let event = sign_event(
-            nostr::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
+            nostr::prelude::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
                 self.urls
                     .iter()
                     .map(|url| Tag::parse(["g", url.as_ref()]).unwrap())
@@ -146,13 +151,13 @@ pub async fn get_user_ref_from_cache(
     public_key: &PublicKey,
 ) -> Result<UserRef> {
     let filters = vec![
-        nostr::Filter::default()
+        nostr::prelude::Filter::default()
             .author(*public_key)
             .kind(Kind::Metadata),
-        nostr::Filter::default()
+        nostr::prelude::Filter::default()
             .author(*public_key)
             .kind(Kind::RelayList),
-        nostr::Filter::default()
+        nostr::prelude::Filter::default()
             .author(*public_key)
             .kind(KIND_USER_GRASP_LIST),
     ];
@@ -171,17 +176,17 @@ pub async fn get_user_ref_from_cache(
 }
 
 pub fn extract_user_metadata(
-    public_key: &nostr::PublicKey,
-    events: &[nostr::Event],
+    public_key: &nostr::prelude::PublicKey,
+    events: &[nostr::prelude::Event],
 ) -> Result<UserMetadata> {
     let event = events
         .iter()
-        .filter(|e| e.kind.eq(&nostr::Kind::Metadata) && e.pubkey.eq(public_key))
+        .filter(|e| e.kind.eq(&nostr::prelude::Kind::Metadata) && e.pubkey.eq(public_key))
         .max_by_key(|e| e.created_at);
 
-    let metadata: Option<nostr::Metadata> = if let Some(event) = event {
+    let metadata: Option<nostr::prelude::Metadata> = if let Some(event) = event {
         Some(
-            nostr::Metadata::from_json(event.content.clone())
+            nostr::prelude::Metadata::from_json(event.content.clone())
                 .context("metadata cannot be found in kind 0 event content")?,
         )
     } else {
@@ -220,10 +225,13 @@ pub fn extract_user_metadata(
     })
 }
 
-pub fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event]) -> UserRelays {
+pub fn extract_user_relays(
+    public_key: &nostr::prelude::PublicKey,
+    events: &[nostr::prelude::Event],
+) -> UserRelays {
     let event = events
         .iter()
-        .filter(|e| e.kind.eq(&nostr::Kind::RelayList) && e.pubkey.eq(public_key))
+        .filter(|e| e.kind.eq(&nostr::prelude::Kind::RelayList) && e.pubkey.eq(public_key))
         .max_by_key(|e| e.created_at);
 
     UserRelays {
@@ -253,8 +261,8 @@ pub fn extract_user_relays(public_key: &nostr::PublicKey, events: &[nostr::Event
 }
 
 pub fn extract_user_grasp_list(
-    public_key: &nostr::PublicKey,
-    events: &[nostr::Event],
+    public_key: &nostr::prelude::PublicKey,
+    events: &[nostr::prelude::Event],
 ) -> UserGraspList {
     let event = events
         .iter()

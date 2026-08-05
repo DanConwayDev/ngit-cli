@@ -15,6 +15,10 @@ categories = ["command-line-utilities","development-tools"]
 anyhow = "1.0.98"
 async-trait = "0.1.88"
 auth-git2 = "0.6.0"
+# `nostr` stopped re-exporting `bitcoin_hashes` at 0.45.0-alpha.8, but its
+# NIP-34 API still takes `bitcoin_hashes::sha1::Hash`. Keep this in step with
+# the version `nostr` depends on so the two `Sha1Hash` types stay identical.
+bitcoin_hashes = "0.14"
 chacha20poly1305 = "0.10.1"
 chrono = "0.4"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -32,12 +36,12 @@ mailparse = "0.16.1"
 # later alphas within 0.45.0. `cargo install` ignores Cargo.lock, so
 # without `=` a fresh install resolves to a newer alpha and fails to
 # compile. Bump these together when moving to a new alpha.
-nostr = { version = "=0.45.0-alpha.2", features = ["nip49"] }
-nostr-connect = "=0.45.0-alpha.2"
-nostr-database = "=0.45.0-alpha.2"
-nostr-keyring = "=0.45.0-alpha.2"
-nostr-lmdb = "=0.45.0-alpha.2"
-nostr-sdk = "=0.45.0-alpha.2"
+nostr = { version = "=0.45.0-alpha.8", features = ["nip49"] }
+nostr-connect = "=0.45.0-alpha.8"
+nostr-database = "=0.45.0-alpha.8"
+nostr-keyring = "=0.45.0-alpha.8"
+nostr-lmdb = "=0.45.0-alpha.8"
+nostr-sdk = "=0.45.0-alpha.8"
 passwords = "3.1.16"
 qrcode = { version = "0.14.1", default-features = false }
 reqwest = { version = "0.12.28", features = ["json"] }

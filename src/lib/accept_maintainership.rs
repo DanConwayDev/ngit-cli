@@ -21,7 +21,7 @@ use std::{
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use nostr::{Event, PublicKey, RelayUrl};
+use nostr::prelude::{Event, PublicKey, RelayUrl};
 
 #[cfg(not(test))]
 use crate::client::Client;

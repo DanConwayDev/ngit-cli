@@ -12,10 +12,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use git2::{Branch, Oid, RepositoryInitOptions, Signature, Time};
-use nostr::{
-    Kind, RelayUrl, Tag, ToBech32,
-    event::FinalizeEvent,
-    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+use nostr::prelude::{
+    Kind, RelayUrl, Tag, ToBech32, event::FinalizeEvent, nip01::Coordinate, nip19::Nip19Coordinate,
 };
 use once_cell::sync::Lazy;
 
@@ -42,12 +40,12 @@ fn unique_suffix() -> String {
 /// pubkey is what `RepoRef::try_from` will see as the maintainer / author.
 static TEST_KEY_1_NSEC: &str = "nsec1ppsg5sm2aexq06juxmu9evtutr6jkwkhp98exxxvwamhru9lyx9s3rwseq";
 
-static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
-    Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
+static TEST_KEY_1_KEYS: Lazy<nostr::prelude::Keys> =
+    Lazy::new(|| nostr::prelude::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
 
 pub static TEST_KEY_1_SIGNER: Lazy<std::sync::Arc<crate::NgitSigner>> = Lazy::new(|| {
     std::sync::Arc::new(crate::NgitSigner::Keys(
-        nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
+        nostr::prelude::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
     ))
 });
 
@@ -62,9 +60,9 @@ pub fn joe_signature() -> Signature<'static> {
 /// `GitTestRepo::populate()` when the author/committer signature is
 /// `joe_signature()` at unix time 0 — i.e. the deterministic setup used
 /// throughout the git module's tests.
-pub fn generate_repo_ref_event() -> nostr::Event {
+pub fn generate_repo_ref_event() -> nostr::prelude::Event {
     let root_commit = "9ee507fc4357d7ee16a5d8901bedcd103f23c17d";
-    nostr::event::EventBuilder::new(nostr::Kind::GitRepoAnnouncement, "")
+    nostr::event::EventBuilder::new(nostr::prelude::Kind::GitRepoAnnouncement, "")
         .tags([
             Tag::identifier(format!("{root_commit}-consider-it-random")),
             Tag::parse(["r", root_commit]).unwrap(),

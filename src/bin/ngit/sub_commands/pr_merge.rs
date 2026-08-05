@@ -10,12 +10,10 @@ use ngit::{
         sign_ordered_status_event, status_kinds, tag_value,
     },
 };
-use nostr::{
+use nostr::prelude::{
     EventBuilder, Kind, Tag,
-    nips::{
-        nip01::Nip01Tag,
-        nip10::{Marker, Nip10Tag},
-    },
+    nip01::Nip01Tag,
+    nip10::{Marker, Nip10Tag},
 };
 
 use crate::{
@@ -66,10 +64,10 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
         let mut s = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds(status_kinds().clone())
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .custom_tags(
                         nostr::filter::SingleLetterTag::uppercase(nostr::filter::Alphabet::E),
                         proposals_and_revisions.iter().map(|e| e.id),
@@ -83,7 +81,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
         s
     };
 
-    let proposals_vec: Vec<nostr::Event> =
+    let proposals_vec: Vec<nostr::prelude::Event> =
         proposal_roots(&proposals_and_revisions).cloned().collect();
 
     let current_status = get_status(&proposal, &repo_ref, &statuses, &proposals_vec);
@@ -166,7 +164,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
     }
 
     // Publish GitStatusApplied event
-    let mut public_keys: std::collections::HashSet<nostr::PublicKey> =
+    let mut public_keys: std::collections::HashSet<nostr::prelude::PublicKey> =
         repo_ref.maintainers.iter().copied().collect();
     public_keys.insert(proposal.pubkey);
 

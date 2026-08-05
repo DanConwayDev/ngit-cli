@@ -15,7 +15,7 @@
 use std::{collections::HashSet, path::Path};
 
 use anyhow::Result;
-use nostr::{EventId, FromBech32, Tag, nips::nip19::Nip19};
+use nostr::prelude::{EventId, FromBech32, Tag, nip19::Nip19};
 
 use crate::client::get_events_from_local_cache;
 
@@ -204,9 +204,9 @@ pub fn dedup_tags(tags: Vec<Tag>) -> Vec<Tag> {
 async fn lookup_event_pubkey(
     event_id: &EventId,
     git_repo_path: Option<&Path>,
-) -> Option<nostr::PublicKey> {
+) -> Option<nostr::prelude::PublicKey> {
     let path = git_repo_path?;
-    let filter = nostr::Filter::default().id(*event_id);
+    let filter = nostr::prelude::Filter::default().id(*event_id);
     let events = get_events_from_local_cache(path, vec![filter]).await.ok()?;
     events
         .into_iter()
@@ -218,8 +218,8 @@ async fn lookup_event_pubkey(
 /// Trailing optional elements are omitted when absent.
 fn build_q_tag_for_event(
     event_id: EventId,
-    relay: Option<nostr::RelayUrl>,
-    pubkey: Option<nostr::PublicKey>,
+    relay: Option<nostr::prelude::RelayUrl>,
+    pubkey: Option<nostr::prelude::PublicKey>,
 ) -> Result<Tag> {
     let mut parts = vec!["q".to_string(), event_id.to_hex()];
     match (relay, pubkey) {

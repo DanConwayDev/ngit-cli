@@ -3,7 +3,7 @@ use ngit::{
     client::{Params, send_events},
     git_events::{KIND_LABEL, get_labels},
 };
-use nostr::{EventBuilder, Tag, nips::nip10::Nip10Tag};
+use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     client::{
@@ -66,7 +66,11 @@ async fn publish_label_event(
     // Fetch existing label events so we can warn about duplicates.
     let existing_label_events = get_events_from_local_cache(
         git_repo_path,
-        vec![nostr::Filter::default().event(event_id).kind(KIND_LABEL)],
+        vec![
+            nostr::prelude::Filter::default()
+                .event(event_id)
+                .kind(KIND_LABEL),
+        ],
     )
     .await?;
 

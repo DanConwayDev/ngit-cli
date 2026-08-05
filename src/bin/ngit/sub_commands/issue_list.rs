@@ -8,10 +8,10 @@ use ngit::{
         process_cover_note, status_kinds, tag_value,
     },
 };
-use nostr::{
+use nostr::prelude::{
     Kind, RelayUrl, ToBech32,
     filter::{Alphabet, SingleLetterTag},
-    nips::nip19::Nip19Event,
+    nip19::Nip19Event,
 };
 
 use crate::{
@@ -25,9 +25,15 @@ use crate::{
 };
 
 /// `(event, status_kind, labels, comment_count, subject_override)`
-type IssueRow<'a> = (&'a nostr::Event, Kind, Vec<String>, usize, Option<String>);
+type IssueRow<'a> = (
+    &'a nostr::prelude::Event,
+    Kind,
+    Vec<String>,
+    usize,
+    Option<String>,
+);
 
-fn get_issue_title(event: &nostr::Event, subject_override: Option<&str>) -> String {
+fn get_issue_title(event: &nostr::prelude::Event, subject_override: Option<&str>) -> String {
     if let Some(s) = subject_override {
         return s.to_string();
     }
@@ -64,8 +70,8 @@ fn status_kind_to_str(kind: Kind) -> &'static str {
 /// Returns a map from issue `EventId` to comment count.
 async fn get_comment_counts(
     git_repo_path: &std::path::Path,
-    issues: &[nostr::Event],
-) -> Result<HashMap<nostr::EventId, usize>> {
+    issues: &[nostr::prelude::Event],
+) -> Result<HashMap<nostr::prelude::EventId, usize>> {
     if issues.is_empty() {
         return Ok(HashMap::new());
     }
@@ -74,7 +80,7 @@ async fn get_comment_counts(
     let comments = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .custom_tags(
                     SingleLetterTag::uppercase(Alphabet::E),
                     issues.iter().map(|e| e.id),
@@ -84,13 +90,13 @@ async fn get_comment_counts(
     )
     .await?;
 
-    let mut counts: HashMap<nostr::EventId, usize> = HashMap::new();
+    let mut counts: HashMap<nostr::prelude::EventId, usize> = HashMap::new();
     for comment in &comments {
         // Find the uppercase E tag that matches one of our issue IDs.
         for tag in comment.tags.iter() {
             let s = tag.as_slice();
             if s.len() >= 2 && s[0].eq("E") {
-                if let Ok(root_id) = nostr::EventId::parse(&s[1]) {
+                if let Ok(root_id) = nostr::prelude::EventId::parse(&s[1]) {
                     if issues.iter().any(|e| e.id == root_id) {
                         *counts.entry(root_id).or_insert(0) += 1;
                         break;
@@ -105,12 +111,12 @@ async fn get_comment_counts(
 /// Fetch NIP-22 kind-1111 comments for a single issue, sorted oldest-first.
 async fn get_comments_for_issue(
     git_repo_path: &std::path::Path,
-    issue_id: &nostr::EventId,
-) -> Result<Vec<nostr::Event>> {
+    issue_id: &nostr::prelude::EventId,
+) -> Result<Vec<nostr::prelude::Event>> {
     let mut comments = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .custom_tags(
                     SingleLetterTag::uppercase(Alphabet::E),
                     std::iter::once(*issue_id),
@@ -124,7 +130,7 @@ async fn get_comments_for_issue(
             let s = t.as_slice();
             s.len() >= 2
                 && s[0].eq("E")
-                && nostr::EventId::parse(&s[1]).is_ok_and(|id| id == *issue_id)
+                && nostr::prelude::EventId::parse(&s[1]).is_ok_and(|id| id == *issue_id)
         })
     });
     comments.sort_by_key(|e| e.created_at);
@@ -154,7 +160,7 @@ pub async fn launch(
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
-    let issues: Vec<nostr::Event> =
+    let issues: Vec<nostr::prelude::Event> =
         get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
     if issues.is_empty() {
@@ -162,14 +168,14 @@ pub async fn launch(
         return Ok(());
     }
 
-    let statuses: Vec<nostr::Event> = {
+    let statuses: Vec<nostr::prelude::Event> = {
         let mut statuses = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds(status_kinds().clone())
                     .events(issues.iter().map(|e| e.id)),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .custom_tags(
                         SingleLetterTag::uppercase(Alphabet::E),
                         issues.iter().map(|e| e.id),
@@ -184,10 +190,10 @@ pub async fn launch(
     };
 
     // Fetch NIP-32 kind-1985 label events for all issues.
-    let label_events: Vec<nostr::Event> = get_events_from_local_cache(
+    let label_events: Vec<nostr::prelude::Event> = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .events(issues.iter().map(|e| e.id))
                 .kind(KIND_LABEL),
         ],
@@ -203,7 +209,7 @@ pub async fn launch(
 
     // Use an empty vec as the "all_pr_roots" argument — issues don't have PR
     // revisions, so we pass an empty slice.
-    let empty_proposals: Vec<nostr::Event> = vec![];
+    let empty_proposals: Vec<nostr::prelude::Event> = vec![];
 
     let filtered: Vec<IssueRow<'_>> = issues
         .iter()
@@ -254,7 +260,7 @@ pub async fn launch(
         let cover_note_events = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .event(target_id)
                     .kind(KIND_COVER_NOTE),
             ],
@@ -286,11 +292,11 @@ pub async fn launch(
 /// Extract the parent comment ID from a NIP-22 comment event.
 /// Returns `Some(id)` when the lowercase `e` tag differs from the root `E` tag
 /// (i.e. the comment is a reply to another comment, not a top-level comment).
-fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
+fn comment_reply_to(comment: &nostr::prelude::Event) -> Option<nostr::prelude::EventId> {
     let root_id = comment.tags.iter().find_map(|t| {
         let s = t.as_slice();
         if s.len() >= 2 && s[0].eq("E") {
-            nostr::EventId::parse(&s[1]).ok()
+            nostr::prelude::EventId::parse(&s[1]).ok()
         } else {
             None
         }
@@ -298,7 +304,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
     comment.tags.iter().find_map(|t| {
         let s = t.as_slice();
         if s.len() >= 2 && s[0].eq("e") {
-            let parent_id = nostr::EventId::parse(&s[1]).ok()?;
+            let parent_id = nostr::prelude::EventId::parse(&s[1]).ok()?;
             if parent_id == root_id {
                 None
             } else {
@@ -310,7 +316,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
     })
 }
 
-fn describe_issue_row(issue: &nostr::Event, rows: &[IssueRow<'_>]) -> String {
+fn describe_issue_row(issue: &nostr::prelude::Event, rows: &[IssueRow<'_>]) -> String {
     let Some((_, status_kind, labels, comment_count, subject_override)) =
         rows.iter().find(|(row, _, _, _, _)| row.id == issue.id)
     else {
@@ -339,11 +345,11 @@ fn describe_issue_row(issue: &nostr::Event, rows: &[IssueRow<'_>]) -> String {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn show_issue_details(
     issues: &[IssueRow<'_>],
-    target_id: nostr::EventId,
+    target_id: nostr::prelude::EventId,
     json: bool,
     show_comments: bool,
-    comments: &[nostr::Event],
-    cover_note_events: &[nostr::Event],
+    comments: &[nostr::prelude::Event],
+    cover_note_events: &[nostr::prelude::Event],
     repo_ref: &ngit::repo_ref::RepoRef,
     relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
@@ -528,7 +534,7 @@ fn output_table(issues: &[IssueRow<'_>], status_filter: &str, label_filter: &Has
 
 /// Convert an event ID to a `nevent1…` bech32 string, including a relay hint
 /// when one is available.  Falls back to the plain hex string on error.
-fn event_id_to_nevent(event_id: nostr::EventId, relay: Option<&RelayUrl>) -> String {
+fn event_id_to_nevent(event_id: nostr::prelude::EventId, relay: Option<&RelayUrl>) -> String {
     let relays = relay.map(|r| vec![r.clone()]).unwrap_or_default();
     Nip19Event {
         event_id,

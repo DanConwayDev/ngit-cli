@@ -32,16 +32,14 @@ use futures::{
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 #[cfg(test)]
 use mockall::*;
-use nostr::{
+use nostr::prelude::{
     Alphabet, Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
     Url,
     event::UnsignedEvent,
     message::MachineReadablePrefix,
-    nips::{
-        nip01::Coordinate,
-        nip05::{Nip05Address, Nip05Profile},
-        nip19::Nip19Coordinate,
-    },
+    nip01::Coordinate,
+    nip05::{Nip05Address, Nip05Profile},
+    nip19::Nip19Coordinate,
 };
 use nostr_database::{NostrDatabase, SaveEventStatus};
 use nostr_lmdb::NostrLmdb;
@@ -172,18 +170,18 @@ pub trait Connect {
         git_repo_path: Option<&'a Path>,
         url: &str,
         event: nostr::event::Event,
-    ) -> Result<nostr::EventId>;
+    ) -> Result<nostr::prelude::EventId>;
     async fn get_events(
         &self,
         relays: Vec<String>,
-        filters: Vec<nostr::Filter>,
-    ) -> Result<Vec<nostr::Event>>;
+        filters: Vec<nostr::prelude::Filter>,
+    ) -> Result<Vec<nostr::prelude::Event>>;
     async fn get_events_per_relay(
         &self,
         relays: Vec<RelayUrl>,
-        filters: Vec<nostr::Filter>,
+        filters: Vec<nostr::prelude::Filter>,
         progress_reporter: MultiProgress,
-    ) -> Result<(Vec<Result<Vec<nostr::Event>>>, MultiProgress)>;
+    ) -> Result<(Vec<Result<Vec<nostr::prelude::Event>>>, MultiProgress)>;
     async fn fetch_all<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -287,7 +285,7 @@ impl Connect for Client {
         git_repo_path: Option<&'a Path>,
         url: &str,
         event: Event,
-    ) -> Result<nostr::EventId> {
+    ) -> Result<nostr::prelude::EventId> {
         self.client.add_relay(url).await?;
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
@@ -317,8 +315,8 @@ impl Connect for Client {
     async fn get_events(
         &self,
         relays: Vec<String>,
-        filters: Vec<nostr::Filter>,
-    ) -> Result<Vec<nostr::Event>> {
+        filters: Vec<nostr::prelude::Filter>,
+    ) -> Result<Vec<nostr::prelude::Event>> {
         let (relay_results, _) = self
             .get_events_per_relay(
                 relays.iter().map(|r| RelayUrl::parse(r).unwrap()).collect(),
@@ -332,9 +330,9 @@ impl Connect for Client {
     async fn get_events_per_relay(
         &self,
         relays: Vec<RelayUrl>,
-        filters: Vec<nostr::Filter>,
+        filters: Vec<nostr::prelude::Filter>,
         progress_reporter: MultiProgress,
-    ) -> Result<(Vec<Result<Vec<nostr::Event>>>, MultiProgress)> {
+    ) -> Result<(Vec<Result<Vec<nostr::prelude::Event>>>, MultiProgress)> {
         // add relays
         for relay in &relays {
             self.client
@@ -418,7 +416,7 @@ impl Connect for Client {
             })
             .collect();
 
-        let relay_results: Vec<Result<Vec<nostr::Event>>> =
+        let relay_results: Vec<Result<Vec<nostr::prelude::Event>>> =
             stream::iter(futures).buffer_unordered(15).collect().await;
 
         Ok((relay_results, progress_reporter))
@@ -907,7 +905,8 @@ impl Connect for Client {
                 .relay(&relay_url)
                 .await?
                 .ok_or_else(|| anyhow!("relay not found: {relay_url}"))?;
-            let events: Vec<nostr::Event> = get_events_of(&relay, filters.clone(), pb).await?;
+            let events: Vec<nostr::prelude::Event> =
+                get_events_of(&relay, filters.clone(), pb).await?;
             // TODO: try reconcile
 
             // Track the best state event seen from this relay so callers can
@@ -921,11 +920,13 @@ impl Connect for Client {
                         .state_per_relay
                         .entry(relay_url.clone())
                         .or_insert(None);
-                    let is_newer = entry.as_ref().is_none_or(|existing: &nostr::Event| {
-                        event.created_at.gt(&existing.created_at)
-                            || (event.created_at.eq(&existing.created_at)
-                                && event.id.gt(&existing.id))
-                    });
+                    let is_newer = entry
+                        .as_ref()
+                        .is_none_or(|existing: &nostr::prelude::Event| {
+                            event.created_at.gt(&existing.created_at)
+                                || (event.created_at.eq(&existing.created_at)
+                                    && event.id.gt(&existing.id))
+                        });
                     if is_newer {
                         *entry = Some(event.clone());
                     }
@@ -1001,7 +1002,7 @@ fn short_timeout() -> u64 {
 
 async fn get_events_of(
     relay: &nostr_sdk::relay::Relay,
-    filters: Vec<nostr::Filter>,
+    filters: Vec<nostr::prelude::Filter>,
     pb: &Option<ProgressBar>,
 ) -> Result<Vec<Event>> {
     // relay.reconcile(filter, opts).await?;
@@ -1139,7 +1140,7 @@ async fn get_events_of(
 }
 
 pub struct Params {
-    pub keys: Option<nostr::Keys>,
+    pub keys: Option<nostr::prelude::Keys>,
     pub relay_default_set: Vec<String>,
     pub announcement_indexer_relays: Vec<String>,
     pub blaster_relays: Vec<String>,
@@ -1331,7 +1332,7 @@ impl Params {
     }
 }
 
-fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::Event>>>) -> Vec<Event> {
+fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::prelude::Event>>>) -> Vec<Event> {
     let mut dedup_events: Vec<Event> = vec![];
     for events in relay_results.into_iter().flatten() {
         for event in events {
@@ -1347,7 +1348,7 @@ pub async fn sign_event(
     event_builder: EventBuilder,
     signer: &Arc<NgitSigner>,
     description: String,
-) -> Result<nostr::Event> {
+) -> Result<nostr::prelude::Event> {
     if signer.is_remote() {
         let term = console::Term::stderr();
         term.write_line(&format!(
@@ -1371,7 +1372,7 @@ pub async fn sign_draft_event(
     draft_event: UnsignedEvent,
     signer: &Arc<NgitSigner>,
     description: String,
-) -> Result<nostr::Event> {
+) -> Result<nostr::prelude::Event> {
     if signer.is_remote() {
         let term = console::Term::stderr();
         term.write_line(&format!(
@@ -1391,7 +1392,7 @@ pub async fn sign_draft_event(
     }
 }
 
-pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::PublicKey> {
+pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::prelude::PublicKey> {
     if signer.is_remote() {
         let term = console::Term::stderr();
         term.write_line("fetching npub from remote signer...")?;
@@ -1514,8 +1515,8 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
 
 pub async fn get_events_from_local_cache(
     git_repo_path: &Path,
-    filters: Vec<nostr::Filter>,
-) -> Result<Vec<nostr::Event>> {
+    filters: Vec<nostr::prelude::Filter>,
+) -> Result<Vec<nostr::prelude::Event>> {
     let db = get_local_cache_database(git_repo_path).await?;
 
     let query_results = join_all(filters.into_iter().map(|filter| async {
@@ -1538,8 +1539,8 @@ pub async fn get_events_from_local_cache(
 
 pub async fn get_event_from_global_cache(
     git_repo_path: Option<&Path>,
-    filters: Vec<nostr::Filter>,
-) -> Result<Vec<nostr::Event>> {
+    filters: Vec<nostr::prelude::Filter>,
+) -> Result<Vec<nostr::prelude::Event>> {
     let db = get_global_cache_database(git_repo_path).await?;
 
     let query_results = join_all(filters.into_iter().map(|filter| async {
@@ -1560,7 +1561,10 @@ pub async fn get_event_from_global_cache(
     Ok(events.into_iter().collect())
 }
 
-pub async fn save_event_in_local_cache(git_repo_path: &Path, event: &nostr::Event) -> Result<bool> {
+pub async fn save_event_in_local_cache(
+    git_repo_path: &Path,
+    event: &nostr::prelude::Event,
+) -> Result<bool> {
     match get_local_cache_database(git_repo_path)
         .await?
         .save_event(event)
@@ -1574,7 +1578,7 @@ pub async fn save_event_in_local_cache(git_repo_path: &Path, event: &nostr::Even
 
 pub async fn save_event_in_global_cache(
     git_repo_path: Option<&Path>,
-    event: &nostr::Event,
+    event: &nostr::prelude::Event,
 ) -> Result<bool> {
     match get_global_cache_database(git_repo_path)
         .await?
@@ -1655,7 +1659,7 @@ pub async fn get_repo_ref_from_cache(
         .last()
         .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
 
-    let mut events: HashMap<Nip19Coordinate, nostr::Event> = HashMap::new();
+    let mut events: HashMap<Nip19Coordinate, nostr::prelude::Event> = HashMap::new();
     for m in &ordered_maintainers {
         if let Some(e) = repo_events.iter().find(|e| e.pubkey.eq(m)) {
             events.insert(
@@ -1860,7 +1864,7 @@ async fn create_relays_request(
             for event in &get_events_from_local_cache(
                 git_repo_path,
                 vec![
-                    nostr::Filter::default()
+                    nostr::prelude::Filter::default()
                         .kinds(vec![Kind::GitPatch, KIND_PULL_REQUEST, Kind::GitIssue])
                         .custom_tags(
                             SingleLetterTag::lowercase(Alphabet::A),
@@ -2097,7 +2101,7 @@ async fn create_relays_request(
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn process_fetched_events(
-    events: Vec<nostr::Event>,
+    events: Vec<nostr::prelude::Event>,
     request: &FetchRequest,
     git_repo_path: Option<&Path>,
     fresh_coordinates: &mut HashSet<Nip19Coordinate>,
@@ -2410,7 +2414,7 @@ pub fn get_fetch_filters(
     issue_ids: &HashSet<EventId>,
     non_proposal_event_ids: &HashSet<EventId>,
     required_profiles: &HashSet<PublicKey>,
-) -> Vec<nostr::Filter> {
+) -> Vec<nostr::prelude::Filter> {
     [
         if repo_coordinates.is_empty() {
             vec![]
@@ -2418,7 +2422,7 @@ pub fn get_fetch_filters(
             vec![
                 get_filter_state_events(repo_coordinates, false),
                 get_filter_repo_ann_events(repo_coordinates, false),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds(vec![
                         Kind::GitPatch,
                         Kind::EventDeletion,
@@ -2438,18 +2442,20 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
-                nostr::Filter::default().events(proposal_ids.clone()).kinds(
-                    [
-                        vec![
-                            Kind::GitPatch,
-                            Kind::EventDeletion,
-                            KIND_PULL_REQUEST_UPDATE,
-                        ],
-                        status_kinds(),
-                    ]
-                    .concat(),
-                ),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
+                    .events(proposal_ids.clone())
+                    .kinds(
+                        [
+                            vec![
+                                Kind::GitPatch,
+                                Kind::EventDeletion,
+                                KIND_PULL_REQUEST_UPDATE,
+                            ],
+                            status_kinds(),
+                        ]
+                        .concat(),
+                    ),
+                nostr::prelude::Filter::default()
                     .custom_tags(
                         SingleLetterTag::uppercase(Alphabet::E),
                         proposal_ids.clone(),
@@ -2468,10 +2474,10 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .events(issue_ids.clone())
                     .kinds(status_kinds()),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .custom_tags(SingleLetterTag::uppercase(Alphabet::E), issue_ids.clone())
                     .kinds(status_kinds()),
             ]
@@ -2488,7 +2494,7 @@ pub fn get_fetch_filters(
                 vec![]
             } else {
                 vec![
-                    nostr::Filter::default()
+                    nostr::prelude::Filter::default()
                         .custom_tags(SingleLetterTag::uppercase(Alphabet::E), all_root_ids)
                         .kind(KIND_COMMENT),
                 ]
@@ -2506,7 +2512,7 @@ pub fn get_fetch_filters(
                 vec![]
             } else {
                 vec![
-                    nostr::Filter::default()
+                    nostr::prelude::Filter::default()
                         .events(all_root_ids)
                         .kind(KIND_LABEL),
                 ]
@@ -2524,7 +2530,7 @@ pub fn get_fetch_filters(
                 vec![]
             } else {
                 vec![
-                    nostr::Filter::default()
+                    nostr::prelude::Filter::default()
                         .events(all_root_ids)
                         .kind(KIND_COVER_NOTE),
                 ]
@@ -2538,7 +2544,7 @@ pub fn get_fetch_filters(
             vec![]
         } else {
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kind(Kind::EventDeletion)
                     .events(non_proposal_event_ids.clone()),
             ]
@@ -2554,7 +2560,7 @@ pub fn get_fetch_filters(
 
 fn get_announcement_only_fetch_filters(
     repo_coordinates: &HashSet<Nip19Coordinate>,
-) -> Vec<nostr::Filter> {
+) -> Vec<nostr::prelude::Filter> {
     if repo_coordinates.is_empty() {
         vec![]
     } else {
@@ -2565,8 +2571,8 @@ fn get_announcement_only_fetch_filters(
 pub fn get_filter_repo_ann_events(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     maintainers_only: bool,
-) -> nostr::Filter {
-    let filter = nostr::Filter::default()
+) -> nostr::prelude::Filter {
+    let filter = nostr::prelude::Filter::default()
         .kind(Kind::GitRepoAnnouncement)
         .identifiers(
             repo_coordinates
@@ -2586,17 +2592,19 @@ pub fn get_filter_repo_ann_events(
     }
 }
 
-pub static STATE_KIND: nostr::Kind = Kind::Custom(30618);
+pub static STATE_KIND: nostr::prelude::Kind = Kind::Custom(30618);
 pub fn get_filter_state_events(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     maintainers_only: bool,
-) -> nostr::Filter {
-    let filter = nostr::Filter::default().kind(STATE_KIND).identifiers(
-        repo_coordinates
-            .iter()
-            .map(|c| c.identifier.clone())
-            .collect::<Vec<String>>(),
-    );
+) -> nostr::prelude::Filter {
+    let filter = nostr::prelude::Filter::default()
+        .kind(STATE_KIND)
+        .identifiers(
+            repo_coordinates
+                .iter()
+                .map(|c| c.identifier.clone())
+                .collect::<Vec<String>>(),
+        );
     if maintainers_only {
         filter.authors(
             repo_coordinates
@@ -2609,8 +2617,8 @@ pub fn get_filter_state_events(
     }
 }
 
-pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nostr::Filter {
-    nostr::Filter::default()
+pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nostr::prelude::Filter {
+    nostr::prelude::Filter::default()
         .kinds(vec![Kind::Metadata, Kind::RelayList, KIND_USER_GRASP_LIST])
         .authors(contributors)
 }
@@ -2641,7 +2649,7 @@ pub struct FetchReport {
     /// event at all.  Relays that were never queried are absent from the map.
     /// This is the only point at which per-relay state visibility is available;
     /// the local database only stores the canonical latest event.
-    pub state_per_relay: HashMap<RelayUrl, Option<nostr::Event>>,
+    pub state_per_relay: HashMap<RelayUrl, Option<nostr::prelude::Event>>,
 }
 
 impl Display for FetchReport {
@@ -2863,14 +2871,14 @@ pub async fn fetching_quietly(
 pub async fn get_issues_from_cache(
     git_repo_path: &Path,
     repo_coordinates: HashSet<Nip19Coordinate>,
-) -> Result<Vec<nostr::Event>> {
+) -> Result<Vec<nostr::prelude::Event>> {
     let mut issues = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
-                .kinds([nostr::Kind::GitIssue])
+            nostr::prelude::Filter::default()
+                .kinds([nostr::prelude::Kind::GitIssue])
                 .custom_tags(
-                    nostr::SingleLetterTag::lowercase(Alphabet::A),
+                    nostr::prelude::SingleLetterTag::lowercase(Alphabet::A),
                     repo_coordinates
                         .iter()
                         .map(|c| c.coordinate.to_string())
@@ -2887,14 +2895,14 @@ pub async fn get_issues_from_cache(
 pub async fn get_proposals_and_revisions_from_cache(
     git_repo_path: &Path,
     repo_coordinates: HashSet<Nip19Coordinate>,
-) -> Result<Vec<nostr::Event>> {
+) -> Result<Vec<nostr::prelude::Event>> {
     let mut proposals = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
-                .kinds([nostr::Kind::GitPatch, KIND_PULL_REQUEST])
+            nostr::prelude::Filter::default()
+                .kinds([nostr::prelude::Kind::GitPatch, KIND_PULL_REQUEST])
                 .custom_tags(
-                    nostr::SingleLetterTag::lowercase(Alphabet::A),
+                    nostr::prelude::SingleLetterTag::lowercase(Alphabet::A),
                     repo_coordinates
                         .iter()
                         .map(|c| c.coordinate.to_string())
@@ -2907,7 +2915,7 @@ pub async fn get_proposals_and_revisions_from_cache(
     .filter(|e| event_is_patch_set_root(e) || e.kind.eq(&KIND_PULL_REQUEST))
     .filter(|e| e.kind.eq(&Kind::GitPatch) || event_is_valid_pr_or_pr_update(e))
     .cloned()
-    .collect::<Vec<nostr::Event>>();
+    .collect::<Vec<nostr::prelude::Event>>();
     proposals.sort_by_key(|e| e.created_at);
     proposals.reverse();
     Ok(proposals)
@@ -2916,27 +2924,27 @@ pub async fn get_proposals_and_revisions_from_cache(
 pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
     git_repo_path: &Path,
     repo_ref: &RepoRef,
-    proposal_id: &nostr::EventId,
-) -> Result<Vec<nostr::Event>> {
+    proposal_id: &nostr::prelude::EventId,
+) -> Result<Vec<nostr::prelude::Event>> {
     let mut commit_events = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .kinds([
-                    nostr::Kind::GitPatch,
+                    nostr::prelude::Kind::GitPatch,
                     KIND_PULL_REQUEST,
                     KIND_PULL_REQUEST_UPDATE,
                 ])
                 .event(*proposal_id),
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .kinds([
-                    nostr::Kind::GitPatch,
+                    nostr::prelude::Kind::GitPatch,
                     KIND_PULL_REQUEST,
                     KIND_PULL_REQUEST_UPDATE,
                 ])
                 .custom_tag(SingleLetterTag::uppercase(Alphabet::E), *proposal_id),
-            nostr::Filter::default()
-                .kinds([nostr::Kind::GitPatch, KIND_PULL_REQUEST])
+            nostr::prelude::Filter::default()
+                .kinds([nostr::prelude::Kind::GitPatch, KIND_PULL_REQUEST])
                 .id(*proposal_id),
         ],
     )
@@ -2962,7 +2970,7 @@ pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
             && (e.kind.eq(&Kind::GitPatch) || event_is_valid_pr_or_pr_update(e))
     });
 
-    let revision_roots: HashSet<nostr::EventId> = commit_events
+    let revision_roots: HashSet<nostr::prelude::EventId> = commit_events
         .iter()
         .filter(|e| event_is_revision_root(e))
         .map(|e| e.id)
@@ -2972,17 +2980,17 @@ pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
         for event in get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds([
-                        nostr::Kind::GitPatch,
+                        nostr::prelude::Kind::GitPatch,
                         KIND_PULL_REQUEST,
                         KIND_PULL_REQUEST_UPDATE,
                     ])
                     .events(revision_roots.clone())
                     .authors(permissioned_users.clone()),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds([
-                        nostr::Kind::GitPatch,
+                        nostr::prelude::Kind::GitPatch,
                         KIND_PULL_REQUEST,
                         KIND_PULL_REQUEST_UPDATE,
                     ])
@@ -3006,7 +3014,7 @@ pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
 pub async fn get_event_from_cache_by_id(git_repo: &Repo, event_id: &EventId) -> Result<Event> {
     Ok(get_events_from_local_cache(
         git_repo.get_path()?,
-        vec![nostr::Filter::default().id(*event_id)],
+        vec![nostr::prelude::Filter::default().id(*event_id)],
     )
     .await?
     .first()
@@ -3033,7 +3041,7 @@ pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     git_repo_path: Option<&Path>,
-    events: Vec<nostr::Event>,
+    events: Vec<nostr::prelude::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<RelayUrl>,
     animate: bool,
@@ -3063,7 +3071,7 @@ pub async fn send_events_without_caching(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     git_repo_path: Option<&Path>,
-    events: Vec<nostr::Event>,
+    events: Vec<nostr::prelude::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<RelayUrl>,
     animate: bool,
@@ -3094,7 +3102,7 @@ async fn send_events_with_cache_path(
     #[cfg(not(test))] client: &Client,
     cache_path: Option<&Path>,
     config_repo_path: Option<&Path>,
-    events: Vec<nostr::Event>,
+    events: Vec<nostr::prelude::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<RelayUrl>,
     animate: bool,
@@ -3408,7 +3416,7 @@ async fn send_events_with_cache_path(
 /// Builds a human-readable description of what is being published, e.g.
 /// "3 patches", "1 announcement and 1 state event", "2 patches and 1 cover
 /// letter".
-fn describe_events(events: &[nostr::Event]) -> String {
+fn describe_events(events: &[nostr::prelude::Event]) -> String {
     use crate::git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_USER_GRASP_LIST};
 
     // key = singular, value = (plural, count)
@@ -3471,10 +3479,10 @@ fn describe_events(events: &[nostr::Event]) -> String {
 
 pub async fn delete_event_from_local_cache(
     git_repo_path: &Path,
-    event_id: nostr::EventId,
+    event_id: nostr::prelude::EventId,
 ) -> Result<()> {
     let db = get_local_cache_database(git_repo_path).await?;
-    db.delete(nostr::Filter::default().id(event_id))
+    db.delete(nostr::prelude::Filter::default().id(event_id))
         .await
         .map_err(|e| anyhow!("failed to delete event from local cache: {e}"))?;
     Ok(())

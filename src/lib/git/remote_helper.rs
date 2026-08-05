@@ -375,10 +375,7 @@ mod tests {
     };
 
     use anyhow::{Context, Result, ensure};
-    use nostr::{
-        PublicKey,
-        nips::{nip01::Coordinate, nip19::Nip19Coordinate},
-    };
+    use nostr::prelude::{PublicKey, nip01::Coordinate, nip19::Nip19Coordinate};
     use tempfile::TempDir;
 
     use super::*;
@@ -478,7 +475,7 @@ mod tests {
                         "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
                     )
                     .expect("valid public key"),
-                    kind: nostr::Kind::GitRepoAnnouncement,
+                    kind: nostr::prelude::Kind::GitRepoAnnouncement,
                 },
                 relays: vec![],
             },

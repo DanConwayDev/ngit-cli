@@ -6,10 +6,7 @@ use std::{
 
 use anyhow::Result;
 use console::{Color, Style};
-use nostr::{
-    RelayUrl,
-    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
-};
+use nostr::prelude::{RelayUrl, nip01::Coordinate, nip19::Nip19Coordinate};
 
 use crate::client::{STATE_KIND, get_event_from_global_cache, get_filter_state_events};
 
@@ -49,7 +46,7 @@ pub fn is_version_check_relay(relay_url: &RelayUrl) -> bool {
 }
 
 #[must_use]
-pub fn ngit_repo_state_filter() -> nostr::Filter {
+pub fn ngit_repo_state_filter() -> nostr::prelude::Filter {
     get_filter_state_events(&[ngit_repo_coordinate()].into_iter().collect(), true)
 }
 
@@ -115,7 +112,7 @@ pub fn available_update_versions(current: &str, latest: &str) -> Option<(String,
 }
 
 #[must_use]
-pub fn latest_version_tag(event: &nostr::Event) -> Option<String> {
+pub fn latest_version_tag(event: &nostr::prelude::Event) -> Option<String> {
     event
         .tags
         .iter()
@@ -128,7 +125,7 @@ pub fn latest_version_tag(event: &nostr::Event) -> Option<String> {
 }
 
 #[must_use]
-pub fn is_ngit_repo_state_event(event: &nostr::Event) -> bool {
+pub fn is_ngit_repo_state_event(event: &nostr::prelude::Event) -> bool {
     let coordinate = ngit_repo_coordinate();
     event.kind == STATE_KIND
         && event.pubkey == coordinate.public_key
@@ -212,7 +209,7 @@ impl PartialOrd for VersionTag {
 
 #[cfg(test)]
 mod tests {
-    use nostr::{
+    use nostr::prelude::{
         EventBuilder,
         event::{FinalizeEvent, Tag},
     };
@@ -221,7 +218,7 @@ mod tests {
 
     #[test]
     fn picks_highest_semver_tag_from_state_event() {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::prelude::Keys::generate();
         let event = EventBuilder::new(STATE_KIND, "")
             .tags([
                 Tag::parse(["d", "ngit"]).unwrap(),

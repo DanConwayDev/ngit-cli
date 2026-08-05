@@ -12,11 +12,11 @@ use crate::{
 pub struct RepoState {
     pub identifier: String,
     pub state: HashMap<String, String>,
-    pub event: nostr::Event,
+    pub event: nostr::prelude::Event,
 }
 
 impl RepoState {
-    pub fn try_from(state_events: Vec<nostr::Event>) -> Result<Self> {
+    pub fn try_from(state_events: Vec<nostr::prelude::Event>) -> Result<Self> {
         let event =
             crate::event_ordering::latest_event(&state_events).context("no state events")?;
         let mut state = HashMap::new();
@@ -55,7 +55,7 @@ impl RepoState {
         identifier: String,
         mut state: HashMap<String, String>,
         signer: &Arc<crate::NgitSigner>,
-        reference: Option<&nostr::Event>,
+        reference: Option<&nostr::prelude::Event>,
     ) -> Result<Self> {
         add_head(&mut state);
         let mut tags = vec![Tag::identifier(identifier.clone())];

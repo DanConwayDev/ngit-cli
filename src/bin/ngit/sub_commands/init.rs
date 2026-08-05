@@ -35,9 +35,8 @@ use ngit::{
     repo_state::RepoState,
     utils::join_with_and,
 };
-use nostr::{
-    FromBech32, Kind, PublicKey, RelayUrl, ToBech32, Url,
-    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+use nostr::prelude::{
+    FromBech32, Kind, PublicKey, RelayUrl, ToBech32, Url, nip01::Coordinate, nip19::Nip19Coordinate,
 };
 
 use crate::{
@@ -140,13 +139,13 @@ struct ResolvedFields {
     selected_grasp_servers: Vec<String>,
     /// Existing announcements for this coordinate, retained so a republish can
     /// order itself after the current NIP-01 winner.
-    announcement_events: HashMap<Nip19Coordinate, nostr::Event>,
+    announcement_events: HashMap<Nip19Coordinate, nostr::prelude::Event>,
     /// Tags from the source announcement that aren't in ngit's known
     /// allowlist ([`is_known_tag_name`]), preserved verbatim on
     /// republish so that tags added by a future ngit version or a
     /// third-party tool aren't silently dropped. Cleared when
     /// `--clean` is passed. See [`SubCommandArgs::clean`].
-    extra_tags: Vec<nostr::Tag>,
+    extra_tags: Vec<nostr::prelude::Tag>,
 }
 
 /// Extract my own announcement's `RepoRef` from the events map.
@@ -1118,7 +1117,7 @@ fn resolve_fields(
     // propagates new tags, matching how name/description/web cascade).
     // Falls back to my own event for symmetry; in MyAnnouncement state
     // my event *is* the latest so both branches return the same set.
-    let extra_tags: Vec<nostr::Tag> = if args.clean {
+    let extra_tags: Vec<nostr::prelude::Tag> = if args.clean {
         vec![]
     } else if let Some(ref lr) = latest {
         lr.extra_tags.clone()

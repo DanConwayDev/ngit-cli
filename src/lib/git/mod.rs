@@ -4,12 +4,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use bitcoin_hashes::{Hash, sha1::Hash as Sha1Hash};
 use git2::{DiffOptions, Oid, Sort};
 pub use identify_ahead_behind::identify_ahead_behind;
-use nostr::{
-    Tags,
-    hashes::{Hash, sha1::Hash as Sha1Hash},
-};
+use nostr::prelude::Tags;
 use nostr_url::NostrUrlDecoded;
 
 use crate::git_events::{get_commit_id_from_patch, tag_value};
@@ -147,11 +145,11 @@ pub trait RepoActions {
     fn apply_patch_chain(
         &self,
         branch_name: &str,
-        patch_and_ancestors: Vec<nostr::Event>,
-    ) -> Result<Vec<nostr::Event>>;
+        patch_and_ancestors: Vec<nostr::prelude::Event>,
+    ) -> Result<Vec<nostr::prelude::Event>>;
     fn create_commit_from_patch(
         &self,
-        patch: &nostr::Event,
+        patch: &nostr::prelude::Event,
         parent_commit_id_override: Option<String>,
     ) -> Result<Oid>;
     fn parse_starting_commits(&self, starting_commits: &str) -> Result<Vec<Sha1Hash>>;
@@ -832,12 +830,12 @@ impl RepoActions for Repo {
     fn apply_patch_chain(
         &self,
         branch_name: &str,
-        patch_and_ancestors: Vec<nostr::Event>,
-    ) -> Result<Vec<nostr::Event>> {
+        patch_and_ancestors: Vec<nostr::prelude::Event>,
+    ) -> Result<Vec<nostr::prelude::Event>> {
         let branch_tip_result = self.get_tip_of_branch(branch_name);
 
         // filter out existing ancestors in branch
-        let mut patches_to_apply: Vec<nostr::Event> = patch_and_ancestors
+        let mut patches_to_apply: Vec<nostr::prelude::Event> = patch_and_ancestors
             .into_iter()
             .filter(|e| {
                 // When the commit tag is absent, the commit id from the mbox envelope
@@ -915,7 +913,7 @@ impl RepoActions for Repo {
     }
     fn create_commit_from_patch(
         &self,
-        patch: &nostr::Event,
+        patch: &nostr::prelude::Event,
         parent_commit_id_override: Option<String>,
     ) -> Result<Oid> {
         let commit_id = get_commit_id_from_patch(patch);
@@ -1460,7 +1458,7 @@ fn split_diff_git_paths(rest: &str) -> (&str, &str) {
     }
 }
 
-fn extract_description_from_patch(patch: &nostr::Event) -> Result<String> {
+fn extract_description_from_patch(patch: &nostr::prelude::Event) -> Result<String> {
     if let Ok(desc) = tag_value(patch, "description") {
         return Ok(desc);
     }
@@ -1527,7 +1525,7 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
 mod tests {
     use std::fs;
 
-    use nostr::Tag;
+    use nostr::prelude::Tag;
 
     use super::*;
     use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event, joe_signature};
@@ -2518,14 +2516,16 @@ index ce01362..a21e91c 100644\n\
             repo_ref::RepoRef,
         };
 
-        async fn generate_patch_from_head_commit(test_repo: &GitTestRepo) -> Result<nostr::Event> {
+        async fn generate_patch_from_head_commit(
+            test_repo: &GitTestRepo,
+        ) -> Result<nostr::prelude::Event> {
             let original_oid = test_repo.git_repo.head()?.peel_to_commit()?.id();
             let git_repo = Repo::from_path(&test_repo.dir)?;
             generate_patch_event(
                 &git_repo,
                 &git_repo.get_root_commit()?,
                 &oid_to_sha1(&original_oid),
-                Some(nostr::EventId::all_zeros()),
+                Some(nostr::prelude::EventId::all_zeros()),
                 &TEST_KEY_1_SIGNER,
                 &RepoRef::try_from((generate_repo_ref_event(), None)).unwrap(),
                 None,
@@ -2536,7 +2536,7 @@ index ce01362..a21e91c 100644\n\
             )
             .await
         }
-        fn test_patch_applies_to_repository(patch_event: nostr::Event) -> Result<()> {
+        fn test_patch_applies_to_repository(patch_event: nostr::prelude::Event) -> Result<()> {
             let test_repo = GitTestRepo::default();
             test_repo.populate()?;
             let git_repo = Repo::from_path(&test_repo.dir)?;
@@ -2666,8 +2666,11 @@ index ce01362..a21e91c 100644\n\
 
         static BRANCH_NAME: &str = "add-example-feature";
         // returns original_repo, cover_letter_event, patch_events
-        async fn generate_test_repo_and_events()
-        -> Result<(GitTestRepo, nostr::Event, Vec<nostr::Event>)> {
+        async fn generate_test_repo_and_events() -> Result<(
+            GitTestRepo,
+            nostr::prelude::Event,
+            Vec<nostr::prelude::Event>,
+        )> {
             let original_repo = GitTestRepo::default();
             let oid3 = original_repo.populate_with_test_branch()?;
             let oid2 = original_repo.git_repo.find_commit(oid3)?.parent_id(0)?;

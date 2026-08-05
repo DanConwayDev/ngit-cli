@@ -7,7 +7,7 @@ use ngit::{
     content_tags::{dedup_tags, tags_from_content},
     git_events::KIND_COMMENT,
 };
-use nostr::{EventBuilder, EventId, Kind, PublicKey, Tag};
+use nostr::prelude::{EventBuilder, EventId, Kind, PublicKey, Tag};
 
 use crate::{
     client::{
@@ -66,7 +66,11 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
         // Look up the comment event from local cache
         let events = get_events_from_local_cache(
             git_repo_path,
-            vec![nostr::Filter::default().id(reply_id).kind(KIND_COMMENT)],
+            vec![
+                nostr::prelude::Filter::default()
+                    .id(reply_id)
+                    .kind(KIND_COMMENT),
+            ],
         )
         .await?;
         let parent = events

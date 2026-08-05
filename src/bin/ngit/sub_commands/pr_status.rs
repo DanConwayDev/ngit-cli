@@ -6,12 +6,10 @@ use ngit::{
     client::{Params, get_proposals_and_revisions_from_cache, send_events},
     git_events::{get_status, sign_ordered_status_event, status_kinds},
 };
-use nostr::{
+use nostr::prelude::{
     EventBuilder, Kind, Tag, ToBech32,
-    nips::{
-        nip01::Nip01Tag,
-        nip10::{Marker, Nip10Tag},
-    },
+    nip01::Nip01Tag,
+    nip10::{Marker, Nip10Tag},
 };
 
 use crate::{
@@ -67,10 +65,10 @@ async fn launch_status(
         let mut s = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds(status_kinds().clone())
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .custom_tags(
                         nostr::filter::SingleLetterTag::uppercase(nostr::filter::Alphabet::E),
                         proposals_and_revisions.iter().map(|e| e.id),
@@ -84,7 +82,7 @@ async fn launch_status(
         s
     };
 
-    let proposals_vec: Vec<nostr::Event> =
+    let proposals_vec: Vec<nostr::prelude::Event> =
         proposal_roots(&proposals_and_revisions).cloned().collect();
 
     let current_status = get_status(&proposal, &repo_ref, &statuses, &proposals_vec);
@@ -125,7 +123,7 @@ async fn launch_status(
     };
 
     // Build status event following the same pattern as push.rs
-    let mut public_keys: std::collections::HashSet<nostr::PublicKey> =
+    let mut public_keys: std::collections::HashSet<nostr::prelude::PublicKey> =
         repo_ref.maintainers.iter().copied().collect();
     public_keys.insert(proposal.pubkey);
 

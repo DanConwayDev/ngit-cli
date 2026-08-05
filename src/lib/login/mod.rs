@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use fresh::fresh_login_or_signup;
-use nostr::{PublicKey, Timestamp, ToBech32};
+use nostr::prelude::{PublicKey, Timestamp, ToBech32};
 
 #[cfg(not(test))]
 use crate::client::Client;

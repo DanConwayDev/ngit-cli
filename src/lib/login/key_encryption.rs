@@ -1,13 +1,13 @@
 use anyhow::Result;
 use nostr::prelude::*;
 
-pub fn decrypt_key(encrypted_key: &str, password: &str) -> Result<nostr::Keys> {
+pub fn decrypt_key(encrypted_key: &str, password: &str) -> Result<nostr::prelude::Keys> {
     let encrypted_key = nostr::nips::nip49::EncryptedSecretKey::from_bech32(encrypted_key)?;
     // to request that log_n gets exposed
     if encrypted_key.log_n() > 14 {
         println!("this may take a few seconds...");
     }
-    Ok(nostr::Keys::new(encrypted_key.decrypt(password)?))
+    Ok(nostr::prelude::Keys::new(encrypted_key.decrypt(password)?))
 }
 
 #[cfg(test)]
@@ -30,8 +30,8 @@ mod tests {
     static TEST_PASSWORD: &str = "769dfd£pwega8SHGv3!#Bsfd5t";
     static TEST_WEAK_PASSWORD: &str = "fhaiuhfwe";
 
-    static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
-        Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
+    static TEST_KEY_1_KEYS: Lazy<nostr::prelude::Keys> =
+        Lazy::new(|| nostr::prelude::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
 
     pub fn encrypt_key(keys: &Keys, password: &str) -> Result<String> {
         let log2_rounds: u8 = if password.len() > 20 {
@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn encrypt_key_produces_string_prefixed_with() -> Result<()> {
-        let s = encrypt_key(&nostr::Keys::generate(), TEST_PASSWORD)?;
+        let s = encrypt_key(&nostr::prelude::Keys::generate(), TEST_PASSWORD)?;
         assert!(s.starts_with("ncryptsec"));
         Ok(())
     }
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn decrypts_key_encrypted_using_encrypt_key() -> Result<()> {
-        let key = nostr::Keys::generate();
+        let key = nostr::prelude::Keys::generate();
         let s = encrypt_key(&key, TEST_PASSWORD)?;
         let newkey = decrypt_key(s.as_str(), TEST_PASSWORD)?;
 
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn decrypt_key_successfully_decrypts_key_encrypted_using_encrypt_key() -> Result<()> {
-        let key = nostr::Keys::generate();
+        let key = nostr::prelude::Keys::generate();
         let s = encrypt_key(&key, TEST_PASSWORD)?;
         let newkey = decrypt_key(s.as_str(), TEST_PASSWORD)?;
 

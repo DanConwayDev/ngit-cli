@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use ngit::client::Params;
-use nostr::ToBech32;
+use nostr::prelude::ToBech32;
 
 use crate::{
     cli::Cli,

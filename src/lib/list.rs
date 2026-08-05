@@ -11,9 +11,9 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use auth_git2::GitAuthenticator;
+use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
-use nostr::hashes::sha1::Hash as Sha1Hash;
 
 use crate::{
     client::is_verbose,

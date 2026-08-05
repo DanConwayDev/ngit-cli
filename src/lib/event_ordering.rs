@@ -1,7 +1,7 @@
 //! Shared NIP-01 ordering policy for events that replace an earlier event.
 
 use anyhow::Result;
-use nostr::{
+use nostr::prelude::{
     Event, EventBuilder, EventId, PublicKey, Tag, Timestamp,
     event::{FinalizeUnsignedEvent, UnsignedEvent},
 };
@@ -48,7 +48,7 @@ pub fn finalize_strictly_later_unsigned(
     public_key: PublicKey,
     reference: Option<&Event>,
 ) -> Result<UnsignedEvent> {
-    builder.tags = nostr::Tags::from_list(
+    builder.tags = nostr::prelude::Tags::from_list(
         builder
             .tags
             .into_iter()
@@ -97,7 +97,7 @@ fn finalize_ordered_unsigned_at(
 ) -> Result<UnsignedEvent> {
     // This is an internal, one-use tiebreaker. Do not round-trip it through
     // announcement extra tags after the next normally-timestamped update.
-    builder.tags = nostr::Tags::from_list(
+    builder.tags = nostr::prelude::Tags::from_list(
         builder
             .tags
             .into_iter()
@@ -158,7 +158,7 @@ fn expected_attempts_at_most(id: &EventId, maximum: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use nostr::{Keys, Kind, event::SignEvent};
+    use nostr::prelude::{Keys, Kind, event::SignEvent};
 
     use super::*;
 

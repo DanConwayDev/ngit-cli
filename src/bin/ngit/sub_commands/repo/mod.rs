@@ -13,7 +13,7 @@ use ngit::{
     },
     utils::get_short_git_server_name,
 };
-use nostr::{FromBech32, PublicKey, ToBech32, nips::nip19::Nip19Coordinate};
+use nostr::prelude::{FromBech32, PublicKey, ToBech32, nip19::Nip19Coordinate};
 use serde::Serialize;
 
 use crate::{
@@ -587,7 +587,7 @@ async fn display_name_for(
 /// Returns `None` if listed directly by the selected maintainer,
 /// or `Some(lister_pubkey_hex)` if listed by a co-maintainer.
 fn find_lister(repo_ref: &RepoRef, target: &PublicKey, selected: &PublicKey) -> Option<String> {
-    use nostr::{Kind, nips::nip01::Coordinate};
+    use nostr::prelude::{Kind, nip01::Coordinate};
 
     let selected_coord = nostr::nips::nip19::Nip19Coordinate {
         coordinate: Coordinate {

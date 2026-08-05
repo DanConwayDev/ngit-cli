@@ -2,7 +2,7 @@ use std::fmt;
 
 use anyhow::{Context, Result, anyhow, bail};
 use keyring::Error as KeyringError;
-use nostr::{Keys, PublicKey, ToBech32};
+use nostr::prelude::{Keys, PublicKey, ToBech32};
 use nostr_keyring::NostrKeyring;
 
 pub const SERVICE: &str = "ngit";

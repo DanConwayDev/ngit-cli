@@ -3,10 +3,7 @@ use ngit::{
     client::{Params, send_events, sign_event},
     content_tags::{dedup_tags, tags_from_content},
 };
-use nostr::{
-    EventBuilder, Kind, Tag, ToBech32,
-    nips::{nip01::Nip01Tag, nip19::Nip19Event},
-};
+use nostr::prelude::{EventBuilder, Kind, Tag, ToBech32, nip01::Nip01Tag, nip19::Nip19Event};
 
 use crate::{
     client::{

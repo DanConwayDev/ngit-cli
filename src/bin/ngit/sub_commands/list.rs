@@ -15,10 +15,10 @@ use ngit::{
     },
     repo_ref::RepoRef,
 };
-use nostr::{
+use nostr::prelude::{
     Kind, RelayUrl, ToBech32,
     filter::{Alphabet, SingleLetterTag},
-    nips::nip19::Nip19Event,
+    nip19::Nip19Event,
 };
 
 use crate::{
@@ -69,21 +69,21 @@ pub async fn launch(
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
-    let proposals_and_revisions: Vec<nostr::Event> =
+    let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
     if proposals_and_revisions.is_empty() {
         println!("no proposals found... create one? try `ngit send`");
         return Ok(());
     }
 
-    let statuses: Vec<nostr::Event> = {
+    let statuses: Vec<nostr::prelude::Event> = {
         let mut statuses = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds(status_kinds().clone())
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .custom_tags(
                         SingleLetterTag::uppercase(Alphabet::E),
                         proposals_and_revisions.iter().map(|e| e.id),
@@ -98,22 +98,22 @@ pub async fn launch(
     };
 
     // Fetch NIP-32 kind-1985 label events for all proposals.
-    let label_events: Vec<nostr::Event> = get_events_from_local_cache(
+    let label_events: Vec<nostr::prelude::Event> = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .events(proposals_and_revisions.iter().map(|e| e.id))
                 .kind(KIND_LABEL),
         ],
     )
     .await?;
 
-    let mut open_proposals: Vec<&nostr::Event> = vec![];
-    let mut draft_proposals: Vec<&nostr::Event> = vec![];
-    let mut closed_proposals: Vec<&nostr::Event> = vec![];
-    let mut applied_proposals: Vec<&nostr::Event> = vec![];
+    let mut open_proposals: Vec<&nostr::prelude::Event> = vec![];
+    let mut draft_proposals: Vec<&nostr::prelude::Event> = vec![];
+    let mut closed_proposals: Vec<&nostr::prelude::Event> = vec![];
+    let mut applied_proposals: Vec<&nostr::prelude::Event> = vec![];
 
-    let proposals: Vec<nostr::Event> = proposals_and_revisions
+    let proposals: Vec<nostr::prelude::Event> = proposals_and_revisions
         .iter()
         .filter(|e| !event_is_revision_root(e))
         .cloned()
@@ -137,35 +137,36 @@ pub async fn launch(
     // OR filter: proposal must have at least one of the requested labels.
     let label_filter: HashSet<String> = labels.iter().map(|l| l.trim().to_lowercase()).collect();
 
-    let filtered_proposals: Vec<(&nostr::Event, Kind, Vec<String>, Option<String>)> = proposals
-        .iter()
-        .filter_map(|p| {
-            let status_kind = get_status(p, &repo_ref, &statuses, &proposals);
-            let status_str = match status_kind {
-                Kind::GitStatusOpen => "open",
-                Kind::GitStatusDraft => "draft",
-                Kind::GitStatusClosed => "closed",
-                Kind::GitStatusApplied => "applied",
-                _ => "unknown",
-            };
-            if !status_filter.contains(status_str) && !status_filter.contains("unknown") {
-                return None;
-            }
-            let (proposal_labels, subject_override) =
-                get_labels_and_subject(p, &repo_ref, &label_events);
-            if !label_filter.is_empty() {
-                let proposal_labels_lower: HashSet<String> =
-                    proposal_labels.iter().map(|l| l.to_lowercase()).collect();
-                if !label_filter
-                    .iter()
-                    .any(|l| proposal_labels_lower.contains(l))
-                {
+    let filtered_proposals: Vec<(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)> =
+        proposals
+            .iter()
+            .filter_map(|p| {
+                let status_kind = get_status(p, &repo_ref, &statuses, &proposals);
+                let status_str = match status_kind {
+                    Kind::GitStatusOpen => "open",
+                    Kind::GitStatusDraft => "draft",
+                    Kind::GitStatusClosed => "closed",
+                    Kind::GitStatusApplied => "applied",
+                    _ => "unknown",
+                };
+                if !status_filter.contains(status_str) && !status_filter.contains("unknown") {
                     return None;
                 }
-            }
-            Some((p, status_kind, proposal_labels, subject_override))
-        })
-        .collect();
+                let (proposal_labels, subject_override) =
+                    get_labels_and_subject(p, &repo_ref, &label_events);
+                if !label_filter.is_empty() {
+                    let proposal_labels_lower: HashSet<String> =
+                        proposal_labels.iter().map(|l| l.to_lowercase()).collect();
+                    if !label_filter
+                        .iter()
+                        .any(|l| proposal_labels_lower.contains(l))
+                    {
+                        return None;
+                    }
+                }
+                Some((p, status_kind, proposal_labels, subject_override))
+            })
+            .collect();
 
     if let Some(ref event_id_or_nevent) = id {
         // Resolve the target proposal ID so we can fetch its comments.
@@ -193,7 +194,7 @@ pub async fn launch(
         let cover_note_events = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .event(target_id)
                     .kind(KIND_COVER_NOTE),
             ],
@@ -227,12 +228,12 @@ pub async fn launch(
 /// sorted oldest-first.
 async fn get_comments_for_proposal(
     git_repo_path: &std::path::Path,
-    proposal_id: &nostr::EventId,
-) -> Result<Vec<nostr::Event>> {
+    proposal_id: &nostr::prelude::EventId,
+) -> Result<Vec<nostr::prelude::Event>> {
     let mut comments = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .custom_tags(
                     SingleLetterTag::uppercase(Alphabet::E),
                     std::iter::once(*proposal_id),
@@ -247,7 +248,7 @@ async fn get_comments_for_proposal(
             let s = t.as_slice();
             s.len() >= 2
                 && s[0].eq("E")
-                && nostr::EventId::parse(&s[1]).is_ok_and(|id| id == *proposal_id)
+                && nostr::prelude::EventId::parse(&s[1]).is_ok_and(|id| id == *proposal_id)
         })
     });
     // Oldest first
@@ -265,7 +266,7 @@ fn status_kind_to_str(kind: Kind) -> &'static str {
     }
 }
 
-fn proposal_title(proposal: &nostr::Event, subject_override: Option<&str>) -> String {
+fn proposal_title(proposal: &nostr::prelude::Event, subject_override: Option<&str>) -> String {
     if let Some(s) = subject_override {
         return s.to_string();
     }
@@ -279,8 +280,8 @@ fn proposal_title(proposal: &nostr::Event, subject_override: Option<&str>) -> St
 }
 
 fn describe_proposal_row(
-    proposal: &nostr::Event,
-    rows: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
+    proposal: &nostr::prelude::Event,
+    rows: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
 ) -> String {
     let Some((_, status_kind, labels, subject_override)) =
         rows.iter().find(|(row, _, _, _)| row.id == proposal.id)
@@ -308,7 +309,7 @@ fn describe_proposal_row(
 }
 
 fn output_table(
-    proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
+    proposals: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
     status_filter: &str,
     label_filter: &HashSet<String>,
 ) {
@@ -358,7 +359,7 @@ fn output_table(
 
 /// Convert an event ID to a `nevent1…` bech32 string, including a relay hint
 /// when one is available.  Falls back to the plain hex string on error.
-fn event_id_to_nevent(event_id: nostr::EventId, relay: Option<&RelayUrl>) -> String {
+fn event_id_to_nevent(event_id: nostr::prelude::EventId, relay: Option<&RelayUrl>) -> String {
     let relays = relay.map(|r| vec![r.clone()]).unwrap_or_default();
     Nip19Event {
         event_id,
@@ -371,7 +372,7 @@ fn event_id_to_nevent(event_id: nostr::EventId, relay: Option<&RelayUrl>) -> Str
 }
 
 fn output_json(
-    proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
+    proposals: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
     relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
     let json_output: Vec<serde_json::Value> = proposals
@@ -419,11 +420,11 @@ fn output_json(
 /// Extract the parent comment ID from a NIP-22 comment event.
 /// Returns `Some(id)` when the lowercase `e` tag differs from the root `E` tag
 /// (i.e. the comment is a reply to another comment, not a top-level comment).
-fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
+fn comment_reply_to(comment: &nostr::prelude::Event) -> Option<nostr::prelude::EventId> {
     let root_id = comment.tags.iter().find_map(|t| {
         let s = t.as_slice();
         if s.len() >= 2 && s[0].eq("E") {
-            nostr::EventId::parse(&s[1]).ok()
+            nostr::prelude::EventId::parse(&s[1]).ok()
         } else {
             None
         }
@@ -431,7 +432,7 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
     comment.tags.iter().find_map(|t| {
         let s = t.as_slice();
         if s.len() >= 2 && s[0].eq("e") {
-            let parent_id = nostr::EventId::parse(&s[1]).ok()?;
+            let parent_id = nostr::prelude::EventId::parse(&s[1]).ok()?;
             if parent_id == root_id {
                 None
             } else {
@@ -445,17 +446,17 @@ fn comment_reply_to(comment: &nostr::Event) -> Option<nostr::EventId> {
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn show_proposal_details(
-    proposals: &[(&nostr::Event, Kind, Vec<String>, Option<String>)],
-    target_id: nostr::EventId,
+    proposals: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
+    target_id: nostr::prelude::EventId,
     json: bool,
     show_comments: bool,
     comment_count: usize,
-    comments: &[nostr::Event],
-    cover_note_events: &[nostr::Event],
+    comments: &[nostr::prelude::Event],
+    cover_note_events: &[nostr::prelude::Event],
     repo_ref: &RepoRef,
     relay_hint: Option<&RelayUrl>,
 ) -> Result<()> {
-    use nostr::ToBech32;
+    use nostr::prelude::ToBech32;
 
     let (proposal, status_kind, proposal_labels, subject_override) = proposals
         .iter()
@@ -657,21 +658,21 @@ async fn launch_interactive() -> Result<()> {
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
-    let proposals_and_revisions: Vec<nostr::Event> =
+    let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
     if proposals_and_revisions.is_empty() {
         println!("no proposals found... create one? try `ngit send`");
         return Ok(());
     }
 
-    let statuses: Vec<nostr::Event> = {
+    let statuses: Vec<nostr::prelude::Event> = {
         let mut statuses = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds(status_kinds().clone())
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .custom_tags(
                         SingleLetterTag::uppercase(Alphabet::E),
                         proposals_and_revisions.iter().map(|e| e.id),
@@ -685,12 +686,12 @@ async fn launch_interactive() -> Result<()> {
         statuses
     };
 
-    let mut open_proposals: Vec<&nostr::Event> = vec![];
-    let mut draft_proposals: Vec<&nostr::Event> = vec![];
-    let mut closed_proposals: Vec<&nostr::Event> = vec![];
-    let mut applied_proposals: Vec<&nostr::Event> = vec![];
+    let mut open_proposals: Vec<&nostr::prelude::Event> = vec![];
+    let mut draft_proposals: Vec<&nostr::prelude::Event> = vec![];
+    let mut closed_proposals: Vec<&nostr::prelude::Event> = vec![];
+    let mut applied_proposals: Vec<&nostr::prelude::Event> = vec![];
 
-    let proposals: Vec<nostr::Event> = proposals_and_revisions
+    let proposals: Vec<nostr::prelude::Event> = proposals_and_revisions
         .iter()
         .filter(|e|
             // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
@@ -795,7 +796,7 @@ async fn launch_interactive() -> Result<()> {
         let cover_letter = event_to_cover_letter(proposals_for_status[selected_index])
             .context("failed to extract proposal details from proposal root event")?;
 
-        let commits_events: Vec<nostr::Event> =
+        let commits_events: Vec<nostr::prelude::Event> =
             get_all_proposal_patch_pr_pr_update_events_from_cache(
                 git_repo_path,
                 &repo_ref,
@@ -1350,7 +1351,7 @@ async fn launch_interactive() -> Result<()> {
     }
 }
 
-fn launch_git_am_with_patches(mut patches: Vec<nostr::Event>) -> Result<()> {
+fn launch_git_am_with_patches(mut patches: Vec<nostr::prelude::Event>) -> Result<()> {
     println!("applying to current branch with `git am`");
     // TODO: add PATCH x/n to appended patches
     patches.reverse();
@@ -1381,11 +1382,11 @@ fn launch_git_am_with_patches(mut patches: Vec<nostr::Event>) -> Result<()> {
     Ok(())
 }
 
-fn event_id_extra_shorthand(event: &nostr::Event) -> String {
+fn event_id_extra_shorthand(event: &nostr::prelude::Event) -> String {
     event.id.to_string()[..5].to_string()
 }
 
-fn save_patches_to_dir(mut patches: Vec<nostr::Event>, git_repo: &Repo) -> Result<()> {
+fn save_patches_to_dir(mut patches: Vec<nostr::prelude::Event>, git_repo: &Repo) -> Result<()> {
     // TODO: add PATCH x/n to appended patches
     patches.reverse();
     let path = git_repo.get_path()?.join("patches");

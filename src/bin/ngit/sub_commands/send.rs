@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Style;
 use ngit::{
     client::{Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events},
@@ -8,12 +9,7 @@ use ngit::{
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
     utils::proposal_tip_is_pr_or_pr_update,
 };
-use nostr::{
-    ToBech32,
-    event::Event,
-    hashes::sha1::Hash as Sha1Hash,
-    nips::{nip10::Nip10Tag, nip19::Nip19Event},
-};
+use nostr::prelude::{ToBech32, event::Event, nip10::Nip10Tag, nip19::Nip19Event};
 
 use crate::{
     cli::{Cli, extract_signer_cli_arguments},
@@ -675,14 +671,16 @@ fn summarise_commit_for_selection(git_repo: &Repo, commit: &Sha1Hash) -> Result<
 async fn get_root_proposal_and_mentions_from_in_reply_to(
     git_repo_path: &Path,
     in_reply_to: &[String],
-) -> Result<(Option<Event>, Vec<nostr::Tag>)> {
+) -> Result<(Option<Event>, Vec<nostr::prelude::Tag>)> {
     let root_proposal = if let Some(first) = in_reply_to.first() {
         let root_tag =
             event_tag_from_nip19_or_hex(first, "in-reply-to", EventRefType::Root, true, false)?;
         if let Ok(Nip10Tag::Event { id: event_id, .. }) = Nip10Tag::try_from(root_tag) {
-            let events =
-                get_events_from_local_cache(git_repo_path, vec![nostr::Filter::new().id(event_id)])
-                    .await?;
+            let events = get_events_from_local_cache(
+                git_repo_path,
+                vec![nostr::prelude::Filter::new().id(event_id)],
+            )
+            .await?;
 
             if let Some(first) = events.iter().find(|e| e.id.eq(&event_id)) {
                 if event_is_patch_set_root(first) || first.kind.eq(&KIND_PULL_REQUEST) {

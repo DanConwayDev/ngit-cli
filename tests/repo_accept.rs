@@ -61,7 +61,7 @@ async fn arrange_invited_clone(
     // "default" relay gives the announcement a queryable destination and
     // matches how a real logged-in user would be set up.
     let relay_url = harness.relay("default").url().to_string();
-    let relay_list = EventBuilder::relay_list([(RelayUrl::parse(&relay_url)?, None)])
+    let relay_list = RelayList::new([(RelayUrl::parse(&relay_url)?, None)])
         .finalize(co_maintainer_keys)
         .context("failed to sign co-maintainer relay list event")?;
     let nostr_client = Client::default();

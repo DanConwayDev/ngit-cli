@@ -25,7 +25,7 @@ use ngit::{
     repo_state::RepoState,
     utils::{get_short_git_server_name, join_with_and},
 };
-use nostr::RelayUrl;
+use nostr::prelude::RelayUrl;
 
 use crate::state_transaction::{
     LiveOps, ServerForcePolicy, ServerPushOutcome, StateTransaction, StateTransactionFailure,
@@ -1150,11 +1150,7 @@ mod tests {
     use std::collections::HashMap;
 
     use ngit::{client::STATE_KIND, git::Repo};
-    use nostr::{
-        Kind,
-        event::FinalizeEvent,
-        nips::{nip01::Coordinate, nip19::Nip19Coordinate},
-    };
+    use nostr::prelude::{Kind, event::FinalizeEvent, nip01::Coordinate, nip19::Nip19Coordinate};
     use test_helpers::GitTestRepo;
 
     use super::*;
@@ -1290,9 +1286,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn dummy_nostr_state(state: HashMap<String, String>) -> RepoState {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::prelude::Keys::generate();
         let event = nostr::event::EventBuilder::new(STATE_KIND, "")
-            .tags(vec![nostr::Tag::identifier("test")])
+            .tags(vec![nostr::prelude::Tag::identifier("test")])
             .finalize(&keys)
             .unwrap();
         RepoState {
@@ -1303,7 +1299,7 @@ mod tests {
     }
 
     fn dummy_decoded_url() -> NostrUrlDecoded {
-        let keys = nostr::Keys::generate();
+        let keys = nostr::prelude::Keys::generate();
         NostrUrlDecoded {
             original_string: String::new(),
             coordinate: Nip19Coordinate {

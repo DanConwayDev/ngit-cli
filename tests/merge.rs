@@ -1137,7 +1137,7 @@ async fn merge_without_id_ambiguous_name_and_tip_still_errors() -> Result<()> {
     // Precondition: two distinct PR roots now exist for the repo.
     let pr_roots = harness
         .grasp("repo")
-        .events(nostr::Filter::new().kind(ngit::git_events::KIND_PULL_REQUEST))
+        .events(nostr::prelude::Filter::new().kind(ngit::git_events::KIND_PULL_REQUEST))
         .await?;
     anyhow::ensure!(
         pr_roots.len() == 2,

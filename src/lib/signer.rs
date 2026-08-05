@@ -1,11 +1,10 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use anyhow::{Result, anyhow};
-use nostr::{
+use nostr::prelude::{
     Event, EventBuilder, Keys, PublicKey,
     event::{AsyncSignEvent, FinalizeUnsignedEvent, SignEvent, UnsignedEvent},
     key::AsyncGetPublicKey,
-    util::BoxedFuture,
 };
 use nostr_connect::{client::NostrConnect, error::Error as NostrConnectError};
 use nostr_sdk::{authenticator::SignerAuthenticator, client::ClientBuilder, relay::RelayLimits};
@@ -33,7 +32,9 @@ impl AsyncGetPublicKey for SharedConnect {
     type Error = NostrConnectError;
 
     #[inline]
-    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, Self::Error>> {
+    fn get_public_key_async(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<PublicKey, Self::Error>> + Send + '_>> {
         self.0.get_public_key_async()
     }
 }
@@ -45,7 +46,7 @@ impl AsyncSignEvent for SharedConnect {
     fn sign_event_async(
         &self,
         unsigned: UnsignedEvent,
-    ) -> BoxedFuture<'_, Result<Event, Self::Error>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Event, Self::Error>> + Send + '_>> {
         self.0.sign_event_async(unsigned)
     }
 }

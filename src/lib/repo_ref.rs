@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use console::Style;
-use nostr::{
-    FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url,
-    nips::{nip01::Coordinate, nip19::Nip19Coordinate},
+use nostr::prelude::{
+    FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url, nip01::Coordinate,
+    nip19::Nip19Coordinate,
 };
 use serde::{Deserialize, Serialize};
 use urlencoding::encode as pct_encode;
@@ -49,7 +49,7 @@ pub struct RepoRef {
     pub selected_maintainer: PublicKey,
     // set to None if not known
     pub maintainers_without_annoucnement: Option<Vec<PublicKey>>,
-    pub events: HashMap<Nip19Coordinate, nostr::Event>,
+    pub events: HashMap<Nip19Coordinate, nostr::prelude::Event>,
     pub nostr_git_url: Option<NostrUrlDecoded>,
     /// Tags on the source announcement event whose first slot is not a name
     /// this version of ngit knows about. Round-tripped verbatim on republish
@@ -84,7 +84,7 @@ pub fn is_known_tag_name(name: &str) -> bool {
     )
 }
 
-impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
+impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
     type Error = anyhow::Error;
 
     /*
@@ -92,7 +92,9 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
      * `get_repo_ref_from_cache`. Other than tests, its only used there and the
      * changes made by that function are important.
      */
-    fn try_from((event, selected_maintainer): (nostr::Event, Option<PublicKey>)) -> Result<Self> {
+    fn try_from(
+        (event, selected_maintainer): (nostr::prelude::Event, Option<PublicKey>),
+    ) -> Result<Self> {
         // TODO: turn selected maintainer into NostrUrlDecoded
         if !event.kind.eq(&Kind::GitRepoAnnouncement) {
             bail!("incorrect kind");
@@ -222,96 +224,97 @@ impl TryFrom<(nostr::Event, Option<PublicKey>)> for RepoRef {
 }
 
 impl RepoRef {
-    pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::Event> {
-        let builder = nostr::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
-            [
-                vec![
-                    Tag::identifier(if self.identifier.to_string().is_empty() {
-                        // fiatjaf thought a random string. its not in the draft nip.
-                        // thread_rng()
-                        //     .sample_iter(&Alphanumeric)
-                        //     .take(15)
-                        //     .map(char::from)
-                        //     .collect()
-
-                        // an identifier based on first commit is better so that users dont
-                        // accidentally create two seperate identifiers for the same repo
-                        // there is a hesitancy to use the commit id
-                        // in another conversaion with fiatjaf he suggested the first 6
-                        // character of the commit id
-                        // here we are using 7 which is the standard for shorthand commit id
-                        self.root_commit.to_string()[..7].to_string()
-                    } else {
-                        self.identifier.to_string()
-                    }),
-                    Tag::parse(["r", &self.root_commit, "euc"]).unwrap(),
-                    Tag::parse(["name", &self.name]).unwrap(),
-                    Tag::parse(["description", &self.description]).unwrap(),
-                    Tag::parse([vec!["clone".to_string()], self.git_server.clone()].concat())
-                        .unwrap(),
-                    Tag::parse([vec!["web".to_string()], self.web.clone()].concat()).unwrap(),
-                    Tag::parse(
-                        [
-                            vec!["relays".to_string()],
-                            self.relays
-                                .iter()
-                                .map(|r| r.to_string())
-                                .collect::<Vec<_>>(),
-                        ]
-                        .concat(),
-                    )
-                    .unwrap(),
-                    Tag::parse(
-                        [
-                            vec!["maintainers".to_string()],
-                            self.maintainers
-                                .iter()
-                                .map(|pk| pk.to_string())
-                                .collect::<Vec<_>>(),
-                        ]
-                        .concat(),
-                    )
-                    .unwrap(),
-                    Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
-                ],
-                self.hashtags
-                    .iter()
-                    .map(|h| Tag::parse(["t", h]).unwrap())
-                    .collect(),
-                self.upstream
-                    .iter()
-                    .map(|upstream| {
-                        Tag::parse([vec!["u".to_string()], upstream.clone()].concat()).unwrap()
-                    })
-                    .collect(),
-                if self.blossoms.is_empty() {
-                    vec![]
-                } else {
+    pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::prelude::Event> {
+        let builder =
+            nostr::prelude::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
+                [
                     vec![
+                        Tag::identifier(if self.identifier.to_string().is_empty() {
+                            // fiatjaf thought a random string. its not in the draft nip.
+                            // thread_rng()
+                            //     .sample_iter(&Alphanumeric)
+                            //     .take(15)
+                            //     .map(char::from)
+                            //     .collect()
+
+                            // an identifier based on first commit is better so that users dont
+                            // accidentally create two seperate identifiers for the same repo
+                            // there is a hesitancy to use the commit id
+                            // in another conversaion with fiatjaf he suggested the first 6
+                            // character of the commit id
+                            // here we are using 7 which is the standard for shorthand commit id
+                            self.root_commit.to_string()[..7].to_string()
+                        } else {
+                            self.identifier.to_string()
+                        }),
+                        Tag::parse(["r", &self.root_commit, "euc"]).unwrap(),
+                        Tag::parse(["name", &self.name]).unwrap(),
+                        Tag::parse(["description", &self.description]).unwrap(),
+                        Tag::parse([vec!["clone".to_string()], self.git_server.clone()].concat())
+                            .unwrap(),
+                        Tag::parse([vec!["web".to_string()], self.web.clone()].concat()).unwrap(),
                         Tag::parse(
                             [
-                                vec!["blossoms".to_string()],
-                                self.blossoms
+                                vec!["relays".to_string()],
+                                self.relays
                                     .iter()
-                                    .map(|b| b.to_string_without_trailing_slash())
+                                    .map(|r| r.to_string())
                                     .collect::<Vec<_>>(),
                             ]
                             .concat(),
                         )
                         .unwrap(),
-                    ]
-                },
-                // Unknown tags carried over verbatim from the source
-                // announcement. See [`RepoRef::extra_tags`] and
-                // [`is_known_tag_name`]: ngit-known names never end up
-                // here (they round-trip through their typed field), so
-                // appending unconditionally cannot duplicate a typed
-                // tag emitted above.
-                self.extra_tags.clone(),
-                // code languages and hashtags
-            ]
-            .concat(),
-        );
+                        Tag::parse(
+                            [
+                                vec!["maintainers".to_string()],
+                                self.maintainers
+                                    .iter()
+                                    .map(|pk| pk.to_string())
+                                    .collect::<Vec<_>>(),
+                            ]
+                            .concat(),
+                        )
+                        .unwrap(),
+                        Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
+                    ],
+                    self.hashtags
+                        .iter()
+                        .map(|h| Tag::parse(["t", h]).unwrap())
+                        .collect(),
+                    self.upstream
+                        .iter()
+                        .map(|upstream| {
+                            Tag::parse([vec!["u".to_string()], upstream.clone()].concat()).unwrap()
+                        })
+                        .collect(),
+                    if self.blossoms.is_empty() {
+                        vec![]
+                    } else {
+                        vec![
+                            Tag::parse(
+                                [
+                                    vec!["blossoms".to_string()],
+                                    self.blossoms
+                                        .iter()
+                                        .map(|b| b.to_string_without_trailing_slash())
+                                        .collect::<Vec<_>>(),
+                                ]
+                                .concat(),
+                            )
+                            .unwrap(),
+                        ]
+                    },
+                    // Unknown tags carried over verbatim from the source
+                    // announcement. See [`RepoRef::extra_tags`] and
+                    // [`is_known_tag_name`]: ngit-known names never end up
+                    // here (they round-trip through their typed field), so
+                    // appending unconditionally cannot duplicate a typed
+                    // tag emitted above.
+                    self.extra_tags.clone(),
+                    // code languages and hashtags
+                ]
+                .concat(),
+            );
         let public_key = signer.get_public_key().await?;
         crate::client::sign_draft_event(
             crate::event_ordering::finalize_ordered_unsigned(
@@ -1485,18 +1488,18 @@ mod tests {
     static TEST_KEY_2_NSEC: &str =
         "nsec1ypglg6nj6ep0g2qmyfqcv2al502gje3jvpwye6mthmkvj93tqkesknv6qm";
 
-    static TEST_KEY_1_KEYS: Lazy<nostr::Keys> =
-        Lazy::new(|| nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
-    static TEST_KEY_2_KEYS: Lazy<nostr::Keys> =
-        Lazy::new(|| nostr::Keys::from_str(TEST_KEY_2_NSEC).unwrap());
+    static TEST_KEY_1_KEYS: Lazy<nostr::prelude::Keys> =
+        Lazy::new(|| nostr::prelude::Keys::from_str(TEST_KEY_1_NSEC).unwrap());
+    static TEST_KEY_2_KEYS: Lazy<nostr::prelude::Keys> =
+        Lazy::new(|| nostr::prelude::Keys::from_str(TEST_KEY_2_NSEC).unwrap());
 
     static TEST_KEY_1_SIGNER: Lazy<Arc<crate::NgitSigner>> = Lazy::new(|| {
         Arc::new(crate::NgitSigner::Keys(
-            nostr::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
+            nostr::prelude::Keys::from_str(TEST_KEY_1_NSEC).unwrap(),
         ))
     });
 
-    async fn create() -> nostr::Event {
+    async fn create() -> nostr::prelude::Event {
         RepoRef {
             identifier: "123412341".to_string(),
             name: "test name".to_string(),
@@ -1639,8 +1642,8 @@ mod tests {
 
         mod root_commit_is_empty_if_no_r_tag_which_is_sha1_format {
             use super::*;
-            async fn create_with_incorrect_first_commit_ref(s: &str) -> nostr::Event {
-                nostr::Event::from_json(
+            async fn create_with_incorrect_first_commit_ref(s: &str) -> nostr::prelude::Event {
+                nostr::prelude::Event::from_json(
                     create()
                         .await
                         .as_json()
@@ -1717,7 +1720,7 @@ mod tests {
                 ])
                 .unwrap(),
             );
-            let event = nostr::EventBuilder::new(base.kind, base.content)
+            let event = nostr::prelude::EventBuilder::new(base.kind, base.content)
                 .tags(tags)
                 .finalize(&*TEST_KEY_1_KEYS)
                 .unwrap();
@@ -1822,7 +1825,7 @@ mod tests {
             #[tokio::test]
             async fn relays() {
                 let event = create().await;
-                let relays_tag: &nostr::Tag = event
+                let relays_tag: &nostr::prelude::Tag = event
                     .tags
                     .iter()
                     .find(|t| t.as_slice()[0].eq("relays"))
@@ -1835,7 +1838,7 @@ mod tests {
             #[tokio::test]
             async fn web() {
                 let event = create().await;
-                let web_tag: &nostr::Tag = event
+                let web_tag: &nostr::prelude::Tag = event
                     .tags
                     .iter()
                     .find(|t| t.as_slice()[0].eq("web"))
@@ -1855,7 +1858,7 @@ mod tests {
                 ]];
 
                 let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
-                let upstream_tag: &nostr::Tag =
+                let upstream_tag: &nostr::prelude::Tag =
                     event.tags.iter().find(|t| t.as_slice()[0].eq("u")).unwrap();
                 assert_eq!(upstream_tag.as_slice().len(), 4);
                 assert_eq!(
@@ -1877,7 +1880,7 @@ mod tests {
             #[tokio::test]
             async fn maintainers() {
                 let event = create().await;
-                let maintainers_tag: &nostr::Tag = event
+                let maintainers_tag: &nostr::prelude::Tag = event
                     .tags
                     .iter()
                     .find(|t| t.as_slice()[0].eq("maintainers"))
@@ -1910,16 +1913,16 @@ mod tests {
     /// `tests/init_preserves_unknown_tags.rs`. These tests pin only the
     /// library-level invariant the CLI relies on.
     mod extra_tags_round_trip {
-        use nostr::{EventBuilder, event::FinalizeEvent};
+        use nostr::prelude::{EventBuilder, event::FinalizeEvent};
 
         use super::*;
 
         /// Build the canonical fixture event from [`create`], then re-sign a
         /// copy with `extra` appended after its existing tags. Uses
-        /// [`EventBuilder`] (not [`nostr::Event::from_json`] string surgery)
-        /// so the new tags land on a valid signed event the same shape ngit
-        /// itself produces.
-        async fn create_with_extra_tags(extra: Vec<Tag>) -> nostr::Event {
+        /// [`EventBuilder`] (not [`nostr::prelude::Event::from_json`] string
+        /// surgery) so the new tags land on a valid signed event the
+        /// same shape ngit itself produces.
+        async fn create_with_extra_tags(extra: Vec<Tag>) -> nostr::prelude::Event {
             let base = create().await;
             let mut tags: Vec<Tag> = base.tags.iter().cloned().collect();
             tags.extend(extra);
@@ -1963,7 +1966,7 @@ mod tests {
             let matching: Vec<&[String]> = re_emitted
                 .tags
                 .iter()
-                .map(nostr::Tag::as_slice)
+                .map(nostr::prelude::Tag::as_slice)
                 .filter(|s| s.first().map(String::as_str) == Some("example"))
                 .collect();
             assert_eq!(matching.len(), 1);
@@ -1984,7 +1987,7 @@ mod tests {
             let matching: Vec<&[String]> = re_emitted
                 .tags
                 .iter()
-                .map(nostr::Tag::as_slice)
+                .map(nostr::prelude::Tag::as_slice)
                 .filter(|s| s.first().map(String::as_str) == Some("multi"))
                 .collect();
             assert_eq!(matching.len(), 1);
@@ -2009,7 +2012,7 @@ mod tests {
             let matching: Vec<&[String]> = re_emitted
                 .tags
                 .iter()
-                .map(nostr::Tag::as_slice)
+                .map(nostr::prelude::Tag::as_slice)
                 .filter(|s| s.first().map(String::as_str) == Some("repeat"))
                 .collect();
             assert_eq!(matching.len(), 2);
@@ -2039,7 +2042,7 @@ mod tests {
             let name_tags: Vec<&[String]> = re_emitted
                 .tags
                 .iter()
-                .map(nostr::Tag::as_slice)
+                .map(nostr::prelude::Tag::as_slice)
                 .filter(|s| s.first().map(String::as_str) == Some("name"))
                 .collect();
             assert_eq!(

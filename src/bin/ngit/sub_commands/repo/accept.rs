@@ -9,7 +9,7 @@ use ngit::{
     repo_ref::{RepoRef, apply_grasp_infrastructure, latest_event_repo_ref},
     signer::NgitSigner,
 };
-use nostr::{RelayUrl, ToBech32, nips::nip19::Nip19Coordinate};
+use nostr::prelude::{RelayUrl, ToBech32, nip19::Nip19Coordinate};
 
 use crate::{
     cli::{Cli, extract_signer_cli_arguments},

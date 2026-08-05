@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
-use nostr::EventId;
+use nostr::prelude::EventId;
 use test_harness::{
     CloneLogin, Harness, PublishRepoOpts, PublishedPatchSeries, PublishedRepo, Repo,
 };

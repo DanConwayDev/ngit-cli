@@ -1,7 +1,7 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nostr::{Keys, PublicKey, ToBech32, nips::nip46::NostrConnectUri};
+use nostr::prelude::{Keys, PublicKey, ToBech32, nip46::NostrConnectUri};
 use nostr_connect::client::NostrConnect;
 
 use super::{
@@ -339,7 +339,7 @@ async fn get_signer(
                     .context("failed to decrypt key with provided password")
                     .context("failed to decrypt ncryptsec supplied as nsec with password")?
             } else {
-                nostr::Keys::from_str(nsec).context("invalid nsec parameter")?
+                nostr::prelude::Keys::from_str(nsec).context("invalid nsec parameter")?
             };
             let public_key = keys.public_key();
             Ok((Arc::new(crate::NgitSigner::Keys(keys)), public_key))
@@ -352,7 +352,7 @@ async fn get_signer(
             let uri = NostrConnectUri::parse(bunker_uri)?;
             let s = NostrConnect::new(
                 uri,
-                nostr::Keys::from_str(bunker_app_key).context("invalid app key")?,
+                nostr::prelude::Keys::from_str(bunker_app_key).context("invalid app key")?,
                 Duration::from_secs(10 * 60),
                 None,
             )?;

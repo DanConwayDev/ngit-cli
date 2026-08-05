@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use client::{
     get_events_from_local_cache, get_issues_from_cache, get_state_from_cache, sign_event,
 };
@@ -34,17 +35,14 @@ use ngit::{
         get_short_git_server_name, read_line,
     },
 };
-use nostr::{
+use nostr::prelude::{
     Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, RelayUrl, Tag,
     event::TagCodec,
-    hashes::sha1::Hash as Sha1Hash,
-    nips::{
-        nip01::Nip01Tag,
-        nip10::{Marker, Nip10Tag},
-        nip19::{Nip19, ToBech32},
-        nip22::CommentTarget,
-        nip34::Nip34Tag,
-    },
+    nip01::Nip01Tag,
+    nip10::{Marker, Nip10Tag},
+    nip19::{Nip19, ToBech32},
+    nip22::CommentTarget,
+    nip34::Nip34Tag,
 };
 use repo_ref::RepoRef;
 use repo_state::RepoState;
@@ -1354,7 +1352,7 @@ async fn get_merged_status_events(
     let mut events = vec![];
     let mut status_events = get_events_from_local_cache(
         git_repo.get_path()?,
-        vec![nostr::Filter::default().kinds(status_kinds().clone())],
+        vec![nostr::prelude::Filter::default().kinds(status_kinds().clone())],
     )
     .await?;
     status_events.sort_by(|a, b| {
@@ -1364,7 +1362,7 @@ async fn get_merged_status_events(
     });
     let pr_roots = get_events_from_local_cache(
         git_repo.get_path()?,
-        vec![nostr::Filter::default().kind(KIND_PULL_REQUEST)],
+        vec![nostr::prelude::Filter::default().kind(KIND_PULL_REQUEST)],
     )
     .await?;
 
@@ -1395,9 +1393,9 @@ async fn get_merged_status_events(
             let commit_events = get_events_from_local_cache(
                 git_repo.get_path()?,
                 vec![
-                    nostr::Filter::default().kind(nostr::Kind::GitPatch),
-                    nostr::Filter::default().kind(KIND_PULL_REQUEST),
-                    nostr::Filter::default().kind(KIND_PULL_REQUEST_UPDATE),
+                    nostr::prelude::Filter::default().kind(nostr::prelude::Kind::GitPatch),
+                    nostr::prelude::Filter::default().kind(KIND_PULL_REQUEST),
+                    nostr::prelude::Filter::default().kind(KIND_PULL_REQUEST_UPDATE),
                     // TODO: limit by repo_ref
                 ],
             )
@@ -1460,10 +1458,10 @@ async fn get_issue_resolution_status_events(
     }
 
     let issue_status_filters = vec![
-        nostr::Filter::default()
+        nostr::prelude::Filter::default()
             .kinds(status_kinds().clone())
             .events(issues.iter().map(|e| e.id)),
-        nostr::Filter::default()
+        nostr::prelude::Filter::default()
             .custom_tags(
                 nostr::filter::SingleLetterTag::uppercase(nostr::filter::Alphabet::E),
                 issues.iter().map(|e| e.id),
@@ -2348,7 +2346,7 @@ async fn get_proposal_or_revision_event(git_repo: &Repo, event: &Event) -> Resul
     )?;
     let cached = get_events_from_local_cache(
         git_repo.get_path()?,
-        vec![nostr::Filter::default().id(proposal_or_revision_id)],
+        vec![nostr::prelude::Filter::default().id(proposal_or_revision_id)],
     )
     .await?;
     cached

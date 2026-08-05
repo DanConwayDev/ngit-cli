@@ -1,6 +1,7 @@
-//! Vanilla in-process nostr relay backed by `nostr-relay-builder::LocalRelay`.
+//! Vanilla in-process nostr relay backed by
+//! `nostr_sdk::local_relay::LocalRelay`.
 //!
-//! Accepts arbitrary events with the relay-builder default `Generic` mode —
+//! Accepts arbitrary events with the builder's default `Generic` mode —
 //! suitable for user metadata (kind 0), relay lists (kind 10002), signer
 //! connect events, etc. Not a GRASP server (no git smart-http, no repo-only
 //! filtering); a future PR adds GRASP via subprocess.
@@ -16,8 +17,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use nostr_relay_builder::{Error as RelayBuilderError, LocalRelay, error::ErrorKind};
-use nostr_sdk::prelude::*;
+use nostr_sdk::{
+    error::{Error as SdkError, ErrorKind},
+    local_relay::LocalRelay,
+    prelude::*,
+};
 
 use crate::{
     port::{self, PortReservation},
@@ -134,7 +138,7 @@ impl VanillaRelay {
 
 /// `true` iff `e` is an I/O `AddrInUse` (EADDRINUSE) — the signature of
 /// having lost the port-allocation race.
-fn is_addr_in_use(e: &RelayBuilderError) -> bool {
+fn is_addr_in_use(e: &SdkError) -> bool {
     e.kind() == ErrorKind::IO
         && e.source()
             .and_then(|source| source.downcast_ref::<io::Error>())

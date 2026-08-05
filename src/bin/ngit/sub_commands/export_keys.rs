@@ -9,7 +9,7 @@ use ngit::{
         fresh::generate_qr,
     },
 };
-use nostr::ToBech32;
+use nostr::prelude::ToBech32;
 
 use crate::git::Repo;
 
@@ -72,7 +72,9 @@ pub async fn launch() -> Result<()> {
                     let npub = if let Some(npub) = npub {
                         npub
                     } else {
-                        nostr::Keys::from_str(&nsec)?.public_key().to_bech32()?
+                        nostr::prelude::Keys::from_str(&nsec)?
+                            .public_key()
+                            .to_bech32()?
                     };
                     println!("{npub}");
                     Ok(())
@@ -81,7 +83,9 @@ pub async fn launch() -> Result<()> {
                     let npub = if let Some(npub) = npub {
                         npub
                     } else {
-                        nostr::Keys::from_str(&nsec)?.public_key().to_bech32()?
+                        nostr::prelude::Keys::from_str(&nsec)?
+                            .public_key()
+                            .to_bech32()?
                     };
                     for line in generate_qr(&npub)? {
                         println!("{line}");

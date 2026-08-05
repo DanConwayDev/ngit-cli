@@ -6,7 +6,7 @@ use ngit::{
     client::{Params, send_events},
     git_events::{KIND_LABEL, get_labels_and_subject},
 };
-use nostr::{EventBuilder, Tag, nips::nip10::Nip10Tag};
+use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     client::{
@@ -74,7 +74,11 @@ async fn publish_set_subject_event(
     // already set to the requested value.
     let existing_label_events = get_events_from_local_cache(
         git_repo_path,
-        vec![nostr::Filter::default().event(event_id).kind(KIND_LABEL)],
+        vec![
+            nostr::prelude::Filter::default()
+                .event(event_id)
+                .kind(KIND_LABEL),
+        ],
     )
     .await?;
 

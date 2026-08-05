@@ -6,7 +6,7 @@ use ngit::{
     git_events::{event_is_revision_root, tag_value},
     repo_ref::RepoRef,
 };
-use nostr::{EventId, FromBech32, ToBech32, nips::nip19::Nip19};
+use nostr::prelude::{EventId, FromBech32, ToBech32, nip19::Nip19};
 
 use crate::git_events::event_to_cover_letter;
 
@@ -32,8 +32,8 @@ pub fn resolve_event_id_or_prefix<'a, I, F>(
     describe: F,
 ) -> Result<EventId>
 where
-    I: IntoIterator<Item = &'a nostr::Event>,
-    F: Fn(&nostr::Event) -> String,
+    I: IntoIterator<Item = &'a nostr::prelude::Event>,
+    F: Fn(&nostr::prelude::Event) -> String,
 {
     let id = id.trim();
 
@@ -48,7 +48,7 @@ where
         return parse_event_id(id);
     }
 
-    let matches: Vec<&nostr::Event> = candidates
+    let matches: Vec<&nostr::prelude::Event> = candidates
         .into_iter()
         .filter(|event| event.id.to_hex().starts_with(&prefix))
         .collect();
@@ -68,12 +68,12 @@ pub fn resolve_event_or_prefix<'a, I, F>(
     candidates: I,
     item_name: &str,
     describe: F,
-) -> Result<&'a nostr::Event>
+) -> Result<&'a nostr::prelude::Event>
 where
-    I: IntoIterator<Item = &'a nostr::Event>,
-    F: Fn(&nostr::Event) -> String,
+    I: IntoIterator<Item = &'a nostr::prelude::Event>,
+    F: Fn(&nostr::prelude::Event) -> String,
 {
-    let candidates: Vec<&nostr::Event> = candidates.into_iter().collect();
+    let candidates: Vec<&nostr::prelude::Event> = candidates.into_iter().collect();
     let event_id = resolve_event_id_or_prefix(id, candidates.iter().copied(), item_name, describe)?;
 
     candidates
@@ -87,15 +87,17 @@ where
         })
 }
 
-pub fn proposal_roots(events: &[nostr::Event]) -> impl Iterator<Item = &nostr::Event> {
+pub fn proposal_roots(
+    events: &[nostr::prelude::Event],
+) -> impl Iterator<Item = &nostr::prelude::Event> {
     events.iter().filter(|event| !event_is_revision_root(event))
 }
 
-pub fn pr_description(event: &nostr::Event) -> String {
+pub fn pr_description(event: &nostr::prelude::Event) -> String {
     event_to_cover_letter(event).map_or_else(|_| String::new(), |cover| cover.title)
 }
 
-pub fn issue_description(issue: &nostr::Event) -> String {
+pub fn issue_description(issue: &nostr::prelude::Event) -> String {
     tag_value(issue, "subject")
         .ok()
         .filter(|subject| !subject.is_empty())
@@ -114,10 +116,10 @@ pub fn resolve_pr_root_or_prefix<'a, I, F>(
     id: &str,
     candidates: I,
     describe: F,
-) -> Result<&'a nostr::Event>
+) -> Result<&'a nostr::prelude::Event>
 where
-    I: IntoIterator<Item = &'a nostr::Event>,
-    F: Fn(&nostr::Event) -> String,
+    I: IntoIterator<Item = &'a nostr::prelude::Event>,
+    F: Fn(&nostr::prelude::Event) -> String,
 {
     resolve_event_or_prefix(
         id,
@@ -135,10 +137,10 @@ pub fn resolve_pr_root_id_or_prefix<'a, I, F>(
     describe: F,
 ) -> Result<EventId>
 where
-    I: IntoIterator<Item = &'a nostr::Event>,
-    F: Fn(&nostr::Event) -> String,
+    I: IntoIterator<Item = &'a nostr::prelude::Event>,
+    F: Fn(&nostr::prelude::Event) -> String,
 {
-    let candidates: Vec<&nostr::Event> = candidates
+    let candidates: Vec<&nostr::prelude::Event> = candidates
         .into_iter()
         .filter(|event| !event_is_revision_root(event))
         .collect();
@@ -155,20 +157,20 @@ pub fn resolve_issue_or_prefix<'a, I, F>(
     id: &str,
     candidates: I,
     describe: F,
-) -> Result<&'a nostr::Event>
+) -> Result<&'a nostr::prelude::Event>
 where
-    I: IntoIterator<Item = &'a nostr::Event>,
-    F: Fn(&nostr::Event) -> String,
+    I: IntoIterator<Item = &'a nostr::prelude::Event>,
+    F: Fn(&nostr::prelude::Event) -> String,
 {
     resolve_event_or_prefix(id, candidates, "issue", describe)
 }
 
 pub fn resolve_issue_id_or_prefix<'a, I, F>(id: &str, candidates: I, describe: F) -> Result<EventId>
 where
-    I: IntoIterator<Item = &'a nostr::Event>,
-    F: Fn(&nostr::Event) -> String,
+    I: IntoIterator<Item = &'a nostr::prelude::Event>,
+    F: Fn(&nostr::prelude::Event) -> String,
 {
-    let candidates: Vec<&nostr::Event> = candidates.into_iter().collect();
+    let candidates: Vec<&nostr::prelude::Event> = candidates.into_iter().collect();
     let event_id = resolve_event_id_or_prefix(id, candidates.iter().copied(), "issue", describe)?;
 
     if candidates.iter().any(|event| event.id == event_id) {
@@ -182,7 +184,7 @@ pub async fn load_and_resolve_pr_root(
     git_repo_path: &Path,
     repo_ref: &RepoRef,
     id: &str,
-) -> Result<nostr::Event> {
+) -> Result<nostr::prelude::Event> {
     let proposals_and_revisions =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
     Ok(resolve_pr_root_or_prefix(id, proposals_and_revisions.iter(), pr_description)?.clone())
@@ -192,14 +194,14 @@ pub async fn load_and_resolve_issue(
     git_repo_path: &Path,
     repo_ref: &RepoRef,
     id: &str,
-) -> Result<nostr::Event> {
+) -> Result<nostr::prelude::Event> {
     let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
     Ok(resolve_issue_or_prefix(id, issues.iter(), issue_description)?.clone())
 }
 
-fn matching_items<F>(matches: &[&nostr::Event], describe: F) -> String
+fn matching_items<F>(matches: &[&nostr::prelude::Event], describe: F) -> String
 where
-    F: Fn(&nostr::Event) -> String,
+    F: Fn(&nostr::prelude::Event) -> String,
 {
     matches
         .iter()
@@ -216,7 +218,7 @@ where
         .join("\n")
 }
 
-fn event_context(event: &nostr::Event) -> String {
+fn event_context(event: &nostr::prelude::Event) -> String {
     let author = event
         .pubkey
         .to_bech32()
@@ -227,7 +229,7 @@ fn event_context(event: &nostr::Event) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nostr::{
+    use nostr::prelude::{
         Keys, Tag, ToBech32,
         event::{EventBuilder, FinalizeEvent},
     };
@@ -237,14 +239,14 @@ mod tests {
         resolve_pr_root_id_or_prefix, resolve_pr_root_or_prefix,
     };
 
-    fn make_event(content: &str) -> nostr::Event {
-        EventBuilder::new(nostr::Kind::TextNote, content)
+    fn make_event(content: &str) -> nostr::prelude::Event {
+        EventBuilder::new(nostr::prelude::Kind::TextNote, content)
             .finalize(&Keys::generate())
             .expect("test event should finalize")
     }
 
-    fn make_revision_root(content: &str) -> nostr::Event {
-        EventBuilder::new(nostr::Kind::GitPatch, content)
+    fn make_revision_root(content: &str) -> nostr::prelude::Event {
+        EventBuilder::new(nostr::prelude::Kind::GitPatch, content)
             .tags([Tag::parse(["t", "revision-root"]).expect("tag parses")])
             .finalize(&Keys::generate())
             .expect("test event should finalize")
@@ -308,7 +310,7 @@ mod tests {
             let first = event.id.to_hex()[..1].to_string();
             if events
                 .iter()
-                .any(|existing: &nostr::Event| existing.id.to_hex().starts_with(&first))
+                .any(|existing: &nostr::prelude::Event| existing.id.to_hex().starts_with(&first))
             {
                 events.push(event);
                 let err = resolve_event_id_or_prefix(&first, events.iter(), "issue", |event| {

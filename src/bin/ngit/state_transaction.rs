@@ -47,7 +47,7 @@ use ngit::{
     repo_state::RepoState,
     utils::get_short_git_server_name,
 };
-use nostr::{Event, RelayUrl};
+use nostr::prelude::{Event, RelayUrl};
 
 /// Side-effecting operations used by [`StateTransaction`]. Injected so the
 /// transaction phases can be exercised deterministically in tests; the
@@ -759,10 +759,10 @@ fn relay_urls_match(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use ngit::client::STATE_KIND;
-    use nostr::{
+    use nostr::prelude::{
         EventBuilder, EventId, Keys, Tag,
         event::{FinalizeUnsignedEvent, SignEvent},
-        nips::nip19::ToBech32,
+        nip19::ToBech32,
     };
 
     use super::*;

@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use git2::Repository;
-use nostr::{Event, EventId, Kind, PublicKey, nips::nip19::ToBech32};
+use nostr::prelude::{Event, EventId, Kind, PublicKey, nip19::ToBech32};
 
 use crate::{
     client::{
@@ -133,9 +133,9 @@ pub async fn get_open_or_draft_proposals(
     repo_ref: &RepoRef,
 ) -> Result<HashMap<EventId, (Event, Vec<Event>, Option<Event>)>> {
     let git_repo_path = git_repo.get_path()?;
-    let proposals_and_revisions: Vec<nostr::Event> =
+    let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
-    let proposals: Vec<nostr::Event> = proposals_and_revisions
+    let proposals: Vec<nostr::prelude::Event> = proposals_and_revisions
         .iter()
         .filter(|e|
             // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
@@ -144,11 +144,11 @@ pub async fn get_open_or_draft_proposals(
         .cloned()
         .collect();
 
-    let statuses: Vec<nostr::Event> = {
+    let statuses: Vec<nostr::prelude::Event> = {
         let mut statuses = get_events_from_local_cache(
             git_repo_path,
             vec![
-                nostr::Filter::default()
+                nostr::prelude::Filter::default()
                     .kinds(status_kinds().clone())
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
             ],
@@ -196,7 +196,7 @@ pub async fn get_all_proposals(
     repo_ref: &RepoRef,
 ) -> Result<HashMap<EventId, (Event, Vec<Event>, Option<Event>)>> {
     let git_repo_path = git_repo.get_path()?;
-    let proposals: Vec<nostr::Event> =
+    let proposals: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?
             .iter()

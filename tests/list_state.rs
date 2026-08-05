@@ -254,11 +254,11 @@ async fn find_state_event_covering(
     ref_name: &str,
     expected_oid: &str,
 ) -> Result<Event> {
-    let kind = nostr::Kind::Custom(30618);
+    let kind = nostr::prelude::Kind::Custom(30618);
     let events = harness
         .grasp("repo")
         .events(
-            nostr::Filter::new()
+            nostr::prelude::Filter::new()
                 .kind(kind)
                 .author(repo.maintainer_keys.public_key()),
         )

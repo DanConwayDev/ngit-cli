@@ -7,7 +7,7 @@ use ngit::{
     content_tags::{dedup_tags, tags_from_content},
     git_events::{KIND_COVER_NOTE, process_cover_note},
 };
-use nostr::{EventBuilder, Tag, nips::nip10::Nip10Tag};
+use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     client::{
@@ -80,7 +80,7 @@ async fn publish_set_cover_note_event(
     let existing_cover_note_events = get_events_from_local_cache(
         git_repo_path,
         vec![
-            nostr::Filter::default()
+            nostr::prelude::Filter::default()
                 .event(event_id)
                 .kind(KIND_COVER_NOTE),
         ],

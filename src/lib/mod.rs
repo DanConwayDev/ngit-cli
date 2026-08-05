@@ -19,7 +19,7 @@ pub mod version_check;
 
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
-use nostr::Url;
+use nostr::prelude::Url;
 pub use signer::NgitSigner;
 
 pub fn get_dirs() -> Result<ProjectDirs> {

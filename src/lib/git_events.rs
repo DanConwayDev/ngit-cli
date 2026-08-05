@@ -1,16 +1,14 @@
 use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use nostr::{
+use bitcoin_hashes::sha1::Hash as Sha1Hash;
+use nostr::prelude::{
     Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag, Timestamp,
     event::{FinalizeUnsignedEvent, TagCodec, UnsignedEvent},
-    hashes::sha1::Hash as Sha1Hash,
-    nips::{
-        nip01::{Coordinate, Nip01Tag},
-        nip10::{Marker, Nip10Tag},
-        nip19::Nip19,
-        nip34::Nip34Tag,
-    },
+    nip01::{Coordinate, Nip01Tag},
+    nip10::{Marker, Nip10Tag},
+    nip19::Nip19,
+    nip34::Nip34Tag,
 };
 
 use crate::{
@@ -91,7 +89,7 @@ pub fn get_parent_commit_from_patch(event: &Event, git_repo: Option<&Repo>) -> R
     bail!("no parent-commit tag and could not determine best guess parent")
 }
 
-pub fn get_event_root(event: &nostr::Event) -> Result<EventId> {
+pub fn get_event_root(event: &nostr::prelude::Event) -> Result<EventId> {
     Ok(EventId::parse(
         event
             .tags
@@ -219,15 +217,15 @@ pub async fn generate_patch_event(
     git_repo: &Repo,
     root_commit: &Sha1Hash,
     commit: &Sha1Hash,
-    thread_event_id: Option<nostr::EventId>,
+    thread_event_id: Option<nostr::prelude::EventId>,
     signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
-    parent_patch_event_id: Option<nostr::EventId>,
+    parent_patch_event_id: Option<nostr::prelude::EventId>,
     series_count: Option<(u64, u64)>,
     branch_name: Option<String>,
     root_proposal_id: &Option<String>,
-    mentions: &[nostr::Tag],
-) -> Result<nostr::Event> {
+    mentions: &[nostr::prelude::Tag],
+) -> Result<nostr::prelude::Event> {
     generate_patch_event_at(
         git_repo,
         root_commit,
@@ -251,16 +249,16 @@ async fn generate_patch_event_at(
     git_repo: &Repo,
     root_commit: &Sha1Hash,
     commit: &Sha1Hash,
-    thread_event_id: Option<nostr::EventId>,
+    thread_event_id: Option<nostr::prelude::EventId>,
     signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
-    parent_patch_event_id: Option<nostr::EventId>,
+    parent_patch_event_id: Option<nostr::prelude::EventId>,
     series_count: Option<(u64, u64)>,
     branch_name: Option<String>,
     root_proposal_id: &Option<String>,
-    mentions: &[nostr::Tag],
+    mentions: &[nostr::prelude::Tag],
     created_at: Option<Timestamp>,
-) -> Result<nostr::Event> {
+) -> Result<nostr::prelude::Event> {
     let commit_parent = git_repo
         .get_commit_parent(commit)
         .context("failed to get parent commit")?;
@@ -279,7 +277,7 @@ async fn generate_patch_event_at(
                 .map(|m| {
                     Tag::from(Nip01Tag::Coordinate {
                         coordinate: Coordinate {
-                            kind: nostr::Kind::GitRepoAnnouncement,
+                            kind: nostr::prelude::Kind::GitRepoAnnouncement,
                             public_key: *m,
                             identifier: repo_ref.identifier.to_string(),
                         },
@@ -440,7 +438,7 @@ pub fn event_tag_from_nip19_or_hex(
     ref_type: EventRefType,
     allow_npub_reference: bool,
     prompt_for_correction: bool,
-) -> Result<nostr::Tag> {
+) -> Result<nostr::prelude::Tag> {
     let mut bech32 = reference.to_string();
     loop {
         if bech32.is_empty() {
@@ -492,7 +490,7 @@ pub fn event_tag_from_nip19_or_hex(
                 _ => {}
             }
         }
-        if let Ok(id) = nostr::EventId::from_str(&bech32) {
+        if let Ok(id) = nostr::prelude::EventId::from_str(&bech32) {
             if ref_type == EventRefType::Quote {
                 break Ok(Tag::parse(["q", &id.to_hex()]).expect("valid q tag"));
             }
@@ -524,7 +522,7 @@ pub async fn generate_unsigned_pr_or_update_event(
     first_commit: &Sha1Hash,
     merge_base: Option<&Sha1Hash>,
     clone_url_hint: &[&str],
-    mentions: &[nostr::Tag],
+    mentions: &[nostr::prelude::Tag],
     git_repo_path: Option<&Path>,
     ordering_reference: Option<&Event>,
 ) -> Result<UnsignedEvent> {
@@ -621,7 +619,7 @@ pub async fn generate_unsigned_pr_or_update_event(
                 .map(|m| {
                     Tag::from(Nip01Tag::Coordinate {
                         coordinate: Coordinate {
-                            kind: nostr::Kind::GitRepoAnnouncement,
+                            kind: nostr::prelude::Kind::GitRepoAnnouncement,
                             public_key: *m,
                             identifier: repo_ref.identifier.to_string(),
                         },
@@ -715,9 +713,9 @@ pub async fn generate_cover_letter_and_patch_events(
     signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
     root_proposal_id: &Option<String>,
-    mentions: &[nostr::Tag],
+    mentions: &[nostr::prelude::Tag],
     ordering_reference: Option<&Event>,
-) -> Result<Vec<nostr::Event>> {
+) -> Result<Vec<nostr::prelude::Event>> {
     let git_repo_path = git_repo.get_path().ok();
     let root_commit = git_repo
         .get_root_commit()
@@ -745,7 +743,7 @@ pub async fn generate_cover_letter_and_patch_events(
                     .map(|m| {
                         Tag::from(Nip01Tag::Coordinate {
                             coordinate: Coordinate {
-                                kind: nostr::Kind::GitRepoAnnouncement,
+                                kind: nostr::prelude::Kind::GitRepoAnnouncement,
                                 public_key: *m,
                                 identifier: repo_ref.identifier.to_string(),
                             },
@@ -870,7 +868,7 @@ pub struct CoverLetter {
     pub title: String,
     pub description: String,
     pub branch_name_without_id_or_prefix: String,
-    pub event_id: Option<nostr::EventId>,
+    pub event_id: Option<nostr::prelude::EventId>,
 }
 
 impl CoverLetter {
@@ -886,7 +884,7 @@ impl CoverLetter {
         ))
     }
 }
-pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
+pub fn event_is_cover_letter(event: &nostr::prelude::Event) -> bool {
     // TODO: look for Subject:[ PATCH 0/n ] but watch out for:
     //   [PATCH v1 0/n ] or
     //   [PATCH subsystem v2 0/n ]
@@ -901,7 +899,7 @@ pub fn event_is_cover_letter(event: &nostr::Event) -> bool {
             .any(|t| t.as_slice().len() > 1 && t.as_slice()[1].eq("cover-letter"))
 }
 
-pub fn commit_msg_from_patch(patch: &nostr::Event) -> Result<String> {
+pub fn commit_msg_from_patch(patch: &nostr::prelude::Event) -> Result<String> {
     if let Ok(msg) = tag_value(patch, "description") {
         Ok(msg)
     } else {
@@ -917,14 +915,14 @@ pub fn commit_msg_from_patch(patch: &nostr::Event) -> Result<String> {
     }
 }
 
-pub fn commit_msg_from_patch_oneliner(patch: &nostr::Event) -> Result<String> {
+pub fn commit_msg_from_patch_oneliner(patch: &nostr::prelude::Event) -> Result<String> {
     Ok(commit_msg_from_patch(patch)?
         .split('\n')
         .collect::<Vec<&str>>()[0]
         .to_string())
 }
 
-pub fn event_to_cover_letter(event: &nostr::Event) -> Result<CoverLetter> {
+pub fn event_to_cover_letter(event: &nostr::prelude::Event) -> Result<CoverLetter> {
     if !event.kind.eq(&KIND_PULL_REQUEST) && !event_is_patch_set_root(event) {
         bail!("event is not a patch set root event (root patch or cover letter)")
     }
@@ -973,13 +971,13 @@ fn safe_branch_name_for_pr(s: &str) -> String {
 }
 
 pub fn get_pr_tip_event_or_most_recent_patch_with_ancestors(
-    mut proposal_events: Vec<nostr::Event>,
-) -> Result<Vec<nostr::Event>> {
+    mut proposal_events: Vec<nostr::prelude::Event>,
+) -> Result<Vec<nostr::prelude::Event>> {
     proposal_events.sort_by_key(|e| e.created_at);
 
     let youngest = proposal_events.last().context("no proposal events found")?;
 
-    let events_with_youngest_created_at: Vec<&nostr::Event> = proposal_events
+    let events_with_youngest_created_at: Vec<&nostr::prelude::Event> = proposal_events
         .iter()
         .filter(|p| p.created_at.eq(&youngest.created_at))
         .collect();
@@ -1017,7 +1015,7 @@ pub fn get_pr_tip_event_or_most_recent_patch_with_ancestors(
     Ok(res)
 }
 
-fn get_event_parent_id(event: &nostr::Event) -> Result<String> {
+fn get_event_parent_id(event: &nostr::prelude::Event) -> Result<String> {
     Ok(if let Some(reply_tag) = event
         .tags
         .iter()
@@ -1355,28 +1353,28 @@ mod tests {
     mod get_commit_id_from_patch {
         use super::*;
 
-        fn make_patch_event(commit: &str) -> Result<nostr::Event> {
+        fn make_patch_event(commit: &str) -> Result<nostr::prelude::Event> {
             Ok(nostr::event::EventBuilder::new(
                 nostr::event::Kind::GitPatch,
                 format!("From {commit} Mon Sep 17 00:00:00 2001\nSubject: [PATCH 1/1] test\n\n"),
             )
             .tags([Tag::parse(["commit", commit]).expect("valid commit tag")])
-            .finalize(&nostr::Keys::generate())?)
+            .finalize(&nostr::prelude::Keys::generate())?)
         }
 
-        fn make_pr_event(tip_commit: &str) -> Result<nostr::Event> {
+        fn make_pr_event(tip_commit: &str) -> Result<nostr::prelude::Event> {
             Ok(
                 nostr::event::EventBuilder::new(KIND_PULL_REQUEST, "PR description")
                     .tags([Tag::parse(["c", tip_commit]).expect("valid c tag")])
-                    .finalize(&nostr::Keys::generate())?,
+                    .finalize(&nostr::prelude::Keys::generate())?,
             )
         }
 
-        fn make_pr_update_event(tip_commit: &str) -> Result<nostr::Event> {
+        fn make_pr_update_event(tip_commit: &str) -> Result<nostr::prelude::Event> {
             Ok(
                 nostr::event::EventBuilder::new(KIND_PULL_REQUEST_UPDATE, "")
                     .tags([Tag::parse(["c", tip_commit]).expect("valid c tag")])
-                    .finalize(&nostr::Keys::generate())?,
+                    .finalize(&nostr::prelude::Keys::generate())?,
             )
         }
 
@@ -1411,7 +1409,7 @@ mod tests {
     mod event_to_cover_letter {
         use super::*;
 
-        fn generate_cover_letter(title: &str, description: &str) -> Result<nostr::Event> {
+        fn generate_cover_letter(title: &str, description: &str) -> Result<nostr::prelude::Event> {
             Ok(nostr::event::EventBuilder::new(
                 nostr::event::Kind::GitPatch,
                 format!("From ea897e987ea9a7a98e7a987e97987ea98e7a3334 Mon Sep 17 00:00:00 2001\nSubject: [PATCH 0/2] {title}\n\n{description}"),
@@ -1421,7 +1419,7 @@ mod tests {
                     Tag::hashtag("root"),
                 ],
             )
-            .finalize(&nostr::Keys::generate())?)
+            .finalize(&nostr::prelude::Keys::generate())?)
         }
 
         #[test]
@@ -1515,7 +1513,7 @@ mod tests {
     }
 
     mod event_tag_from_nip19_or_hex {
-        use nostr::ToBech32;
+        use nostr::prelude::ToBech32;
 
         use super::*;
 
@@ -1533,7 +1531,7 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001";
 
         fn event_id_bech32() -> String {
-            nostr::EventId::from_hex(EVENT_ID_HEX)
+            nostr::prelude::EventId::from_hex(EVENT_ID_HEX)
                 .expect("valid hex event id")
                 .to_bech32()
                 .expect("encoding event id as note1...")
