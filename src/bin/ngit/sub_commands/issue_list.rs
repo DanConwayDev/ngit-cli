@@ -8,11 +8,7 @@ use ngit::{
         process_cover_note, status_kinds, tag_value,
     },
 };
-use nostr::prelude::{
-    Kind, RelayUrl, ToBech32,
-    filter::{Alphabet, SingleLetterTag},
-    nip19::Nip19Event,
-};
+use nostr::prelude::{Kind, RelayUrl, ToBech32, filter::SingleLetterTag, nip19::Nip19Event};
 
 use crate::{
     client::{
@@ -81,10 +77,7 @@ async fn get_comment_counts(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()
-                .custom_tags(
-                    SingleLetterTag::uppercase(Alphabet::E),
-                    issues.iter().map(|e| e.id),
-                )
+                .custom_tags(SingleLetterTag::UPPERCASE_E, issues.iter().map(|e| e.id))
                 .kind(KIND_COMMENT),
         ],
     )
@@ -117,10 +110,7 @@ async fn get_comments_for_issue(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()
-                .custom_tags(
-                    SingleLetterTag::uppercase(Alphabet::E),
-                    std::iter::once(*issue_id),
-                )
+                .custom_tags(SingleLetterTag::UPPERCASE_E, std::iter::once(*issue_id))
                 .kind(KIND_COMMENT),
         ],
     )
@@ -176,10 +166,7 @@ pub async fn launch(
                     .kinds(status_kinds().clone())
                     .events(issues.iter().map(|e| e.id)),
                 nostr::prelude::Filter::default()
-                    .custom_tags(
-                        SingleLetterTag::uppercase(Alphabet::E),
-                        issues.iter().map(|e| e.id),
-                    )
+                    .custom_tags(SingleLetterTag::UPPERCASE_E, issues.iter().map(|e| e.id))
                     .kinds(status_kinds().clone()),
             ],
         )

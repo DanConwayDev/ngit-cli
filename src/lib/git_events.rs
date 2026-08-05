@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use nostr::prelude::{
     Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag, Timestamp,
-    event::{FinalizeUnsignedEvent, TagCodec, UnsignedEvent},
+    event::{FinalizeUnsignedEvent, UnsignedEvent},
     nip01::{Coordinate, Nip01Tag},
     nip10::{Marker, Nip10Tag},
     nip19::Nip19,

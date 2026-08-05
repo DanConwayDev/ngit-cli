@@ -18,7 +18,8 @@ auth-git2 = "0.6.0"
 # `nostr` stopped re-exporting `bitcoin_hashes` at 0.45.0-alpha.8, but its
 # NIP-34 API still takes `bitcoin_hashes::sha1::Hash`. Keep this in step with
 # the version `nostr` depends on so the two `Sha1Hash` types stay identical.
-bitcoin_hashes = "0.14"
+# `nostr` 0.45.0 moved from `bitcoin_hashes` 0.14 to 1.x.
+bitcoin_hashes = "1.1"
 chacha20poly1305 = "0.10.1"
 chrono = "0.4"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -31,17 +32,19 @@ git2 = { version = "0.21.0", features = ["ssh", "https"] }
 indicatif = "0.18.0"
 keyring = "3.6.3"
 mailparse = "0.16.1"
-# Pinned exactly: NostrDevKit alpha releases make breaking changes
-# between alphas, and a caret requirement on a pre-release still admits
-# later alphas within 0.45.0. `cargo install` ignores Cargo.lock, so
-# without `=` a fresh install resolves to a newer alpha and fails to
-# compile. Bump these together when moving to a new alpha.
-nostr = { version = "=0.45.0-alpha.8", features = ["nip49"] }
-nostr-connect = "=0.45.0-alpha.8"
-nostr-database = "=0.45.0-alpha.8"
+# NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
+# is safe again: it no longer admits breaking pre-releases the way a caret
+# on `0.45.0-alpha.N` did. Bump these together.
+nostr = { version = "0.45.0", features = ["nip49"] }
+nostr-connect = "0.45.0"
+nostr-database = "0.45.0"
+# `nostr-keyring` has no 0.45.0 release yet, so it stays pinned to the last
+# alpha. Its `nostr` requirement (`^0.45.0-alpha.8`) is satisfied by stable
+# 0.45.0, so it still builds against the same `nostr` as everything else.
+# Move it to "0.45.0" once released.
 nostr-keyring = "=0.45.0-alpha.8"
-nostr-lmdb = "=0.45.0-alpha.8"
-nostr-sdk = "=0.45.0-alpha.8"
+nostr-lmdb = "0.45.0"
+nostr-sdk = "0.45.0"
 passwords = "3.1.16"
 qrcode = { version = "0.14.1", default-features = false }
 reqwest = { version = "0.12.28", features = ["json"] }

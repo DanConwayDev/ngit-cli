@@ -11,7 +11,7 @@ use auth_git2::GitAuthenticator;
 use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Term;
 use nostr::prelude::{
-    event::{Event, EventBuilder, Kind, Tag, TagCodec, UnsignedEvent},
+    event::{Event, EventBuilder, Kind, Tag, UnsignedEvent},
     key::PublicKey,
 };
 
@@ -810,21 +810,21 @@ async fn create_close_status_for_original_patch(
             [
                 vec![
                     Tag::parse(["alt", "Git patch closed as forthcoming update is too large. Replacing with Pull Request"]).unwrap(),
-                    nostr::nips::nip01::Nip01Tag::Event {
+                    Tag::from(nostr::nips::nip01::Nip01Tag::Event {
                         id: proposal.id,
                         relay_hint: repo_ref.relays.first().cloned(),
                         public_key: None,
-                    }.to_tag(),
+                    }),
                 ],
                 public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
                 repo_ref
                     .coordinates()
                     .iter()
                     .map(|c| {
-                        nostr::nips::nip01::Nip01Tag::Coordinate {
+                        Tag::from(nostr::nips::nip01::Nip01Tag::Coordinate {
                             coordinate: c.coordinate.clone(),
                             relay_hint: c.relays.first().cloned(),
-                        }.to_tag()
+                        })
                     })
                     .collect::<Vec<Tag>>(),
                 vec![

@@ -143,9 +143,9 @@ dependencies = [
 
 [[package]]
 name = "async-wsocket"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efa9ef232c1731ddbe4a306b5b5dcf9e50a924d6bd086d4784939d14f8e78daa"
+checksum = "2c713e1f14c7b82e32ea159af1c6e2f070cfadbdf23fb2512acce9af0a26f1a2"
 dependencies = [
  "futures",
  "futures-util",
@@ -202,25 +202,56 @@ version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
  "serde",
  "unicode-normalization",
 ]
 
 [[package]]
-name = "bitcoin-io"
-version = "0.1.100"
+name = "bitcoin-consensus-encoding"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11301df0b06f22dea7bb1916403fdd88a371031e495c49b8f96931b28189e175"
+checksum = "207311705279250ba465076a1bac4b1ac982855fff73fc5f67e22158ac58cdc9"
+dependencies = [
+ "bitcoin-internals",
+ "hex-conservative 1.2.0",
+ "serde",
+]
+
+[[package]]
+name = "bitcoin-internals"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d573f4cf32996a8dce612e4348cece65a241f1882ed594047c9ba348e8869fa5"
+
+[[package]]
+name = "bitcoin-io"
+version = "0.1.101"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb5de036369d1ac59d3c1819ebc4d850f89466f5401c571a285b6ed564a4cb78"
+dependencies = [
+ "bitcoin-consensus-encoding",
+]
 
 [[package]]
 name = "bitcoin_hashes"
-version = "0.14.100"
+version = "0.14.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c9901a56e133a1fc86eeb1113e2591f45f4682451ca893bff494d2f88918e3f"
+checksum = "bca4c7abb40c8817d77403c880988cfd484f23ab2365726afb2f798363e2c4a2"
 dependencies = [
  "bitcoin-io",
- "hex-conservative",
+ "hex-conservative 0.2.2",
+]
+
+[[package]]
+name = "bitcoin_hashes"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5304e53726dbe5f93141535e102ed97b5bf4714fbecefdda8f9fb98d7fdaff0e"
+dependencies = [
+ "bitcoin-consensus-encoding",
+ "bitcoin-internals",
+ "hex-conservative 1.2.0",
  "serde",
 ]
 
@@ -1140,6 +1171,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-conservative"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35431185f361ccf3ffc58254628af5f1f5d5f28531da2e02e5d6c82bbc282a10"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
 name = "hmac"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,7 +1774,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "auth-git2",
- "bitcoin_hashes",
+ "bitcoin_hashes 1.2.0",
  "chacha20poly1305",
  "chrono",
  "clap",
@@ -1773,20 +1813,20 @@ dependencies = [
 
 [[package]]
 name = "nostr"
-version = "0.45.0-alpha.8"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0334ad7a19f229983c808840f65d813d09c7fc030775db5d325abffa1295fe6c"
+checksum = "7279feef28d43a04c0b3529acd4fea923ac816729bd643191b292296f1f6cc13"
 dependencies = [
  "aes",
  "base64",
  "bech32",
  "bip39",
- "bitcoin_hashes",
+ "bitcoin_hashes 1.2.0",
  "cbc",
  "chacha20",
  "chacha20poly1305",
  "faster-hex",
- "opaquerr",
+ "opaquerr 0.2.0",
  "rand 0.10.1",
  "scrypt",
  "secp256k1",
@@ -1795,43 +1835,42 @@ dependencies = [
  "unicode-normalization",
  "universal-time",
  "url",
+ "zeroize",
 ]
 
 [[package]]
 name = "nostr-connect"
-version = "0.45.0-alpha.8"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb1ea29502ac7768a25f117e352abb719cef913e06a133b53999d2fa86e296f"
+checksum = "6ab2d08f5611af6679d9aeb4c34560cbc903604c29994334505b1da02e365673"
 dependencies = [
  "async-utility",
  "futures-core",
  "nostr",
  "nostr-sdk",
- "opaquerr",
+ "opaquerr 0.2.0",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "nostr-database"
-version = "0.45.0-alpha.8"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e3827aa36205889d9950bb07e9ab9380f7881ab3b059956f2d87651fa64281"
+checksum = "81c7ffd33114d62c737dd2b8f77ffec4693c64b7a1c6090cab0d0009f9986e22"
 dependencies = [
- "btreecap",
- "flatbuffers",
  "nostr",
- "opaquerr",
+ "opaquerr 0.2.0",
 ]
 
 [[package]]
 name = "nostr-gossip"
-version = "0.45.0-alpha.8"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4696e01b02eb84daa6d8419f529c6e6f3063b742a54925dc0300a3230871477"
+checksum = "fa07539e52a71cb91fe0d693facaa298f03fcf9edcd66a521094e18e286e2336"
 dependencies = [
  "nostr",
- "opaquerr",
+ "opaquerr 0.2.0",
 ]
 
 [[package]]
@@ -1842,16 +1881,17 @@ checksum = "0764f9a491ebe58f76c2fc8175dd7ba4be31c73ee1c6eef2566ec8c9c74c4709"
 dependencies = [
  "keyring",
  "nostr",
- "opaquerr",
+ "opaquerr 0.1.0",
 ]
 
 [[package]]
 name = "nostr-lmdb"
-version = "0.45.0-alpha.8"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2832ab8243313733630c90208f36b9859dd939b13c745c977f2a0c465b5ec117"
+checksum = "b7a313418ff58bfa444ba4b71200ff8fe2d3eb31f2b5d0d8fdb7f5e60a703d31"
 dependencies = [
  "async-utility",
+ "flatbuffers",
  "flume",
  "heed",
  "nostr",
@@ -1862,9 +1902,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-memory"
-version = "0.45.0-alpha.8"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1688a4bfea60f72ca212c55f23cc9f068bfb5e787829d85fc7f689c3df9de842"
+checksum = "1a827de4b11c4f2b235eabe37f1a67460db68e453606f4755e1ac5a522347a86"
 dependencies = [
  "btreecap",
  "nostr",
@@ -1874,9 +1914,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.45.0-alpha.8"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2ffff8a1d69b9828574ead3b34d615bffe4c75ff3e3335a28f111867c7f7cdd"
+checksum = "359881fbaded2d19a5003609673744b8b68c4973817598eb0e262d049ec9c3f3"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -1888,7 +1928,7 @@ dependencies = [
  "nostr-database",
  "nostr-gossip",
  "nostr-memory",
- "opaquerr",
+ "opaquerr 0.2.0",
  "rand 0.10.1",
  "tokio",
  "tokio-stream",
@@ -1928,6 +1968,12 @@ name = "opaquerr"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e55a7b7f0accc9fdd8e514f122a697adf824d55de481ca26c31ff8f9a8e813c5"
+
+[[package]]
+name = "opaquerr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f933a4265d5cdad61d19bbdfc972ea5726d56cd8d3d57b8f2d3c365dd42bee9"
 
 [[package]]
 name = "openssl"
@@ -2562,7 +2608,7 @@ version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b50c5943d326858130af85e049f2661ba3c78b26589b8ab98e65e80ae44a1252"
 dependencies = [
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
  "rand 0.8.6",
  "secp256k1-sys",
 ]
@@ -3944,9 +3990,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.8.2"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
  "zeroize_derive",
 ]

@@ -70,7 +70,7 @@ async fn launch_status(
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
                 nostr::prelude::Filter::default()
                     .custom_tags(
-                        nostr::filter::SingleLetterTag::uppercase(nostr::filter::Alphabet::E),
+                        nostr::filter::SingleLetterTag::UPPERCASE_E,
                         proposals_and_revisions.iter().map(|e| e.id),
                     )
                     .kinds(status_kinds().clone()),

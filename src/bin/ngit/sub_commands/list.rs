@@ -15,11 +15,7 @@ use ngit::{
     },
     repo_ref::RepoRef,
 };
-use nostr::prelude::{
-    Kind, RelayUrl, ToBech32,
-    filter::{Alphabet, SingleLetterTag},
-    nip19::Nip19Event,
-};
+use nostr::prelude::{Kind, RelayUrl, ToBech32, filter::SingleLetterTag, nip19::Nip19Event};
 
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
@@ -85,7 +81,7 @@ pub async fn launch(
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
                 nostr::prelude::Filter::default()
                     .custom_tags(
-                        SingleLetterTag::uppercase(Alphabet::E),
+                        SingleLetterTag::UPPERCASE_E,
                         proposals_and_revisions.iter().map(|e| e.id),
                     )
                     .kinds(status_kinds().clone()),
@@ -234,10 +230,7 @@ async fn get_comments_for_proposal(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()
-                .custom_tags(
-                    SingleLetterTag::uppercase(Alphabet::E),
-                    std::iter::once(*proposal_id),
-                )
+                .custom_tags(SingleLetterTag::UPPERCASE_E, std::iter::once(*proposal_id))
                 .kind(KIND_COMMENT),
         ],
     )
@@ -674,7 +667,7 @@ async fn launch_interactive() -> Result<()> {
                     .events(proposals_and_revisions.iter().map(|e| e.id)),
                 nostr::prelude::Filter::default()
                     .custom_tags(
-                        SingleLetterTag::uppercase(Alphabet::E),
+                        SingleLetterTag::UPPERCASE_E,
                         proposals_and_revisions.iter().map(|e| e.id),
                     )
                     .kinds(status_kinds().clone()),

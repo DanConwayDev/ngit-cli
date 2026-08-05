@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use bitcoin_hashes::{Hash, sha1::Hash as Sha1Hash};
+use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use git2::{DiffOptions, Oid, Sort};
 pub use identify_ahead_behind::identify_ahead_behind;
 use nostr::prelude::Tags;
@@ -2525,7 +2525,7 @@ index ce01362..a21e91c 100644\n\
                 &git_repo,
                 &git_repo.get_root_commit()?,
                 &oid_to_sha1(&original_oid),
-                Some(nostr::prelude::EventId::all_zeros()),
+                Some(nostr::prelude::EventId::from_byte_array([0; 32])),
                 &TEST_KEY_1_SIGNER,
                 &RepoRef::try_from((generate_repo_ref_event(), None)).unwrap(),
                 None,

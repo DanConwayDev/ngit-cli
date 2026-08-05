@@ -33,8 +33,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 #[cfg(test)]
 use mockall::*;
 use nostr::prelude::{
-    Alphabet, Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
-    Url,
+    Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp, Url,
     event::UnsignedEvent,
     message::MachineReadablePrefix,
     nip01::Coordinate,
@@ -1867,7 +1866,7 @@ async fn create_relays_request(
                     nostr::prelude::Filter::default()
                         .kinds(vec![Kind::GitPatch, KIND_PULL_REQUEST, Kind::GitIssue])
                         .custom_tags(
-                            SingleLetterTag::lowercase(Alphabet::A),
+                            SingleLetterTag::LOWERCASE_A,
                             repo_coordinates_without_relays
                                 .iter()
                                 .map(|c| c.coordinate.to_string())
@@ -2430,7 +2429,7 @@ pub fn get_fetch_filters(
                         Kind::GitIssue,
                     ])
                     .custom_tags(
-                        SingleLetterTag::lowercase(Alphabet::A),
+                        SingleLetterTag::LOWERCASE_A,
                         repo_coordinates
                             .iter()
                             .map(|c| c.coordinate.to_string())
@@ -2456,10 +2455,7 @@ pub fn get_fetch_filters(
                         .concat(),
                     ),
                 nostr::prelude::Filter::default()
-                    .custom_tags(
-                        SingleLetterTag::uppercase(Alphabet::E),
-                        proposal_ids.clone(),
-                    )
+                    .custom_tags(SingleLetterTag::UPPERCASE_E, proposal_ids.clone())
                     .kinds(
                         [
                             vec![Kind::EventDeletion, KIND_PULL_REQUEST_UPDATE],
@@ -2478,7 +2474,7 @@ pub fn get_fetch_filters(
                     .events(issue_ids.clone())
                     .kinds(status_kinds()),
                 nostr::prelude::Filter::default()
-                    .custom_tags(SingleLetterTag::uppercase(Alphabet::E), issue_ids.clone())
+                    .custom_tags(SingleLetterTag::UPPERCASE_E, issue_ids.clone())
                     .kinds(status_kinds()),
             ]
         },
@@ -2495,7 +2491,7 @@ pub fn get_fetch_filters(
             } else {
                 vec![
                     nostr::prelude::Filter::default()
-                        .custom_tags(SingleLetterTag::uppercase(Alphabet::E), all_root_ids)
+                        .custom_tags(SingleLetterTag::UPPERCASE_E, all_root_ids)
                         .kind(KIND_COMMENT),
                 ]
             }
@@ -2878,7 +2874,7 @@ pub async fn get_issues_from_cache(
             nostr::prelude::Filter::default()
                 .kinds([nostr::prelude::Kind::GitIssue])
                 .custom_tags(
-                    nostr::prelude::SingleLetterTag::lowercase(Alphabet::A),
+                    nostr::prelude::SingleLetterTag::LOWERCASE_A,
                     repo_coordinates
                         .iter()
                         .map(|c| c.coordinate.to_string())
@@ -2902,7 +2898,7 @@ pub async fn get_proposals_and_revisions_from_cache(
             nostr::prelude::Filter::default()
                 .kinds([nostr::prelude::Kind::GitPatch, KIND_PULL_REQUEST])
                 .custom_tags(
-                    nostr::prelude::SingleLetterTag::lowercase(Alphabet::A),
+                    nostr::prelude::SingleLetterTag::LOWERCASE_A,
                     repo_coordinates
                         .iter()
                         .map(|c| c.coordinate.to_string())
@@ -2942,7 +2938,7 @@ pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
                     KIND_PULL_REQUEST,
                     KIND_PULL_REQUEST_UPDATE,
                 ])
-                .custom_tag(SingleLetterTag::uppercase(Alphabet::E), *proposal_id),
+                .custom_tag(SingleLetterTag::UPPERCASE_E, *proposal_id),
             nostr::prelude::Filter::default()
                 .kinds([nostr::prelude::Kind::GitPatch, KIND_PULL_REQUEST])
                 .id(*proposal_id),
@@ -2994,7 +2990,7 @@ pub async fn get_all_proposal_patch_pr_pr_update_events_from_cache(
                         KIND_PULL_REQUEST,
                         KIND_PULL_REQUEST_UPDATE,
                     ])
-                    .custom_tags(SingleLetterTag::uppercase(Alphabet::E), revision_roots)
+                    .custom_tags(SingleLetterTag::UPPERCASE_E, revision_roots)
                     .authors(permissioned_users.clone()),
             ],
         )
