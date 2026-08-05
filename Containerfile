@@ -40,7 +40,7 @@ WORKDIR /opt/ngit
 
 FROM base AS ngit-cli
 COPY --from=builder /out/* /usr/local/bin/
-ENTRYPOINT ["/usr/local/bin/ngit-cli"]
+ENTRYPOINT ["/usr/local/bin/ngit"]
 
 
 FROM ngit-cli AS ngit-utils
