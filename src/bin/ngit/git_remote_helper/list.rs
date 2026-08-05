@@ -18,13 +18,19 @@ use repo_ref::RepoRef;
 
 use super::fetch::make_commits_for_proposal;
 
+#[derive(Clone)]
+pub(super) struct ListResult {
+    pub(super) remote_states: HashMap<String, (HashMap<String, String>, bool)>,
+    pub(super) advertised_refs: HashMap<String, String>,
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn run_list(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     for_push: bool,
     fetch_report: &FetchReport,
-) -> Result<HashMap<String, (HashMap<String, String>, bool)>> {
+) -> Result<ListResult> {
     let nostr_state = (get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await).ok();
 
     let term = console::Term::stderr();
@@ -124,6 +130,7 @@ pub async fn run_list(
 
     // TODO 'for push' should we check with the git servers to see if any of them
     // allow push from the user?
+    let advertised_refs = state.clone();
     for (name, value) in state {
         if value.starts_with("ref: ") {
             if !for_push {
@@ -135,7 +142,10 @@ pub async fn run_list(
     }
 
     println!();
-    Ok(remote_states)
+    Ok(ListResult {
+        remote_states,
+        advertised_refs,
+    })
 }
 
 /// fetches branches and tags from git servers so patch parent commits can be

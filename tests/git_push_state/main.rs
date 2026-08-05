@@ -50,6 +50,9 @@
 //!   server whose bare repo can be mutated out-of-band: a tag already pushed to
 //!   the server directly produces an empty per-server plan, and the nostr push
 //!   must succeed and still publish the updated state event.
+//! - [`force_with_lease`] — two maintainer checkouts diverge on `main`; a stale
+//!   guarded force push is rejected without changing kind-30618 state, then
+//!   succeeds after fetch advances the lease to the published winner.
 //!
 //! When adding a new scenario file, declare it as another `mod` below
 //! and follow the same fixture / case shape so failures stay
@@ -60,6 +63,7 @@ mod all_servers_down;
 mod auto_accept_maintainership;
 mod clone_interact_tag;
 mod delete_branch;
+mod force_with_lease;
 mod fresh_repo;
 mod grasp_accepts_remaining_relay_down;
 mod push_tag;
