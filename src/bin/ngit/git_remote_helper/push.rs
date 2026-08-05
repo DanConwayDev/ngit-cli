@@ -804,6 +804,23 @@ type HashMapUrlRefspecs = HashMap<String, Vec<String>>;
 /// Also used by `ngit init`'s in-process initial-branch push so a fresh
 /// init builds exactly the per-server plans a `git push` through the
 /// remote helper would have produced.
+///
+/// One of two per-server plan builders; the other is
+/// `sub_commands::sync::build_state_push_plans`. Converging them was
+/// attempted and abandoned: this builder is refspec-driven (it filters
+/// and adjusts the refspecs the user asked `git push` to perform,
+/// judging each against the nostr baseline *and* every server with
+/// three-way ancestry checks), can *reject* a refspec — a concept the
+/// state-driven builder has no channel for — with the rejection
+/// cascading out of every server's plan and per-ref recovery dialogue
+/// printed inline, and special-cases annotated-tag object oids and
+/// oid-literal refspecs. `build_state_push_plans` instead derives the
+/// goal from a desired state map (emitting deletions for refs absent
+/// from it) and defers destructive-refspec policy to the transaction's
+/// `ServerForcePolicy`. A shared core would need mode switches for the
+/// baseline source, the comparison arity, the reject-vs-drop channel,
+/// tag handling and the dialogue sink — more machinery than the two
+/// focused builders it would replace.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn create_rejected_refspecs_and_remotes_refspecs(
     term: &console::Term,

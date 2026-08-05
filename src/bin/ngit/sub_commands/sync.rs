@@ -579,6 +579,19 @@ pub(crate) enum BranchPushSource<'a> {
 /// server; the transaction's [`ServerForcePolicy`] decides where they
 /// execute. Returns the per-server plans and the deduplicated union
 /// (force prefixes stripped) used as the transaction's state refspecs.
+///
+/// One of two per-server plan builders; the other is the remote
+/// helper's `create_rejected_refspecs_and_remotes_refspecs`
+/// (`git_remote_helper::push`), and `ngit init` uses one of each in
+/// different arms. Converging them was attempted and abandoned: this
+/// builder is state-driven (the goal is a desired ref map, deletions
+/// included) and never rejects — destructive refspecs are emitted and
+/// policy-filtered later — while the helper's is refspec-driven,
+/// judges each user-requested refspec with three-way ancestry checks
+/// against the nostr baseline, cascades per-refspec rejections out of
+/// every server's plan and prints recovery dialogue inline. See the
+/// note on that function for why a shared core loses to two focused
+/// builders.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build_state_push_plans(
     git_repo: &Repo,
