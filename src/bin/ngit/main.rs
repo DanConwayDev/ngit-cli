@@ -91,8 +91,11 @@ async fn main() {
                     std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
                     sub_commands::login::launch(&cli, sub_args).await
                 }
-                AccountCommands::Logout => sub_commands::logout::launch().await,
+                AccountCommands::Logout(sub_args) => sub_commands::logout::launch(sub_args).await,
                 AccountCommands::ExportKeys => sub_commands::export_keys::launch().await,
+                AccountCommands::ForgetKeys(sub_args) => {
+                    sub_commands::forget_keys::launch(sub_args)
+                }
                 AccountCommands::Create(sub_args) => {
                     sub_commands::create::launch(&cli, sub_args).await
                 }

@@ -3,6 +3,7 @@ pub mod checkout;
 pub mod comment;
 pub mod create;
 pub mod export_keys;
+pub mod forget_keys;
 pub mod id_resolver;
 pub mod init;
 pub mod issue_create;

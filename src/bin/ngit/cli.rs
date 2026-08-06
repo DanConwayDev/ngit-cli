@@ -288,10 +288,14 @@ pub enum AccountCommands {
     Login(sub_commands::login::SubCommandArgs),
     /// connect interactively (alias for `login -i`)
     Connect(sub_commands::login::SubCommandArgs),
-    /// remove nostr account details stored in git config
-    Logout,
+    /// remove nostr account details from git config; keeps the stored
+    /// secret unless --forget is passed
+    Logout(sub_commands::logout::SubCommandArgs),
     /// export nostr keys to login to other nostr clients
     ExportKeys,
+    /// remove a stored account secret from the OS credential store / ngit
+    /// file store
+    ForgetKeys(sub_commands::forget_keys::SubCommandArgs),
     /// create a new nostr account
     Create(sub_commands::create::SubCommandArgs),
     /// show currently logged-in account(s)

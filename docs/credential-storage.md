@@ -48,6 +48,15 @@ instead of silently writing plaintext to git config.
 The pre-release `nostr.credential-store` / `NGIT_CREDENTIAL_STORE` boolean
 is still read: `false` maps to `git-config`, `true` to `auto`.
 
+## Logout
+
+`ngit account logout` removes the login from git config but deliberately
+keeps the stored secret: the credential store may hold the only copy of an
+identity key, so deleting it on logout could destroy the account. Logout
+prints the exact command to remove the secret as well —
+`ngit account forget-keys <entry>` — and `ngit account logout --forget`
+does both in one step.
+
 ## Interop convention
 
 A value of `nostr.nsec` / `nostr.bunker-app-key` matching

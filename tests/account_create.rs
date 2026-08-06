@@ -175,7 +175,7 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
 }
 
 #[tokio::test]
-async fn credential_file_stores_pointer_resolves_and_logout_deletes_entry() -> Result<()> {
+async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -235,10 +235,81 @@ async fn credential_file_stores_pointer_resolves_and_logout_deletes_entry() -> R
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(repo.config("nostr.nsec").await?.is_none());
+    // Logout keeps the stored secret - the store may hold the only copy of
+    // the key - and points at the explicit removal command instead.
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert!(
+        entries.get(format!("ngit/{pointer}")).is_some(),
+        "logout must retain the credential entry"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("forget-keys"),
+        "logout should name the removal command: {stderr}"
+    );
+
+    let output = repo
+        .ngit(["account", "forget-keys", &pointer])
+        .env("NGIT_SECRET_STORAGE", "auto")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "forget-keys failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert!(
         entries.get(format!("ngit/{pointer}")).is_none(),
-        "logout retained credential entry"
+        "forget-keys must remove the credential entry"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_forget_removes_entry() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let nsec = Keys::generate().secret_key().to_bech32()?;
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .env("NGIT_SECRET_STORAGE", "auto")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pointer = repo
+        .config("nostr.nsec")
+        .await?
+        .context("pointer missing after login")?;
+
+    let output = repo
+        .ngit(["account", "logout", "--forget"])
+        .env("NGIT_SECRET_STORAGE", "auto")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "logout --forget failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(repo.config("nostr.nsec").await?.is_none());
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert!(
+        entries.get(format!("ngit/{pointer}")).is_none(),
+        "logout --forget must remove the credential entry"
     );
     Ok(())
 }

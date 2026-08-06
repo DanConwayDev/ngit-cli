@@ -286,25 +286,18 @@ pub fn forget(name: &str) -> Result<bool> {
     Ok(deleted)
 }
 
-pub fn delete(name: &str) -> Result<()> {
-    forget(name).map(|_| ())
-}
-
-/// Delete the credential-store entries referenced by any pointer values in
-/// the given config scope's `nostr.nsec` / `nostr.bunker-app-key` items.
-pub fn delete_config_pointers(git_repo: &Option<&crate::git::Repo>) -> Result<()> {
-    for item in ["nostr.nsec", "nostr.bunker-app-key"] {
-        if let Some(value) = crate::git::get_git_config_item(git_repo, item)? {
-            if parse_pointer(&value).is_some() {
-                delete(&value).with_context(|| {
-                    format!(
-                        "failed to remove credential entry {value}; remove it via your OS keychain UI"
-                    )
-                })?;
-            }
-        }
-    }
-    Ok(())
+/// Credential-store pointer values in the given config scope's `nostr.nsec`
+/// / `nostr.bunker-app-key` items.
+pub fn config_pointers(git_repo: &Option<&crate::git::Repo>) -> Vec<String> {
+    ["nostr.nsec", "nostr.bunker-app-key"]
+        .iter()
+        .filter_map(|item| {
+            crate::git::get_git_config_item(git_repo, item)
+                .ok()
+                .flatten()
+        })
+        .filter(|value| parse_pointer(value).is_some())
+        .collect()
 }
 
 fn is_no_entry(error: &(dyn std::error::Error + 'static)) -> bool {

@@ -130,14 +130,11 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
         .await
         {
             // In non-interactive mode, automatically logout without prompting
+            // Stored secrets are deliberately kept when switching accounts:
+            // the credential store may hold the only copy of the key, and a
+            // re-login of the same account reuses its entry. `ngit account
+            // forget-keys` removes entries explicitly.
             if Interactor::is_non_interactive() {
-                credential_store::delete_config_pointers(
-                    &if source == SignerInfoSource::GitLocal {
-                        git_repo
-                    } else {
-                        None
-                    },
-                )?;
                 for item in [
                     "nostr.nsec",
                     "nostr.npub",
@@ -197,13 +194,6 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                     }),
             )? {
                 0 => {
-                    credential_store::delete_config_pointers(&if source
-                        == SignerInfoSource::GitLocal
-                    {
-                        git_repo
-                    } else {
-                        None
-                    })?;
                     for item in [
                         "nostr.nsec",
                         "nostr.npub",
