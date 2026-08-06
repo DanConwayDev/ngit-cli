@@ -16,7 +16,7 @@ use std::{
     fs::create_dir_all,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -42,6 +42,7 @@ use nostr::prelude::{
 };
 use nostr_database::{NostrDatabase, SaveEventStatus};
 use nostr_lmdb::NostrLmdb;
+use nostr_memory::MemoryDatabase;
 use nostr_sdk::{
     authenticator::SignerAuthenticator,
     client::ClientBuilder,
@@ -73,6 +74,8 @@ const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
 
 static INVITED_MAINTAINER_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
 static VERSION_CHECK_STATE_REQUESTED: AtomicBool = AtomicBool::new(false);
+static GLOBAL_MEMORY_CACHE: OnceLock<Arc<dyn NostrDatabase>> = OnceLock::new();
+static GLOBAL_CACHE_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
 
 /// Holds the final state of a progress bar that finished before the detail
 /// view was revealed. The style and prefix are already set on the bar; only
@@ -1499,7 +1502,7 @@ fn get_global_cache_dir() -> Result<PathBuf> {
     Ok(get_dirs()?.cache_dir().to_path_buf())
 }
 
-async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLmdb> {
+async fn open_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLmdb> {
     let path = if std::env::var("NGITTEST").is_ok() {
         if let Some(git_repo_path) = git_repo_path {
             let git_dir = git2::Repository::discover(git_repo_path)
@@ -1527,6 +1530,25 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
             path.display()
         )
     })
+}
+
+async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Arc<dyn NostrDatabase>> {
+    match open_global_cache_database(git_repo_path).await {
+        Ok(database) => Ok(Arc::new(database)),
+        Err(error) if std::env::var("NGITTEST").is_err() => Ok(use_in_memory_global_cache(error)),
+        Err(error) => Err(error),
+    }
+}
+
+fn use_in_memory_global_cache(error: anyhow::Error) -> Arc<dyn NostrDatabase> {
+    if !GLOBAL_CACHE_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "warning: {error:#}\n\
+             continuing with an in-memory global cache; set NGIT_CACHE_DIR to a writable directory \
+             to enable persistent caching"
+        );
+    }
+    Arc::clone(GLOBAL_MEMORY_CACHE.get_or_init(|| Arc::new(MemoryDatabase::unbounded())))
 }
 
 pub async fn get_events_from_local_cache(
@@ -3511,6 +3533,8 @@ fn remove_trailing_slash(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use nostr::prelude::event::{FinalizeUnsignedEvent, SignEvent};
+
     use super::*;
 
     #[test]
@@ -3545,6 +3569,22 @@ mod tests {
     #[test]
     fn announcement_only_filters_are_empty_without_coordinates() {
         assert!(get_announcement_only_fetch_filters(&HashSet::new()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn global_memory_fallback_retains_events_for_the_process() {
+        let database = use_in_memory_global_cache(anyhow!("test cache failure"));
+        let keys = nostr::prelude::Keys::generate();
+        let event = keys
+            .sign_event(
+                EventBuilder::new(Kind::TextNote, "cached in memory")
+                    .finalize_unsigned(keys.public_key()),
+            )
+            .unwrap();
+
+        database.save_event(&event).await.unwrap();
+
+        assert_eq!(database.event_by_id(&event.id).await.unwrap(), Some(event));
     }
 
     mod event_rejection_is_duplicate {

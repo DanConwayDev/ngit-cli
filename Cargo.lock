@@ -1792,6 +1792,7 @@ dependencies = [
  "nostr-connect",
  "nostr-database",
  "nostr-lmdb",
+ "nostr-memory",
  "nostr-sdk",
  "once_cell",
  "passwords",
