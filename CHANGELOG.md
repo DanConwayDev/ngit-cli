@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Git server clone URLs can use installed `git-remote-<scheme>` helpers for listing, fetching, and pushing. Installing a helper is treated as consent for signed repository announcements to invoke it, subject to Git's protocol policy; recursive `nostr`, internal `fd`, and GRASP-reserved `ws`/`wss` schemes are not delegated.
 - Global `--repo <REMOTE|NADDR|NOSTR-URL>` argument selects the target repository for repo-scoped operations (`send`, `issue`, `pr`, `repo`, `sync`, and every other command that resolves a repository coordinate). Available at any command position (`ngit --repo upstream issue create`, `ngit issue --repo upstream create`, `ngit issue create --repo upstream`). Value is first matched against configured remote names, then parsed as an naddr, then as a `nostr://` URL.
 - Repo-coordinate resolution now prints a `target repository: <naddr> (source: ...)` diagnostic when publishing repo-scoped events, so an incorrect target is visible before the event is signed.
+- Opportunistic Tor support for `.onion` relays and clone URLs. ngit uses an available SOCKS5 proxy from `NGIT_TOR_PROXY` or probes the common system Tor and Tor Browser ports (`127.0.0.1:9050` and `127.0.0.1:9150`). Unavailable onion entries fail immediately so they do not delay clearnet alternatives. See `docs/onion.md`.
 
 ### Changed
 
@@ -85,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ngit send --in-reply-to` now errors before publishing an update to an existing PR when the signer is neither the proposal author nor a repository maintainer.
 - Push reporting no longer returns `ok` before any git server has successfully received the git data.
 - State events are no longer broadcast before the git data is successfully pushed: ngit now publishes the state event to GRASP servers using their purgatory support, pushes the git data, then only broadcasts to additional relays after at least one git server succeeds, so `ok` requires the latest state on at least one relay and the git data on at least one git server.
+- `.onion` hosts supplied as a relay-hint segment in a `nostr://<npub>/<host>/<repo>` URL no longer get a stray `wss://` prefix, which previously made onion relays unreachable. Same fix applies to the `?relay=` query-string form.
 
 ### Removed
 

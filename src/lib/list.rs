@@ -26,7 +26,7 @@ use crate::{
     repo_state::RepoState,
     utils::{
         Direction, get_read_protocols_to_try, get_short_git_server_name, join_with_and,
-        set_protocol_preference,
+        onion_proxy_options_for_url, set_protocol_preference,
     },
 };
 
@@ -566,7 +566,8 @@ fn list_from_remote_url(
     if !dont_authenticate {
         remote_callbacks.credentials(auth.credentials(&git_config));
     }
-    git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), None)?;
+    let proxy = onion_proxy_options_for_url(git_server_remote_url)?;
+    git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), proxy)?;
     let mut state = HashMap::new();
     for head in git_server_remote.list()? {
         if let Some(symbolic_reference) = head.symref_target() {

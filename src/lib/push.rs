@@ -34,7 +34,7 @@ use crate::{
     },
     utils::{
         Direction, get_short_git_server_name, get_write_protocols_to_try, join_with_and,
-        set_protocol_preference,
+        onion_proxy_options_for_url, set_protocol_preference,
     },
 };
 
@@ -178,6 +178,9 @@ pub fn push_to_remote_url(
         }
     };
     let mut push_options = git2::PushOptions::new();
+    if let Some(proxy) = onion_proxy_options_for_url(git_server_url)? {
+        push_options.proxy_options(proxy);
+    }
     let mut remote_callbacks = git2::RemoteCallbacks::new();
     let push_reporter = Arc::new(Mutex::new(PushReporter::new(term)));
 

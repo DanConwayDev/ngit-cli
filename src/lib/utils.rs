@@ -467,6 +467,32 @@ pub fn set_protocol_preference(
     )
 }
 
+/// Build a libgit2 `ProxyOptions` configured to route the given URL
+/// through the local Tor SOCKS5 proxy when the host is `.onion`, or
+/// returns `None` otherwise so callers fall back to libgit2's default
+/// (no proxy / auto-detected from gitconfig).
+///
+/// libgit2 dispatches to libcurl on most platforms, which understands
+/// `socks5h://host:port` (the trailing `h` keeps DNS resolution on the
+/// proxy side, which is required for `.onion` addresses).
+///
+/// The proxy address comes from the same `NGIT_TOR_PROXY` env var as the
+/// nostr-sdk relay proxy ([`crate::client::tor_socks5_proxy_addr`]); set
+/// it to `none` to disable.
+pub fn onion_proxy_options_for_url(url: &str) -> Result<Option<git2::ProxyOptions<'static>>> {
+    if !crate::git::nostr_url::host_is_onion(url) {
+        return Ok(None);
+    }
+    crate::client::ensure_onion_url_reachable(url)?;
+    let addr = crate::client::tor_socks5_proxy_addr()
+        .context("Tor proxy became unavailable after reachability check")?;
+    let mut opts = git2::ProxyOptions::new();
+    // `socks5h://` so DNS resolution happens at the proxy (mandatory for
+    // `.onion` addresses, which the local resolver can't handle).
+    opts.url(&format!("socks5h://{addr}"));
+    Ok(Some(opts))
+}
+
 pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     let error_str = error.to_string();
     for s in [

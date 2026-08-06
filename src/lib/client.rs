@@ -47,6 +47,7 @@ use nostr_sdk::{
     authenticator::SignerAuthenticator,
     client::ClientBuilder,
     error::{Error as NostrSdkError, ErrorKind as NostrSdkErrorKind},
+    proxy::Proxy,
     relay::{RelayLimits, ReqExitPolicy},
 };
 use serde_json::Value;
@@ -68,6 +69,76 @@ use crate::{
 
 pub fn is_verbose() -> bool {
     std::env::var("NGIT_VERBOSE").is_ok()
+}
+
+/// Default SOCKS5 proxy used to reach `.onion` relays and clone URLs.
+///
+/// Override with `NGIT_TOR_PROXY=host:port`. Set to `none` (or empty) to
+/// disable routing `.onion` traffic through a SOCKS5 proxy, in which case
+/// `.onion` relays / clone URLs will be unreachable on hosts without their
+/// own transparent Tor proxy.
+pub const DEFAULT_TOR_SOCKS5_PROXY: &str = "127.0.0.1:9050";
+pub const TOR_BROWSER_SOCKS5_PROXY: &str = "127.0.0.1:9150";
+
+const TOR_PROXY_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+static TOR_SOCKS5_PROXY: OnceLock<Option<std::net::SocketAddr>> = OnceLock::new();
+
+/// Return a reachable SOCKS5 proxy for `.onion` traffic, if one is available.
+///
+/// Reads `NGIT_TOR_PROXY`:
+///   - unset → probe [`DEFAULT_TOR_SOCKS5_PROXY`] and
+///     [`TOR_BROWSER_SOCKS5_PROXY`]
+///   - `""` / `none` / `off` / `disable` → `None`
+///   - `host:port` → use it if a bounded TCP probe succeeds
+pub fn tor_socks5_proxy_addr() -> Option<std::net::SocketAddr> {
+    *TOR_SOCKS5_PROXY.get_or_init(|| {
+        discover_tor_socks5_proxy(std::env::var("NGIT_TOR_PROXY").ok().as_deref(), |addr| {
+            std::net::TcpStream::connect_timeout(&addr, TOR_PROXY_PROBE_TIMEOUT).is_ok()
+        })
+    })
+}
+
+fn discover_tor_socks5_proxy(
+    configured: Option<&str>,
+    mut is_reachable: impl FnMut(std::net::SocketAddr) -> bool,
+) -> Option<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let candidates: Vec<&str> = match configured.map(str::trim) {
+        Some(value)
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "" | "none" | "off" | "disable" | "disabled"
+            ) =>
+        {
+            return None;
+        }
+        Some(value) => vec![value],
+        None => vec![DEFAULT_TOR_SOCKS5_PROXY, TOR_BROWSER_SOCKS5_PROXY],
+    };
+
+    candidates
+        .into_iter()
+        .filter_map(|candidate| candidate.to_socket_addrs().ok())
+        .flatten()
+        .find(|addr| is_reachable(*addr))
+}
+
+pub fn ensure_onion_url_reachable(url: &str) -> Result<()> {
+    if crate::git::nostr_url::host_is_onion(url) && tor_socks5_proxy_addr().is_none() {
+        bail!(
+            "cannot reach .onion address {url}: no Tor SOCKS5 proxy is available; start Tor on 127.0.0.1:9050 or 127.0.0.1:9150, or set NGIT_TOR_PROXY=host:port"
+        );
+    }
+    Ok(())
+}
+
+/// Wire up nostr-sdk's per-relay SOCKS5 proxy so `.onion` relays go through
+/// the configured Tor proxy and clearnet relays stay direct.
+fn apply_onion_proxy(builder: ClientBuilder) -> ClientBuilder {
+    match tor_socks5_proxy_addr() {
+        Some(addr) => builder.proxy(Proxy::onion(addr)),
+        None => builder,
+    }
 }
 
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
@@ -207,16 +278,20 @@ impl Connect for Client {
     fn new(opts: Params) -> Self {
         Client {
             client: if let Some(keys) = opts.keys {
-                ClientBuilder::default()
-                    .relay_limits(RelayLimits::disable())
-                    .verify_subscriptions(true)
-                    .authenticator(SignerAuthenticator::new(keys))
-                    .build()
+                apply_onion_proxy(
+                    ClientBuilder::default()
+                        .relay_limits(RelayLimits::disable())
+                        .verify_subscriptions(true)
+                        .authenticator(SignerAuthenticator::new(keys)),
+                )
+                .build()
             } else {
-                ClientBuilder::default()
-                    .relay_limits(RelayLimits::disable())
-                    .verify_subscriptions(true)
-                    .build()
+                apply_onion_proxy(
+                    ClientBuilder::default()
+                        .relay_limits(RelayLimits::disable())
+                        .verify_subscriptions(true),
+                )
+                .build()
             },
             relay_default_set: opts.relay_default_set,
             announcement_indexer_relays: opts.announcement_indexer_relays,
@@ -232,6 +307,7 @@ impl Connect for Client {
     }
 
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
+        ensure_onion_url_reachable(relay_url.as_str())?;
         if let Some(reason) = self.is_relay_skipped_for_session(relay_url) {
             bail!("{reason}");
         }
@@ -288,6 +364,7 @@ impl Connect for Client {
         url: &str,
         event: Event,
     ) -> Result<nostr::prelude::EventId> {
+        ensure_onion_url_reachable(url)?;
         self.client.add_relay(url).await?;
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
@@ -390,6 +467,10 @@ impl Connect for Client {
                     if let Some(reason) = self.is_relay_skipped_for_session(relay.url()) {
                         update_progress_bar_with_error(relay.url(), pb, &anyhow!("{reason}"));
                         bail!("{reason}");
+                    }
+                    if let Err(error) = ensure_onion_url_reachable(relay.url().as_str()) {
+                        update_progress_bar_with_error(relay.url(), pb, &error);
+                        return Err(error);
                     }
                     #[allow(clippy::large_futures)]
                     match get_events_of(relay, filters, &pb).await {
@@ -639,6 +720,7 @@ impl Connect for Client {
                             .selected_relay
                             .clone()
                             .context("fetch_all_from_relay called without a relay")?;
+                        ensure_onion_url_reachable(relay_url.as_str())?;
 
                         // Always create a real progress bar added to the detail
                         // multi. In test mode the multi has a hidden draw target
@@ -855,6 +937,7 @@ impl Connect for Client {
             .selected_relay
             .clone()
             .context("fetch_all_from_relay called without a relay")?;
+        ensure_onion_url_reachable(relay_url.as_str())?;
 
         let relay_column_width = request.relay_column_width;
 
@@ -3627,5 +3710,61 @@ mod tests {
                 "duplicate: already have this event".to_string(),
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod tor_proxy_tests {
+    use std::net::{SocketAddr, TcpListener};
+
+    use super::*;
+
+    fn addr(value: &str) -> SocketAddr {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn discovers_system_tor_before_tor_browser() {
+        let found = discover_tor_socks5_proxy(None, |candidate| {
+            candidate == addr(DEFAULT_TOR_SOCKS5_PROXY)
+        });
+        assert_eq!(found, Some(addr(DEFAULT_TOR_SOCKS5_PROXY)));
+    }
+
+    #[test]
+    fn falls_back_to_tor_browser_proxy() {
+        let found = discover_tor_socks5_proxy(None, |candidate| {
+            candidate == addr(TOR_BROWSER_SOCKS5_PROXY)
+        });
+        assert_eq!(found, Some(addr(TOR_BROWSER_SOCKS5_PROXY)));
+    }
+
+    #[test]
+    fn explicit_proxy_does_not_fall_back_to_defaults() {
+        let configured = "127.0.0.1:19050";
+        let mut probed = Vec::new();
+        let found = discover_tor_socks5_proxy(Some(configured), |candidate| {
+            probed.push(candidate);
+            false
+        });
+        assert_eq!(found, None);
+        assert_eq!(probed, vec![addr(configured)]);
+    }
+
+    #[test]
+    fn disabled_proxy_does_not_probe() {
+        let found =
+            discover_tor_socks5_proxy(Some("off"), |_| panic!("disabled proxy must not be probed"));
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn detects_a_listening_proxy_without_waiting() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let found = discover_tor_socks5_proxy(Some(&listener_addr.to_string()), |candidate| {
+            std::net::TcpStream::connect_timeout(&candidate, TOR_PROXY_PROBE_TIMEOUT).is_ok()
+        });
+        assert_eq!(found, Some(listener_addr));
     }
 }

@@ -80,17 +80,20 @@ impl NgitSigner {
 
     /// Build a nostr_sdk client with the appropriate NIP-42 authenticator.
     pub fn build_client(&self) -> nostr_sdk::client::Client {
-        match self {
+        let builder = match self {
             Self::Keys(k) => ClientBuilder::default()
                 .relay_limits(RelayLimits::disable())
                 .verify_subscriptions(true)
-                .authenticator(SignerAuthenticator::new(k.clone()))
-                .build(),
+                .authenticator(SignerAuthenticator::new(k.clone())),
             Self::Connect(c) => ClientBuilder::default()
                 .relay_limits(RelayLimits::disable())
                 .verify_subscriptions(true)
-                .authenticator(SignerAuthenticator::new(SharedConnect(Arc::clone(c))))
-                .build(),
+                .authenticator(SignerAuthenticator::new(SharedConnect(Arc::clone(c)))),
+        };
+        // Route `.onion` relays through the configured SOCKS5/Tor proxy.
+        match crate::client::tor_socks5_proxy_addr() {
+            Some(addr) => builder.proxy(nostr_sdk::proxy::Proxy::onion(addr)).build(),
+            None => builder.build(),
         }
     }
 }
