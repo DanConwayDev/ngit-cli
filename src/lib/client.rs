@@ -14,7 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{Display, Write},
     fs::create_dir_all,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1492,6 +1492,13 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLmdb> {
     })
 }
 
+fn get_global_cache_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("NGIT_CACHE_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(get_dirs()?.cache_dir().to_path_buf())
+}
+
 async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLmdb> {
     let path = if std::env::var("NGITTEST").is_ok() {
         if let Some(git_repo_path) = git_repo_path {
@@ -1504,11 +1511,14 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
             bail!("git_repo must be supplied to get_global_cache_database during integration tests")
         }
     } else {
-        create_dir_all(get_dirs()?.cache_dir()).context(format!(
-            "failed to create cache directory in: {:?}",
-            get_dirs()?.cache_dir()
-        ))?;
-        get_dirs()?.cache_dir().join("nostr-cache.lmdb")
+        let cache_dir = get_global_cache_dir()?;
+        create_dir_all(&cache_dir).with_context(|| {
+            format!(
+                "failed to create global cache directory at {}",
+                cache_dir.display()
+            )
+        })?;
+        cache_dir.join("nostr-cache.lmdb")
     };
 
     NostrLmdb::open(&path).await.with_context(|| {

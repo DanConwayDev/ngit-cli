@@ -75,9 +75,15 @@ pub fn customise_template() -> String {
 {title}
 ==============
 
-ngit settings are managed through git config. Where an environment variable is
-listed, it overrides git config; local git config overrides global git config;
-built-in defaults are used last.
+Most ngit settings are managed through git config. Where an environment
+variable is listed alongside a git config key, it overrides git config; local
+git config overrides global git config; built-in defaults are used last.
+
+{cache_storage}
+
+  {cache_dir}
+    Overrides the platform-specific directory used for ngit's global event
+    cache. Repository caches remain in the Git common directory.
 
 {relay_defaults}
 
@@ -141,6 +147,8 @@ Values are semicolon-separated URLs without spaces.
 Other repository-local config keys, such as {nip05} and {protocol_push}, are
 implementation details used for efficiency.
 ",
+        cache_storage = section("Cache storage"),
+        cache_dir = env("NGIT_CACHE_DIR"),
         relay_defaults = section("Relay defaults"),
         grasp = key("nostr.grasp-default-set"),
         grasp_env = env("NGIT_GRASP_DEFAULT_SET"),
