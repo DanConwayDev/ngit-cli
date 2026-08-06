@@ -21,6 +21,27 @@ install options:
 
 run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in your PATH. `git-remote-nostr` is a small compatibility launcher that git discovers by name; the implementation lives in `ngit`, so both need installing together.
 
+### trusting locally installed certificate authorities
+
+Release binaries use the self-contained WebPKI root store. To additionally
+trust certificate authorities installed on the local system, such as an
+`mkcert` authority used by a development grasp server, build ngit with the
+`native-tls-roots` feature:
+
+```sh
+cargo build --release --features native-tls-roots
+```
+
+The feature can also be enabled when installing from crates.io:
+
+```sh
+cargo install ngit --features native-tls-roots
+```
+
+This expands which certificate authorities ngit trusts and can vary by
+platform, so enable it only when the system trust store is appropriate for the
+environment. WebPKI roots remain enabled alongside the native roots.
+
 ## configuration
 
 Run `ngit --customize` to list supported git config keys and their environment-variable overrides. Useful examples:

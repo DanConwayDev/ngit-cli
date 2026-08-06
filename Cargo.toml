@@ -81,6 +81,10 @@ path = "src/lib/mod.rs"
 
 [features]
 default = []
+native-tls-roots = [
+    "nostr-connect/rustls-tls-native-roots",
+    "nostr-sdk/rustls-tls-native-roots",
+]
 vendored-openssl = ["git2/vendored-openssl"]
 
 [[bin]]
