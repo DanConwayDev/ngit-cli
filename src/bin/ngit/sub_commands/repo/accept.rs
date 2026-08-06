@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use ngit::{
-    accept_maintainership::{accept_maintainership_with_defaults, wait_for_grasp_servers},
+    accept_maintainership::{
+        accept_maintainership_with_defaults, default_acceptance_maintainers, wait_for_grasp_servers,
+    },
     cli_interactor::cli_error,
     client::{Params, fetching_with_report, get_repo_ref_from_cache, send_events},
     git::nostr_url::NostrUrlDecoded,
@@ -104,8 +106,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     // Happy path: CoMaintainer state without an existing announcement
     let repo_name = &repo_ref.name;
-    let selected_npub = selected.to_bech32().unwrap_or_else(|_| selected.to_hex());
-    println!("accepting co-maintainership of '{repo_name}' (offered by {selected_npub})");
+    println!("accepting maintainer invitation for '{repo_name}'");
     println!("publishing your repository announcement to nostr...");
 
     if args.grasp_server.is_empty() {
@@ -216,10 +217,7 @@ async fn accept_with_grasp_servers(
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| repo_ref.root_commit.clone());
 
-    let mut maintainers = vec![*my_pubkey];
-    if repo_ref.selected_maintainer != *my_pubkey {
-        maintainers.push(repo_ref.selected_maintainer);
-    }
+    let maintainers = default_acceptance_maintainers(repo_ref, *my_pubkey);
 
     let my_repo_ref = RepoRef {
         identifier: identifier.clone(),

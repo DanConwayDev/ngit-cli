@@ -62,6 +62,11 @@ struct RepoInfoJson {
     upstream: Option<Vec<Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     maintainers: Option<Vec<String>>,
+    selected_maintainer: Option<String>,
+    confirmed_maintainers: Option<Vec<String>>,
+    invited_maintainers: Option<Vec<String>>,
+    lead_maintainer: Option<String>,
+    maintainer_edges: Option<Vec<MaintainerEdgeJson>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     grasp_servers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +75,39 @@ struct RepoInfoJson {
     relays: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hashtags: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct MaintainerEdgeJson {
+    from: String,
+    to: String,
+}
+
+type MaintainerJsonFields = (
+    Vec<String>,
+    Vec<String>,
+    Option<String>,
+    Vec<MaintainerEdgeJson>,
+);
+
+fn maintainer_json_fields(repo_ref: &RepoRef) -> MaintainerJsonFields {
+    let encode = |pk: &PublicKey| pk.to_bech32().unwrap_or_else(|_| pk.to_hex());
+    let confirmed = repo_ref
+        .confirmed_maintainers()
+        .iter()
+        .map(&encode)
+        .collect();
+    let invited = repo_ref.invited_maintainers().iter().map(&encode).collect();
+    let lead = repo_ref.lead_maintainer().as_ref().map(&encode);
+    let edges = repo_ref
+        .maintainer_edges()
+        .iter()
+        .map(|edge| MaintainerEdgeJson {
+            from: encode(&edge.from),
+            to: encode(&edge.to),
+        })
+        .collect();
+    (confirmed, invited, lead, edges)
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +149,11 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                     web: None,
                     upstream: None,
                     maintainers: None,
+                    selected_maintainer: None,
+                    confirmed_maintainers: None,
+                    invited_maintainers: None,
+                    lead_maintainer: None,
+                    maintainer_edges: None,
                     grasp_servers: None,
                     git_servers: None,
                     relays: None,
@@ -155,6 +198,16 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                     web: None,
                     upstream: None,
                     maintainers: None,
+                    selected_maintainer: Some(
+                        repo_coordinate
+                            .public_key
+                            .to_bech32()
+                            .unwrap_or_else(|_| repo_coordinate.public_key.to_hex()),
+                    ),
+                    confirmed_maintainers: None,
+                    invited_maintainers: None,
+                    lead_maintainer: None,
+                    maintainer_edges: None,
                     grasp_servers: None,
                     git_servers: None,
                     relays: None,
@@ -247,6 +300,9 @@ fn print_repo_info_json(
         .iter()
         .filter_map(|pk| pk.to_bech32().ok())
         .collect();
+    let encode = |pk: &PublicKey| pk.to_bech32().unwrap_or_else(|_| pk.to_hex());
+    let (confirmed_maintainers, invited_maintainers, lead_maintainer, maintainer_edges) =
+        maintainer_json_fields(repo_ref);
 
     let info = RepoInfoJson {
         is_nostr_repo: true,
@@ -270,6 +326,11 @@ fn print_repo_info_json(
             Some(repo_ref.upstream.clone())
         },
         maintainers: Some(maintainers),
+        selected_maintainer: Some(encode(&repo_ref.selected_maintainer)),
+        confirmed_maintainers: Some(confirmed_maintainers),
+        invited_maintainers: Some(invited_maintainers),
+        lead_maintainer,
+        maintainer_edges: Some(maintainer_edges),
         grasp_servers: if grasp_servers.is_empty() {
             None
         } else {
@@ -359,8 +420,16 @@ async fn print_repo_info(
     let selected_name = display_name_for(selected, my_pubkey, git_repo_path).await;
     println!("  selected: {selected_name}");
 
+    if let Some(lead) = repo_ref.lead_maintainer() {
+        let lead_name = display_name_for(&lead, my_pubkey, git_repo_path).await;
+        println!(
+            "  lead: {lead_name} {}",
+            dim.apply_to("(coordination only)")
+        );
+    }
+
     let co_maintainers: Vec<PublicKey> = repo_ref
-        .maintainers_with_announcements()
+        .confirmed_maintainers()
         .into_iter()
         .filter(|m| *m != *selected)
         .collect();
@@ -398,17 +467,19 @@ async fn print_repo_info(
         }
     }
 
-    if let Some(without) = &repo_ref.maintainers_without_annoucnement {
-        if !without.is_empty() {
-            let mut names = Vec::new();
-            for pk in without {
-                names.push(display_name_for(pk, my_pubkey, git_repo_path).await);
-            }
-            println!(
-                "  {}",
-                dim.apply_to(format!("invited: {}", names.join(", ")))
-            );
+    let invited = repo_ref.invited_maintainers();
+    if !invited.is_empty() {
+        let mut names = Vec::new();
+        for pk in invited {
+            names.push(display_name_for(&pk, my_pubkey, git_repo_path).await);
         }
+        println!("  invited: {}", names.join(", "));
+        println!(
+            "  {}",
+            dim.apply_to(
+                "invited maintainers have maintainer rights; acceptance is reciprocal framing"
+            )
+        );
     }
     println!();
 
@@ -555,8 +626,8 @@ async fn print_repo_info(
             dim.apply_to(
                 "Note: git servers and relays are pooled from all maintainers' announcements.\n\
                  Name, description, web, upstream, and hashtags come from the most recently updated announcement.\n\
-                 Each maintainer independently decides who they list as co-maintainers;\n\
-                 if Alice lists Bob and Bob lists Carol, all three are in the maintainer set."
+                 Every listed maintainer has maintainer rights through the directional graph.\n\
+                 Reciprocal links confirm co-maintainership; a unique lead coordinates but has no extra rights."
             )
         );
     }

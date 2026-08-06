@@ -18,7 +18,7 @@ No network access is required to find the coordinate. The coordinate may exist w
 
 Each repository announcement (kind 30617) contains a `maintainers` tag listing public keys. These form a recursive graph: if Alice lists Bob, and Bob lists Carol, then {Alice, Bob, Carol} can all be discovered from Alice's selected coordinate.
 
-Each maintainer independently decides who they list. Adding someone to your maintainers tag is an invitation to co-maintain.
+Each maintainer independently decides who they list. A directional listing immediately places that pubkey in the recursive maintainer set: their repository events are authoritative. Calling the relationship an **invitation** describes its unreciprocated social state, not reduced permissions.
 
 ## Maintainer Roles
 
@@ -26,21 +26,21 @@ Each maintainer independently decides who they list. Adding someone to your main
   `nostr://` URL or config. This maintainer's announcement is the anchor for
   repository discovery and should be listed first in repository `a` tags on
   proposals.
-- **Lead maintainer**: an optional UI-level role inferred when exactly one
-  maintainer is listed by strictly more recursive maintainers than every other
+- **Lead maintainer**: an optional coordination role inferred when exactly one
+  confirmed maintainer is listed by strictly more confirmed maintainers than every other
   maintainer. If the count ties, UIs should omit the lead indication rather than
   assert that no lead exists. If one maintainer is intended to be the lead,
   co-maintainers may list only that lead in their own announcement, letting the
   lead remove co-maintainers unilaterally by changing the lead's maintainer
   list. This inferred lead is informational, distinct from the selected
-  maintainer, and not displayed by ngit's CLI.
-- **Co-maintainer**: a discovered maintainer who has published their own kind
-  30617 announcement for this repository identifier. Co-maintainers are shown in
-  `ngit repo`.
-- **Invited maintainer**: a pubkey listed by a co-maintainer, but with no
-  discovered kind 30617 announcement of its own. Invited maintainers are still
-  tagged for discovery, but are not shown as co-maintainers until they publish an
-  announcement.
+  maintainer. It grants no additional permission. ngit displays it when unique.
+- **Confirmed co-maintainer**: a maintainer in the reciprocally connected group
+  containing the selected maintainer. Confirmation is derived from graph edges,
+  not merely from whether a same-identifier announcement exists.
+- **Invited maintainer**: an authorized maintainer reached through a directional
+  edge who has not reciprocally connected to the selected group. The familiar
+  invitation framing prevents an unsolicited listing from implying endorsement;
+  it does not withhold maintainer rights.
 
 The selected maintainer is not necessarily the lead maintainer. Different users
 can select different maintainers for the same repository by using different
@@ -51,10 +51,10 @@ can select different maintainers for the same repository by using different
 Proposal events such as patches and pull requests tag repository announcements with `a` tags. These tags should be ordered as:
 
 1. the selected maintainer's announcement coordinate,
-2. other co-maintainers' announcement coordinates,
-3. invited maintainers' announcement coordinates.
+2. other confirmed maintainers' announcement coordinates,
+3. invited maintainers' coordinates.
 
-Invited maintainers are included so clients can discover the invitation, but they come last because their announcement may not exist yet. Putting the selected maintainer first gives clients a stable, existing announcement to anchor rendering and avoids treating an invitation as the primary repository reference.
+Invited maintainers are included because they are part of the authorized directional graph. They come last for compatibility because their announcement may not exist yet. Putting the selected maintainer first gives clients a stable trust and discovery anchor; it does not grant that maintainer greater authority.
 
 ## Consuming vs Publishing
 
@@ -105,7 +105,7 @@ Grasp-format clone URLs belonging to other maintainers are kept as additional gi
 
 Sourced from **my own announcement only**. Each maintainer independently decides who they list.
 
-If I don't have an existing announcement (first time accepting an invitation), the default is `[me, selected_maintainer]`.
+If I don't have an existing announcement, non-interactive acceptance lists me plus the sole confirmed maintainer or unique inferred lead. If leadership is ambiguous, ngit retains the selected maintainer as the compatibility default.
 
 #### Earliest Unique Commit
 
@@ -124,13 +124,13 @@ When `ngit init` runs, there are 6 possible states based on what exists locally 
 | **Fresh**                  | No coordinate found                                                        | Must provide name + server infrastructure           |
 | **Coordinate Only**        | Coordinate exists, no announcement on relays                               | Requires `--force` (could be a relay/network issue) |
 | **My Announcement**        | Announcement exists, I'm the selected maintainer                           | Re-publish/update, no force needed                  |
-| **Invited Maintainer**     | Announcement exists, I'm listed as maintainer but have no announcement yet | Publish own announcement to accept, no force needed |
-| **Co-Maintainer**          | Announcement exists, I'm listed and have my own announcement               | Re-publish/update my announcement, no force needed  |
+| **Invited Maintainer**     | I'm directionally listed but not reciprocally connected                    | Already authorized; publish my relationship choice, no force needed |
+| **Confirmed Co-Maintainer**| I'm in the selected maintainer's reciprocal group                          | Re-publish/update my announcement, no force needed  |
 | **Not Listed**             | Announcement exists, I'm not in maintainer set                             | Requires `--force`                                  |
 
 See `src/bin/ngit/sub_commands/init.rs` (`InitState` enum) and the `tests/init_state_*` integration tests for the implementation and test coverage.
 
-## Why Each Invited Maintainer Must Publish Their Own Announcement
+## Why Reciprocal Announcements Matter
 
 ### The Scam Scenario
 
@@ -154,33 +154,24 @@ This creates an attack vector:
    Alice's state event when fetching the scam repo.
 5. Alice's reputation is attached to a project she has never heard of.
 
-### Why the Announcement Resolves This
+### Why Reciprocity Resolves the Display Problem
 
-A Kind:30617 announcement is a signed statement from Alice that says:
+A Kind:30617 announcement is an author-keyed statement. Alice's announcement
+has coordinate `30617:Alice:{identifier}` and describes the maintainers Alice
+recognizes for her repository with that identifier. It is never published under
+the selected maintainer's coordinate.
 
-> "I, Alice (pubkey X), am a maintainer of the repository at identifier `my-lib`
-> whose selected maintainer is pubkey Y."
-
-The coordinate used to discover Alice's announcement is
-`30617:Y:{identifier}` — it is rooted at the selected maintainer's pubkey, not the
-identifier alone. Alice's own announcement event, signed by Alice's key, is published
-under that same coordinate chain (because `get_repo_ref_from_cache` walks the
-maintainer graph starting from Y's event, and finds Alice's event because Alice
-listed herself as a maintainer of the same identifier).
-
-A scammer's fake `my-lib` has a different selected maintainer pubkey (Z, not Y). Even
-if Z lists Alice in their maintainers tag, Alice's existing Kind:30617 under the
-`30617:Y:my-lib` coordinate chain does NOT appear under `30617:Z:my-lib`. The scammer
-cannot bootstrap from Alice's existing announcement.
-
-Alice's Kind:30617 announcement gives clients a signed opt-in that binds her pubkey
-to one coordinate chain. Without that announcement, Alice is only invited: her pubkey
-appears in someone else's maintainer list, but she has not signed a statement joining
-that repository.
-
-This distinction lets ngit require an announcement before publishing Alice's own
-state events, and lets UIs avoid displaying an invited maintainer as a
+If the selected group lists Alice, clients immediately include Alice in the
+directional maintainer graph and accept her repository events as authoritative.
+If Alice's own announcement also creates a path back to that group, the
+relationship is reciprocal and clients may present Alice as a confirmed
 co-maintainer.
+
+A scammer can still list Alice and thereby authorize Alice's real
+same-identifier events in the scammer's directional graph. The safety boundary
+is therefore honest presentation: until Alice reciprocates, clients show her as
+invited rather than implying that she endorsed the association. Invitation is a
+relationship state, not an authorization restriction.
 
 ### The Remaining Vulnerability Without Announcements
 
@@ -198,24 +189,14 @@ The scammer cannot forge Alice's state events (they're signed), but they can att
 real ones to their fake project. A user fetching the scam repo sees a real commit
 history, ostensibly co-maintained by Alice, with no indication anything is wrong.
 
-### Asymmetric Enforcement: Push vs Fetch
+### Push and Fetch
 
-ngit enforces the announcement requirement on push only. When fetching, state events
-are accepted from any pubkey in the maintainer set, regardless of whether that pubkey
-has published its own Kind:30617. This encourages good practice while remaining
-resilient when other tools don't follow the same pattern.
+ngit publishes an announcement before its own push path emits state for a
+maintainer without one. This records the user's relationship choice; it does not
+activate rights that were previously absent.
 
-- **Push (strict)**: ngit will not publish a state event for an invited maintainer who
-  lacks an announcement. If the user has no announcement, ngit auto-publishes one
-  with defaults before proceeding. This ensures that every state event ngit produces
-  is backed by an explicit, signed opt-in.
-
-- **Fetch (permissive)**: state events from invited maintainers are still
-  accepted. This keeps ngit interoperable with other tools that may not enforce the
-  announcement requirement, and avoids silently dropping legitimate state from
-  maintainers who used a different client.
-
-The scam scenario is therefore partially mitigated rather than fully prevented: a
-scammer can still attribute Alice's state events to a fake coordinate chain if Alice
-has never pushed via ngit. The push-side requirement limits the window of exposure
-to maintainers who have only ever used non-compliant tooling.
+When fetching, state events are accepted from every pubkey in the directional
+maintainer set, regardless of reciprocity or whether that pubkey has published
+their own Kind:30617. The scam scenario is therefore not prevented at the
+authorization layer. It is made clear at the presentation layer by separating
+authorized invitations from reciprocal, confirmed membership.
