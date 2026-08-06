@@ -1489,7 +1489,8 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLmdb> {
     let path = git_dir.join("nostr-cache.lmdb");
     NostrLmdb::open(&path).await.with_context(|| {
         format!(
-            "failed to open or create repository nostr cache database at {}",
+            "failed to open or create repository nostr cache database at {}; ngit requires the \
+             Git common directory to be writable for repository state",
             path.display()
         )
     })
