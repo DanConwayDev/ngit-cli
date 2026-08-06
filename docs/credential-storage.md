@@ -7,7 +7,7 @@ applications can rely on.
 
 `ngit account login` stores the secret in the OS credential store (macOS
 Keychain, Windows Credential Manager, or the D-Bus secret service on Linux)
-via the [`keyring`] crate, under keyring **service `ngit`**. When no OS
+via the [`keyring`] crate, under keyring **service `nostr`**. When no OS
 credential store is available, the secret goes to ngit's **file store**
 instead: a JSON file at `<ngit-data-dir>/credentials.json` (on Linux
 `~/.local/share/ngit/credentials.json`) restricted to the current user
@@ -63,13 +63,20 @@ does both in one step.
 
 A value of `nostr.nsec` / `nostr.bunker-app-key` that is a bare `npub1…`
 (or the legacy `npub1…/<8 alphanumeric chars>` form) is the name (the
-account/user field) of an entry under keyring service `ngit`. The npub is
+account/user field) of an entry under keyring service `nostr`. The npub is
 derived from the stored secret itself and must be verified against the
 retrieved key on read.
 
-The entry's secret is the **32 raw bytes** of the secret key, with no
-encoding or envelope — the representation `nostr-keyring` used, so
-applications built on that crate interoperate without changes.
+The service is `nostr`, not `ngit`, because nothing about an entry is
+ngit-specific: it is named by the npub of the key it holds, and pairs with
+`nostr.*` git config keys. Any nostr application can read and write these
+entries.
+
+The entry's secret is written as an **`nsec1…` bech32 string**, so the
+platform's own credential UI can display it and a user can recover the key
+without ngit. Readers should also accept a **64-character hex string** for
+compatibility with applications that use that textual representation. Other
+values are corrupt rather than alternate encodings to guess at.
 
 Plaintext and `ncryptsec1…` values remain valid indefinitely;
 applications without credential-store support can keep writing plaintext.

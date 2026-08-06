@@ -18,6 +18,7 @@
 //! relay's real wire query.
 
 use anyhow::{Context, Result};
+use ngit::login::credential_store::SERVICE;
 use nostr_sdk::prelude::*;
 use serde_json::Value;
 use tempfile::NamedTempFile;
@@ -208,7 +209,7 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
     );
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert!(
-        entries.get(format!("ngit/{pointer}")).is_some(),
+        entries.get(format!("{SERVICE}/{pointer}")).is_some(),
         "credential file lacks pointer entry"
     );
 
@@ -240,7 +241,7 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
     // the key - and points at the explicit removal command instead.
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert!(
-        entries.get(format!("ngit/{pointer}")).is_some(),
+        entries.get(format!("{SERVICE}/{pointer}")).is_some(),
         "logout must retain the credential entry"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -262,7 +263,7 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
     );
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert!(
-        entries.get(format!("ngit/{pointer}")).is_none(),
+        entries.get(format!("{SERVICE}/{pointer}")).is_none(),
         "forget-keys must remove the credential entry"
     );
     Ok(())
@@ -309,7 +310,7 @@ async fn logout_forget_removes_entry() -> Result<()> {
     assert!(repo.config("nostr.nsec").await?.is_none());
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert!(
-        entries.get(format!("ngit/{pointer}")).is_none(),
+        entries.get(format!("{SERVICE}/{pointer}")).is_none(),
         "logout --forget must remove the credential entry"
     );
     Ok(())

@@ -4,7 +4,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use keyring::Error as KeyringError;
 use nostr::prelude::{Keys, PublicKey, ToBech32};
 
-pub const SERVICE: &str = "ngit";
+/// Keyring service shared by nostr applications, not specific to ngit: the
+/// git config keys this pairs with are `nostr.*` rather than `ngit.*`, and
+/// an entry is named by the npub of the key it holds, so nothing about an
+/// entry is ngit-specific. See `docs/credential-storage.md`.
+pub const SERVICE: &str = "nostr";
 /// Debug-build-only override: redirects the file store to the given path and
 /// disables the OS credential store so tests never touch a real keychain.
 pub const FILE_ENV: &str = "NGIT_KEYRING_FILE";
@@ -343,15 +347,19 @@ impl std::error::Error for OsError {
 /// Inlined from `nostr-keyring`, which upstream discontinued as too thin a
 /// wrapper over `keyring` (nostrdevkit/nostr#1414).
 ///
-/// The stored representation is deliberately unchanged from that crate's:
-/// service [`SERVICE`], the npub entry name, and the 32 raw secret bytes
-/// with no encoding or envelope. It is the format every application built
-/// on `nostr-keyring` already reads, which is what makes the interop
-/// convention in `docs/credential-storage.md` implementable by others.
+/// Secrets are written as an `nsec1…` string rather than as raw bytes so
+/// that the OS credential manager can display them. The store may hold the
+/// only copy of an identity key, so a user must be able to recover it
+/// through the platform's own UI — Keychain Access, seahorse, Credential
+/// Manager — without ngit present and working.
+///
+/// Hex-encoded secrets are also read for compatibility with applications
+/// that use that textual representation. Other values are rejected as
+/// corrupt rather than guessed at.
 mod os_store {
     use keyring::Entry;
-    use nostr::prelude::{Keys, SecretKey};
-    use zeroize::Zeroize;
+    use nostr::prelude::{Keys, SecretKey, ToBech32};
+    use zeroize::Zeroizing;
 
     use super::{KeyringError, OsError};
 
@@ -360,22 +368,27 @@ mod os_store {
     }
 
     pub fn set(name: &str, keys: &Keys) -> Result<(), OsError> {
+        let nsec = Zeroizing::new(
+            keys.secret_key()
+                .to_bech32()
+                // nostr declares `Err = Infallible` for this impl.
+                .expect("bech32 encoding of a secret key cannot fail"),
+        );
         entry(name)?
-            .set_secret(keys.secret_key().as_secret_bytes())
+            .set_password(nsec.as_str())
             .map_err(OsError::Store)
     }
 
     pub fn get(name: &str) -> Result<Keys, OsError> {
-        let mut secret: Vec<u8> = match entry(name)?.get_secret() {
-            Ok(secret) => secret,
+        let secret_key = match entry(name)?.get_password() {
+            Ok(password) => {
+                SecretKey::parse(Zeroizing::new(password).as_str()).map_err(|_| OsError::Corrupt)?
+            }
+            Err(KeyringError::BadEncoding(_)) => return Err(OsError::Corrupt),
             Err(KeyringError::NoEntry) => return Err(OsError::NoEntry),
             Err(error) => return Err(OsError::Store(error)),
         };
-        let parsed = SecretKey::from_slice(&secret).map_err(|_| OsError::Corrupt);
-        // The store hands back an owned copy of the secret; clear it instead
-        // of releasing it to the allocator still holding key material.
-        secret.zeroize();
-        Ok(Keys::new(parsed?))
+        Ok(Keys::new(secret_key))
     }
 
     pub fn delete(name: &str) -> Result<(), OsError> {

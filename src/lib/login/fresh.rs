@@ -1005,7 +1005,8 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
         Ok((protected, pointer, backend)) => {
             match backend {
                 Backend::Os => eprintln!(
-                    "stored the account secret in the OS credential store as entry '{pointer}' under service 'ngit'"
+                    "stored the account secret in the OS credential store as entry '{pointer}' under service '{}'",
+                    credential_store::SERVICE
                 ),
                 Backend::File => {
                     let path = credential_store::file_store_path().map_or_else(
