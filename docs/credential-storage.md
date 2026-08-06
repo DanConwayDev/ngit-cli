@@ -57,19 +57,16 @@ stored secret itself and must be verified against the retrieved key on
 read. Plaintext and `ncryptsec1…` values remain valid indefinitely;
 applications without credential-store support can keep writing plaintext.
 
-## Migration
+## Plaintext values
 
-When ngit reads a plaintext nsec or bunker app key from local or global git
-config, it best-effort migrates it: the credential entry is written and
-read-back-verified before the config value is replaced with the entry name,
-and a notice is printed. Any failure leaves the plaintext in place and in
-use, with a once-per-run warning. System-level git config is never
-rewritten.
+ngit reads plaintext `nsec1…` / app-key values from git config indefinitely
+and never rewrites them: a read path that migrates credential storage nags
+on every command when no store is available, and inside a sandboxed or
+ephemeral environment it could strand the only copy of a key in a store
+that is about to disappear.
 
-If you run ngit in a sandboxed or ephemeral environment (a container or
-throwaway VM), migration moves the secret into *that environment's*
-credential store; a git config shared with the host would then point at an
-entry the host does not have. `ngit account export-keys` retrieves the
-secret.
+To move an existing plaintext login into a credential store, log in again
+with `ngit account login`. Interactive commands print a once-per-run hint
+to that effect while a plaintext secret is in use.
 
 [`nostr-keyring`]: https://crates.io/crates/nostr-keyring

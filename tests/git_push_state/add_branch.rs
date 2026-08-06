@@ -147,21 +147,25 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .to_bech32()
         .context("failed to bech32-encode publisher pubkey")?;
 
-    // Migrate the freshly-created plaintext test login into the file-backed
-    // credential store, then leave that environment in place for the remote
-    // helper spawned by Repo::nostr_push below.
+    // Move the freshly-created test login into the file-backed credential
+    // store by logging in again with the store enabled, then leave that
+    // environment in place for the remote helper spawned by Repo::nostr_push
+    // below. Plaintext logins are never migrated by reads.
     let keyring_file = tempfile::NamedTempFile::new()?;
     publisher.set_env("NGIT_SECRET_STORAGE", "auto");
     publisher.set_env(
         "NGIT_KEYRING_FILE",
         keyring_file.path().to_string_lossy().into_owned(),
     );
-    let export = publisher.ngit(["account", "export-keys"]).output().await?;
-    require_success("migrate login to credential store", &export)?;
+    let login = publisher
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .output()
+        .await?;
+    require_success("re-login into credential store", &login)?;
     let pointer = publisher
         .config("nostr.nsec")
         .await?
-        .context("nostr.nsec missing after migration")?;
+        .context("nostr.nsec missing after credential-store login")?;
     assert!(pointer.starts_with("npub1") && pointer.contains('/'));
 
     let main_branch_ref = format!("refs/heads/{DEFAULT_BRANCH}");

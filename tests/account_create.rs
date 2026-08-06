@@ -244,7 +244,8 @@ async fn credential_file_stores_pointer_resolves_and_logout_deletes_entry() -> R
 }
 
 #[tokio::test]
-async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<()> {
+async fn plaintext_is_read_without_migration_and_dangling_pointer_has_login_guidance() -> Result<()>
+{
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -261,6 +262,9 @@ async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<
     )
     .await?;
 
+    // Reading a plaintext login with the credential store enabled leaves it
+    // untouched: moving it into a store only happens via `ngit account
+    // login`.
     let output = repo
         .ngit(["account", "export-keys"])
         .env("NGIT_SECRET_STORAGE", "auto")
@@ -269,13 +273,36 @@ async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<
         .await?;
     assert!(
         output.status.success(),
-        "export-keys during migration failed: {}",
+        "export-keys with plaintext nsec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.nsec").await?.as_deref(),
+        Some(nsec.as_str()),
+        "plaintext nsec must not be rewritten by a read"
+    );
+    assert!(
+        std::fs::read(file.path())?.is_empty(),
+        "no credential entry may be written by a read"
+    );
+
+    // Log in with the store enabled to obtain a pointer, then wipe the
+    // store to make it dangle.
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .env("NGIT_SECRET_STORAGE", "auto")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "login into credential store failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let pointer = repo
         .config("nostr.nsec")
         .await?
-        .context("plaintext nsec was not migrated")?;
+        .context("nostr.nsec pointer missing after login")?;
     assert_ne!(pointer, nsec);
     let expected_npub = keys.public_key().to_bech32()?;
     assert_eq!(

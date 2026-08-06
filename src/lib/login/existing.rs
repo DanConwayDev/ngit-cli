@@ -1,7 +1,7 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nostr::prelude::{Keys, PublicKey, ToBech32, nip46::NostrConnectUri};
+use nostr::prelude::{PublicKey, ToBech32, nip46::NostrConnectUri};
 use nostr_connect::client::NostrConnect;
 
 use super::{
@@ -129,7 +129,7 @@ pub fn get_signer_info(
                 .context("failed get local git config")?
                 .context("git local config item nostr.nsec doesn't exist")
             {
-                let nsec = resolve_config_secret(&Some(git_repo), "nostr.nsec", &nsec, true, true)?;
+                let nsec = resolve_config_secret(&Some(git_repo), &nsec, true, true)?;
                 (
                     SignerInfo::Nsec {
                         nsec: nsec.to_string(),
@@ -144,7 +144,7 @@ pub fn get_signer_info(
                 .context("git local config item nostr.bunker-uri doesn't exist")
             {
                 (SignerInfo::Bunker {
-                    bunker_uri, bunker_app_key: resolve_config_secret(&Some(git_repo), "nostr.bunker-app-key", &get_git_config_item(&Some(git_repo), "nostr.bunker-app-key")
+                    bunker_uri, bunker_app_key: resolve_config_secret(&Some(git_repo), &get_git_config_item(&Some(git_repo), "nostr.bunker-app-key")
                     .context("failed get local git config")?
                     .context("git local config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, true)?,
                     npub: get_git_config_item(&Some(git_repo), "nostr.npub")
@@ -158,7 +158,7 @@ pub fn get_signer_info(
             if let Some(nsec) = get_git_config_item(&None, "nostr.nsec")
                 .context("failed to get global git config")?
             {
-                let nsec = resolve_config_secret(&None, "nostr.nsec", &nsec, true, true)?;
+                let nsec = resolve_config_secret(&None, &nsec, true, true)?;
                 (
                     SignerInfo::Nsec {
                         nsec: nsec.to_string(),
@@ -172,7 +172,7 @@ pub fn get_signer_info(
                 .context("failed to get global git config")?
             {
                 (SignerInfo::Bunker {
-                    bunker_uri, bunker_app_key: resolve_config_secret(&None, "nostr.bunker-app-key", &get_git_config_item(&None, "nostr.bunker-app-key")
+                    bunker_uri, bunker_app_key: resolve_config_secret(&None, &get_git_config_item(&None, "nostr.bunker-app-key")
                     .context("failed get local git config")?
                     .context("git global config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, true)?,
                     npub: get_git_config_item(&None, "nostr.npub")
@@ -186,7 +186,7 @@ pub fn get_signer_info(
             if let Some(nsec) = get_git_config_item_system("nostr.nsec")
                 .context("failed to get system git config")?
             {
-                let nsec = resolve_config_secret(&None, "nostr.nsec", &nsec, true, false)?;
+                let nsec = resolve_config_secret(&None, &nsec, true, false)?;
                 (
                     SignerInfo::Nsec {
                         nsec: nsec.to_string(),
@@ -200,7 +200,7 @@ pub fn get_signer_info(
                 .context("failed to get system git config")?
             {
                 (SignerInfo::Bunker {
-                    bunker_uri, bunker_app_key: resolve_config_secret(&None, "nostr.bunker-app-key", &get_git_config_item_system("nostr.bunker-app-key")
+                    bunker_uri, bunker_app_key: resolve_config_secret(&None, &get_git_config_item_system("nostr.bunker-app-key")
                     .context("failed to get system git config")?
                     .context("system git config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, false)?,
                     npub: get_git_config_item_system("nostr.npub")
@@ -215,10 +215,9 @@ pub fn get_signer_info(
 
 fn resolve_config_secret(
     git_repo: &Option<&Repo>,
-    config_key: &str,
     value: &str,
     is_nsec: bool,
-    migrate: bool,
+    hint_if_plaintext: bool,
 ) -> Result<String> {
     let classified = if is_nsec {
         credential_store::classify_nsec(value)
@@ -235,78 +234,33 @@ fn resolve_config_secret(
                 Ok(keys.secret_key().to_secret_hex())
             }
         }
-        credential_store::ConfigSecret::Plaintext(value) if !migrate => Ok(value.to_string()),
-        credential_store::ConfigSecret::Plaintext(value)
-            if credential_store::policy(git_repo) == credential_store::SecretStorage::GitConfig =>
-        {
-            Ok(value.to_string())
-        }
         credential_store::ConfigSecret::Plaintext(value) => {
-            let keys = match Keys::parse(value) {
-                Ok(keys) => keys,
-                Err(_) => return Ok(value.to_string()),
-            };
-            let pointer = match credential_store::store(&keys, credential_store::policy(git_repo)) {
-                Ok((pointer, _backend)) => pointer,
-                Err(error) => {
-                    warn_migration(&format!(
-                        "could not move {config_key} into the OS credential store: {error}"
-                    ));
-                    return Ok(value.to_string());
-                }
-            };
-            let previous_npub = if is_nsec {
-                crate::git::get_git_config_item(git_repo, "nostr.npub")
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            };
-            let rewrite = crate::git::save_git_config_item(git_repo, config_key, &pointer)
-                .and_then(|_| {
-                    if is_nsec {
-                        crate::git::save_git_config_item(
-                            git_repo,
-                            "nostr.npub",
-                            &keys.public_key().to_bech32()?,
-                        )
-                    } else {
-                        Ok(())
-                    }
-                });
-            if let Err(error) = rewrite {
-                let _ = crate::git::save_git_config_item(git_repo, config_key, value);
-                if is_nsec {
-                    if let Some(npub) = previous_npub {
-                        let _ = crate::git::save_git_config_item(git_repo, "nostr.npub", &npub);
-                    } else {
-                        let _ = crate::git::remove_git_config_item(git_repo, "nostr.npub");
-                    }
-                }
-                let _ = credential_store::delete(&pointer);
-                warn_migration(&format!(
-                    "could not replace plaintext {config_key} with its credential-store pointer: {error}"
-                ));
-            } else {
-                eprintln!(
-                    "moved {config_key} into the credential store as entry '{pointer}' under service 'ngit'; git config now holds only the entry name. If this is a sandboxed or ephemeral environment, the secret now lives only in this environment's credential store; `ngit account export-keys` retrieves it."
-                );
+            if hint_if_plaintext {
+                hint_plaintext_secret(git_repo);
             }
             Ok(value.to_string())
         }
     }
 }
 
-fn warn_migration(message: &str) {
+/// Plaintext git-config secrets are read as-is and never auto-migrated: a
+/// read path that rewrites credential storage nags on every command when no
+/// store is available and can strand the only copy of a key inside a
+/// sandboxed environment's store. Interactive users get a once-per-run nudge
+/// towards `ngit account login` instead; system-config and CLI-supplied
+/// secrets never hint.
+fn hint_plaintext_secret(git_repo: &Option<&Repo>) {
     use std::sync::atomic::{AtomicBool, Ordering};
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    // Printed even in non-interactive mode so automation can surface that the
-    // secret remains in plaintext git config.
-    if !WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "warning: {message}; continuing with the existing plaintext credential. Run `git config --global nostr.secret-storage git-config` to stop these attempts and silence this warning."
-        );
+    static HINTED: AtomicBool = AtomicBool::new(false);
+    if Interactor::is_non_interactive()
+        || credential_store::policy(git_repo) == credential_store::SecretStorage::GitConfig
+        || HINTED.swap(true, Ordering::Relaxed)
+    {
+        return;
     }
+    eprintln!(
+        "hint: this login's nostr secret is stored in plaintext in git config; run `ngit account login` to move it into a credential store, or set `git config --global nostr.secret-storage git-config` to keep it there and silence this hint."
+    );
 }
 
 async fn get_signer(
