@@ -42,6 +42,11 @@ Each maintainer independently decides who they list. A directional listing immed
   invitation framing prevents an unsolicited listing from implying endorsement;
   it does not withhold maintainer rights.
 
+`ngit repo` renders these edges as relationship summaries: each confirmed
+maintainer shows whom they list, and invited maintainers show their inviter(s)
+when fewer than the whole confirmed group sent the invitation. The same graph
+is available to tools as `maintainer_edges` in `ngit repo --json`.
+
 The selected maintainer is not necessarily the lead maintainer. Different users
 can select different maintainers for the same repository by using different
 `nostr://` URLs, while still discovering the same recursive maintainer graph.
