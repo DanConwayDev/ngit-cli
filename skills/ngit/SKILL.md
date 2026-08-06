@@ -3,7 +3,7 @@ name: ngit
 description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.2"
+  version: "1.3"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -32,7 +32,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 - **Always use `--json`** on `ngit` commands when reading output — far easier to parse than human-readable text. `git` commands do not support `--json`.
 - **Use `--offline`** on all but the first `ngit` command in a session — reads from local cache instantly. `git fetch origin` also refreshes the cache.
 - **Never construct NIP-05 addresses** (`user@domain`). Use the `npub1...` form unless a NIP-05 address was explicitly provided.
-- **`<ID|nevent>`** accepts a 64-char hex event ID or a `nevent1...` bech32 string. Get IDs from `ngit pr list --json` or `ngit issue list --json`.
+- **`<ID|nevent>`** accepts a `nevent1...` bech32 string, a 64-char hex event ID, or a unique hex prefix with an optional leading `#` (e.g. `#deadbeef`). Ambiguous prefixes fail and list the matches. Get IDs from `ngit pr list --json` or `ngit issue list --json`.
 - **`--json` output uses `nevent1…` bech32** for all `id` and `reply_to` fields (not raw hex). Use these values directly as `<ID|nevent>` arguments and in `nostr:` URI references.
 - **Reference other issues/PRs/comments in `--body` using `nostr:` URIs** — e.g. `nostr:nevent1abc…` or `nostr:naddr1abc…`. Never paste raw hex IDs into body text. The `id` field from `--json` output is already a valid `nevent1…` string; prefix it with `nostr:` to form the URI. Example: `--body "Relates to nostr:nevent1abc…"`. ngit automatically converts these into the correct event tags.
 
@@ -43,7 +43,18 @@ git remote -v | grep -q 'nostr://'   # primary check — no cache needed
 ngit repo --json --offline            # full metadata when needed
 ```
 
-`ngit repo` always exits 0; `is_nostr_repo: false` can be a cold-cache false negative — if remotes show `nostr://`, run `git fetch origin` then retry. Full output includes `nostr_url`, `maintainers`, `grasp_servers`.
+`ngit repo` always exits 0; `is_nostr_repo: false` can be a cold-cache false negative — if remotes show `nostr://`, run `git fetch origin` then retry. Full output includes `nostr_url`, `maintainers`, `selected_maintainer`, `confirmed_maintainers`, `invited_maintainers`, `lead_maintainer`, `maintainer_edges`, and `grasp_servers`. "Invited" means the relationship is not reciprocal; it does not mean the maintainer lacks authority.
+
+## Selecting the target repository
+
+When a git repository has multiple `nostr://` remotes for different repositories, use global `--repo <REMOTE|NADDR|NOSTR-URL>` to select the target explicitly. Prefer the configured remote name:
+
+```bash
+ngit --repo upstream issue create --subject "Bug" --body "Details"
+ngit pr --repo upstream list --json
+```
+
+Without `--repo`, ngit uses repository configuration and branch tracking to infer the target, and fails instead of guessing when the choice is ambiguous. Before signing an event, verify the `target repository: <naddr> (source: ...)` diagnostic on stderr.
 
 ## nostr:// URLs
 
@@ -180,20 +191,27 @@ ngit issue set-subject <ID|nevent> --subject "New title"
 ngit issue set-cover-note <ID|nevent> --body "Updated description. See nostr:nevent1abc…"
 ```
 
+Commits pushed to the default branch automatically resolve issues when their messages use `fixes` or `resolves` followed by a unique hex ID/prefix or `nostr:nevent1…`, for example `Fixes #deadbeef`.
+
 ## Account management
 
 ```bash
 ngit account whoami --json
 ngit account whoami --json --offline          # use cache, no network
-ngit account login                            # interactive, stores nsec in global git config
+ngit account login                            # interactive; stores the secret in a credential store
 ngit account login --bunker-url bunker://...  # NIP-46 remote signer
 ngit account login --local                    # this repo only
+ngit account login --secret-storage file      # bypass the OS store; use ngit's user-only file store
+ngit account login --secret-storage git-config # explicitly allow plaintext git-config storage
 ngit account create --name "Alice"
 ngit account export-keys
-ngit account logout
-git config --global nostr.nsec <nsec>         # set directly
+ngit account logout                           # removes login config, but preserves stored keys
+ngit account logout --forget                  # logout and delete the stored secret
+ngit account forget-keys <entry>              # delete a preserved credential-store entry
 ngit --nsec <nsec> <command>                  # inline for CI, no login needed
 ```
+
+By default, login/create use the OS credential store and fall back to ngit's user-only file store. Git config contains the credential entry name rather than the secret. Select `auto`, `file`, or `git-config` with `--secret-storage`, `NGIT_SECRET_STORAGE`, or `nostr.secret-storage`; plaintext git-config storage must be requested explicitly. Existing plaintext values remain supported.
 
 ## Sync
 
@@ -209,6 +227,8 @@ ngit sync --ref-name main        # sync specific ref
 | `-d`, `--defaults`    | Non-interactive; use sensible defaults |
 | `--offline`           | Local cache only, skip network         |
 | `--json`              | Structured output (ngit commands only) |
+| `--repo <TARGET>`     | Select remote, naddr, or nostr URL     |
+| `--repo-relay-only`   | Publish only to repository relays      |
 | `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
 | `-f`, `--force`       | Bypass safety guards                   |
 | `-v`, `--verbose`     | Verbose output                         |
@@ -219,4 +239,8 @@ ngit sync --ref-name main        # sync specific ref
 ngit --customize                          # show all options
 git config nostr.repo-relay-only true     # don't broadcast to personal relays
 git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes
+git config nostr.secret-storage file      # use ngit's user-only credential file
+NGIT_CACHE_DIR=/writable/path ngit repo --json # override the global event-cache directory
 ```
+
+If the global cache directory is unavailable, ngit falls back to an in-memory cache. Repository caches do not: the Git common directory must be writable.
