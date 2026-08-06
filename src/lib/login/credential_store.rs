@@ -3,7 +3,6 @@ use std::{fmt, path::PathBuf, sync::OnceLock};
 use anyhow::{Context, Result, anyhow, bail};
 use keyring::Error as KeyringError;
 use nostr::prelude::{Keys, PublicKey, ToBech32};
-use nostr_keyring::NostrKeyring;
 
 pub const SERVICE: &str = "ngit";
 /// Debug-build-only override: redirects the file store to the given path and
@@ -201,18 +200,15 @@ pub fn store(keys: &Keys, policy: SecretStorage) -> Result<(String, Backend)> {
 }
 
 fn store_os(name: &str, keys: &Keys) -> Result<()> {
-    let store = NostrKeyring::new(SERVICE);
-    store
-        .set(name, keys)
-        .context("failed to write OS credential store")?;
-    match store.get(name) {
+    os_store::set(name, keys).context("failed to write OS credential store")?;
+    match os_store::get(name) {
         Ok(retrieved) if retrieved.public_key() == keys.public_key() => Ok(()),
         Ok(_) => {
-            let _ = store.delete(name);
+            let _ = os_store::delete(name);
             bail!("OS credential store read-back returned a different key")
         }
         Err(error) => {
-            let _ = store.delete(name);
+            let _ = os_store::delete(name);
             Err(anyhow!(error).context("failed to verify OS credential store write"))
         }
     }
@@ -239,7 +235,7 @@ pub fn retrieve(name: &str) -> std::result::Result<Keys, LookupError> {
     let os_error = if os_store_disabled() {
         None
     } else {
-        match NostrKeyring::new(SERVICE).get(name) {
+        match os_store::get(name) {
             Ok(keys) if key_matches_npub(&keys, expected) => return Ok(keys),
             // an entry that fails npub verification is treated as absent
             Ok(_) => None,
@@ -276,7 +272,7 @@ pub fn forget(name: &str) -> Result<bool> {
     }
     let mut deleted = false;
     if !os_store_disabled() {
-        match NostrKeyring::new(SERVICE).delete(name) {
+        match os_store::delete(name) {
             Ok(()) => deleted = true,
             Err(error) if is_no_entry(&error) => {}
             Err(error) => {
@@ -304,18 +300,45 @@ pub fn config_pointers(git_repo: &Option<&crate::git::Repo>) -> Vec<String> {
         .collect()
 }
 
-fn is_no_entry(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut current = Some(error);
-    while let Some(err) = current {
-        if matches!(
-            err.downcast_ref::<KeyringError>(),
-            Some(KeyringError::NoEntry)
-        ) {
-            return true;
-        }
-        current = err.source();
+fn is_no_entry(error: &KeyringError) -> bool {
+    matches!(error, KeyringError::NoEntry)
+}
+
+/// OS credential store access.
+///
+/// Inlined from `nostr-keyring`, which upstream discontinued as too thin a
+/// wrapper over `keyring` (nostrdevkit/nostr#1414). Deliberately a faithful
+/// copy rather than a redesign: the stored representation — service
+/// [`SERVICE`], the entry name, and the bare 32 secret bytes with no
+/// envelope — is what earlier ngit versions wrote, and an OS keychain entry
+/// may hold the only copy of an identity key.
+mod os_store {
+    use keyring::{Entry, Error};
+    use nostr::prelude::{Keys, SecretKey};
+
+    fn entry(name: &str) -> Result<Entry, Error> {
+        Entry::new(super::SERVICE, name)
     }
-    false
+
+    pub fn set(name: &str, keys: &Keys) -> Result<(), Error> {
+        entry(name)?.set_secret(keys.secret_key().as_secret_bytes())
+    }
+
+    pub fn get(name: &str) -> Result<Keys, Error> {
+        let secret: Vec<u8> = entry(name)?.get_secret()?;
+        match SecretKey::from_slice(&secret) {
+            Ok(secret_key) => Ok(Keys::new(secret_key)),
+            // `BadEncoding` is the store's "retrieved blob isn't what we
+            // expect" variant. Any error other than `NoEntry` keeps the
+            // callers' behaviour of treating the entry as unusable rather
+            // than absent, so a corrupt entry is never silently ignored.
+            Err(_) => Err(Error::BadEncoding(secret)),
+        }
+    }
+
+    pub fn delete(name: &str) -> Result<(), Error> {
+        entry(name)?.delete_credential()
+    }
 }
 
 /// JSON-file secret store used when no OS credential store is available or

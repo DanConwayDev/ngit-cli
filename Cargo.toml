@@ -30,7 +30,17 @@ directories = "6.0.0"
 futures = "0.3.31"
 git2 = { version = "0.21.0", features = ["ssh", "https"] }
 indicatif = "0.18.0"
-keyring = "3.6.3"
+# Backend features must be listed explicitly: `keyring`'s default feature set
+# is empty, which compiles to an in-memory mock store rather than failing the
+# build. These four arrived via feature unification from `nostr-keyring` until
+# that wrapper was inlined into `src/lib/login/credential_store.rs`; dropping
+# them would silently demote every user to ngit's file store.
+keyring = { version = "3.6.3", features = [
+    "apple-native",
+    "linux-native",
+    "linux-native-sync-persistent",
+    "windows-native",
+] }
 mailparse = "0.16.1"
 # NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
 # is safe again: it no longer admits breaking pre-releases the way a caret
@@ -38,11 +48,6 @@ mailparse = "0.16.1"
 nostr = { version = "0.45.0", features = ["nip49"] }
 nostr-connect = "0.45.0"
 nostr-database = "0.45.0"
-# `nostr-keyring` has no 0.45.0 release yet, so it stays pinned to the last
-# alpha. Its `nostr` requirement (`^0.45.0-alpha.8`) is satisfied by stable
-# 0.45.0, so it still builds against the same `nostr` as everything else.
-# Move it to "0.45.0" once released.
-nostr-keyring = "=0.45.0-alpha.8"
 nostr-lmdb = "0.45.0"
 nostr-sdk = "0.45.0"
 passwords = "3.1.16"

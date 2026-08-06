@@ -1791,7 +1791,6 @@ dependencies = [
  "nostr",
  "nostr-connect",
  "nostr-database",
- "nostr-keyring",
  "nostr-lmdb",
  "nostr-sdk",
  "once_cell",
@@ -1826,7 +1825,7 @@ dependencies = [
  "chacha20",
  "chacha20poly1305",
  "faster-hex",
- "opaquerr 0.2.0",
+ "opaquerr",
  "rand 0.10.1",
  "scrypt",
  "secp256k1",
@@ -1848,7 +1847,7 @@ dependencies = [
  "futures-core",
  "nostr",
  "nostr-sdk",
- "opaquerr 0.2.0",
+ "opaquerr",
  "tokio",
  "tracing",
 ]
@@ -1860,7 +1859,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81c7ffd33114d62c737dd2b8f77ffec4693c64b7a1c6090cab0d0009f9986e22"
 dependencies = [
  "nostr",
- "opaquerr 0.2.0",
+ "opaquerr",
 ]
 
 [[package]]
@@ -1870,18 +1869,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa07539e52a71cb91fe0d693facaa298f03fcf9edcd66a521094e18e286e2336"
 dependencies = [
  "nostr",
- "opaquerr 0.2.0",
-]
-
-[[package]]
-name = "nostr-keyring"
-version = "0.45.0-alpha.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0764f9a491ebe58f76c2fc8175dd7ba4be31c73ee1c6eef2566ec8c9c74c4709"
-dependencies = [
- "keyring",
- "nostr",
- "opaquerr 0.1.0",
+ "opaquerr",
 ]
 
 [[package]]
@@ -1928,7 +1916,7 @@ dependencies = [
  "nostr-database",
  "nostr-gossip",
  "nostr-memory",
- "opaquerr 0.2.0",
+ "opaquerr",
  "rand 0.10.1",
  "tokio",
  "tokio-stream",
@@ -1962,12 +1950,6 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
-
-[[package]]
-name = "opaquerr"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e55a7b7f0accc9fdd8e514f122a697adf824d55de481ca26c31ff8f9a8e813c5"
 
 [[package]]
 name = "opaquerr"

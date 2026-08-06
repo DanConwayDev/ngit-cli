@@ -7,7 +7,7 @@ applications can rely on.
 
 `ngit account login` stores the secret in the OS credential store (macOS
 Keychain, Windows Credential Manager, or the D-Bus secret service on Linux)
-via [`nostr-keyring`], under keyring **service `ngit`**. When no OS
+via the [`keyring`] crate, under keyring **service `ngit`**. When no OS
 credential store is available, the secret goes to ngit's **file store**
 instead: a JSON file at `<ngit-data-dir>/credentials.json` (on Linux
 `~/.local/share/ngit/credentials.json`) restricted to the current user
@@ -80,4 +80,4 @@ To move an existing plaintext login into a credential store, log in again
 with `ngit account login`. Interactive commands print a once-per-run hint
 to that effect while a plaintext secret is in use.
 
-[`nostr-keyring`]: https://crates.io/crates/nostr-keyring
+[`keyring`]: https://crates.io/crates/keyring
