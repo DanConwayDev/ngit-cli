@@ -135,27 +135,33 @@ pub fn classify_app_key(value: &str) -> ConfigSecret<'_> {
     }
 }
 
-pub fn parse_pointer(value: &str) -> Option<(&str, &str)> {
-    let (npub, suffix) = value.split_once('/')?;
-    if !npub.starts_with("npub1")
-        || suffix.len() != 8
-        || !suffix.bytes().all(|c| c.is_ascii_alphanumeric())
-    {
+/// A pointer is the entry's npub-based name: either a bare `npub1…` or the
+/// legacy `npub1…/<8-alphanumeric>` form written by pre-release versions.
+/// Returns the npub the retrieved key must verify against.
+pub fn parse_pointer(value: &str) -> Option<&str> {
+    let npub = if let Some((npub, suffix)) = value.split_once('/') {
+        if suffix.len() != 8 || !suffix.bytes().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        npub
+    } else {
+        value
+    };
+    if !npub.starts_with("npub1") {
         return None;
     }
     PublicKey::parse(npub).ok()?;
-    Some((npub, suffix))
+    Some(npub)
 }
 
+/// Entry names are the bech32 npub of the stored key itself: stable across
+/// logins of the same account (a re-login overwrites the entry with the same
+/// secret) and derivable after logout, which lets the logout guidance print
+/// a ready-to-paste `forget-keys` command. Sharing one entry per account is
+/// safe because logout never deletes entries; bunker app keys are freshly
+/// generated per login, so their entries cannot collide either.
 pub fn entry_name(keys: &Keys) -> Result<String> {
-    // 8 hex chars (32 bits) of throwaway-key randomness: unique enough for a
-    // user's handful of logins without adding a rand dependency.
-    let random = Keys::generate().secret_key().to_secret_hex();
-    Ok(format!(
-        "{}/{}",
-        keys.public_key().to_bech32()?,
-        &random[..8]
-    ))
+    keys.public_key().to_bech32().map_err(Into::into)
 }
 
 /// True when the debug-only `NGIT_KEYRING_FILE` redirect is active; the OS
@@ -229,9 +235,7 @@ pub fn file_store_path() -> Result<PathBuf> {
 }
 
 pub fn retrieve(name: &str) -> std::result::Result<Keys, LookupError> {
-    let expected = parse_pointer(name)
-        .map(|(npub, _)| npub)
-        .ok_or_else(|| LookupError::Missing(name.to_string()))?;
+    let expected = parse_pointer(name).ok_or_else(|| LookupError::Missing(name.to_string()))?;
     let os_error = if os_store_disabled() {
         None
     } else {
@@ -428,10 +432,17 @@ mod tests {
     fn pointer_round_trip_and_verification() -> Result<()> {
         let keys = Keys::generate();
         let name = entry_name(&keys)?;
-        let (npub, suffix) = parse_pointer(&name).context("generated pointer did not parse")?;
-        assert_eq!(npub, keys.public_key().to_bech32()?);
-        assert_eq!(suffix.len(), 8);
+        let npub = keys.public_key().to_bech32()?;
+        assert_eq!(name, npub, "entry name is the bare npub");
+        assert_eq!(parse_pointer(&name), Some(npub.as_str()));
+        // legacy pre-release entry names still parse to their npub
+        assert_eq!(
+            parse_pointer(&format!("{npub}/abcd1234")),
+            Some(npub.as_str())
+        );
         assert!(parse_pointer(&format!("{npub}/short")).is_none());
+        assert!(parse_pointer("npub1notavalidkey").is_none());
+        assert!(parse_pointer(&keys.secret_key().to_secret_hex()).is_none());
         Ok(())
     }
 

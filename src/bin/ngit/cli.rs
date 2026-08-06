@@ -133,7 +133,8 @@ Values are semicolon-separated URLs without spaces.
 
   Secrets normally live in the OS credential store, or in ngit's file store
   when no OS store is available. The value of nostr.nsec or
-  nostr.bunker-app-key is then the entry name under keyring service `ngit`;
+  nostr.bunker-app-key is then the entry name (the key's npub) under
+  keyring service `ngit`;
   plaintext nsec1… values are also accepted. Override where login stores
   secrets with {secret_storage_env} or `ngit account login --secret-storage`.
 

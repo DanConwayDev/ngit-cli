@@ -19,9 +19,11 @@ read routinely — not filesystem compromise by a targeted attacker. A secret
 in an ngit-specific path is far less likely to be casually read and
 republished than one sitting in `~/.gitconfig`.
 
-Each login gets its own entry named `<npub>/<8-char-alphanumeric-suffix>`;
-the random suffix makes entries independent, so logging out of one
-repository never breaks another login for the same account.
+Entries are named by the npub of the stored key itself, so every login for
+the same account shares one entry and the name remains derivable after
+logout. Bunker (NIP-46) logins store the app key under the app key's own
+npub. Entries written by pre-release versions as `<npub>/<8-char-suffix>`
+are still read.
 
 Git config remains the index, because platform keyrings cannot be
 enumerated:
@@ -59,11 +61,11 @@ does both in one step.
 
 ## Interop convention
 
-A value of `nostr.nsec` / `nostr.bunker-app-key` matching
-`npub1…/<8 alphanumeric chars>` is the name (the account/user field) of an
-entry under keyring service `ngit`. The npub prefix is derived from the
-stored secret itself and must be verified against the retrieved key on
-read. Plaintext and `ncryptsec1…` values remain valid indefinitely;
+A value of `nostr.nsec` / `nostr.bunker-app-key` that is a bare `npub1…`
+(or the legacy `npub1…/<8 alphanumeric chars>` form) is the name (the
+account/user field) of an entry under keyring service `ngit`. The npub is
+derived from the stored secret itself and must be verified against the
+retrieved key on read. Plaintext and `ncryptsec1…` values remain valid indefinitely;
 applications without credential-store support can keep writing plaintext.
 
 ## Plaintext values

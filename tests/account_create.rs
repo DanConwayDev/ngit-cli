@@ -201,9 +201,10 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
         .config("nostr.nsec")
         .await?
         .context("nostr.nsec pointer missing")?;
-    assert!(
-        pointer.starts_with("npub1") && pointer.contains('/'),
-        "unexpected pointer: {pointer}"
+    assert_eq!(
+        Some(pointer.as_str()),
+        repo.config("nostr.npub").await?.as_deref(),
+        "entry name should be the account npub"
     );
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert!(
@@ -406,7 +407,7 @@ async fn plaintext_is_read_without_migration_and_dangling_pointer_has_login_guid
 }
 
 #[tokio::test]
-async fn local_logins_for_same_key_get_independent_entries() -> Result<()> {
+async fn local_logins_for_same_key_share_one_entry() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -438,7 +439,9 @@ async fn local_logins_for_same_key_get_independent_entries() -> Result<()> {
         .config("nostr.nsec")
         .await?
         .context("second pointer missing")?;
-    assert_ne!(first_pointer, second_pointer);
+    // one entry per account: both logins point at the same npub-named entry,
+    // which is safe because logout keeps entries instead of deleting them
+    assert_eq!(first_pointer, second_pointer);
 
     let output = first
         .ngit(["account", "logout"])

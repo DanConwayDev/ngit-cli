@@ -166,7 +166,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .config("nostr.nsec")
         .await?
         .context("nostr.nsec missing after credential-store login")?;
-    assert!(pointer.starts_with("npub1") && pointer.contains('/'));
+    assert_eq!(pointer, npub, "entry name is the account npub");
 
     let main_branch_ref = format!("refs/heads/{DEFAULT_BRANCH}");
     let vnext_branch_ref = format!("refs/heads/{SECOND_BRANCH}");
