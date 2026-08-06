@@ -51,6 +51,27 @@ pub struct MaintainerAcceptance {
     identifier: String,
 }
 
+/// Maintainers to list when accepting without an explicit relationship choice.
+///
+/// Match gitworkshop's preferred framing by reciprocating the sole confirmed
+/// maintainer or unique inferred lead. Ambiguous graphs retain the selected
+/// maintainer for backwards-compatible, non-interactive operation.
+pub fn default_acceptance_maintainers(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Vec<PublicKey> {
+    let confirmed = repo_ref.confirmed_maintainers();
+    let preferred = if confirmed.len() == 1 {
+        confirmed.first().copied()
+    } else {
+        repo_ref.lead_maintainer()
+    }
+    .unwrap_or(repo_ref.selected_maintainer);
+
+    let mut maintainers = vec![my_pubkey];
+    if preferred != my_pubkey {
+        maintainers.push(preferred);
+    }
+    maintainers
+}
+
 /// Build the co-maintainer's own Kind:30617 announcement with defaults.
 ///
 /// The caller is responsible for publishing `MaintainerAcceptance::event` to
@@ -117,12 +138,9 @@ pub async fn build_maintainership_acceptance_with_defaults(
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| repo_ref.root_commit.clone());
 
-    // --- Step 3: maintainers = [me, selected_maintainer] ---
+    // --- Step 3: reciprocate the sole maintainer or unique lead ---
 
-    let mut maintainers = vec![*my_pubkey];
-    if repo_ref.selected_maintainer != *my_pubkey {
-        maintainers.push(repo_ref.selected_maintainer);
-    }
+    let maintainers = default_acceptance_maintainers(repo_ref, *my_pubkey);
 
     // --- Step 4: build RepoRef ---
 

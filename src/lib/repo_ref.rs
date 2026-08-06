@@ -59,6 +59,31 @@ pub struct RepoRef {
     pub extra_tags: Vec<Tag>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct MaintainerEdge {
+    pub from: PublicKey,
+    pub to: PublicKey,
+}
+
+fn graph_reaches(from: PublicKey, target: PublicKey, edges: &[MaintainerEdge]) -> bool {
+    let mut pending = vec![from];
+    let mut seen = HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        if current == target {
+            return true;
+        }
+        pending.extend(
+            edges
+                .iter()
+                .filter_map(|edge| (edge.from == current).then_some(edge.to)),
+        );
+    }
+    false
+}
+
 /// Names of tags ngit itself parses on `kind:30617` (`GitRepoAnnouncement`)
 /// events. Used by [`RepoRef::try_from`] to decide whether a tag is "ours"
 /// (consumed by a typed field, with duplicates collapsed on re-emission) or
@@ -356,16 +381,11 @@ impl RepoRef {
     /// Maintainers in announcement-tag order.
     ///
     /// The maintainer selected by the `nostr://` URL or explicit repo
-    /// coordinate is always first. Maintainers with a known announcement come
-    /// before requested maintainers whose announcement has not been seen yet.
-    /// This keeps PR/issue repository `a` tags anchored to an announcement that
-    /// exists, while still tagging requested maintainers for discovery.
+    /// coordinate is always first. Confirmed maintainers come before invited
+    /// maintainers. This keeps PR/issue repository `a` tags anchored to the
+    /// reciprocal group while still tagging every authorized maintainer.
     pub fn maintainers_for_announcement_tags(&self) -> Vec<PublicKey> {
-        let requested: HashSet<PublicKey> = self
-            .maintainers_without_annoucnement
-            .as_ref()
-            .map(|maintainers| maintainers.iter().copied().collect())
-            .unwrap_or_default();
+        let confirmed: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
 
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
@@ -375,13 +395,13 @@ impl RepoRef {
         }
 
         for maintainer in &self.maintainers {
-            if !requested.contains(maintainer) && seen.insert(*maintainer) {
+            if confirmed.contains(maintainer) && seen.insert(*maintainer) {
                 ordered.push(*maintainer);
             }
         }
 
         for maintainer in &self.maintainers {
-            if requested.contains(maintainer) && seen.insert(*maintainer) {
+            if !confirmed.contains(maintainer) && seen.insert(*maintainer) {
                 ordered.push(*maintainer);
             }
         }
@@ -389,19 +409,78 @@ impl RepoRef {
         ordered
     }
 
-    /// Maintainers that have accepted by publishing an announcement.
-    pub fn maintainers_with_announcements(&self) -> Vec<PublicKey> {
-        let requested: HashSet<PublicKey> = self
-            .maintainers_without_annoucnement
-            .as_ref()
-            .map(|maintainers| maintainers.iter().copied().collect())
-            .unwrap_or_default();
+    /// Directed maintainer relationships from the announcements we know.
+    pub fn maintainer_edges(&self) -> Vec<MaintainerEdge> {
+        let mut edges = Vec::new();
+        let mut seen = HashSet::new();
+        for event in self.events.values() {
+            let Ok(event_ref) = RepoRef::try_from((event.clone(), None)) else {
+                continue;
+            };
+            for to in event_ref.maintainers {
+                if to != event.pubkey && seen.insert((event.pubkey, to)) {
+                    edges.push(MaintainerEdge {
+                        from: event.pubkey,
+                        to,
+                    });
+                }
+            }
+        }
+        edges.sort_by_key(|edge| (edge.from.to_hex(), edge.to.to_hex()));
+        edges
+    }
 
+    /// Maintainers in the selected maintainer's reciprocally connected group.
+    ///
+    /// Every maintainer reachable from the selected announcement is authorized.
+    /// Reciprocal connectivity is only the accepted-membership framing used in
+    /// user-facing output; it does not restrict event authority.
+    pub fn confirmed_maintainers(&self) -> Vec<PublicKey> {
+        let edges = self.maintainer_edges();
         self.maintainers
             .iter()
             .copied()
-            .filter(|maintainer| !requested.contains(maintainer))
+            .filter(|maintainer| {
+                *maintainer == self.selected_maintainer
+                    || graph_reaches(*maintainer, self.selected_maintainer, &edges)
+            })
             .collect()
+    }
+
+    /// Authorized maintainers not reciprocally connected to the selected group.
+    pub fn invited_maintainers(&self) -> Vec<PublicKey> {
+        let confirmed: HashSet<_> = self.confirmed_maintainers().into_iter().collect();
+        self.maintainers
+            .iter()
+            .copied()
+            .filter(|maintainer| !confirmed.contains(maintainer))
+            .collect()
+    }
+
+    /// The unique confirmed maintainer with the highest positive in-degree.
+    /// Ties and graphs with no maintainer-to-maintainer edges have no lead.
+    pub fn lead_maintainer(&self) -> Option<PublicKey> {
+        let confirmed = self.confirmed_maintainers();
+        let confirmed_set: HashSet<_> = confirmed.iter().copied().collect();
+        let mut counts: HashMap<PublicKey, usize> = confirmed
+            .iter()
+            .copied()
+            .map(|maintainer| (maintainer, 0))
+            .collect();
+        for edge in self.maintainer_edges() {
+            if confirmed_set.contains(&edge.from) && confirmed_set.contains(&edge.to) {
+                *counts.entry(edge.to).or_default() += 1;
+            }
+        }
+        let highest = counts.values().copied().max().unwrap_or_default();
+        if highest == 0 {
+            return None;
+        }
+        let mut leaders = counts
+            .into_iter()
+            .filter_map(|(maintainer, count)| (count == highest).then_some(maintainer));
+        let lead = leaders.next()?;
+        leaders.next().is_none().then_some(lead)
     }
 
     /// coordinates without relay hints
@@ -1569,8 +1648,8 @@ mod tests {
     mod maintainer_order {
         use super::*;
 
-        #[test]
-        fn announcement_tags_start_with_selected_and_put_requested_last() {
+        #[tokio::test]
+        async fn announcement_tags_start_with_selected_and_put_invited_last() {
             let selected = TEST_KEY_1_KEYS.public_key();
             let accepted = TEST_KEY_2_KEYS.public_key();
             let requested = PublicKey::from_hex(
@@ -1578,9 +1657,17 @@ mod tests {
             )
             .unwrap();
 
-            let repo_ref = create_repo_ref_for_maintainer_order(
+            let mut repo_ref = create_repo_ref_for_maintainer_order(
                 vec![requested, selected, accepted],
                 vec![requested],
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, accepted, requested]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![accepted, selected]).await,
             );
 
             assert_eq!(
@@ -1589,24 +1676,89 @@ mod tests {
             );
         }
 
-        #[test]
-        fn maintainers_with_announcements_excludes_requested_maintainers() {
+        async fn announcement(
+            keys: &nostr::prelude::Keys,
+            listed: Vec<PublicKey>,
+        ) -> nostr::prelude::Event {
+            let signer = Arc::new(crate::NgitSigner::Keys(keys.clone()));
+            let mut repo_ref = create_repo_ref_for_maintainer_order(listed, vec![]);
+            repo_ref.selected_maintainer = keys.public_key();
+            repo_ref.to_event(&signer).await.unwrap()
+        }
+
+        fn insert_event(repo_ref: &mut RepoRef, event: nostr::prelude::Event) {
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: event.pubkey,
+                        identifier: repo_ref.identifier.clone(),
+                    },
+                    relays: vec![],
+                },
+                event,
+            );
+        }
+
+        #[tokio::test]
+        async fn announcement_does_not_confirm_an_unreciprocated_invitation() {
             let selected = TEST_KEY_1_KEYS.public_key();
-            let accepted = TEST_KEY_2_KEYS.public_key();
-            let requested = PublicKey::from_hex(
-                "00000001505e7e48927046e9bbaa728b1f3b511227e2200c578d6e6bb0c77eb9",
-            )
-            .unwrap();
-
-            let repo_ref = create_repo_ref_for_maintainer_order(
-                vec![selected, requested, accepted],
-                vec![requested],
+            let invited = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, invited], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, invited]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![invited]).await,
             );
 
-            assert_eq!(
-                repo_ref.maintainers_with_announcements(),
-                vec![selected, accepted]
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![selected]);
+            assert_eq!(repo_ref.invited_maintainers(), vec![invited]);
+        }
+
+        #[tokio::test]
+        async fn reciprocal_relationship_confirms_both_maintainers() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, other], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, other]).await,
             );
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![other, selected]).await,
+            );
+
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![selected, other]);
+            assert!(repo_ref.invited_maintainers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn lead_requires_unique_highest_confirmed_listing_count() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let lead = TEST_KEY_2_KEYS.public_key();
+            let third_keys = nostr::prelude::Keys::generate();
+            let third = third_keys.public_key();
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, lead, third], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, lead, third]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![lead, selected]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&third_keys, vec![third, lead]).await,
+            );
+
+            assert_eq!(repo_ref.lead_maintainer(), Some(lead));
         }
     }
 

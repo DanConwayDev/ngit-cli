@@ -185,6 +185,28 @@ async fn accept_and_assert_resolution_untouched(clone: &Repo, extra_args: &[&str
          accepter's own coordinate would hide a later removal",
     );
 
+    let info = clone
+        .ngit(["repo", "--json", "--offline"])
+        .output()
+        .await
+        .context("failed to inspect accepted repository as JSON")?;
+    assert!(info.status.success(), "ngit repo --json failed");
+    let json: serde_json::Value = serde_json::from_slice(&info.stdout)?;
+    assert_eq!(json["maintainers"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        json["confirmed_maintainers"].as_array().map(Vec::len),
+        Some(2),
+        "reciprocal acceptance should confirm both maintainers: {json}",
+    );
+    assert_eq!(
+        json["invited_maintainers"],
+        serde_json::json!([]),
+        "accepted maintainers must no longer be framed as invited: {json}",
+    );
+    assert_eq!(json["maintainer_edges"].as_array().map(Vec::len), Some(2));
+    assert!(json["selected_maintainer"].is_string());
+    assert!(json.get("lead_maintainer").is_some());
+
     Ok(())
 }
 

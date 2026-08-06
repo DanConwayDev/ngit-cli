@@ -62,6 +62,11 @@ struct RepoInfoJson {
     upstream: Option<Vec<Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     maintainers: Option<Vec<String>>,
+    selected_maintainer: Option<String>,
+    confirmed_maintainers: Option<Vec<String>>,
+    invited_maintainers: Option<Vec<String>>,
+    lead_maintainer: Option<String>,
+    maintainer_edges: Option<Vec<MaintainerEdgeJson>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     grasp_servers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +75,39 @@ struct RepoInfoJson {
     relays: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hashtags: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct MaintainerEdgeJson {
+    from: String,
+    to: String,
+}
+
+type MaintainerJsonFields = (
+    Vec<String>,
+    Vec<String>,
+    Option<String>,
+    Vec<MaintainerEdgeJson>,
+);
+
+fn maintainer_json_fields(repo_ref: &RepoRef) -> MaintainerJsonFields {
+    let encode = |pk: &PublicKey| pk.to_bech32().unwrap_or_else(|_| pk.to_hex());
+    let confirmed = repo_ref
+        .confirmed_maintainers()
+        .iter()
+        .map(&encode)
+        .collect();
+    let invited = repo_ref.invited_maintainers().iter().map(&encode).collect();
+    let lead = repo_ref.lead_maintainer().as_ref().map(&encode);
+    let edges = repo_ref
+        .maintainer_edges()
+        .iter()
+        .map(|edge| MaintainerEdgeJson {
+            from: encode(&edge.from),
+            to: encode(&edge.to),
+        })
+        .collect();
+    (confirmed, invited, lead, edges)
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +149,11 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                     web: None,
                     upstream: None,
                     maintainers: None,
+                    selected_maintainer: None,
+                    confirmed_maintainers: None,
+                    invited_maintainers: None,
+                    lead_maintainer: None,
+                    maintainer_edges: None,
                     grasp_servers: None,
                     git_servers: None,
                     relays: None,
@@ -155,6 +198,16 @@ async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
                     web: None,
                     upstream: None,
                     maintainers: None,
+                    selected_maintainer: Some(
+                        repo_coordinate
+                            .public_key
+                            .to_bech32()
+                            .unwrap_or_else(|_| repo_coordinate.public_key.to_hex()),
+                    ),
+                    confirmed_maintainers: None,
+                    invited_maintainers: None,
+                    lead_maintainer: None,
+                    maintainer_edges: None,
                     grasp_servers: None,
                     git_servers: None,
                     relays: None,
@@ -247,6 +300,9 @@ fn print_repo_info_json(
         .iter()
         .filter_map(|pk| pk.to_bech32().ok())
         .collect();
+    let encode = |pk: &PublicKey| pk.to_bech32().unwrap_or_else(|_| pk.to_hex());
+    let (confirmed_maintainers, invited_maintainers, lead_maintainer, maintainer_edges) =
+        maintainer_json_fields(repo_ref);
 
     let info = RepoInfoJson {
         is_nostr_repo: true,
@@ -270,6 +326,11 @@ fn print_repo_info_json(
             Some(repo_ref.upstream.clone())
         },
         maintainers: Some(maintainers),
+        selected_maintainer: Some(encode(&repo_ref.selected_maintainer)),
+        confirmed_maintainers: Some(confirmed_maintainers),
+        invited_maintainers: Some(invited_maintainers),
+        lead_maintainer,
+        maintainer_edges: Some(maintainer_edges),
         grasp_servers: if grasp_servers.is_empty() {
             None
         } else {
@@ -357,58 +418,65 @@ async fn print_repo_info(
     println!("{}", heading.apply_to("Maintainers"));
     let selected = &repo_ref.selected_maintainer;
     let selected_name = display_name_for(selected, my_pubkey, git_repo_path).await;
-    println!("  selected: {selected_name}");
-
-    let co_maintainers: Vec<PublicKey> = repo_ref
-        .maintainers_with_announcements()
-        .into_iter()
-        .filter(|m| *m != *selected)
-        .collect();
-
-    if !co_maintainers.is_empty() {
-        let mut direct_names: Vec<String> = Vec::new();
-        let mut indirect: Vec<(String, String)> = Vec::new(); // (name, lister_name)
-
-        for co in &co_maintainers {
-            let co_name = display_name_for(co, my_pubkey, git_repo_path).await;
-            match find_lister(repo_ref, co, selected) {
-                None => direct_names.push(co_name),
-                Some(lister_hex) => {
-                    let lister_name = if let Ok(pk) = PublicKey::from_hex(&lister_hex) {
-                        display_name_for(&pk, my_pubkey, git_repo_path).await
-                    } else {
-                        short_npub(&lister_hex)
-                    };
-                    indirect.push((co_name, lister_name));
-                }
+    let confirmed = repo_ref.confirmed_maintainers();
+    let edges = repo_ref.maintainer_edges();
+    let lead = repo_ref.lead_maintainer();
+    for maintainer in &confirmed {
+        let name = if maintainer == selected {
+            selected_name.clone()
+        } else {
+            display_name_for(maintainer, my_pubkey, git_repo_path).await
+        };
+        let mut roles = Vec::new();
+        if maintainer == selected && confirmed.len() > 1 {
+            roles.push("selected");
+        }
+        if Some(*maintainer) == lead {
+            roles.push("lead");
+        }
+        let role_suffix = (!roles.is_empty()).then(|| format!(" [{}]", roles.join(", ")));
+        let listed = related_maintainers(*maintainer, &confirmed, &edges, EdgeDirection::Outgoing);
+        let listing = if listed.is_empty() {
+            "lists none".to_string()
+        } else {
+            let mut names = Vec::new();
+            for listed_maintainer in listed {
+                names.push(display_name_for(&listed_maintainer, my_pubkey, git_repo_path).await);
             }
-        }
-
-        if !direct_names.is_empty() {
-            println!("  co-maintainers: {}", direct_names.join(", "));
-        }
-        for (name, lister_name) in &indirect {
-            println!(
-                "  {} {}",
-                name,
-                dim.apply_to(format!(
-                    "(listed by {lister_name}, not directly by selected maintainer)"
-                ))
-            );
-        }
+            format!("lists {}", names.join(", "))
+        };
+        println!(
+            "  {name}{} {}",
+            role_suffix.unwrap_or_default(),
+            dim.apply_to(format!("· {listing}"))
+        );
     }
 
-    if let Some(without) = &repo_ref.maintainers_without_annoucnement {
-        if !without.is_empty() {
-            let mut names = Vec::new();
-            for pk in without {
-                names.push(display_name_for(pk, my_pubkey, git_repo_path).await);
+    let invited = repo_ref.invited_maintainers();
+    if !invited.is_empty() {
+        println!("  {}", dim.apply_to("Invited maintainers"));
+        for pk in invited {
+            let name = display_name_for(&pk, my_pubkey, git_repo_path).await;
+            let inviters = related_maintainers(pk, &confirmed, &edges, EdgeDirection::Incoming);
+            if !inviters.is_empty() && inviters.len() < confirmed.len() {
+                let mut inviter_names = Vec::new();
+                for inviter in inviters {
+                    inviter_names.push(display_name_for(&inviter, my_pubkey, git_repo_path).await);
+                }
+                println!(
+                    "  {name} {}",
+                    dim.apply_to(format!("· invited by {}", inviter_names.join(", ")))
+                );
+            } else {
+                println!("  {name}");
             }
-            println!(
-                "  {}",
-                dim.apply_to(format!("invited: {}", names.join(", ")))
-            );
         }
+        println!(
+            "  {}",
+            dim.apply_to(
+                "invited maintainers have maintainer rights; acceptance is reciprocal framing"
+            )
+        );
     }
     println!();
 
@@ -555,8 +623,8 @@ async fn print_repo_info(
             dim.apply_to(
                 "Note: git servers and relays are pooled from all maintainers' announcements.\n\
                  Name, description, web, upstream, and hashtags come from the most recently updated announcement.\n\
-                 Each maintainer independently decides who they list as co-maintainers;\n\
-                 if Alice lists Bob and Bob lists Carol, all three are in the maintainer set."
+                 Every listed maintainer has maintainer rights through the directional graph.\n\
+                 Reciprocal links confirm co-maintainership; a unique lead coordinates but has no extra rights."
             )
         );
     }
@@ -583,41 +651,28 @@ async fn display_name_for(
     }
 }
 
-/// Find which maintainer's event lists `target` as a maintainer.
-/// Returns `None` if listed directly by the selected maintainer,
-/// or `Some(lister_pubkey_hex)` if listed by a co-maintainer.
-fn find_lister(repo_ref: &RepoRef, target: &PublicKey, selected: &PublicKey) -> Option<String> {
-    use nostr::prelude::{Kind, nip01::Coordinate};
+#[derive(Clone, Copy)]
+enum EdgeDirection {
+    Incoming,
+    Outgoing,
+}
 
-    let selected_coord = nostr::nips::nip19::Nip19Coordinate {
-        coordinate: Coordinate {
-            kind: Kind::GitRepoAnnouncement,
-            public_key: *selected,
-            identifier: repo_ref.identifier.clone(),
-        },
-        relays: vec![],
-    };
-    if let Some(event) = repo_ref.events.get(&selected_coord) {
-        if RepoRef::try_from((event.clone(), None))
-            .is_ok_and(|event_ref| event_ref.maintainers.contains(target))
-        {
-            return None;
-        }
-    }
-
-    for (coord, event) in &repo_ref.events {
-        if coord.coordinate.public_key == *selected {
-            continue;
-        }
-        let lister = coord.coordinate.public_key;
-        if RepoRef::try_from((event.clone(), None))
-            .is_ok_and(|event_ref| event_ref.maintainers.contains(target))
-        {
-            return Some(lister.to_hex());
-        }
-    }
-
-    None
+fn related_maintainers(
+    maintainer: PublicKey,
+    ordered_candidates: &[PublicKey],
+    edges: &[ngit::repo_ref::MaintainerEdge],
+    direction: EdgeDirection,
+) -> Vec<PublicKey> {
+    ordered_candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            edges.iter().any(|edge| match direction {
+                EdgeDirection::Incoming => edge.from == *candidate && edge.to == maintainer,
+                EdgeDirection::Outgoing => edge.from == maintainer && edge.to == *candidate,
+            })
+        })
+        .collect()
 }
 
 async fn find_server_owners(
@@ -672,4 +727,43 @@ fn short_npub(npub: &str) -> String {
         return npub.to_string();
     }
     format!("{}...{}", &npub[..12], &npub[npub.len() - 4..])
+}
+
+#[cfg(test)]
+mod tests {
+    use ngit::repo_ref::MaintainerEdge;
+    use nostr::prelude::Keys;
+
+    use super::*;
+
+    #[test]
+    fn related_maintainers_preserves_display_order_in_both_directions() {
+        let alice = Keys::generate().public_key();
+        let bob = Keys::generate().public_key();
+        let carol = Keys::generate().public_key();
+        let ordered = vec![alice, bob, carol];
+        let edges = vec![
+            MaintainerEdge {
+                from: alice,
+                to: carol,
+            },
+            MaintainerEdge {
+                from: bob,
+                to: carol,
+            },
+            MaintainerEdge {
+                from: alice,
+                to: bob,
+            },
+        ];
+
+        assert_eq!(
+            related_maintainers(alice, &ordered, &edges, EdgeDirection::Outgoing),
+            vec![bob, carol]
+        );
+        assert_eq!(
+            related_maintainers(carol, &ordered, &edges, EdgeDirection::Incoming),
+            vec![alice, bob]
+        );
+    }
 }
