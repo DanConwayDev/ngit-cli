@@ -566,7 +566,7 @@ fn list_from_remote_url(
     if !dont_authenticate {
         remote_callbacks.credentials(auth.credentials(&git_config));
     }
-    let proxy = onion_proxy_options_for_url(git_server_remote_url);
+    let proxy = onion_proxy_options_for_url(git_server_remote_url)?;
     git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), proxy)?;
     let mut state = HashMap::new();
     for head in git_server_remote.list()? {

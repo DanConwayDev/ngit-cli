@@ -6,9 +6,9 @@ Tor hidden service, or a contributor wants to push to a hidden grasp server.
 
 ## Quick start
 
-1. Run a Tor SOCKS5 proxy on the local machine. The Tor Browser bundle, the
-   `tor` package on Linux/macOS, or anything else that exposes a SOCKS5 listener
-   will do. The default Tor port is `9050`.
+1. Run a Tor SOCKS5 proxy on the local machine. A system Tor service commonly
+   listens on `127.0.0.1:9050`; Tor Browser commonly uses `127.0.0.1:9150`.
+   ngit probes both addresses and uses the first one available.
 2. Use `.onion` hosts wherever ngit accepts a relay or grasp server URL:
 
    ```sh
@@ -21,9 +21,11 @@ Tor hidden service, or a contributor wants to push to a hidden grasp server.
    git clone nostr://npub1gvv9ahktvavf9qjtrgm62le7gplmmchd5usp5wpfhr85hf79kncqj8xchs/nkkkrgkv3pov3hibjo7kjnc7raslwaqqvmvtzqy2mbsa7liqov6l5qid.onion/0xchat-app-main
    ```
 
-That's it. ngit detects the `.onion` suffix and routes only that traffic
-through the Tor SOCKS5 proxy. Clearnet relays and clearnet clone URLs keep
-talking directly to the network.
+That's it. ngit opportunistically detects a running proxy and routes only
+`.onion` traffic through it. Clearnet relays and clone URLs keep talking
+directly. When no proxy is available, onion entries fail immediately instead
+of delaying usable clearnet alternatives; an onion-only repository reports
+how to enable Tor.
 
 ## What ngit does for `.onion` traffic
 
@@ -49,7 +51,7 @@ talking directly to the network.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `NGIT_TOR_PROXY` | `127.0.0.1:9050` | SOCKS5 address used for `.onion` traffic. Set to `none` / `off` / `disabled` (or empty) to disable routing `.onion` traffic through a SOCKS5 proxy; `.onion` connections will then go through libgit2's / nostr-sdk's default routing, which generally fails on hosts without a transparent Tor proxy. |
+| `NGIT_TOR_PROXY` | auto-detect | SOCKS5 address used for `.onion` traffic. When unset, ngit probes `127.0.0.1:9050` then `127.0.0.1:9150`. Set an explicit `host:port` to probe only that address, or `none` / `off` / `disabled` (or empty) to disable onion routing. |
 
 The same env var controls both the nostr-sdk relay proxy and the libgit2
 proxy. There is no per-relay / per-server override — if you need that, file
@@ -57,8 +59,10 @@ an issue.
 
 ## What ngit deliberately does **not** do
 
-- It does **not** ship an embedded Tor client. You bring your own Tor SOCKS5
-  proxy. This keeps the binary small and lets the OS handle Tor lifecycle.
+- It does **not** ship or launch an embedded Tor client. ngit commands and the
+  git remote helper are short-lived, so starting Tor from each process would
+  repeatedly impose bootstrap cost and provide poor UX. ngit instead uses an
+  already-running SOCKS5 proxy when one is available.
 - It does **not** force every connection through Tor. Only `.onion` relay
   URLs and `.onion` clone URLs are proxied; clearnet stays direct. This is
   the standard "stream isolation by host" model.
@@ -71,9 +75,9 @@ an issue.
 
 ## Troubleshooting
 
-- `connection refused` on the SOCKS5 port: check that Tor is running and
-  listening on `127.0.0.1:9050` (or whatever you set `NGIT_TOR_PROXY` to).
-  `ss -lntp | grep 9050` or `lsof -i :9050` will tell you.
+- `no Tor SOCKS5 proxy is available`: check that Tor is running on
+  `127.0.0.1:9050` or `127.0.0.1:9150`, or set `NGIT_TOR_PROXY` to its actual
+  address.
 - `Couldn't resolve host` from libgit2 when cloning a `.onion` URL: this
   usually means libgit2 isn't using SOCKS5h and is trying to resolve the
   onion name locally. Confirm the URL host is `.onion` and the env var

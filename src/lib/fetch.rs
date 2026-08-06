@@ -306,7 +306,7 @@ fn fetch_from_git_server_url(
         }
     };
     let mut fetch_options = git2::FetchOptions::new();
-    if let Some(proxy) = onion_proxy_options_for_url(git_server_url) {
+    if let Some(proxy) = onion_proxy_options_for_url(git_server_url)? {
         fetch_options.proxy_options(proxy);
     }
     let mut remote_callbacks = git2::RemoteCallbacks::new();

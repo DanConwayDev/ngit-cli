@@ -178,7 +178,7 @@ pub fn push_to_remote_url(
         }
     };
     let mut push_options = git2::PushOptions::new();
-    if let Some(proxy) = onion_proxy_options_for_url(git_server_url) {
+    if let Some(proxy) = onion_proxy_options_for_url(git_server_url)? {
         push_options.proxy_options(proxy);
     }
     let mut remote_callbacks = git2::RemoteCallbacks::new();

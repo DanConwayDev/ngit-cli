@@ -479,16 +479,18 @@ pub fn set_protocol_preference(
 /// The proxy address comes from the same `NGIT_TOR_PROXY` env var as the
 /// nostr-sdk relay proxy ([`crate::client::tor_socks5_proxy_addr`]); set
 /// it to `none` to disable.
-pub fn onion_proxy_options_for_url(url: &str) -> Option<git2::ProxyOptions<'static>> {
+pub fn onion_proxy_options_for_url(url: &str) -> Result<Option<git2::ProxyOptions<'static>>> {
     if !crate::git::nostr_url::host_is_onion(url) {
-        return None;
+        return Ok(None);
     }
-    let addr = crate::client::tor_socks5_proxy_addr()?;
+    crate::client::ensure_onion_url_reachable(url)?;
+    let addr = crate::client::tor_socks5_proxy_addr()
+        .context("Tor proxy became unavailable after reachability check")?;
     let mut opts = git2::ProxyOptions::new();
     // `socks5h://` so DNS resolution happens at the proxy (mandatory for
     // `.onion` addresses, which the local resolver can't handle).
     opts.url(&format!("socks5h://{addr}"));
-    Some(opts)
+    Ok(Some(opts))
 }
 
 pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
