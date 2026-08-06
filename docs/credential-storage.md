@@ -65,7 +65,13 @@ A value of `nostr.nsec` / `nostr.bunker-app-key` that is a bare `npub1…`
 (or the legacy `npub1…/<8 alphanumeric chars>` form) is the name (the
 account/user field) of an entry under keyring service `ngit`. The npub is
 derived from the stored secret itself and must be verified against the
-retrieved key on read. Plaintext and `ncryptsec1…` values remain valid indefinitely;
+retrieved key on read.
+
+The entry's secret is the **32 raw bytes** of the secret key, with no
+encoding or envelope — the representation `nostr-keyring` used, so
+applications built on that crate interoperate without changes.
+
+Plaintext and `ncryptsec1…` values remain valid indefinitely;
 applications without credential-store support can keep writing plaintext.
 
 ## Plaintext values

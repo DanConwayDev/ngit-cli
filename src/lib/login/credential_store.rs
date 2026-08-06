@@ -239,7 +239,7 @@ pub fn retrieve(name: &str) -> std::result::Result<Keys, LookupError> {
             Ok(keys) if key_matches_npub(&keys, expected) => return Ok(keys),
             // an entry that fails npub verification is treated as absent
             Ok(_) => None,
-            Err(error) if is_no_entry(&error) => None,
+            Err(OsError::NoEntry) => None,
             Err(error) => Some(anyhow!(error)),
         }
     };
@@ -274,7 +274,7 @@ pub fn forget(name: &str) -> Result<bool> {
     if !os_store_disabled() {
         match os_store::delete(name) {
             Ok(()) => deleted = true,
-            Err(error) if is_no_entry(&error) => {}
+            Err(OsError::NoEntry) => {}
             Err(error) => {
                 return Err(anyhow!(error).context("failed to delete OS credential store entry"));
             }
@@ -300,44 +300,90 @@ pub fn config_pointers(git_repo: &Option<&crate::git::Repo>) -> Vec<String> {
         .collect()
 }
 
-fn is_no_entry(error: &KeyringError) -> bool {
-    matches!(error, KeyringError::NoEntry)
+/// Why an OS credential store operation did not yield a key.
+///
+/// `NoEntry` is separated from the other cases because the callers must
+/// distinguish "nothing stored here" — an ordinary outcome that falls
+/// through to the file store — from "the store is broken", which must be
+/// reported rather than silently treated as a missing login.
+#[derive(Debug)]
+enum OsError {
+    /// No such entry: never stored, or already deleted.
+    NoEntry,
+    /// The entry exists but does not hold a nostr secret key.
+    Corrupt,
+    /// The store itself could not be reached or used.
+    Store(KeyringError),
+}
+
+impl fmt::Display for OsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoEntry => write!(f, "no such entry in the OS credential store"),
+            Self::Corrupt => write!(
+                f,
+                "OS credential store entry does not contain a nostr secret key"
+            ),
+            Self::Store(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for OsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::NoEntry | Self::Corrupt => None,
+        }
+    }
 }
 
 /// OS credential store access.
 ///
 /// Inlined from `nostr-keyring`, which upstream discontinued as too thin a
-/// wrapper over `keyring` (nostrdevkit/nostr#1414). Deliberately a faithful
-/// copy rather than a redesign: the stored representation — service
-/// [`SERVICE`], the entry name, and the bare 32 secret bytes with no
-/// envelope — is what earlier ngit versions wrote, and an OS keychain entry
-/// may hold the only copy of an identity key.
+/// wrapper over `keyring` (nostrdevkit/nostr#1414).
+///
+/// The stored representation is deliberately unchanged from that crate's:
+/// service [`SERVICE`], the npub entry name, and the 32 raw secret bytes
+/// with no encoding or envelope. It is the format every application built
+/// on `nostr-keyring` already reads, which is what makes the interop
+/// convention in `docs/credential-storage.md` implementable by others.
 mod os_store {
-    use keyring::{Entry, Error};
+    use keyring::Entry;
     use nostr::prelude::{Keys, SecretKey};
+    use zeroize::Zeroize;
 
-    fn entry(name: &str) -> Result<Entry, Error> {
-        Entry::new(super::SERVICE, name)
+    use super::{KeyringError, OsError};
+
+    fn entry(name: &str) -> Result<Entry, OsError> {
+        Entry::new(super::SERVICE, name).map_err(OsError::Store)
     }
 
-    pub fn set(name: &str, keys: &Keys) -> Result<(), Error> {
-        entry(name)?.set_secret(keys.secret_key().as_secret_bytes())
+    pub fn set(name: &str, keys: &Keys) -> Result<(), OsError> {
+        entry(name)?
+            .set_secret(keys.secret_key().as_secret_bytes())
+            .map_err(OsError::Store)
     }
 
-    pub fn get(name: &str) -> Result<Keys, Error> {
-        let secret: Vec<u8> = entry(name)?.get_secret()?;
-        match SecretKey::from_slice(&secret) {
-            Ok(secret_key) => Ok(Keys::new(secret_key)),
-            // `BadEncoding` is the store's "retrieved blob isn't what we
-            // expect" variant. Any error other than `NoEntry` keeps the
-            // callers' behaviour of treating the entry as unusable rather
-            // than absent, so a corrupt entry is never silently ignored.
-            Err(_) => Err(Error::BadEncoding(secret)),
+    pub fn get(name: &str) -> Result<Keys, OsError> {
+        let mut secret: Vec<u8> = match entry(name)?.get_secret() {
+            Ok(secret) => secret,
+            Err(KeyringError::NoEntry) => return Err(OsError::NoEntry),
+            Err(error) => return Err(OsError::Store(error)),
+        };
+        let parsed = SecretKey::from_slice(&secret).map_err(|_| OsError::Corrupt);
+        // The store hands back an owned copy of the secret; clear it instead
+        // of releasing it to the allocator still holding key material.
+        secret.zeroize();
+        Ok(Keys::new(parsed?))
+    }
+
+    pub fn delete(name: &str) -> Result<(), OsError> {
+        match entry(name)?.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(KeyringError::NoEntry) => Err(OsError::NoEntry),
+            Err(error) => Err(OsError::Store(error)),
         }
-    }
-
-    pub fn delete(name: &str) -> Result<(), Error> {
-        entry(name)?.delete_credential()
     }
 }
 
