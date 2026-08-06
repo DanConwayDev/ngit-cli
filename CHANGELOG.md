@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a multi-stage `Containerfile` for building a minimal Alpine-based ngit image, plus a CI smoke test that builds the image and runs `ngit --version`.
 - Add an opt-in `native-tls-roots` build feature that trusts certificate authorities installed on the host alongside WebPKI roots, enabling WSS connections to relays and GRASP servers using private, corporate, or development CAs.
 - `ngit repo --json` now exposes `selected_maintainer`, `confirmed_maintainers`, `invited_maintainers`, `lead_maintainer`, and the directional `maintainer_edges` alongside the backward-compatible full `maintainers` set.
 - Add `ngit skill install`, `upgrade`, and `status` commands plus local and global reminder opt-outs for repository-managed coding-agent guidance. Fresh installs add the versioned ngit skill to both Codex and Claude discovery paths, append a compact pointer only to existing `AGENTS.md` or `CLAUDE.md` files that do not already mention ngit, and never create instruction files or companion state metadata. Upgrades derive status from `SKILL.md`, update only locations that remain installed, preserve supported symlinks, protect modified or newer copies unless forced, and create distinct guidance-only install or upgrade commits for every user; non-maintainers are advised to push the commit as a pull request, while `ngit init` leaves installation as an explicit suggested follow-up.

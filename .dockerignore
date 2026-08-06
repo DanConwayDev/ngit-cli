@@ -1,0 +1,13 @@
+.git/
+.gitignore
+.gitlint
+.github/
+.ngit/
+Dockerfile
+.dockerignore
+*.nix
+.envrc
+.env
+skills/
+docs/architecture/
+AGENTS.md

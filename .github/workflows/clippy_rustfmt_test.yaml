@@ -14,3 +14,11 @@ jobs:
       - run: nix develop --command cargo clippy
       - run: nix develop --command cargo fmt --all -- --check
       - run: nix develop --command cargo test
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build --tag ngit:ci --file Containerfile .
+      - run: docker run --rm ngit:ci --version
