@@ -51,6 +51,12 @@ git config nostr.repo-relay-only true       # only publish nostr events to repo 
 git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes up to 10 minutes of socket silence
 ```
 
+Set `NGIT_CACHE_DIR` to place ngit's global event cache in a different
+writable directory, for example in a sandbox or ephemeral agent environment.
+If that directory is unavailable, ngit uses an in-memory global cache for the
+current process. Repository event caches remain in the Git common directory;
+commands that use them require that directory (normally `.git`) to be writable.
+
 Secrets are kept in the OS credential store where possible; see
 [docs/credential-storage.md](docs/credential-storage.md) for the storage
 model, plaintext migration, and how to opt out.
