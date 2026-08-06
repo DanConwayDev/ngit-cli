@@ -1483,9 +1483,13 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLmdb> {
         .context("failed to discover git repository")?
         .commondir()
         .to_path_buf();
-    NostrLmdb::open(git_dir.join("nostr-cache.lmdb"))
-        .await
-        .context("failed to open or create nostr cache database at <git-dir>/nostr-cache.lmdb")
+    let path = git_dir.join("nostr-cache.lmdb");
+    NostrLmdb::open(&path).await.with_context(|| {
+        format!(
+            "failed to open or create repository nostr cache database at {}",
+            path.display()
+        )
+    })
 }
 
 async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLmdb> {
@@ -1507,9 +1511,12 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nostr
         get_dirs()?.cache_dir().join("nostr-cache.lmdb")
     };
 
-    NostrLmdb::open(path)
-        .await
-        .context("failed to open ngit global nostr cache database")
+    NostrLmdb::open(&path).await.with_context(|| {
+        format!(
+            "failed to open or create global nostr cache database at {}",
+            path.display()
+        )
+    })
 }
 
 pub async fn get_events_from_local_cache(
@@ -1583,11 +1590,11 @@ pub async fn save_event_in_global_cache(
         .await?
         .save_event(event)
         .await
-        .context("failed to save event in local cache")
+        .context("failed to save event in global cache")
     {
         Ok(SaveEventStatus::Success) => Ok(true),
         Ok(_) => Ok(false),
-        Err(e) => Err(e).context("failed to save event in local cache"),
+        Err(e) => Err(e).context("failed to save event in global cache"),
     }
 }
 
