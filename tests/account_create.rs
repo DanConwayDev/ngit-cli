@@ -187,7 +187,7 @@ async fn credential_file_stores_pointer_resolves_and_logout_deletes_entry() -> R
 
     let output = repo
         .ngit(["account", "create", "--local", "--name", "keyring alice"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
@@ -213,7 +213,7 @@ async fn credential_file_stores_pointer_resolves_and_logout_deletes_entry() -> R
 
     let output = repo
         .ngit(["account", "export-keys"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
@@ -225,7 +225,7 @@ async fn credential_file_stores_pointer_resolves_and_logout_deletes_entry() -> R
 
     let output = repo
         .ngit(["account", "logout"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
@@ -263,7 +263,7 @@ async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<
 
     let output = repo
         .ngit(["account", "export-keys"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
@@ -286,7 +286,7 @@ async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<
     std::fs::write(file.path(), b"{}")?;
     let output = repo
         .ngit(["account", "export-keys"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
@@ -298,7 +298,7 @@ async fn plaintext_migrates_and_dangling_pointer_has_login_guidance() -> Result<
     );
     let output = repo
         .ngit(["account", "logout"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
@@ -322,7 +322,7 @@ async fn local_logins_for_same_key_get_independent_entries() -> Result<()> {
     for repo in [&first, &second] {
         let output = repo
             .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
-            .env("NGIT_CREDENTIAL_STORE", "true")
+            .env("NGIT_SECRET_STORAGE", "auto")
             .env("NGIT_KEYRING_FILE", file.path())
             .output()
             .await?;
@@ -344,14 +344,14 @@ async fn local_logins_for_same_key_get_independent_entries() -> Result<()> {
 
     let output = first
         .ngit(["account", "logout"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;
     assert!(output.status.success());
     let output = second
         .ngit(["account", "export-keys"])
-        .env("NGIT_CREDENTIAL_STORE", "true")
+        .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
         .await?;

@@ -67,7 +67,7 @@ pub fn require_account(error: anyhow::Error) -> anyhow::Error {
         error.downcast_ref::<credential_store::LookupError>()
     {
         return crate::cli_interactor::cli_error(
-            "nostr credential was not found in the OS credential store",
+            "nostr credential was not found in the credential store",
             &[("entry", name)],
             &[
                 "ngit account login",

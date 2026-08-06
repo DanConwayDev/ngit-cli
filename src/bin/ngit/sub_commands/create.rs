@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use ngit::client::Params;
+use ngit::{client::Params, login::credential_store};
 use nostr::prelude::ToBech32;
 
 use crate::{
@@ -28,9 +28,20 @@ pub struct SubCommandArgs {
     /// Save credentials only to local git config
     #[arg(long)]
     pub local: bool,
+
+    /// Where to store the account secret: auto (OS credential store, falling
+    /// back to ngit's file store), file, or git-config (plaintext)
+    #[arg(long, value_name = "auto|file|git-config")]
+    pub secret_storage: Option<String>,
 }
 
 pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
+    if let Some(value) = &args.secret_storage {
+        let policy = credential_store::parse_policy(value).with_context(|| {
+            format!("invalid --secret-storage value '{value}'; expected auto, file or git-config")
+        })?;
+        credential_store::set_policy_override(policy);
+    }
     let git_repo = Repo::discover().ok();
 
     let params = Params::with_git_config_relay_defaults(&git_repo.as_ref());

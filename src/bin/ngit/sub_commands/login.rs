@@ -31,9 +31,20 @@ pub struct SubCommandArgs {
     /// bunker:// URL from signer app for non-interactive remote signer login
     #[arg(long = "bunker-url")]
     bunker_url: Option<String>,
+
+    /// where to store the account secret: auto (OS credential store, falling
+    /// back to ngit's file store), file, or git-config (plaintext)
+    #[arg(long, value_name = "auto|file|git-config")]
+    secret_storage: Option<String>,
 }
 
 pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
+    if let Some(value) = &command_args.secret_storage {
+        let policy = credential_store::parse_policy(value).with_context(|| {
+            format!("invalid --secret-storage value '{value}'; expected auto, file or git-config")
+        })?;
+        credential_store::set_policy_override(policy);
+    }
     // Early validation: check if we have required parameters in non-interactive
     // mode
     let signer_info = extract_signer_cli_arguments(args)?;

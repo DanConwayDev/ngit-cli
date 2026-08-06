@@ -237,7 +237,7 @@ fn resolve_config_secret(
         }
         credential_store::ConfigSecret::Plaintext(value) if !migrate => Ok(value.to_string()),
         credential_store::ConfigSecret::Plaintext(value)
-            if !credential_store::enabled(git_repo) =>
+            if credential_store::policy(git_repo) == credential_store::SecretStorage::GitConfig =>
         {
             Ok(value.to_string())
         }
@@ -246,8 +246,8 @@ fn resolve_config_secret(
                 Ok(keys) => keys,
                 Err(_) => return Ok(value.to_string()),
             };
-            let pointer = match credential_store::store(&keys) {
-                Ok(pointer) => pointer,
+            let pointer = match credential_store::store(&keys, credential_store::policy(git_repo)) {
+                Ok((pointer, _backend)) => pointer,
                 Err(error) => {
                     warn_migration(&format!(
                         "could not move {config_key} into the OS credential store: {error}"
@@ -289,7 +289,7 @@ fn resolve_config_secret(
                 ));
             } else {
                 eprintln!(
-                    "moved {config_key} into the OS credential store as entry '{pointer}' under service 'ngit'; git config now holds only the entry name. If this is a sandboxed or ephemeral environment, the secret now lives only in this environment's credential store; `ngit account export-keys` retrieves it."
+                    "moved {config_key} into the credential store as entry '{pointer}' under service 'ngit'; git config now holds only the entry name. If this is a sandboxed or ephemeral environment, the secret now lives only in this environment's credential store; `ngit account export-keys` retrieves it."
                 );
             }
             Ok(value.to_string())
@@ -304,7 +304,7 @@ fn warn_migration(message: &str) {
     // secret remains in plaintext git config.
     if !WARNED.swap(true, Ordering::Relaxed) {
         eprintln!(
-            "warning: {message}; continuing with the existing plaintext credential. Run `git config --global nostr.credential-store false` to stop these attempts and silence this warning."
+            "warning: {message}; continuing with the existing plaintext credential. Run `git config --global nostr.secret-storage git-config` to stop these attempts and silence this warning."
         );
     }
 }

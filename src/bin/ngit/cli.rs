@@ -125,16 +125,17 @@ Values are semicolon-separated URLs without spaces.
 
   These are configured by {login_cmd}:
 
-  {nsec:<27} credential-store entry name, or a legacy nsec / ncryptsec
+  {nsec:<27} credential-store entry name, or a plaintext nsec / ncryptsec
   {npub:<27} used for ncryptsec and remote signer
   {bunker_uri:<27} used for remote signer
   {bunker_app_key:<27} credential-store entry name used for remote signer
-  {credential_store:<27} set false to store new secrets directly in git config
+  {secret_storage:<27} auto | file | git-config
 
-  Secrets normally live in the OS credential store. The value of nostr.nsec or
-  nostr.bunker-app-key is the entry name under keyring service `ngit`;
-  plaintext nsec1… values are also accepted and migrated when possible.
-  Set {credential_store_env}=false to override the credential-store policy.
+  Secrets normally live in the OS credential store, or in ngit's file store
+  when no OS store is available. The value of nostr.nsec or
+  nostr.bunker-app-key is then the entry name under keyring service `ngit`;
+  plaintext nsec1… values are also accepted. Override where login stores
+  secrets with {secret_storage_env} or `ngit account login --secret-storage`.
 
 Other repository-local config keys, such as {nip05} and {protocol_push}, are
 implementation details used for efficiency.
@@ -180,8 +181,8 @@ implementation details used for efficiency.
         npub = key("nostr.npub"),
         bunker_uri = key("nostr.bunker-uri"),
         bunker_app_key = key("nostr.bunker-app-key"),
-        credential_store = key("nostr.credential-store"),
-        credential_store_env = env("NGIT_CREDENTIAL_STORE"),
+        secret_storage = key("nostr.secret-storage"),
+        secret_storage_env = env("NGIT_SECRET_STORAGE"),
         nip05 = key("nostr.nip05"),
         protocol_push = key("nostr.protocol-push"),
     )

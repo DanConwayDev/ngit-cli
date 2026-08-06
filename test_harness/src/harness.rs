@@ -180,7 +180,10 @@ impl Harness {
     pub fn env(&self) -> Vec<(String, String)> {
         let mut env = vec![
             ("NGITTEST".to_string(), "TRUE".to_string()),
-            ("NGIT_CREDENTIAL_STORE".to_string(), "false".to_string()),
+            // Plaintext-in-git-config policy so tests never touch a real
+            // credential store; keyring scenarios override this per command
+            // together with `NGIT_KEYRING_FILE`.
+            ("NGIT_SECRET_STORAGE".to_string(), "git-config".to_string()),
         ];
 
         let default_urls = self.relay_role_urls("default");

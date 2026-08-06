@@ -101,7 +101,7 @@ pub async fn fresh_login_or_signup(
             }
         }
     };
-    let _ = save_to_git_config(git_repo, &signer_info, !save_local).await;
+    save_to_git_config(git_repo, &signer_info, !save_local).await?;
     let user_ref = get_user_details(
         &public_key,
         client,
@@ -150,7 +150,7 @@ pub async fn login_with_bunker_url(
         npub: Some(user_public_key.to_bech32()?),
     };
 
-    let _ = save_to_git_config(git_repo, &signer_info, !save_local).await;
+    save_to_git_config(git_repo, &signer_info, !save_local).await?;
 
     let user_ref = get_user_details(
         &user_public_key,
@@ -782,7 +782,7 @@ async fn save_to_git_config(
     signer_info: &SignerInfo,
     global: bool,
 ) -> Result<()> {
-    let signer_info = protect_secrets(git_repo, signer_info);
+    let signer_info = protect_secrets(git_repo, signer_info)?;
     let signer_info = &signer_info;
     let global = if std::env::var("NGITTEST").is_ok() {
         false
@@ -931,62 +931,111 @@ fn get_pubkey_from_signer_info(signer_info: &SignerInfo) -> Result<PublicKey> {
     }
 }
 
-fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> SignerInfo {
+/// Swap the plaintext secret in `signer_info` for a credential-store pointer
+/// according to the secret-storage policy.
+///
+/// Fails closed: when neither the OS credential store nor ngit's file store
+/// can hold the secret, interactive users are offered plaintext git config
+/// explicitly and non-interactive callers get an error naming
+/// `--secret-storage git-config`, instead of a silent plaintext fallback.
+fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result<SignerInfo> {
+    use crate::login::credential_store::{self, Backend, SecretStorage};
     if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if nsec.starts_with("ncryptsec1")) {
-        return signer_info.clone();
+        return Ok(signer_info.clone());
     }
-    if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if crate::login::credential_store::parse_pointer(nsec).is_some())
-        || matches!(signer_info, SignerInfo::Bunker { bunker_app_key, .. } if crate::login::credential_store::parse_pointer(bunker_app_key).is_some())
+    if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if credential_store::parse_pointer(nsec).is_some())
+        || matches!(signer_info, SignerInfo::Bunker { bunker_app_key, .. } if credential_store::parse_pointer(bunker_app_key).is_some())
     {
-        return signer_info.clone();
+        return Ok(signer_info.clone());
     }
-    if !crate::login::credential_store::enabled(git_repo) {
+    let policy = credential_store::policy(git_repo);
+    if policy == SecretStorage::GitConfig {
         eprintln!(
-            "warning: credential-store storage is disabled; saving the plaintext secret in git config"
+            "saving the secret to git config in plaintext (secret-storage policy: git-config)"
         );
-        return signer_info.clone();
+        return Ok(signer_info.clone());
     }
-    let protected = match signer_info {
+    let stored = match signer_info {
         SignerInfo::Nsec {
             nsec,
             password,
-            npub,
-        } if !nsec.starts_with("ncryptsec1") => {
-            nostr::prelude::Keys::parse(nsec).ok().and_then(|keys| {
-                crate::login::credential_store::store(&keys)
-                    .ok()
-                    .map(|pointer| SignerInfo::Nsec {
-                        nsec: pointer,
+            npub: _,
+        } => {
+            let Ok(keys) = nostr::prelude::Keys::parse(nsec) else {
+                return Ok(signer_info.clone());
+            };
+            credential_store::store(&keys, policy).map(|(pointer, backend)| {
+                (
+                    SignerInfo::Nsec {
+                        nsec: pointer.clone(),
                         password: password.clone(),
                         npub: Some(
                             keys.public_key()
                                 .to_bech32()
                                 .expect("public keys always encode as npub"),
                         ),
-                    })
+                    },
+                    pointer,
+                    backend,
+                )
             })
         }
         SignerInfo::Bunker {
             bunker_uri,
             bunker_app_key,
             npub,
-        } => nostr::prelude::Keys::parse(bunker_app_key)
-            .ok()
-            .and_then(|keys| {
-                crate::login::credential_store::store(&keys)
-                    .ok()
-                    .map(|pointer| SignerInfo::Bunker {
+        } => {
+            let Ok(keys) = nostr::prelude::Keys::parse(bunker_app_key) else {
+                return Ok(signer_info.clone());
+            };
+            credential_store::store(&keys, policy).map(|(pointer, backend)| {
+                (
+                    SignerInfo::Bunker {
                         bunker_uri: bunker_uri.clone(),
-                        bunker_app_key: pointer,
+                        bunker_app_key: pointer.clone(),
                         npub: npub.clone(),
-                    })
-            }),
-        _ => return signer_info.clone(),
+                    },
+                    pointer,
+                    backend,
+                )
+            })
+        }
     };
-    protected.unwrap_or_else(|| {
-        eprintln!("warning: OS credential store unavailable; saving the plaintext secret in git config so headless and CI use can continue");
-        signer_info.clone()
-    })
+    match stored {
+        Ok((protected, pointer, backend)) => {
+            match backend {
+                Backend::Os => eprintln!(
+                    "stored the account secret in the OS credential store as entry '{pointer}' under service 'ngit'"
+                ),
+                Backend::File => {
+                    let path = credential_store::file_store_path().map_or_else(
+                        |_| "ngit's file store".to_string(),
+                        |path| path.display().to_string(),
+                    );
+                    if policy == SecretStorage::File {
+                        eprintln!("stored the account secret in {path}");
+                    } else {
+                        eprintln!(
+                            "OS credential store unavailable; stored the account secret in {path}"
+                        );
+                    }
+                }
+            }
+            Ok(protected)
+        }
+        Err(error) => {
+            if !Interactor::is_non_interactive()
+                && Interactor::default().confirm(PromptConfirmParms::default().with_prompt(
+                    "failed to store the secret in a credential store. save it as plaintext in git config instead?",
+                ))?
+            {
+                return Ok(signer_info.clone());
+            }
+            Err(error.context(
+                "failed to store the account secret in a credential store; re-run with `--secret-storage git-config` to save it as plaintext in git config instead",
+            ))
+        }
+    }
 }
 
 fn silently_save_to_git_config(
@@ -1075,7 +1124,7 @@ pub async fn signup_non_interactive(
 
     // Save to git config
     let git_repo = Repo::discover().ok();
-    let config_signer_info = protect_secrets(&git_repo.as_ref(), &signer_info);
+    let config_signer_info = protect_secrets(&git_repo.as_ref(), &signer_info)?;
     if let Err(error) =
         silently_save_to_git_config(&git_repo.as_ref(), &config_signer_info, !save_local)
     {

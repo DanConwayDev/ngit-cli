@@ -151,7 +151,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // credential store, then leave that environment in place for the remote
     // helper spawned by Repo::nostr_push below.
     let keyring_file = tempfile::NamedTempFile::new()?;
-    publisher.set_env("NGIT_CREDENTIAL_STORE", "true");
+    publisher.set_env("NGIT_SECRET_STORAGE", "auto");
     publisher.set_env(
         "NGIT_KEYRING_FILE",
         keyring_file.path().to_string_lossy().into_owned(),
