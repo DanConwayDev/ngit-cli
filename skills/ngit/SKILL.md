@@ -3,7 +3,7 @@ name: ngit
 description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.3"
+  version: "1.4"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -35,6 +35,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 - **`<ID|nevent>`** accepts a `nevent1...` bech32 string, a 64-char hex event ID, or a unique hex prefix with an optional leading `#` (e.g. `#deadbeef`). Ambiguous prefixes fail and list the matches. Get IDs from `ngit pr list --json` or `ngit issue list --json`.
 - **`--json` output uses `nevent1…` bech32** for all `id` and `reply_to` fields (not raw hex). Use these values directly as `<ID|nevent>` arguments and in `nostr:` URI references.
 - **Reference other issues/PRs/comments in `--body` using `nostr:` URIs** — e.g. `nostr:nevent1abc…` or `nostr:naddr1abc…`. Never paste raw hex IDs into body text. The `id` field from `--json` output is already a valid `nevent1…` string; prefix it with `nostr:` to form the URI. Example: `--body "Relates to nostr:nevent1abc…"`. ngit automatically converts these into the correct event tags.
+- **Multiline files are safe with normal `ngit` text options, but not with `git push -o`.** For `ngit ... --body` or `ngit ... --description`, pass the file as one quoted argument: `--body "$(cat note.md)"`. For a Git push option, real newlines are forbidden; use literal `\n` only for a short inline value. Never convert a file into `-o description=...`.
 
 ## Detecting a nostr repo
 
@@ -95,7 +96,8 @@ git checkout -b pr/my-feature          # MUST use pr/ prefix — not "my-feature
 git push -u origin pr/my-feature
 
 # Multiple commits: supply title and description explicitly
-# Use literal \n\n for paragraph breaks — ngit's push-option parser converts them to real newlines.
+# Use this only for short inline descriptions. Write the two literal characters \n
+# for each line break; ngit's push-option parser converts them to real newlines.
 # Do NOT use $'...\n\n...' ANSI-C quoting — git cannot pass real newlines through push options.
 git push -u origin pr/my-feature \
   -o 'title=My feature title' \
@@ -104,15 +106,34 @@ git push -u origin pr/my-feature \
 
 When there is only one commit, omitting `-o title=` and `-o description=` is preferred — ngit uses the commit subject as the title and the commit body as the description. Pass `-d` (or `--defaults`) to confirm this automatically. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
 
+**Do not generate a `git push -o description=...` value from a Markdown file.**
+This restriction is specific to Git push options, which cannot contain real
+newlines. Pre-escaping a file with `perl`, `sed`, `string join`, or similar
+introduces multiple layers of shell and git escaping.
+Normal `ngit` options such as `--body` and `--description` do accept multiline
+arguments from a quoted `"$(cat file.md)"`. To open a proposal with an existing
+description file, use `ngit send`; do not also push a new `pr/` branch for the
+same proposal.
+
 ### Advanced: ngit send
 
-`ngit send` takes `--description` as a regular shell argument — the shell does **not** interpret `\n` inside double-quoted strings, so `"...\n\n..."` produces literal backslash-n in the event. Use ANSI-C quoting (`$'...'`) to embed real newlines:
+Like other `ngit` text options, `ngit send --description` takes a regular shell
+argument and therefore accepts real newlines. The shell does **not** interpret
+`\n` inside double-quoted strings, so `"...\n\n..."` produces literal
+backslash-n in the event. Use ANSI-C quoting (`$'...'`) for inline multiline
+text, or a quoted command substitution for a file:
 
 ```bash
 # correct — $'...' quoting gives real newlines
 ngit send HEAD~2 \
   --subject "My Feature" \
   --description $'First paragraph.\n\nSecond paragraph.'
+
+# Existing Markdown file (POSIX shells such as bash and zsh): quote the
+# substitution so the complete file is passed as one argument with real newlines.
+ngit send HEAD~2 \
+  --subject "My Feature" \
+  --description "$(cat .git/pr-description.md)"
 
 # WRONG — \n inside double quotes is not interpreted; event contains literal \n\n
 ngit send HEAD~2 --subject "My Feature" --description "First paragraph.\n\nSecond paragraph."
@@ -189,6 +210,11 @@ ngit issue reopen <ID|nevent> --reason "regression in v2.3"
 ngit issue label <ID|nevent> --label bug --label enhancement
 ngit issue set-subject <ID|nevent> --subject "New title"
 ngit issue set-cover-note <ID|nevent> --body "Updated description. See nostr:nevent1abc…"
+
+# Existing Markdown file: normal ngit --body options accept real newlines.
+ngit issue set-cover-note <ID|nevent> \
+  --body "$(cat cover-note.md)" \
+  --defaults
 ```
 
 Commits pushed to the default branch automatically resolve issues when their messages use `fixes` or `resolves` followed by a unique hex ID/prefix or `nostr:nevent1…`, for example `Fixes #deadbeef`.
