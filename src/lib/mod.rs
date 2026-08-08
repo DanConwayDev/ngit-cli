@@ -18,6 +18,7 @@ pub mod relay_information;
 pub mod repo_ref;
 pub mod repo_state;
 pub mod signer;
+pub mod software_release;
 pub mod utils;
 pub mod version_check;
 
