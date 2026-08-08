@@ -1037,7 +1037,12 @@ blobs which were already present. Recovery explains that blob publication is
 content-addressed and may be retried after fixing the server set. No automatic
 orphan deletion is attempted. If a later state check, signing operation, or
 relay publication fails, its existing error code and details are retained and
-enriched with the completed Blossom report and possible orphan blobs.
+enriched with the completed Blossom report and possible orphan blobs. Human
+errors include the ordered server outcomes, possible orphan locations, signed
+asset IDs, release-signature state, and recovery guidance. JSON represents the
+same downstream progress explicitly as `signed_asset_ids`,
+`release_event_signed`, and `publication_complete`; it never infers that all
+release events were signed merely because one asset event was signed.
 
 ## Gotchas and edge cases
 

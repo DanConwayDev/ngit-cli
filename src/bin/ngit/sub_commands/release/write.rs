@@ -7,9 +7,9 @@ use std::{
 use anyhow::{Context, Result};
 use ngit::{
     blossom::{
-        BlossomServerList, BlossomServerOutcome, BlossomServerStatus, FileSnapshot,
-        LocalFileRequest, MultiServerUpload, MultiServerUploadError, PossibleOrphanBlob,
-        blossom_server_list_filter, blossom_server_list_from_events,
+        BlossomServerList, BlossomServerOperation, BlossomServerOutcome, BlossomServerStatus,
+        FileSnapshot, LocalFileRequest, MultiServerUpload, MultiServerUploadError,
+        PossibleOrphanBlob, blossom_server_list_filter, blossom_server_list_from_events,
         canonicalize_blossom_server_root, snapshot_local_file, upload_snapshot_to_servers,
     },
     client::{sign_draft_event, sign_event},
@@ -26,7 +26,7 @@ use ngit::{
     },
 };
 use nostr::prelude::{
-    Coordinate, Event, Filter, FromBech32, PublicKey, Timestamp, nip19::Nip19Coordinate,
+    Coordinate, Event, EventId, Filter, FromBech32, PublicKey, Timestamp, nip19::Nip19Coordinate,
 };
 use reqwest::Url;
 use serde::Serialize;
@@ -44,6 +44,9 @@ use crate::{
     },
     sub_commands::id_resolver::parse_event_id,
 };
+
+const BLOSSOM_RETRY_RECOVERY: &str = "Blossom blobs are content-addressed. Correct the server list and rerun the command; no NIP-82 event was signed or published.";
+const BLOSSOM_DOWNSTREAM_RECOVERY: &str = "Do not delete uploaded blobs automatically. Follow the original failure recovery first; the content-addressed blobs can be reused when the NIP-82 operation is safe to retry.";
 
 pub(super) async fn app_init(
     args: &ReleaseAppInitArgs,
@@ -302,7 +305,9 @@ pub(super) async fn release_publish(
         existing.as_ref(),
     )
     .await
-    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", false, false))?;
+    .map_err(|error| {
+        preserve_completed_blossom(error, &blossom, "state_recheck", Nip82Progress::none())
+    })?;
 
     let application = if let Some(application) = existing_application.as_ref() {
         if platform_policy.application_platforms_added.is_empty() {
@@ -315,7 +320,12 @@ pub(super) async fn release_publish(
             )
             .await
             .map_err(|error| {
-                preserve_completed_blossom(error, &blossom, "application_signing", false, false)
+                preserve_completed_blossom(
+                    error,
+                    &blossom,
+                    "application_signing",
+                    Nip82Progress::none(),
+                )
             })?
         }
     } else {
@@ -326,7 +336,12 @@ pub(super) async fn release_publish(
         )
         .await
         .map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "application_signing", false, false)
+            preserve_completed_blossom(
+                error,
+                &blossom,
+                "application_signing",
+                Nip82Progress::none(),
+            )
         })?
     };
     let mut new_asset_event_ids = Vec::new();
@@ -336,12 +351,22 @@ pub(super) async fn release_publish(
             PreparedAsset::File(pending) => pending.input,
         };
         let asset = sign_asset_input(input, &signer).await.map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "asset_signing", false, false)
-        })?;
-        reject_duplicate_asset(&assets, &asset).map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "asset_validation", true, false)
+            preserve_completed_blossom(
+                error,
+                &blossom,
+                "asset_signing",
+                Nip82Progress::assets(&new_asset_event_ids),
+            )
         })?;
         new_asset_event_ids.push(asset.raw_event.id);
+        reject_duplicate_asset(&assets, &asset).map_err(|error| {
+            preserve_completed_blossom(
+                error,
+                &blossom,
+                "asset_validation",
+                Nip82Progress::assets(&new_asset_event_ids),
+            )
+        })?;
         assets.push(asset);
     }
     assets.extend(reused_assets);
@@ -353,7 +378,14 @@ pub(super) async fn release_publish(
         existing.as_ref(),
     )
     .await
-    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", true, false))?;
+    .map_err(|error| {
+        preserve_completed_blossom(
+            error,
+            &blossom,
+            "state_recheck",
+            Nip82Progress::assets(&new_asset_event_ids),
+        )
+    })?;
     context.require_application_author(&application)?;
 
     let released_at = Timestamp::from_secs(
@@ -379,10 +411,20 @@ pub(super) async fn release_publish(
     )
     .await
     .map_err(|error| {
-        preserve_completed_blossom(error, &blossom, "release_signing", false, false)
+        preserve_completed_blossom(
+            error,
+            &blossom,
+            "release_signing",
+            Nip82Progress::assets(&new_asset_event_ids),
+        )
     })?;
     let parsed_release = SoftwareRelease::parse(&release_event).map_err(|error| {
-        preserve_completed_blossom(error.into(), &blossom, "release_validation", true, false)
+        preserve_completed_blossom(
+            error.into(),
+            &blossom,
+            "release_validation",
+            Nip82Progress::release(&new_asset_event_ids),
+        )
     })?;
 
     let mut batch = vec![application.raw_event.clone()];
@@ -397,7 +439,12 @@ pub(super) async fn release_publish(
         )
         .await
         .map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "relay_publication", true, false)
+            preserve_completed_blossom(
+                error,
+                &blossom,
+                "relay_publication",
+                Nip82Progress::release(&new_asset_event_ids),
+            )
         })?;
     let authority = context.authority(&application);
     let operation = if existing.is_some() {
@@ -551,7 +598,9 @@ pub(super) async fn asset_add(
         Some(&release),
     )
     .await
-    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", false, false))?;
+    .map_err(|error| {
+        preserve_completed_blossom(error, &blossom, "state_recheck", Nip82Progress::none())
+    })?;
     let application = if platform_policy.application_platforms_added.is_empty() {
         application
     } else {
@@ -562,7 +611,12 @@ pub(super) async fn asset_add(
         )
         .await
         .map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "application_signing", false, false)
+            preserve_completed_blossom(
+                error,
+                &blossom,
+                "application_signing",
+                Nip82Progress::none(),
+            )
         })?
     };
     let newly_published = prepared_asset.is_some();
@@ -572,7 +626,7 @@ pub(super) async fn asset_add(
             PreparedAsset::File(pending) => pending.input,
         };
         sign_asset_input(input, &signer).await.map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "asset_signing", true, false)
+            preserve_completed_blossom(error, &blossom, "asset_signing", Nip82Progress::none())
         })?
     } else {
         reused_asset.context("asset add requires one URL or event source")?
@@ -590,7 +644,14 @@ pub(super) async fn asset_add(
         Some(&release),
     )
     .await
-    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", true, false))?;
+    .map_err(|error| {
+        preserve_completed_blossom(
+            error,
+            &blossom,
+            "state_recheck",
+            Nip82Progress::assets(std::slice::from_ref(&added_id)),
+        )
+    })?;
     context.require_application_author(&application)?;
     let release_event = build_release_event(
         &context,
@@ -606,10 +667,20 @@ pub(super) async fn asset_add(
     )
     .await
     .map_err(|error| {
-        preserve_completed_blossom(error, &blossom, "release_signing", false, false)
+        preserve_completed_blossom(
+            error,
+            &blossom,
+            "release_signing",
+            Nip82Progress::assets(std::slice::from_ref(&added_id)),
+        )
     })?;
     let parsed_release = SoftwareRelease::parse(&release_event).map_err(|error| {
-        preserve_completed_blossom(error.into(), &blossom, "release_validation", true, false)
+        preserve_completed_blossom(
+            error.into(),
+            &blossom,
+            "release_validation",
+            Nip82Progress::release(std::slice::from_ref(&added_id)),
+        )
     })?;
 
     let mut batch = vec![application.raw_event.clone()];
@@ -629,7 +700,12 @@ pub(super) async fn asset_add(
         )
         .await
         .map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "relay_publication", true, false)
+            preserve_completed_blossom(
+                error,
+                &blossom,
+                "relay_publication",
+                Nip82Progress::release(std::slice::from_ref(&added_id)),
+            )
         })?;
     let authority = context.authority(&application);
     let result = json!({
@@ -1623,6 +1699,7 @@ async fn resolve_blossom_server_selection(
 #[derive(Debug)]
 struct BlossomPublication {
     json: Value,
+    outcomes: Vec<Vec<BlossomServerOutcome>>,
     possible_orphan_blobs: Vec<PossibleOrphanBlob>,
 }
 
@@ -1633,14 +1710,46 @@ impl BlossomPublication {
                 "server_selection": null,
                 "uploads": [],
             }),
+            outcomes: Vec::new(),
             possible_orphan_blobs: Vec::new(),
         }
     }
 
     fn has_uploads(&self) -> bool {
-        self.json["uploads"]
-            .as_array()
-            .is_some_and(|uploads| !uploads.is_empty())
+        !self.outcomes.is_empty()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Nip82Progress<'a> {
+    signed_asset_ids: &'a [EventId],
+    release_event_signed: bool,
+    publication_complete: bool,
+}
+
+impl Nip82Progress<'_> {
+    fn none() -> Self {
+        Self {
+            signed_asset_ids: &[],
+            release_event_signed: false,
+            publication_complete: false,
+        }
+    }
+
+    fn assets(signed_asset_ids: &[EventId]) -> Nip82Progress<'_> {
+        Nip82Progress {
+            signed_asset_ids,
+            release_event_signed: false,
+            publication_complete: false,
+        }
+    }
+
+    fn release(signed_asset_ids: &[EventId]) -> Nip82Progress<'_> {
+        Nip82Progress {
+            signed_asset_ids,
+            release_event_signed: true,
+            publication_complete: false,
+        }
     }
 }
 
@@ -1650,53 +1759,63 @@ async fn upload_prepared_file_assets(
     signer: &std::sync::Arc<ngit::NgitSigner>,
 ) -> Result<BlossomPublication> {
     let mut uploads = Vec::new();
+    let mut outcomes = Vec::new();
     let mut possible_orphan_blobs = Vec::new();
     for prepared in prepared_assets {
         let PreparedAsset::File(pending) = prepared else {
             continue;
         };
-        let upload = match upload_snapshot_to_servers(&selection.servers, &pending.snapshot, signer)
-            .await
-        {
-            Ok(upload) => upload,
-            Err(error) => {
-                let (stage, server) = failed_blossom_operation(&error);
-                possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
-                uploads.push(failed_blossom_upload_json(pending, &error));
-                return Err(coded_error_with_details(
-                    "blossom_publication_failed",
-                    error.message,
-                    json!({
-                        "stage": stage,
-                        "server": server,
-                        "blossom": blossom_json(selection, &uploads),
-                        "possible_orphan_blobs": possible_orphan_blobs,
-                        "release_events_signed": false,
-                        "release_events_published": false,
-                        "recovery": "Blossom blobs are content-addressed. Correct the server list and rerun the command; no NIP-82 event was signed or published.",
-                    }),
-                ));
-            }
-        };
+        let upload =
+            match upload_snapshot_to_servers(&selection.servers, &pending.snapshot, signer).await {
+                Ok(upload) => upload,
+                Err(error) => {
+                    let (stage, server) = failed_blossom_operation(&error);
+                    possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
+                    uploads.push(failed_blossom_upload_json(pending, &error));
+                    outcomes.push(error.servers.clone());
+                    let message = blossom_failure_message(
+                        &error.message,
+                        &outcomes,
+                        &possible_orphan_blobs,
+                        Nip82Progress::none(),
+                        BLOSSOM_RETRY_RECOVERY,
+                    );
+                    return Err(coded_error_with_details(
+                        "blossom_publication_failed",
+                        message,
+                        json!({
+                            "stage": stage,
+                            "server": server,
+                            "blossom": blossom_json(selection, &uploads),
+                            "possible_orphan_blobs": possible_orphan_blobs,
+                            "release_events_signed": false,
+                            "release_events_published": false,
+                            "recovery": BLOSSOM_RETRY_RECOVERY,
+                        }),
+                    ));
+                }
+            };
         pending.input.url = Some(upload.primary.url.to_string());
         uploads.push(blossom_upload_json(pending, &upload));
+        outcomes.push(upload.servers.clone());
         possible_orphan_blobs.extend(possible_orphans_from_upload(&pending.snapshot, &upload));
         if let Err(error) = validate_asset_input(&pending.input) {
             let publication = BlossomPublication {
                 json: blossom_json(selection, &uploads),
+                outcomes,
                 possible_orphan_blobs,
             };
             return Err(preserve_completed_blossom(
                 error,
                 &publication,
                 "asset_metadata",
-                false,
-                false,
+                Nip82Progress::none(),
             ));
         }
     }
     Ok(BlossomPublication {
         json: blossom_json(selection, &uploads),
+        outcomes,
         possible_orphan_blobs,
     })
 }
@@ -1776,12 +1895,67 @@ fn possible_orphans_from_upload(
         .collect()
 }
 
+fn blossom_failure_message(
+    message: &str,
+    outcomes: &[Vec<BlossomServerOutcome>],
+    possible_orphan_blobs: &[PossibleOrphanBlob],
+    progress: Nip82Progress<'_>,
+    recovery: &str,
+) -> String {
+    let server_outcomes = outcomes
+        .iter()
+        .flatten()
+        .map(|outcome| {
+            let operation = match outcome.operation {
+                BlossomServerOperation::Upload => "upload",
+                BlossomServerOperation::Mirror => "mirror",
+            };
+            let status = match outcome.status {
+                BlossomServerStatus::Stored => "stored",
+                BlossomServerStatus::AlreadyPresent => "already_present",
+                BlossomServerStatus::Failed => "failed",
+                BlossomServerStatus::Unknown => "unknown",
+                BlossomServerStatus::NotAttempted => "not_attempted",
+            };
+            format!("{operation} {}: {status}", outcome.server)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let possible_orphans = if possible_orphan_blobs.is_empty() {
+        "none".to_owned()
+    } else {
+        possible_orphan_blobs
+            .iter()
+            .map(|orphan| {
+                orphan.url.as_ref().map_or_else(
+                    || format!("{} hash {} (URL unknown)", orphan.server, orphan.sha256),
+                    |url| format!("{url} hash {}", orphan.sha256),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let signed_asset_ids = if progress.signed_asset_ids.is_empty() {
+        "none".to_owned()
+    } else {
+        progress
+            .signed_asset_ids
+            .iter()
+            .map(EventId::to_hex)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{message}\nserver outcomes: {server_outcomes}\npossible orphan blobs: {possible_orphans}\nsigned asset IDs: {signed_asset_ids}\nrelease event signed: {}\npublication complete: {}\nrecovery: {recovery}",
+        progress.release_event_signed, progress.publication_complete
+    )
+}
+
 fn preserve_completed_blossom(
     error: anyhow::Error,
     blossom: &BlossomPublication,
     stage: &'static str,
-    release_events_signed: bool,
-    release_events_published: bool,
+    progress: Nip82Progress<'_>,
 ) -> anyhow::Error {
     if !blossom.has_uploads() {
         return error;
@@ -1805,24 +1979,35 @@ fn preserve_completed_blossom(
         json!(blossom.possible_orphan_blobs),
     );
     details.insert(
-        "release_events_signed".to_owned(),
-        json!(release_events_signed),
+        "signed_asset_ids".to_owned(),
+        json!(
+            progress
+                .signed_asset_ids
+                .iter()
+                .map(EventId::to_hex)
+                .collect::<Vec<_>>()
+        ),
     );
     details.insert(
-        "release_events_published".to_owned(),
-        json!(release_events_published),
+        "release_event_signed".to_owned(),
+        json!(progress.release_event_signed),
+    );
+    details.insert(
+        "publication_complete".to_owned(),
+        json!(progress.publication_complete),
     );
     details.insert(
         "blossom_recovery".to_owned(),
-        json!("The uploaded blobs are content-addressed and may be reused by rerunning after resolving this failure; no automatic deletion was attempted."),
+        json!(BLOSSOM_DOWNSTREAM_RECOVERY),
     );
-    coded_error_with_details(
-        code,
-        format!(
-            "{message}\nBlossom uploads completed before this failure; inspect the possible orphan blob details"
-        ),
-        Value::Object(details),
-    )
+    let message = blossom_failure_message(
+        &message,
+        &blossom.outcomes,
+        &blossom.possible_orphan_blobs,
+        progress,
+        BLOSSOM_DOWNSTREAM_RECOVERY,
+    );
+    coded_error_with_details(code, message, Value::Object(details))
 }
 
 async fn prepare_url_asset(
@@ -2064,7 +2249,7 @@ fn redacted_url(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{enforce_platform_policy, is_metadata_warning};
+    use super::*;
 
     fn values(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -2138,5 +2323,56 @@ mod tests {
         assert!(policy.partial_release);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, "partial_platform_release");
+    }
+
+    #[test]
+    fn downstream_failures_retain_truthful_blossom_progress_for_humans_and_json() -> Result<()> {
+        let server = Url::parse("https://blossom.example/")?;
+        let orphan_url = Url::parse(
+            "https://blossom.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.zip",
+        )?;
+        let signed_asset = EventId::from_hex(&"11".repeat(32))?;
+        let publication = BlossomPublication {
+            json: json!({ "server_selection": {}, "uploads": [{}] }),
+            outcomes: vec![vec![BlossomServerOutcome {
+                server: server.clone(),
+                operation: BlossomServerOperation::Upload,
+                status: BlossomServerStatus::Stored,
+                descriptor: None,
+                message: None,
+            }]],
+            possible_orphan_blobs: vec![PossibleOrphanBlob {
+                server,
+                sha256: "aa".repeat(32),
+                url: Some(orphan_url.clone()),
+            }],
+        };
+
+        let error = preserve_completed_blossom(
+            coded_error(
+                "release_signing_failed",
+                "remote signer refused the release",
+            ),
+            &publication,
+            "release_signing",
+            Nip82Progress::assets(std::slice::from_ref(&signed_asset)),
+        );
+        let error = error
+            .downcast::<ReleaseError>()
+            .expect("coded release error");
+
+        assert_eq!(error.code, "release_signing_failed");
+        assert_eq!(error.details["signed_asset_ids"][0], signed_asset.to_hex());
+        assert_eq!(error.details["release_event_signed"], false);
+        assert_eq!(error.details["publication_complete"], false);
+        assert!(error.message.contains(orphan_url.as_str()));
+        assert!(error.message.contains(&signed_asset.to_hex()));
+        assert!(
+            error
+                .message
+                .contains("upload https://blossom.example/: stored")
+        );
+        assert!(error.message.contains("recovery:"));
+        Ok(())
     }
 }

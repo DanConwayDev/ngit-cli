@@ -555,6 +555,13 @@ async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> 
     ensure!(details["possible_orphan_blobs"][0]["server"] == primary_root);
     ensure!(details["possible_orphan_blobs"][0]["sha256"] == hash);
     ensure!(details["possible_orphan_blobs"][0]["url"] == primary_url);
+    let message = failure["error"]["message"]
+        .as_str()
+        .context("Blossom failure message missing")?;
+    ensure!(message.contains(&primary_url));
+    ensure!(message.contains("stored"));
+    ensure!(message.contains("failed"));
+    ensure!(message.contains("recovery:"));
 
     let release_events = harness
         .relay("default")
