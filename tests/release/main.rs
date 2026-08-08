@@ -2,15 +2,26 @@
 //!
 //! These scenarios assert on relay-visible events and structured JSON fields,
 //! not human-facing output. URL-backed asset events are signed and published
-//! directly so the tests remain hermetic and do not require an HTTP server.
+//! directly where the URL transport is irrelevant. URL workflows use a tiny
+//! bounded in-process HTTP server so they exercise the real downloader while
+//! remaining hermetic.
+
+use std::{fs, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
+use bitcoin_hashes::sha256;
 use ngit::software_release::{
-    AssetInput, SOFTWARE_APPLICATION_KIND, SOFTWARE_RELEASE_KIND, asset_event_builder,
+    AssetInput, SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND,
+    SoftwareAsset, SoftwareRelease, asset_event_builder,
 };
 use nostr_sdk::prelude::*;
 use serde_json::Value;
 use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedRepo, Repo};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    task::JoinHandle,
+};
 
 const APP_ID: &str = "ngit-release-test";
 const RELEASE_VERSION: &str = "1.2.3";
@@ -62,6 +73,138 @@ async fn application_create_links_the_repo_and_refuses_implicit_replacement() ->
     )
     .await?;
     ensure!(unchanged.id == application.id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn manifest_publish_downloads_assets_and_preserves_metadata() -> Result<()> {
+    const LINUX_BYTES: &[u8] = b"manifest linux archive\n";
+    const WINDOWS_BYTES: &[u8] = b"manifest windows archive\n";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    let server = AssetHttpServer::spawn(vec![
+        ServedAsset {
+            path: "/manifest-linux-1.2.3.tar.gz",
+            body: LINUX_BYTES,
+            content_type: "application/gzip",
+        },
+        ServedAsset {
+            path: "/manifest-windows-1.2.3.zip",
+            body: WINDOWS_BYTES,
+            content_type: "application/zip",
+        },
+    ])
+    .await?;
+
+    let manifest_dir = publisher.dir().join(".ngit");
+    fs::create_dir_all(&manifest_dir).context("failed to create release manifest directory")?;
+    let manifest = format!(
+        r#"schema: 1
+application: {APP_ID}
+channel: beta
+notes: "Published from the release manifest"
+assets:
+  - source: "{base_url}/manifest-linux-{{version}}.tar.gz"
+    filename: "ngit-{{version}}-linux-x86_64.tar.gz"
+    mime: application/gzip
+    platforms: [linux-x86_64]
+    min_platform_version: glibc-2.31
+    supported_nips: ["34", "82"]
+    variant: portable
+    commit: deadbeef
+    min_allowed_version: 1.0.0
+    original_url: "https://downloads.example.invalid/ngit-{{version}}-linux.tar.gz"
+  - source: "{base_url}/manifest-windows-{{version}}.zip"
+    filename: "ngit-{{version}}-windows-x86_64.zip"
+    mime: application/zip
+    platforms: [windows-x86_64]
+    target_platform_version: "11"
+"#,
+        base_url = server.base_url(),
+    );
+    fs::write(manifest_dir.join("release.yaml"), manifest)
+        .context("failed to write release manifest")?;
+
+    let published_release = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--manifest",
+            ".ngit/release.yaml",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(published_release["result"]["operation"] == "created");
+    server.finish().await?;
+
+    let release = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(RELEASE_IDENTIFIER),
+            "manifest software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(release.channel == "beta");
+    ensure!(release.notes == "Published from the release manifest");
+    ensure!(release.platforms == ["linux-x86_64", "windows-x86_64"]);
+
+    let asset_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(asset_events.len() == 2);
+    let assets = asset_events
+        .iter()
+        .map(SoftwareAsset::parse)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let linux = asset_named(&assets, "ngit-1.2.3-linux-x86_64.tar.gz")?;
+    let windows = asset_named(&assets, "ngit-1.2.3-windows-x86_64.zip")?;
+
+    ensure!(linux.identifier == APP_ID);
+    ensure!(linux.version == RELEASE_VERSION);
+    ensure!(linux.mime == "application/gzip");
+    ensure!(linux.sha256 == sha256_hex(LINUX_BYTES));
+    ensure!(linux.size == Some(LINUX_BYTES.len() as u64));
+    ensure!(linux.platforms == ["linux-x86_64"]);
+    ensure!(linux.min_platform_version.as_deref() == Some("glibc-2.31"));
+    ensure!(linux.supported_nips == ["34", "82"]);
+    ensure!(linux.variant.as_deref() == Some("portable"));
+    ensure!(linux.commit.as_deref() == Some("deadbeef"));
+    ensure!(linux.min_allowed_version.as_deref() == Some("1.0.0"));
+    ensure!(
+        linux.original_url.as_deref()
+            == Some("https://downloads.example.invalid/ngit-1.2.3-linux.tar.gz")
+    );
+
+    ensure!(windows.identifier == APP_ID);
+    ensure!(windows.version == RELEASE_VERSION);
+    ensure!(windows.mime == "application/zip");
+    ensure!(windows.sha256 == sha256_hex(WINDOWS_BYTES));
+    ensure!(windows.size == Some(WINDOWS_BYTES.len() as u64));
+    ensure!(windows.platforms == ["windows-x86_64"]);
+    ensure!(windows.target_platform_version.as_deref() == Some("11"));
+    ensure!(
+        release
+            .assets
+            .iter()
+            .map(|pointer| pointer.event_id)
+            .collect::<Vec<_>>()
+            == [linux.raw_event.id, windows.raw_event.id]
+    );
     Ok(())
 }
 
@@ -532,4 +675,136 @@ fn tag_values(event: &Event, name: &str) -> Vec<String> {
                 .flatten()
         })
         .collect()
+}
+
+fn asset_named<'a>(assets: &'a [SoftwareAsset], filename: &str) -> Result<&'a SoftwareAsset> {
+    assets
+        .iter()
+        .find(|asset| asset.filename.as_deref() == Some(filename))
+        .with_context(|| format!("software asset {filename:?} was not published"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    sha256::Hash::hash(bytes).to_string()
+}
+
+#[derive(Clone, Copy)]
+struct ServedAsset {
+    path: &'static str,
+    body: &'static [u8],
+    content_type: &'static str,
+}
+
+struct AssetHttpServer {
+    base_url: String,
+    task: Option<JoinHandle<Result<()>>>,
+}
+
+impl AssetHttpServer {
+    async fn spawn(assets: Vec<ServedAsset>) -> Result<Self> {
+        ensure!(!assets.is_empty(), "HTTP asset fixture requires a response");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind HTTP asset fixture")?;
+        let address = listener
+            .local_addr()
+            .context("failed to inspect HTTP asset fixture address")?;
+        let task = tokio::spawn(serve_assets(listener, assets));
+        Ok(Self {
+            base_url: format!("http://{address}"),
+            task: Some(task),
+        })
+    }
+
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    async fn finish(mut self) -> Result<()> {
+        let task = self.task.take().context("HTTP asset server task missing")?;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .context("HTTP asset server did not terminate")?
+            .context("HTTP asset server task panicked")?
+    }
+}
+
+impl Drop for AssetHttpServer {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+async fn serve_assets(listener: TcpListener, mut assets: Vec<ServedAsset>) -> Result<()> {
+    let request_count = assets.len();
+    for _ in 0..request_count {
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .context("timed out waiting for an asset request")?
+            .context("failed to accept an asset request")?;
+        let request = read_http_request(&mut stream).await?;
+        let request_line = request
+            .lines()
+            .next()
+            .context("asset request did not contain a request line")?;
+        let mut fields = request_line.split_whitespace();
+        ensure!(
+            fields.next() == Some("GET"),
+            "unexpected request: {request_line}"
+        );
+        let target = fields.next().context("asset request target was missing")?;
+        let path = target.split('?').next().unwrap_or(target);
+        let position = assets
+            .iter()
+            .position(|asset| asset.path == path)
+            .with_context(|| format!("unexpected asset request path {path:?}"))?;
+        let asset = assets.remove(position);
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n",
+            asset.body.len(),
+            asset.content_type,
+        );
+        stream
+            .write_all(headers.as_bytes())
+            .await
+            .context("failed to write asset response headers")?;
+        stream
+            .write_all(asset.body)
+            .await
+            .context("failed to write asset response body")?;
+        stream
+            .shutdown()
+            .await
+            .context("failed to finish asset response")?;
+    }
+    ensure!(
+        assets.is_empty(),
+        "not all HTTP asset fixtures were requested"
+    );
+    Ok(())
+}
+
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Result<String> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .context("timed out reading an asset request")?
+            .context("failed to read an asset request")?;
+        ensure!(read != 0, "asset client closed before sending headers");
+        request.extend_from_slice(&chunk[..read]);
+        ensure!(
+            request.len() <= MAX_HEADER_BYTES,
+            "asset request headers exceeded {MAX_HEADER_BYTES} bytes"
+        );
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8(request).context("asset request headers were not UTF-8")
 }
