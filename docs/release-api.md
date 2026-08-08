@@ -23,10 +23,11 @@ alias.
   Its current event output is not treated as a wire-format oracle where it
   differs from the NIP-82 draft, such as a release without the required
   application `a` tag.
-- ngit-ci's existing Blossom artifact URLs make URL-backed assets useful before
-  ngit itself uploads files.
-- The pending rust-nostr Blossom work informs the future upload boundary, but
-  v1 does not depend on an unreleased API.
+- ngit-ci's existing Blossom artifact uploads establish the local-file and
+  authenticated-upload baseline.
+- The pending rust-nostr Blossom work informs protocol handling, but ngit does
+  not vendor or depend on that unreleased branch. The release client implements
+  only the small BUD surface it needs with ngit's existing Nostr types.
 
 ## Goals
 
@@ -46,13 +47,11 @@ alias.
 - Strongly encourage useful optional metadata, especially target platforms,
   without changing the NIP-82 wire format.
 - Provide deterministic, scriptable JSON for every read and write operation.
-- Allow v1 to publish assets already available at HTTP(S) URLs, including
-  Blossom URLs produced by ngit-ci.
+- Publish assets already available at HTTP(S) URLs or upload stable local-file
+  snapshots to ordered Blossom servers.
 
 ## Non-goals for v1
 
-- Uploading local files to Blossom.
-- Selecting Blossom mirrors or mirroring an upload between servers.
 - Installing, updating, or executing release assets.
 - Dependency resolution, update-channel policy, or release signing beyond
   Nostr event signatures and asset hashes.
@@ -60,6 +59,11 @@ alias.
 - Editing immutable kind `3063` asset events. Corrections require a new asset
   event and an explicit edit of the release which references it.
 - Silently adopting applications published by non-maintainers.
+- Blossom payment negotiation, media optimization, deletion, and blob listing.
+- Publishing mirror URLs in NIP-82 extension tags. v1 publishes the primary
+  Blossom URL and reports mirrors through command output.
+- Local-file entries in release manifests. A later additive schema change can
+  introduce a `file` field without overloading URL `source` detection.
 
 ## Protocol model
 
@@ -651,7 +655,8 @@ URL, byte size, and hash without changing the published event.
 
 ### `ngit release publish VERSION`
 
-This command creates a release and its new URL-backed asset events. It accepts:
+This command creates a release and its new URL- or file-backed asset events. It
+accepts:
 
 - `--app APP`;
 - `--channel CHANNEL` (default `main`);
@@ -661,14 +666,19 @@ This command creates a release and its new URL-backed asset events. It accepts:
 - `--commit COMMIT` to override the Git revision represented by the release;
 - `--manifest PATH`;
 - repeatable `--asset PLATFORM=URL` for the simple case;
+- repeatable `--file PLATFORM=PATH` to upload a local file to Blossom;
 - repeatable `--asset-event ASSET` to reuse an existing asset;
 - `--platform-agnostic-asset URL` as an explicit no-platform shorthand;
+- repeatable `--platform-agnostic-file PATH` as the corresponding local-file
+  shorthand;
 - `--accept-platform-agnostic-assets` to acknowledge reused asset events which
   have no `f` tags;
 - `--add-application-platforms` to add release-only platforms to the
   replaceable application before publication;
 - `--allow-partial-platforms` to acknowledge a non-main release which omits
   application platforms;
+- repeatable `--blossom-server URL` as an ordered server override for all local
+  files in the operation;
 - `--edit`;
 - `--strict-metadata`;
 - `--json`.
@@ -695,18 +705,37 @@ release. New asset inputs append; they do not replace or remove the existing
 operation. An exact asset event already present in the release is an error, not
 a silent no-op.
 
+When local files are present, explicit `--blossom-server` values replace
+discovery. The first server receives `PUT /upload`; every remaining server
+receives `PUT /mirror` in argument order. Without an override, ngit uses the
+ordered `server` tags from the latest kind `10063` event authored by the
+application author, and fails rather than falling back when that latest event
+is invalid. It fails before signing when neither source yields a server. Every
+selected server is required in v1: a failed mirror aborts NIP-82 publication
+rather than silently reducing the requested durability. Discovery requires at
+least one completed author-relay route and reports other failed routes as
+`relay_discovery_incomplete`; an explicit override is the deterministic
+recovery when stale discovery is unacceptable.
+
 Before publishing, ngit MUST:
 
 1. resolve the latest application and release state across the relay set, or
    plan an initial application when neither exists;
 2. apply the create/edit guard;
 3. verify that the signer is both a current maintainer and application author;
-4. resolve the selected Git commit and all existing and proposed assets;
-5. construct the canonical union of asset platforms for release `f` tags;
-6. show or emit the complete mutation plan;
-7. sign the initial application when required, then new assets and the release;
-8. publish one ordered application, assets, release batch, with the release as
-   the final commit point.
+4. resolve the selected Git commit and existing assets, download URL assets,
+   and create stable snapshots of local files while hashing and validating
+   their metadata;
+5. resolve the ordered Blossom server set when local files are present;
+6. construct the canonical union of asset platforms, apply the channel policy,
+   and show or emit metadata warnings before the first signature;
+7. upload each local snapshot to the first server and mirror it to every
+   remaining server, validating every returned descriptor;
+8. re-check application and release state;
+9. sign the initial or additive application replacement when required, then
+   new assets and the release;
+10. publish one ordered application, assets, release batch, with the release as
+    the final commit point.
 
 The exact current application event is sent first even when it already exists.
 This is a retry-safe duplicate and ensures a GRASP relay can validate each
@@ -723,8 +752,16 @@ identifier and release version; manifest `identifier`/`version` or the asset
 command's `--asset-id`/`--asset-version` override the defaults.
 
 The mutation result includes the release coordinate, event ID, previous event
-ID for edits, all asset IDs, newly published asset IDs, reused asset IDs, and
-per-relay results for every event.
+ID for edits, all asset IDs, newly published asset IDs, reused asset IDs,
+per-relay results for every event, and a `blossom` member. Blossom output records
+server-selection source, selected kind-10063 event ID when discovered, local
+filename, hash, decimal-string byte size, MIME type, primary URL, and ordered
+per-server operation, status, and descriptor URL. Status is `stored` for HTTP
+201, `already_present` for HTTP 200, `failed` for a definite rejection,
+`unknown` for an ambiguous transport outcome, or `not_attempted` after an
+earlier fail-fast error. Mirror URLs are operational results; only the primary
+URL is written to the kind `3063` event. A mutation without local files retains
+the same shape with a null server selection and an empty upload list.
 
 ## Asset commands
 
@@ -755,6 +792,8 @@ The new asset is supplied by exactly one of:
 - `--url URL`, with metadata flags such as repeatable `--platform`,
   `--platform-agnostic`, `--asset-id`, `--asset-version`, `--filename`,
   `--mime`, `--variant`, `--commit`, and Android fields; or
+- `--file PATH`, with the same metadata flags and optional repeatable
+  `--blossom-server URL`; or
 - `--event ASSET`, for an existing immutable asset event.
 
 Metadata flags other than `--platform-agnostic` are invalid with `--event`
@@ -768,14 +807,14 @@ for an additive application replacement; `--edit` continues to authorize only
 the release replacement.
 
 The command first performs authority and release preflights, then downloads and
-hashes a URL asset. It publishes one ordered application, assets, release batch,
-resending the exact current application and existing assets before the release
-replacement. If release publication fails after the new asset succeeds, the
-asset is an unreferenced but valid event; JSON and human output MUST report its
-ID and give safe recovery steps. The user must inspect the exact release and
-asset event IDs, then reuse a visible asset with `--event`; ngit must not suggest
-blindly repeating the URL command because that would sign a different immutable
-event.
+hashes a URL asset or snapshots and uploads a local file. It publishes one
+ordered application, assets, release batch, resending the exact current
+application and existing assets before the release replacement. If release
+publication fails after the new asset succeeds, the asset is an unreferenced
+but valid event; JSON and human output MUST report its ID and give safe recovery
+steps. The user must inspect the exact release and asset event IDs, then reuse a
+visible asset with `--event`; ngit must not suggest blindly repeating the source
+command because that would sign a different immutable event.
 
 The command preserves release notes, channel, original release date, unknown
 tags, existing asset order, and existing asset IDs. It appends the new event ID
@@ -953,28 +992,52 @@ event ID for equal timestamps. Invalid newer events MUST be surfaced as invalid;
 ngit MUST NOT silently fall back to an older valid revision and present it as
 latest.
 
-## Future Blossom support
+## Blossom publication
 
-v1 treats a URL as an asset source. This already supports conventional release
-hosting and Blossom URLs emitted by ngit-ci: ngit retrieves the exact bytes,
-verifies what it is about to describe, and publishes the URL in the kind `3063`
-event.
+Local-file publication uses a small private Blossom transport rather than
+vendoring or git-depending on the pending rust-nostr branch. Doing so avoids a
+second incompatible Nostr type graph and keeps the stacked change limited to
+the BUD operations the release workflow needs. The transport can be replaced
+by a released upstream client later without changing the CLI or JSON contract.
 
-The implementation should keep source acquisition behind an internal boundary
-equivalent to:
+ngit copies each input file into a private temporary snapshot while computing
+its SHA-256 and checked `u64` size. It rejects files larger than the same 4 GiB
+limit used for URL acquisition. Hashing, upload, and retry all read that stable
+snapshot so a build process cannot change the described bytes between passes;
+the complete file is never buffered in memory. The original path and any
+credential-bearing URL are not printed in authorization events.
 
-```text
-AssetSource::Url
-AssetSource::ExistingEvent
-```
+For each request, ngit signs a short-lived kind `24242` authorization containing
+`t=upload`, `x=<lowercase sha256>`, and an expiration tag. The HTTP
+`Authorization` value is `Nostr ` followed by URL-safe, unpadded base64 of the
+signed event JSON. Authenticated PUT requests never follow redirects.
 
-Future versions can add `AssetSource::File` and a Blossom publication strategy
-without changing release construction. That strategy should use the improved
-rust-nostr Blossom support for upload response handling, BUD-03 server
-discovery, BUD-04 mirroring, BUD-10 URIs, ordered upload-and-mirror behavior,
-and per-server results. Mirroring policy, authentication/payment flows, and how
-multiple durable locations are represented need a separate design before file
-upload becomes stable API.
+The primary request is `PUT /upload` with `Content-Length`, `Content-Type`, and
+`X-SHA-256` headers and the snapshot as its streaming body. A mirror request is
+`PUT /mirror` with JSON `{ "url": PRIMARY_URL }`, `X-SHA-256`,
+`X-Content-Length`, and `X-Content-Type`. Both endpoints may return `200` or
+`201`. ngit requires a valid descriptor whose hash, size, MIME type, and
+HTTP(S) URL agree with the local snapshot. A mismatched or malformed response
+is a failure even when its status code is successful.
+
+Upload and mirror operations are sequential and ordered. The primary upload
+must succeed before any mirror is attempted, and every selected mirror must
+succeed before ngit signs a kind `3063` asset or kind `30063` release. A later
+failure reports every observed server result plus the hash and primary URL as a
+possible orphan blob; it does not claim that a Nostr asset exists and does not
+recommend a blind rerun. Payment-required and authentication-challenge
+responses are reported as unsupported, actionable failures in v1.
+
+A Blossom failure uses code `blossom_publication_failed`. Its details include
+the failed stage and server, the complete ordered server plan, and
+`release_events_signed: false` plus `release_events_published: false`.
+`possible_orphan_blobs` contains HTTP-201 locations created by this invocation
+and ambiguous requests whose storage result is unknown; it excludes HTTP-200
+blobs which were already present. Recovery explains that blob publication is
+content-addressed and may be retried after fixing the server set. No automatic
+orphan deletion is attempted. If a later state check, signing operation, or
+relay publication fails, its existing error code and details are retained and
+enriched with the completed Blossom report and possible orphan blobs.
 
 ## Gotchas and edge cases
 
@@ -1286,25 +1349,43 @@ fail closed with an actionable error.
 - Clock skew affects new release dates and replacement ordering. Use a stable
   captured timestamp for the plan and show it before signing.
 
-### Future Blossom uploads and mirroring
+### Blossom uploads and mirroring
 
 - Blossom servers can return `200` or `201`, a body which does not match the
   uploaded hash, authentication challenges, payment requirements, or a URL on a
   different host. Validate the upload descriptor against local bytes.
 - BUD-03 discovery ordering matters. Preserve user/server order and do not turn
   a fallback list into nondeterministic parallel preference.
-- BUD-04 mirroring can partially succeed. Decide how many durable copies are
-  required before a release may reference the asset and report each mirror.
-- BUD-10 Blossom URIs and ordinary HTTPS URLs need one canonical resolution
-  path without accidentally signing a local-only or temporary URL.
+- BUD-04 mirroring can partially succeed. v1 requires every selected server,
+  reports each result, and signs no NIP-82 event after a partial upload.
+- BUD-10 Blossom URIs are not accepted as returned primary URLs in v1. Require
+  an ordinary HTTP(S) URL that existing NIP-82 clients can retrieve.
 - Upload authorization events have narrow lifetimes and scopes. Never cache or
-  print secrets, and account for remote-signer clock skew.
+  print secrets, create one close to each request, and account for remote-signer
+  latency and clock skew.
 - Servers may deduplicate by hash while serving different headers or filenames.
   NIP-82 integrity is byte-based; display metadata still needs deterministic
   selection.
-- NIP-82 currently exposes a primary URL. Representing multiple mirrors without
-  breaking other clients needs protocol agreement or carefully preserved
-  extension tags before it becomes stable API.
+- NIP-82 currently exposes a primary URL. Keep mirror URLs in command results
+  and do not invent extension tags without protocol agreement.
+- A local file can be replaced, truncated, grow, or be a symlink into mutable
+  build output while ngit is running. Upload only a completed private snapshot
+  and fail on read errors or the configured size bound.
+- Snapshotting can exhaust temporary storage even when the source file is
+  within the byte limit. Surface that failure without signing or uploading.
+- Server-list events can contain malformed roots, credentials, paths,
+  duplicates, or mixed schemes. Accept only canonical credential-free HTTP(S)
+  roots, preserve the first occurrence, and never reorder fallbacks.
+- Explicit servers are an override, not an addition to discovery. Mixing the
+  two would make the durability set hard to predict and review.
+- Reject returned descriptor URLs with credentials, queries, fragments, or no
+  embedded asset hash; an expiring download URL is not a stable NIP-82 source.
+- `.onion` HTTP servers are unusable unless the HTTP client has an explicit
+  proxy path; relay onion handling does not make reqwest reach them.
+- With multiple files, later failure can leave earlier blobs stored. Preserve
+  every completed file report and never attempt automatic deletion.
+- A state, signing, or relay failure after successful Blossom work must retain
+  the completed upload report alongside any Nostr orphan-asset report.
 
 ### Test coverage checklist
 
@@ -1327,6 +1408,10 @@ fail closed with an actionable error.
 - Test HTTP redirects, timeouts, false lengths, oversized streams, changing
   bytes, MIME conflicts, hostile filenames, and Blossom hash mismatch with a
   bounded local server.
+- Test stable local snapshots, kind-24242 scope/expiration, `200` and `201`
+  descriptors, redirect refusal, ordered kind-10063 discovery, explicit
+  override precedence, primary upload followed by mirrors, and a mirror failure
+  which publishes no NIP-82 events.
 - Test manifest duplicate keys, unknown keys, precedence, exact placeholder
   expansion, and credential redaction.
 - Parse JSON structurally in integration tests; do not assert exact human
@@ -1349,7 +1434,9 @@ The first implementation is complete when:
    fields or assets;
 7. URL-backed assets are streamed, hashed, described, published before the
    release, and optionally verified on read;
-8. platform metadata is supplied or its omission is explicitly acknowledged;
-9. edits preserve unknown tags and use safe addressable-event ordering;
-10. JSON remains parseable and useful on success, validation failure,
+8. local files are snapshotted, uploaded and mirrored in order, and no NIP-82
+   event is signed until every required Blossom operation succeeds;
+9. platform metadata is supplied or its omission is explicitly acknowledged;
+10. edits preserve unknown tags and use safe addressable-event ordering;
+11. JSON remains parseable and useful on success, validation failure,
     authorization failure, and partial relay publication.
