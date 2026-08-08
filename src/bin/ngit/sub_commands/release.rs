@@ -1,0 +1,96 @@
+mod read;
+mod support;
+
+use anyhow::Result;
+use serde_json::json;
+
+use crate::{
+    cli::{Cli, ReleaseAppCommands, ReleaseCommands, ReleaseSubCommandArgs},
+    cli_interactor::CliError,
+};
+
+pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
+    let json_output = wants_json(&args.release_command);
+    let command = command_name(&args.release_command);
+    let result = match &args.release_command {
+        ReleaseCommands::App(args) => match &args.app_command {
+            ReleaseAppCommands::List(args) => read::app_list(cli, args).await,
+            ReleaseAppCommands::View(args) => read::app_view(cli, args).await,
+        },
+    };
+
+    match result {
+        Ok(output) if json_output => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "format_version": 1,
+                    "ok": true,
+                    "command": output.command,
+                    "repository": output.repository,
+                    "authority": output.authority,
+                    "warnings": output.warnings,
+                    "result": output.result,
+                }))?
+            );
+            Ok(())
+        }
+        Ok(output) => {
+            for warning in output.warnings {
+                eprintln!("warning: {}", warning.message);
+            }
+            println!("{}", output.human);
+            Ok(())
+        }
+        Err(error) if json_output => {
+            let (code, message, details) =
+                error.downcast_ref::<support::ReleaseError>().map_or_else(
+                    || {
+                        (
+                            "operation_failed",
+                            format!("{error:#}"),
+                            serde_json::Value::Object(serde_json::Map::new()),
+                        )
+                    },
+                    |error| (error.code, error.message.clone(), error.details.clone()),
+                );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "format_version": 1,
+                    "ok": false,
+                    "command": command,
+                    "repository": null,
+                    "authority": null,
+                    "warnings": [],
+                    "result": null,
+                    "error": {
+                        "code": code,
+                        "message": message,
+                        "details": details,
+                    }
+                }))?
+            );
+            Err(CliError.into())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn wants_json(command: &ReleaseCommands) -> bool {
+    match command {
+        ReleaseCommands::App(args) => match &args.app_command {
+            ReleaseAppCommands::List(args) => args.json,
+            ReleaseAppCommands::View(args) => args.json,
+        },
+    }
+}
+
+fn command_name(command: &ReleaseCommands) -> &'static str {
+    match command {
+        ReleaseCommands::App(args) => match &args.app_command {
+            ReleaseAppCommands::List(_) => "release.app.list",
+            ReleaseAppCommands::View(_) => "release.app.view",
+        },
+    }
+}

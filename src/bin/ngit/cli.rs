@@ -356,6 +356,9 @@ pub enum Commands {
     Merge(MergeSubCommandArgs),
     /// work with issues
     Issue(IssueSubCommandArgs),
+    /// work with software applications and their releases
+    #[command(alias = "releases")]
+    Release(ReleaseSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
@@ -428,6 +431,81 @@ pub struct RepoSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Software release subcommand group
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+pub struct ReleaseSubCommandArgs {
+    #[command(subcommand)]
+    pub release_command: ReleaseCommands,
+}
+
+#[derive(Subcommand)]
+pub enum ReleaseCommands {
+    /// work with software applications
+    #[command(alias = "application")]
+    App(ReleaseAppSubCommandArgs),
+}
+
+#[derive(clap::Parser)]
+pub struct ReleaseAppSubCommandArgs {
+    #[command(subcommand)]
+    pub app_command: ReleaseAppCommands,
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum ReleaseAppCommands {
+    /// list applications linked to this repository or owned by a user
+    List(ReleaseAppListArgs),
+    /// view an application and its publication authority
+    View(ReleaseAppViewArgs),
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReleaseAppListArgs {
+    /// List applications authored by the active user
+    #[arg(long, group = "application_owner")]
+    pub mine: bool,
+    /// Filter user or author applications to those not linked to this
+    /// repository
+    #[arg(long, conflicts_with = "linked", requires = "application_owner")]
+    pub unlinked: bool,
+    /// Filter user or author applications to those linked to this repository
+    #[arg(long, conflicts_with = "unlinked", requires = "application_owner")]
+    pub linked: bool,
+    /// List applications by an explicit author
+    #[arg(long, value_name = "PUBKEY", group = "application_owner")]
+    pub author: Option<String>,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAppViewArgs {
+    /// Application identifier, naddr, or application coordinate
+    #[arg(value_name = "APP")]
+    pub app: String,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -826,7 +904,10 @@ mod tests {
     use clap::{Command, CommandFactory, Parser};
     use tempfile::tempdir;
 
-    use super::{AccountCommands, Cli, Commands, extract_signer_cli_arguments, read_nsec_file};
+    use super::{
+        AccountCommands, Cli, Commands, ReleaseAppCommands, ReleaseCommands,
+        extract_signer_cli_arguments, read_nsec_file,
+    };
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {
         if command.has_subcommands() {
@@ -866,7 +947,6 @@ mod tests {
             );
         }
     }
-
     fn key_file(path: &Path, value: &[u8]) {
         fs::write(path, value).unwrap();
         #[cfg(unix)]
@@ -1095,7 +1175,6 @@ mod tests {
         handle.join().unwrap();
         assert!(result.is_err());
     }
-
     #[test]
     fn repo_arg_is_accepted_at_every_command_position() {
         // Documented policy: `--repo` is a global argument accepted at any
@@ -1150,5 +1229,47 @@ mod tests {
             let cli = Cli::try_parse_from(args).expect("command should parse");
             assert!(cli.repo_relay_only);
         }
+    }
+
+    #[test]
+    fn release_application_commands_and_aliases_parse() {
+        for args in [
+            ["ngit", "release", "app", "list", "--json", "--offline"].as_slice(),
+            [
+                "ngit",
+                "releases",
+                "application",
+                "view",
+                "ngit",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn release_app_link_filters_require_an_author_scope() {
+        assert!(Cli::try_parse_from(["ngit", "release", "app", "list", "--unlinked"]).is_err());
+        Cli::try_parse_from(["ngit", "release", "app", "list", "--mine", "--unlinked"])
+            .expect("--mine --unlinked should parse");
+        Cli::try_parse_from([
+            "ngit", "release", "app", "list", "--author", "deadbeef", "--linked",
+        ])
+        .expect("--author --linked should parse");
+    }
+
+    #[test]
+    fn release_application_command_type_is_exposed_to_dispatch() {
+        let cli = Cli::try_parse_from(["ngit", "release", "app", "list"])
+            .expect("application list should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::App(app) = release.release_command;
+        assert!(matches!(app.app_command, ReleaseAppCommands::List(_)));
     }
 }
