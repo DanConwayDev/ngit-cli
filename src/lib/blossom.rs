@@ -9,19 +9,37 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bitcoin_hashes::{HashEngine as _, sha256};
-use nostr::prelude::{Event, EventId, Filter, Kind, PublicKey, Timestamp, Url};
+use nostr::prelude::{Event, EventBuilder, EventId, Filter, Kind, PublicKey, Tag, Timestamp};
+use reqwest::{
+    StatusCode, Url,
+    header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue},
+    redirect::Policy,
+};
+use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
+use tokio_util::io::ReaderStream;
 
 use crate::{
     event_ordering::latest_event,
-    release_download::{DEFAULT_MAX_ASSET_BYTES, DownloadWarning, infer_mime_type},
+    release_download::{
+        DEFAULT_MAX_ASSET_BYTES, DownloadWarning, DownloadWarningCode, infer_mime_type,
+        sanitize_filename,
+    },
+    signer::NgitSigner,
 };
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+const AUTHORIZATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 
 /// A local file which should be staged for a Blossom upload.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,7 +64,7 @@ impl LocalFileRequest {
 /// Immutable bytes and metadata prepared for one or more Blossom uploads.
 #[derive(Debug)]
 pub struct FileSnapshot {
-    _file: NamedTempFile,
+    file: NamedTempFile,
     pub filename: String,
     pub mime_type: String,
     /// Lowercase, 64-character SHA-256 of the snapshotted bytes.
@@ -56,12 +74,196 @@ pub struct FileSnapshot {
 }
 
 impl FileSnapshot {
-    #[cfg(test)]
     fn reopen(&self) -> Result<File> {
-        self._file
+        self.file
             .reopen()
             .context("failed to reopen the stable asset snapshot")
     }
+}
+
+/// A server-confirmed BUD-02 blob descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BlobDescriptor {
+    pub url: Url,
+    pub sha256: String,
+    pub size: u64,
+    #[serde(rename = "type")]
+    pub mime_type: String,
+    pub uploaded: u64,
+}
+
+/// Result of uploading one blob, including whether this request stored it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BlobUpload {
+    pub descriptor: BlobDescriptor,
+    /// `true` for `201 Created`; `false` for `200 OK` (already present).
+    pub newly_stored: bool,
+}
+
+/// Upload a stable local snapshot to one Blossom server.
+///
+/// The request follows BUD-02 and BUD-11. Authenticated redirects are disabled
+/// so the narrowly scoped authorization event is never forwarded elsewhere.
+pub async fn upload_snapshot(
+    server_url: &str,
+    snapshot: &FileSnapshot,
+    signer: &NgitSigner,
+) -> Result<BlobUpload> {
+    upload_snapshot_with_timeout(server_url, snapshot, signer, TOTAL_TIMEOUT).await
+}
+
+async fn upload_snapshot_with_timeout(
+    server_url: &str,
+    snapshot: &FileSnapshot,
+    signer: &NgitSigner,
+    total_timeout: Duration,
+) -> Result<BlobUpload> {
+    tokio::time::timeout(
+        total_timeout,
+        upload_snapshot_inner(server_url, snapshot, signer),
+    )
+    .await
+    .map_err(|_| anyhow!("Blossom upload exceeded its total timeout"))?
+}
+
+async fn upload_snapshot_inner(
+    server_url: &str,
+    snapshot: &FileSnapshot,
+    signer: &NgitSigner,
+) -> Result<BlobUpload> {
+    let upload_url = blossom_upload_url(server_url)?;
+    let event = upload_authorization(snapshot, signer).await?;
+    let authorization = authorization_header(&event)?;
+    let file = snapshot.reopen()?;
+    let body = reqwest::Body::wrap_stream(ReaderStream::new(tokio::fs::File::from_std(file)));
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(IDLE_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+        .context("failed to create the Blossom HTTP client")?;
+    let request = client
+        .put(upload_url)
+        .header(CONTENT_LENGTH, snapshot.size)
+        .header(CONTENT_TYPE, &snapshot.mime_type)
+        .header("X-SHA-256", &snapshot.sha256)
+        .header(AUTHORIZATION, authorization)
+        .body(body);
+
+    let response = request
+        .send()
+        .await
+        .context("failed to send the Blossom upload")?;
+    let status = response.status();
+    if status != StatusCode::OK && status != StatusCode::CREATED {
+        bail!("Blossom upload returned HTTP {status}");
+    }
+
+    let descriptor = read_descriptor(response).await?;
+    validate_descriptor(&descriptor, snapshot)?;
+    Ok(BlobUpload {
+        descriptor,
+        newly_stored: status == StatusCode::CREATED,
+    })
+}
+
+async fn upload_authorization(snapshot: &FileSnapshot, signer: &NgitSigner) -> Result<Event> {
+    let expires = Timestamp::now() + AUTHORIZATION_LIFETIME;
+    let builder = EventBuilder::new(Kind::BlossomAuth, "Authorize Blossom upload").tags([
+        Tag::parse(["t", "upload"]).expect("static Blossom action tag is valid"),
+        Tag::parse(["x", &snapshot.sha256]).expect("computed SHA-256 tag is valid"),
+        Tag::expiration(expires),
+    ]);
+    signer
+        .sign_event_builder(builder)
+        .await
+        .context("failed to sign the Blossom upload authorization")
+}
+
+fn authorization_header(event: &Event) -> Result<HeaderValue> {
+    let event = serde_json::to_vec(event).context("failed to encode Blossom authorization")?;
+    HeaderValue::from_str(&format!("Nostr {}", URL_SAFE_NO_PAD.encode(event)))
+        .context("failed to construct the Blossom Authorization header")
+}
+
+fn blossom_upload_url(server_url: &str) -> Result<Url> {
+    let mut server = Url::parse(server_url).context("invalid Blossom server URL")?;
+    if !matches!(server.scheme(), "http" | "https") || server.host_str().is_none() {
+        bail!("Blossom server URL must be an absolute HTTP or HTTPS URL");
+    }
+    if !server.username().is_empty() || server.password().is_some() {
+        bail!("Blossom server URL must not contain embedded credentials");
+    }
+    if !matches!(server.path(), "" | "/") || server.query().is_some() || server.fragment().is_some()
+    {
+        bail!("Blossom server URL must not contain a path, query, or fragment");
+    }
+    server.set_path("/");
+    server
+        .join("upload")
+        .context("failed to construct the Blossom upload URL")
+}
+
+async fn read_descriptor(mut response: reqwest::Response) -> Result<BlobDescriptor> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_DESCRIPTOR_BYTES)
+    {
+        bail!("Blossom descriptor exceeds the response size limit");
+    }
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("failed while reading the Blossom descriptor")?
+    {
+        let length = u64::try_from(bytes.len())
+            .ok()
+            .and_then(|length| length.checked_add(u64::try_from(chunk.len()).ok()?))
+            .ok_or_else(|| anyhow!("Blossom descriptor length overflowed u64"))?;
+        if length > MAX_DESCRIPTOR_BYTES {
+            bail!("Blossom descriptor exceeds the response size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    serde_json::from_slice(&bytes).context("Blossom server returned an invalid blob descriptor")
+}
+
+fn validate_descriptor(descriptor: &BlobDescriptor, snapshot: &FileSnapshot) -> Result<()> {
+    if descriptor.sha256 != snapshot.sha256 {
+        bail!("Blossom descriptor SHA-256 does not match the uploaded bytes");
+    }
+    if descriptor.size != snapshot.size {
+        bail!("Blossom descriptor size does not match the uploaded bytes");
+    }
+    if descriptor.mime_type != snapshot.mime_type {
+        bail!("Blossom descriptor MIME type does not match the upload");
+    }
+    validate_blob_url(&descriptor.url, &snapshot.sha256)
+}
+
+fn validate_blob_url(url: &Url, sha256: &str) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("Blossom descriptor URL must be an absolute HTTP or HTTPS URL");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("Blossom descriptor URL must not contain embedded credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("Blossom descriptor URL must not contain a query or fragment");
+    }
+    let filename = url
+        .path_segments()
+        .and_then(Iterator::last)
+        .filter(|segment| !segment.is_empty())
+        .ok_or_else(|| anyhow!("Blossom descriptor URL must identify the uploaded hash"))?;
+    if filename.split('.').next() != Some(sha256) {
+        bail!("Blossom descriptor URL does not identify the uploaded SHA-256");
+    }
+    Ok(())
 }
 
 /// Copy a local regular file into a stable, bounded snapshot without retaining
@@ -71,18 +273,22 @@ pub async fn snapshot_local_file(request: LocalFileRequest) -> Result<FileSnapsh
         bail!("asset byte limit must be greater than zero");
     }
 
-    let filename = source_filename(&request.source_path)?;
+    let (filename, mut warnings) = source_filename(&request.source_path)?;
     let mime = infer_mime_type(request.mime_type.as_deref(), None, &filename)?;
+    warnings.extend(mime.warnings);
 
-    tokio::task::spawn_blocking(move || snapshot_local_file_sync(request, filename, mime))
-        .await
-        .context("local asset snapshot task failed")?
+    tokio::task::spawn_blocking(move || {
+        snapshot_local_file_sync(request, filename, mime.mime_type, warnings)
+    })
+    .await
+    .context("local asset snapshot task failed")?
 }
 
 fn snapshot_local_file_sync(
     request: LocalFileRequest,
     filename: String,
-    mime: crate::release_download::MimeResolution,
+    mime_type: String,
+    warnings: Vec<DownloadWarning>,
 ) -> Result<FileSnapshot> {
     let mut source = File::open(&request.source_path).with_context(|| {
         format!(
@@ -132,25 +338,32 @@ fn snapshot_local_file_sync(
         .context("failed to flush the stable asset snapshot")?;
 
     Ok(FileSnapshot {
-        _file: snapshot,
+        file: snapshot,
         filename,
-        mime_type: mime.mime_type,
+        mime_type,
         sha256: sha256::Hash::from_engine(engine).to_string(),
         size,
-        warnings: mime.warnings,
+        warnings,
     })
 }
 
-fn source_filename(path: &Path) -> Result<String> {
-    let filename = path
+fn source_filename(path: &Path) -> Result<(String, Vec<DownloadWarning>)> {
+    let original = path
         .file_name()
         .ok_or_else(|| anyhow!("local asset path has no filename"))?
         .to_str()
         .ok_or_else(|| anyhow!("local asset filename is not valid UTF-8"))?;
-    if filename.is_empty() || filename.chars().any(char::is_control) {
-        bail!("local asset filename is empty or unsafe");
-    }
-    Ok(filename.to_owned())
+    let filename = sanitize_filename(original)
+        .ok_or_else(|| anyhow!("local asset filename is empty or unsafe"))?;
+    let warnings = if filename == original {
+        Vec::new()
+    } else {
+        vec![DownloadWarning {
+            code: DownloadWarningCode::FilenameSanitized,
+            message: "the local asset filename was sanitized".to_owned(),
+        }]
+    };
+    Ok((filename, warnings))
 }
 
 /// NIP-B7 user Blossom server list.
@@ -253,16 +466,148 @@ pub fn canonicalize_blossom_server_root(value: &str) -> Result<Url> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read as _;
+    use std::{io::Read as _, time::Duration};
 
-    use anyhow::Result;
+    use anyhow::{Result, anyhow, bail};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use nostr::prelude::{
-        EventBuilder, Keys, Tag,
+        Event, EventBuilder, Keys, Tag,
         event::{FinalizeUnsignedEvent, SignEvent},
     };
     use tempfile::tempdir;
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::{TcpListener, TcpStream},
+        task::JoinHandle,
+    };
 
     use super::*;
+
+    const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+    const MAX_TEST_REQUEST_BYTES: usize = 1024 * 1024;
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        head: String,
+        body: Vec<u8>,
+    }
+
+    struct TestResponse {
+        status: &'static str,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    async fn spawn_one_shot_server(
+        response: impl FnOnce(&str) -> TestResponse,
+    ) -> Result<(String, JoinHandle<Result<CapturedRequest>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let response = response(&base_url);
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom request")??;
+            let request = read_request(&mut stream).await?;
+            let mut wire_response = format!(
+                "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                response.status,
+                response.body.len()
+            );
+            for (name, value) in response.headers {
+                wire_response.push_str(&format!("{name}: {value}\r\n"));
+            }
+            wire_response.push_str("\r\n");
+            wire_response.push_str(&response.body);
+            tokio::time::timeout(SERVER_TIMEOUT, stream.write_all(wire_response.as_bytes()))
+                .await
+                .context("timed out writing Blossom response")??;
+            Ok(request)
+        });
+        Ok((base_url, task))
+    }
+
+    async fn read_request(stream: &mut TcpStream) -> Result<CapturedRequest> {
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+            if bytes.len() >= MAX_TEST_REQUEST_BYTES {
+                bail!("test request headers exceeded limit");
+            }
+            let mut chunk = [0_u8; 8192];
+            let read = tokio::time::timeout(SERVER_TIMEOUT, stream.read(&mut chunk))
+                .await
+                .context("timed out reading Blossom request headers")??;
+            if read == 0 {
+                bail!("connection closed before request headers completed");
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        };
+
+        let head = String::from_utf8(bytes[..header_end].to_vec())?;
+        let content_length = request_header(&head, "content-length")
+            .context("upload omitted Content-Length")?
+            .parse::<usize>()?;
+        if header_end
+            .checked_add(content_length)
+            .is_none_or(|length| length > MAX_TEST_REQUEST_BYTES)
+        {
+            bail!("test request body exceeded limit");
+        }
+        while bytes.len() < header_end + content_length {
+            let mut chunk = [0_u8; 8192];
+            let read = tokio::time::timeout(SERVER_TIMEOUT, stream.read(&mut chunk))
+                .await
+                .context("timed out reading Blossom request body")??;
+            if read == 0 {
+                bail!("connection closed before request body completed");
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        let body = bytes[header_end..header_end + content_length].to_vec();
+        Ok(CapturedRequest { head, body })
+    }
+
+    fn request_header<'a>(head: &'a str, wanted: &str) -> Option<&'a str> {
+        head.lines().skip(1).find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(wanted).then(|| value.trim())
+        })
+    }
+
+    async fn completed_request(
+        mut task: JoinHandle<Result<CapturedRequest>>,
+    ) -> Result<CapturedRequest> {
+        match tokio::time::timeout(SERVER_TIMEOUT, &mut task).await {
+            Ok(result) => result.context("Blossom test server task failed")?,
+            Err(_) => {
+                task.abort();
+                Err(anyhow!("timed out waiting for Blossom test server"))
+            }
+        }
+    }
+
+    fn descriptor_json(base_url: &str, sha256: &str, size: u64, mime_type: &str) -> String {
+        serde_json::json!({
+            "url": format!("{base_url}/{sha256}.apk"),
+            "sha256": sha256,
+            "size": size,
+            "type": mime_type,
+            "uploaded": 1,
+        })
+        .to_string()
+    }
+
+    fn event_tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
+        event.tags.iter().find_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().map(String::as_str) == Some(name))
+                .then(|| values.get(1).map(String::as_str))
+                .flatten()
+        })
+    }
 
     #[tokio::test]
     async fn snapshot_retains_exact_bytes_after_source_changes() -> Result<()> {
@@ -489,5 +834,209 @@ mod tests {
             .to_string();
 
         assert!(error.contains("invalid Blossom server"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_sanitizes_the_local_basename() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("bad:name?.zip");
+        std::fs::write(&path, b"asset")?;
+
+        let snapshot = snapshot_local_file(LocalFileRequest::new(path)).await?;
+
+        assert_eq!(snapshot.filename, "bad_name_.zip");
+        assert_eq!(snapshot.warnings.len(), 1);
+        assert_eq!(
+            snapshot.warnings[0].code,
+            DownloadWarningCode::FilenameSanitized
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_streams_snapshot_with_scoped_authorization() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("ngit.apk");
+        let original = vec![0x82; COPY_BUFFER_BYTES * 2 + 19];
+        std::fs::write(&path, &original)?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(&path)).await?;
+        std::fs::write(&path, b"source changed after staging")?;
+
+        let signer_keys = Keys::generate();
+        let signer = NgitSigner::Keys(signer_keys.clone());
+        for status in ["200 OK", "201 Created"] {
+            let expected_hash = snapshot.sha256.clone();
+            let expected_mime = snapshot.mime_type.clone();
+            let expected_size = snapshot.size;
+            let (server_url, server) = spawn_one_shot_server(move |base_url| TestResponse {
+                status,
+                headers: Vec::new(),
+                body: descriptor_json(base_url, &expected_hash, expected_size, &expected_mime),
+            })
+            .await?;
+
+            let upload = upload_snapshot(&server_url, &snapshot, &signer).await?;
+            let request = completed_request(server).await?;
+
+            assert!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+            assert_eq!(request.body, original);
+            assert_eq!(
+                request_header(&request.head, "content-length"),
+                Some(snapshot.size.to_string().as_str())
+            );
+            assert_eq!(
+                request_header(&request.head, "content-type"),
+                Some(snapshot.mime_type.as_str())
+            );
+            assert_eq!(
+                request_header(&request.head, "x-sha-256"),
+                Some(snapshot.sha256.as_str())
+            );
+
+            let authorization = request_header(&request.head, "authorization")
+                .context("upload omitted Authorization")?
+                .strip_prefix("Nostr ")
+                .context("upload authorization used the wrong scheme")?;
+            let event: Event = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(authorization)?)?;
+            event.verify()?;
+            assert_eq!(event.kind, Kind::BlossomAuth);
+            assert_eq!(event.pubkey, signer_keys.public_key());
+            assert_eq!(event_tag(&event, "t"), Some("upload"));
+            assert_eq!(event_tag(&event, "x"), Some(snapshot.sha256.as_str()));
+            let expiration = event_tag(&event, "expiration")
+                .context("authorization omitted expiration")?
+                .parse::<u64>()?;
+            let lifetime = expiration.saturating_sub(event.created_at.as_secs());
+            assert!((299..=300).contains(&lifetime));
+
+            assert_eq!(upload.descriptor.sha256, snapshot.sha256);
+            assert_eq!(upload.descriptor.size, snapshot.size);
+            assert_eq!(upload.descriptor.mime_type, snapshot.mime_type);
+            assert_eq!(upload.newly_stored, status == "201 Created");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_does_not_follow_authenticated_redirects() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (server_url, server) = spawn_one_shot_server(|base_url| TestResponse {
+            status: "307 Temporary Redirect",
+            headers: vec![("Location".to_owned(), format!("{base_url}/elsewhere"))],
+            body: String::new(),
+        })
+        .await?;
+
+        let error = upload_snapshot(&server_url, &snapshot, &NgitSigner::Keys(Keys::generate()))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("307 Temporary Redirect"));
+        let request = completed_request(server).await?;
+        assert!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn total_timeout_covers_the_complete_descriptor_body() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let server_url = format!("http://{}", listener.local_addr()?);
+        let (headers_sent, headers_received) = tokio::sync::oneshot::channel();
+        let mut server = tokio::spawn(async move {
+            let (mut stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom request")??;
+            read_request(&mut stream).await?;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{")
+                .await?;
+            let _ = headers_sent.send(());
+            std::future::pending::<Result<()>>().await
+        });
+        let signer = NgitSigner::Keys(Keys::generate());
+        let upload =
+            upload_snapshot_with_timeout(&server_url, &snapshot, &signer, Duration::from_secs(1));
+        tokio::pin!(upload);
+
+        tokio::select! {
+            result = &mut upload => {
+                server.abort();
+                bail!("upload completed before the partial descriptor was observed: {result:?}");
+            }
+            observed = tokio::time::timeout(SERVER_TIMEOUT, headers_received) => {
+                observed.context("timed out waiting for partial descriptor")??;
+            }
+        }
+        let error = upload.await.unwrap_err();
+        assert!(format!("{error:#}").contains("total timeout"));
+        server.abort();
+        let _ = (&mut server).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_descriptors_that_do_not_commit_to_snapshot() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let cases = [
+            ("sha", "descriptor SHA-256"),
+            ("size", "descriptor size"),
+            ("mime", "descriptor MIME type"),
+            ("url", "descriptor URL does not identify"),
+            ("url_query", "URL must not contain a query"),
+        ];
+        for (field, expected_error) in cases {
+            let expected_hash = snapshot.sha256.clone();
+            let expected_mime = snapshot.mime_type.clone();
+            let expected_size = snapshot.size;
+            let field = field.to_owned();
+            let response_field = field.clone();
+            let (server_url, server) = spawn_one_shot_server(move |base_url| {
+                let mut value: serde_json::Value = serde_json::from_str(&descriptor_json(
+                    base_url,
+                    &expected_hash,
+                    expected_size,
+                    &expected_mime,
+                ))
+                .expect("test descriptor is valid JSON");
+                match response_field.as_str() {
+                    "sha" => value["sha256"] = serde_json::json!("0".repeat(64)),
+                    "size" => value["size"] = serde_json::json!(expected_size + 1),
+                    "mime" => value["type"] = serde_json::json!("text/plain"),
+                    "url" => {
+                        value["url"] = serde_json::json!(format!("{base_url}/not-the-hash.apk"));
+                    }
+                    "url_query" => {
+                        value["url"] = serde_json::json!(format!(
+                            "{base_url}/{expected_hash}.apk?token=secret"
+                        ));
+                    }
+                    _ => unreachable!(),
+                }
+                TestResponse {
+                    status: "200 OK",
+                    headers: Vec::new(),
+                    body: value.to_string(),
+                }
+            })
+            .await?;
+
+            let error = upload_snapshot(&server_url, &snapshot, &signer)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected_error),
+                "wrong error for {field}: {error:#}"
+            );
+            completed_request(server).await?;
+        }
+        Ok(())
     }
 }
