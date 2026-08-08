@@ -159,6 +159,79 @@ async fn release_publish_reuses_an_asset_event_and_is_readable() -> Result<()> {
 }
 
 #[tokio::test]
+async fn adding_an_existing_asset_preserves_release_assets_and_order() -> Result<()> {
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+
+    let first = asset_event(&published, "ngit-linux-x86_64.tar.gz", "11", "linux-x86_64")?;
+    publish_to_default_relay(&harness, &first).await?;
+    wait_for_relay_event(&harness, first.id).await?;
+    run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--asset-event",
+            &first.id.to_hex(),
+            "--notes",
+            "First test release",
+            "--json",
+        ],
+    )
+    .await?;
+    let initial = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_RELEASE_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(RELEASE_IDENTIFIER),
+        "initial software release",
+    )
+    .await?;
+
+    let second = asset_event(
+        &published,
+        "ngit-linux-aarch64.tar.gz",
+        "22",
+        "linux-aarch64",
+    )?;
+    publish_to_default_relay(&harness, &second).await?;
+    wait_for_relay_event(&harness, second.id).await?;
+    let added = run_json(
+        &publisher,
+        &[
+            "release",
+            "asset",
+            "add",
+            RELEASE_IDENTIFIER,
+            "--event",
+            &second.id.to_hex(),
+            "--edit",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(added["result"]["operation"] == "asset_added");
+
+    let replacement = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_RELEASE_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(RELEASE_IDENTIFIER),
+        "replacement software release",
+    )
+    .await?;
+    ensure!(replacement.id != initial.id);
+    ensure!(tag_values(&replacement, "e") == vec![first.id.to_hex(), second.id.to_hex()]);
+    ensure!(tag_values(&replacement, "f") == vec!["linux-aarch64", "linux-x86_64"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn co_maintainer_cannot_publish_for_an_application_owned_by_another_maintainer() -> Result<()>
 {
     let (harness, publisher, published) = setup(1).await?;

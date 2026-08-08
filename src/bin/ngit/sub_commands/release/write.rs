@@ -19,10 +19,11 @@ use serde_json::{Value, json};
 
 use super::support::{
     CommandOutput, LoginMode, ReleaseContext, WarningJson, asset_json, coded_error,
-    coded_error_with_details, load_applications, load_assets, release_json, resolve_application,
+    coded_error_with_details, load_applications, load_assets, load_releases, release_json,
+    resolve_application, resolve_release,
 };
 use crate::{
-    cli::{Cli, ReleaseAppInitArgs, ReleaseAppLinkArgs, ReleasePublishArgs},
+    cli::{Cli, ReleaseAppInitArgs, ReleaseAppLinkArgs, ReleaseAssetAddArgs, ReleasePublishArgs},
     sub_commands::id_resolver::parse_event_id,
 };
 
@@ -226,6 +227,75 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
             parsed_release.identifier,
             assets.len(),
             parsed_release.raw_event.id
+        ),
+    ))
+}
+
+pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<CommandOutput> {
+    let mut context = ReleaseContext::load(cli, false, &args.relays, LoginMode::Required).await?;
+    let applications = trusted_applications_for_write(&mut context).await?;
+    let releases = load_releases(&mut context, &applications, true).await?;
+    let release =
+        resolve_release(&releases, &applications, &args.release, args.app.as_deref())?.clone();
+    let application = applications
+        .iter()
+        .find(|application| application.coordinate() == release.application.coordinate)
+        .context("release application was not resolved")?
+        .clone();
+    context.require_application_author(&application)?;
+
+    let mut assets = require_all_assets(&mut context, &release).await?;
+    let asset = load_asset_event(&mut context, &args.event, true).await?;
+    validate_reused_asset(&application, &asset, args.platform_agnostic)?;
+    reject_duplicate_asset(&assets, &asset)?;
+    let added_id = asset.raw_event.id;
+    assets.push(asset);
+
+    ensure_release_state_unchanged(&mut context, &application, &release.version, Some(&release))
+        .await?;
+    context.emit_human_warnings_before_signing(args.json);
+    let signer = context
+        .signer
+        .as_ref()
+        .context("nostr signer was not initialized")?
+        .clone();
+    let release_event = build_release_event(
+        &context,
+        &application,
+        &release.version,
+        release.channel.clone(),
+        release.notes.clone(),
+        &assets,
+        Some(&release),
+        release.raw_event.created_at,
+        &signer,
+    )
+    .await?;
+    let parsed_release = SoftwareRelease::parse(&release_event)?;
+
+    let mut batch: Vec<Event> = assets.iter().map(|asset| asset.raw_event.clone()).collect();
+    batch.push(release_event);
+    let relay_results = context.publish_batch(batch, &[], args.json).await?;
+    let authority = context.authority(&application);
+    let result = json!({
+        "operation": "asset_added",
+        "release": release_json(&parsed_release, &assets),
+        "asset": assets.last().map(asset_json),
+        "previous_event_id": release.raw_event.id.to_hex(),
+        "newly_published_asset_ids": Vec::<String>::new(),
+        "reused_asset_ids": vec![added_id.to_hex()],
+        "relays": relay_json(&relay_results),
+        "events": mutation_events_json(&assets, &parsed_release, &relay_results),
+        "orphan_asset_ids": Vec::<String>::new(),
+    });
+    Ok(CommandOutput::new(
+        "release.asset.add",
+        &mut context,
+        authority,
+        result,
+        format!(
+            "added asset {added_id} to release {}\nreplacement event: {}",
+            parsed_release.identifier, parsed_release.raw_event.id
         ),
     ))
 }

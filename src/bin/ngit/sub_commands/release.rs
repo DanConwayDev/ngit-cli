@@ -27,6 +27,7 @@ pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
         ReleaseCommands::Asset(args) => match &args.asset_command {
             ReleaseAssetCommands::List(args) => read::asset_list(cli, args).await,
             ReleaseAssetCommands::View(args) => read::asset_view(cli, args).await,
+            ReleaseAssetCommands::Add(args) => write::asset_add(cli, args).await,
         },
     };
 
@@ -102,6 +103,7 @@ fn wants_json(command: &ReleaseCommands) -> bool {
         ReleaseCommands::Asset(args) => match &args.asset_command {
             ReleaseAssetCommands::List(args) => args.json,
             ReleaseAssetCommands::View(args) => args.json,
+            ReleaseAssetCommands::Add(args) => args.json,
         },
     }
 }
@@ -120,6 +122,7 @@ fn command_name(command: &ReleaseCommands) -> &'static str {
         ReleaseCommands::Asset(args) => match &args.asset_command {
             ReleaseAssetCommands::List(_) => "release.asset.list",
             ReleaseAssetCommands::View(_) => "release.asset.view",
+            ReleaseAssetCommands::Add(_) => "release.asset.add",
         },
     }
 }

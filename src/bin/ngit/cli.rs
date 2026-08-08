@@ -744,6 +744,8 @@ pub enum ReleaseAssetCommands {
     List(ReleaseAssetListArgs),
     /// view complete metadata for a release asset
     View(ReleaseAssetViewArgs),
+    /// attach an existing asset and explicitly replace a release
+    Add(ReleaseAssetAddArgs),
 }
 
 #[derive(clap::Args)]
@@ -785,6 +787,31 @@ pub struct ReleaseAssetViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAssetAddArgs {
+    /// Release app@version, naddr, event-id, nevent, or unambiguous version
+    #[arg(value_name = "RELEASE")]
+    pub release: String,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Existing kind 3063 asset event to attach
+    #[arg(long, value_name = "ASSET", required = true)]
+    pub event: String,
+    /// Acknowledge an existing asset with no target platform
+    #[arg(long)]
+    pub platform_agnostic: bool,
+    /// Confirm replacement of the existing release event
+    #[arg(long, required = true)]
+    pub edit: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -1607,6 +1634,18 @@ mod tests {
                 "--offline",
             ]
             .as_slice(),
+            [
+                "ngit",
+                "release",
+                "asset",
+                "add",
+                "ngit@1.8.0",
+                "--event",
+                "deadbeef",
+                "--edit",
+                "--json",
+            ]
+            .as_slice(),
         ] {
             Cli::try_parse_from(args)
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
@@ -1628,7 +1667,19 @@ mod tests {
 
     #[test]
     fn release_replacement_commands_require_edit() {
-        for args in [["ngit", "release", "app", "link", "ngit"].as_slice()] {
+        for args in [
+            ["ngit", "release", "app", "link", "ngit"].as_slice(),
+            [
+                "ngit",
+                "release",
+                "asset",
+                "add",
+                "ngit@1.8.0",
+                "--event",
+                "deadbeef",
+            ]
+            .as_slice(),
+        ] {
             assert!(
                 Cli::try_parse_from(args).is_err(),
                 "command unexpectedly accepted without --edit: {args:?}"
