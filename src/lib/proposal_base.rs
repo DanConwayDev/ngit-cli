@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use bitcoin_hashes::sha1::Hash as Sha1Hash;
-use nostr::prelude::{Event, EventId, FromBech32, Nip19};
+use nostr::prelude::{Event, EventId, FromBech32, Nip19, PublicKey};
 
 use crate::{
     client::get_all_proposal_patch_pr_pr_update_events_from_cache,
@@ -19,6 +19,20 @@ pub type Proposals = HashMap<EventId, (Event, Vec<Event>, Option<Event>)>;
 pub struct ExplicitBase {
     pub commit: Sha1Hash,
     pub description: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalBaseInference {
+    NotFound,
+    Selected(ExplicitBase),
+    ParentContainedByTarget,
+}
+
+#[derive(Clone, Debug)]
+struct ProposalLineage {
+    root_id: EventId,
+    latest: Sha1Hash,
+    commits: HashSet<Sha1Hash>,
 }
 
 fn event_id(reference: &str) -> Option<EventId> {
@@ -130,16 +144,190 @@ pub fn merge_base_for_fast_forward_update(
         return Ok(None);
     }
 
-    let Ok(value) = tag_value(latest, "merge-base") else {
+    let Some(merge_base) = proposal_merge_base(latest)? else {
         return Ok(None);
     };
-    let merge_base = str_to_sha1(&value).context("previous PR merge-base tag is invalid")?;
     let (_, behind) = git_repo.get_commits_ahead_behind(&merge_base, tip)?;
     if behind.is_empty() {
         Ok(Some(merge_base))
     } else {
         Ok(None)
     }
+}
+
+fn proposal_merge_base(latest: &Event) -> Result<Option<Sha1Hash>> {
+    let Ok(value) = tag_value(latest, "merge-base") else {
+        return Ok(None);
+    };
+    Ok(Some(
+        str_to_sha1(&value).context("previous PR merge-base tag is invalid")?,
+    ))
+}
+
+fn commit_is_available(git_repo: &Repo, commit: &Sha1Hash) -> bool {
+    git_repo
+        .get_commit_or_tip_of_reference(&commit.to_string())
+        .is_ok()
+}
+
+fn target_contains(git_repo: &Repo, target_tips: &[Sha1Hash], commit: &Sha1Hash) -> Result<bool> {
+    for target in target_tips {
+        if target == commit || git_repo.ancestor_of(target, commit)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn shares_target_history(git_repo: &Repo, target_tips: &[Sha1Hash], commit: &Sha1Hash) -> bool {
+    target_tips
+        .iter()
+        .any(|target| git_repo.get_merge_base(target, commit).is_ok())
+}
+
+fn inferred_base(root_id: &EventId, commit: Sha1Hash) -> ProposalBaseInference {
+    ProposalBaseInference::Selected(ExplicitBase {
+        commit,
+        description: format!("latest tip of inferred PR #{}", &root_id.to_hex()[..8]),
+    })
+}
+
+fn select_proposal_base(
+    git_repo: &Repo,
+    lineages: &[ProposalLineage],
+    previous_base: Option<Sha1Hash>,
+    tip: &Sha1Hash,
+    target_tips: &[Sha1Hash],
+) -> Result<ProposalBaseInference> {
+    if let Some(previous_base) = previous_base {
+        let matches = lineages
+            .iter()
+            .filter(|lineage| lineage.commits.contains(&previous_base))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => {}
+            [lineage] => {
+                if !commit_is_available(git_repo, &lineage.latest) {
+                    bail!(
+                        "the latest tip of inferred parent PR #{} is not available locally; fetch it or specify --base",
+                        &lineage.root_id.to_hex()[..8]
+                    );
+                }
+                if target_contains(git_repo, target_tips, &lineage.latest)? {
+                    return Ok(ProposalBaseInference::ParentContainedByTarget);
+                }
+                if lineage.latest == *tip || git_repo.ancestor_of(tip, &lineage.latest)? {
+                    return Ok(inferred_base(&lineage.root_id, lineage.latest));
+                }
+                bail!(
+                    "inferred parent PR #{} has advanced to {}, but the proposal tip is not descended from it; rebase onto the latest parent or specify --base",
+                    &lineage.root_id.to_hex()[..8],
+                    lineage.latest
+                );
+            }
+            _ => {
+                bail!(
+                    "the previous proposal base belongs to multiple open PR lineages; specify --base"
+                );
+            }
+        }
+    }
+
+    let mut eligible = Vec::new();
+    for lineage in lineages {
+        if commit_is_available(git_repo, &lineage.latest)
+            && (lineage.latest == *tip || git_repo.ancestor_of(tip, &lineage.latest)?)
+            && !target_contains(git_repo, target_tips, &lineage.latest)?
+            && shares_target_history(git_repo, target_tips, &lineage.latest)
+        {
+            eligible.push(lineage);
+        }
+    }
+
+    let mut maximal = Vec::new();
+    'candidate: for candidate in &eligible {
+        for other in &eligible {
+            if candidate.latest != other.latest
+                && git_repo.ancestor_of(&other.latest, &candidate.latest)?
+            {
+                continue 'candidate;
+            }
+        }
+        maximal.push(*candidate);
+    }
+    maximal.sort_by_key(|lineage| lineage.latest);
+    maximal.dedup_by_key(|lineage| lineage.latest);
+
+    match maximal.as_slice() {
+        [] => Ok(ProposalBaseInference::NotFound),
+        [lineage] => Ok(inferred_base(&lineage.root_id, lineage.latest)),
+        _ => bail!("multiple unrelated open PR tips are possible proposal bases; specify --base"),
+    }
+}
+
+/// Infer a stack base from open or draft PRs by the proposal author.
+///
+/// Historical tips identify an existing parent lineage. New proposals select
+/// the unique most-advanced eligible tip; unrelated candidates are rejected as
+/// ambiguous rather than chosen by event or iteration order.
+#[allow(clippy::too_many_arguments)]
+pub async fn infer_proposal_base(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    open_proposals: &Proposals,
+    current_root_id: Option<EventId>,
+    current_latest: Option<&Event>,
+    proposal_author: PublicKey,
+    tip: &Sha1Hash,
+    target_tips: &[Sha1Hash],
+) -> Result<ProposalBaseInference> {
+    if target_tips.is_empty() {
+        return Ok(ProposalBaseInference::NotFound);
+    }
+
+    let mut lineages = Vec::new();
+    for (root_id, (root, latest_chain, _pr_upgrade_root)) in open_proposals {
+        if current_root_id.as_ref() == Some(root_id) {
+            continue;
+        }
+        if root.pubkey != proposal_author {
+            continue;
+        }
+        let Some(latest_event) = latest_chain.first() else {
+            continue;
+        };
+        if ![KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&latest_event.kind) {
+            continue;
+        }
+        let latest = str_to_sha1(&get_commit_id_from_patch(latest_event)?)?;
+        let commits = get_all_proposal_patch_pr_pr_update_events_from_cache(
+            git_repo.get_path()?,
+            repo_ref,
+            root_id,
+        )
+        .await?
+        .into_iter()
+        .filter(|event| [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&event.kind))
+        .filter_map(|event| get_commit_id_from_patch(&event).ok())
+        .filter_map(|commit| str_to_sha1(&commit).ok())
+        .collect();
+        lineages.push(ProposalLineage {
+            root_id: *root_id,
+            latest,
+            commits,
+        });
+    }
+
+    select_proposal_base(
+        git_repo,
+        &lineages,
+        current_latest
+            .map(proposal_merge_base)
+            .transpose()?
+            .flatten(),
+        tip,
+        target_tips,
+    )
 }
 
 /// Resolve a user-selected proposal base from the repository state already
@@ -253,6 +441,12 @@ mod tests {
 
     use super::*;
     use crate::git::{oid_to_sha1, test_helpers::GitTestRepo};
+
+    fn proposal_id(label: &str) -> Result<EventId> {
+        Ok(EventBuilder::new(KIND_PULL_REQUEST, label)
+            .finalize(&nostr::prelude::Keys::generate())?
+            .id)
+    }
 
     #[test]
     fn git_revision_resolves_and_base_must_leave_commits() -> Result<()> {
@@ -462,6 +656,187 @@ mod tests {
         assert_eq!(
             merge_base_for_fast_forward_update(&git_repo, &latest, &oid_to_sha1(&rewritten_tip))?,
             None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inference_selects_the_unique_most_advanced_parent_tip() -> Result<()> {
+        let fixture = GitTestRepo::default();
+        let target = fixture.populate()?;
+        fixture.create_branch("parent")?;
+        fixture.checkout("parent")?;
+        fs::write(fixture.dir.join("parent-one"), "one")?;
+        let parent_one = fixture.stage_and_commit("parent one")?;
+        fs::write(fixture.dir.join("parent-two"), "two")?;
+        let parent_two = fixture.stage_and_commit("parent two")?;
+        fs::write(fixture.dir.join("child"), "child")?;
+        let child = fixture.stage_and_commit("child")?;
+        let first_root = proposal_id("first parent")?;
+        let second_root = proposal_id("second parent")?;
+        let lineages = vec![
+            ProposalLineage {
+                root_id: first_root,
+                latest: oid_to_sha1(&parent_one),
+                commits: HashSet::from([oid_to_sha1(&parent_one)]),
+            },
+            ProposalLineage {
+                root_id: second_root,
+                latest: oid_to_sha1(&parent_two),
+                commits: HashSet::from([oid_to_sha1(&parent_two)]),
+            },
+        ];
+
+        assert_eq!(
+            select_proposal_base(
+                &Repo::from_path(&fixture.dir)?,
+                &lineages,
+                None,
+                &oid_to_sha1(&child),
+                &[oid_to_sha1(&target)],
+            )?,
+            inferred_base(&second_root, oid_to_sha1(&parent_two))
+        );
+        let ProposalBaseInference::Selected(duplicate_base) = select_proposal_base(
+            &Repo::from_path(&fixture.dir)?,
+            &lineages,
+            None,
+            &oid_to_sha1(&parent_two),
+            &[oid_to_sha1(&target)],
+        )?
+        else {
+            bail!("an exact open PR tip should still be selected as the base");
+        };
+        assert!(
+            commits_after_base(
+                &Repo::from_path(&fixture.dir)?,
+                &duplicate_base,
+                &oid_to_sha1(&parent_two)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no commits after")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inference_rejects_a_child_that_does_not_contain_the_latest_parent() -> Result<()> {
+        let fixture = GitTestRepo::default();
+        fixture.populate()?;
+        fixture.create_branch("parent")?;
+        fixture.checkout("parent")?;
+        fs::write(fixture.dir.join("parent-one"), "one")?;
+        let parent_one = fixture.stage_and_commit("parent one")?;
+        fixture.create_branch("child")?;
+        fs::write(fixture.dir.join("parent-two"), "two")?;
+        let parent_two = fixture.stage_and_commit("parent two")?;
+        fixture.checkout("child")?;
+        fs::write(fixture.dir.join("child"), "child")?;
+        let child = fixture.stage_and_commit("child")?;
+        let root_id = proposal_id("parent")?;
+        let lineages = vec![ProposalLineage {
+            root_id,
+            latest: oid_to_sha1(&parent_two),
+            commits: HashSet::from([oid_to_sha1(&parent_one), oid_to_sha1(&parent_two)]),
+        }];
+
+        let error = select_proposal_base(
+            &Repo::from_path(&fixture.dir)?,
+            &lineages,
+            Some(oid_to_sha1(&parent_one)),
+            &oid_to_sha1(&child),
+            &[fixture
+                .git_repo
+                .find_commit(parent_one)?
+                .parent_id(0)
+                .map(|oid| oid_to_sha1(&oid))?],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("rebase onto the latest parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn inference_stops_tracking_a_parent_once_the_target_contains_it() -> Result<()> {
+        let fixture = GitTestRepo::default();
+        fixture.populate()?;
+        fixture.create_branch("parent")?;
+        fixture.checkout("parent")?;
+        fs::write(fixture.dir.join("parent"), "parent")?;
+        let parent = fixture.stage_and_commit("parent")?;
+        fs::write(fixture.dir.join("child"), "child")?;
+        let child = fixture.stage_and_commit("child")?;
+        let root_id = proposal_id("parent")?;
+        let lineages = vec![ProposalLineage {
+            root_id,
+            latest: oid_to_sha1(&parent),
+            commits: HashSet::from([oid_to_sha1(&parent)]),
+        }];
+
+        assert_eq!(
+            select_proposal_base(
+                &Repo::from_path(&fixture.dir)?,
+                &lineages,
+                Some(oid_to_sha1(&parent)),
+                &oid_to_sha1(&child),
+                &[oid_to_sha1(&parent)],
+            )?,
+            ProposalBaseInference::ParentContainedByTarget
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inference_rejects_incomparable_parent_tips() -> Result<()> {
+        let fixture = GitTestRepo::default();
+        fixture.populate()?;
+        fixture.create_branch("left")?;
+        fixture.checkout("left")?;
+        fs::write(fixture.dir.join("left"), "left")?;
+        let left = fixture.stage_and_commit("left")?;
+        fixture.checkout("main")?;
+        fixture.create_branch("right")?;
+        fixture.checkout("right")?;
+        fs::write(fixture.dir.join("right"), "right")?;
+        let right = fixture.stage_and_commit("right")?;
+        fixture.checkout("left")?;
+        let left_commit = fixture.git_repo.find_commit(left)?;
+        let right_commit = fixture.git_repo.find_commit(right)?;
+        let merge_tree = left_commit.tree()?;
+        let child = fixture.git_repo.commit(
+            Some("HEAD"),
+            &crate::git::test_helpers::joe_signature(),
+            &crate::git::test_helpers::joe_signature(),
+            "child merge",
+            &merge_tree,
+            &[&left_commit, &right_commit],
+        )?;
+        let target = left_commit.parent_id(0)?;
+        let lineages = vec![
+            ProposalLineage {
+                root_id: proposal_id("left")?,
+                latest: oid_to_sha1(&left),
+                commits: HashSet::from([oid_to_sha1(&left)]),
+            },
+            ProposalLineage {
+                root_id: proposal_id("right")?,
+                latest: oid_to_sha1(&right),
+                commits: HashSet::from([oid_to_sha1(&right)]),
+            },
+        ];
+
+        assert!(
+            select_proposal_base(
+                &Repo::from_path(&fixture.dir)?,
+                &lineages,
+                None,
+                &oid_to_sha1(&child),
+                &[oid_to_sha1(&target)],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("multiple unrelated open PR tips")
         );
         Ok(())
     }

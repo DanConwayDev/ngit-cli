@@ -27,16 +27,16 @@ use ngit::{
     list::list_from_remotes,
     login::{existing::load_existing_login, user::UserRef},
     proposal_base::{
-        commits_after_base, merge_base_for_fast_forward_update, resolve_explicit_base,
-        resolve_target_branch_tip,
+        ProposalBaseInference, commits_after_base, infer_proposal_base,
+        merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
     repo_ref::{self, get_repo_config_from_yaml},
     repo_state,
     signer::NgitSigner,
     utils::{
-        find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
-        get_short_git_server_name, read_line,
+        find_proposal_and_patches_by_branch_name, get_all_proposals, get_open_or_draft_proposals,
+        get_remote_name_by_url, get_short_git_server_name, read_line,
     },
 };
 use nostr::prelude::{
@@ -632,6 +632,11 @@ async fn process_proposal_refspecs(
     } else {
         None
     };
+    let open_proposals = if explicit_base.is_none() {
+        get_open_or_draft_proposals(git_repo, repo_ref).await?
+    } else {
+        HashMap::new()
+    };
     let current_user = user_ref.public_key;
 
     for refspec in proposal_refspecs {
@@ -652,10 +657,41 @@ async fn process_proposal_refspecs(
             // to the proposal event itself.
             let effective_root: &Event = pr_upgrade_root.as_ref().unwrap_or(proposal);
             let inherited_target = tag_value(effective_root, "b").ok();
-            if let Some(branch) = &inherited_target {
-                resolve_target_branch_tip(git_repo, branch, default_branch, false)?;
-            }
-            let preserved_base = if explicit_base.is_none() && !refspec.starts_with('+') {
+            let target_tips = if let Some(branch) = &inherited_target {
+                vec![resolve_target_branch_tip(
+                    git_repo,
+                    branch,
+                    default_branch,
+                    false,
+                )?]
+            } else {
+                git_repo.get_default_branch_tips(default_branch)?
+            };
+            let inference = if explicit_base.is_none() {
+                infer_proposal_base(
+                    git_repo,
+                    repo_ref,
+                    &open_proposals,
+                    Some(proposal.id),
+                    patches.first(),
+                    proposal.pubkey,
+                    &tip_of_pushed_branch,
+                    &target_tips,
+                )
+                .await?
+            } else {
+                ProposalBaseInference::NotFound
+            };
+            let inferred_base = match &inference {
+                ProposalBaseInference::Selected(base) => Some(base.clone()),
+                ProposalBaseInference::NotFound
+                | ProposalBaseInference::ParentContainedByTarget => None,
+            };
+            let selected_base = explicit_base.clone().or(inferred_base);
+            let preserved_base = if selected_base.is_none()
+                && matches!(inference, ProposalBaseInference::NotFound)
+                && !refspec.starts_with('+')
+            {
                 merge_base_for_fast_forward_update(
                     git_repo,
                     patches
@@ -666,12 +702,12 @@ async fn process_proposal_refspecs(
             } else {
                 None
             };
-            if let Some(base) = &explicit_base {
+            if let Some(base) = &selected_base {
                 commits_after_base(git_repo, base, &tip_of_pushed_branch)?;
             }
             let proposal_metadata = ngit::push::ProposalMetadata {
                 target_branch: inherited_target,
-                explicit_base: explicit_base
+                explicit_base: selected_base
                     .as_ref()
                     .map(|base| base.commit)
                     .or(preserved_base),
@@ -682,7 +718,7 @@ async fn process_proposal_refspecs(
             {
                 if refspec.starts_with('+') {
                     // force push
-                    let (ahead, default_label) = if let Some(base) = &explicit_base {
+                    let (ahead, default_label) = if let Some(base) = &selected_base {
                         (
                             commits_after_base(git_repo, base, &tip_of_pushed_branch)?,
                             base.description.clone(),
@@ -815,14 +851,42 @@ async fn process_proposal_refspecs(
             }
         } else {
             // TODO new proposal / couldn't find exisiting proposal
-            if let Some(branch) = &proposal_options.target_branch {
-                resolve_target_branch_tip(git_repo, branch, default_branch, true)?;
-            }
+            let target_tips = if let Some(branch) = &proposal_options.target_branch {
+                vec![resolve_target_branch_tip(
+                    git_repo,
+                    branch,
+                    default_branch,
+                    true,
+                )?]
+            } else {
+                git_repo.get_default_branch_tips(default_branch)?
+            };
+            let inferred_base = if explicit_base.is_none() {
+                match infer_proposal_base(
+                    git_repo,
+                    repo_ref,
+                    &open_proposals,
+                    None,
+                    None,
+                    current_user,
+                    &tip_of_pushed_branch,
+                    &target_tips,
+                )
+                .await?
+                {
+                    ProposalBaseInference::Selected(base) => Some(base),
+                    ProposalBaseInference::NotFound
+                    | ProposalBaseInference::ParentContainedByTarget => None,
+                }
+            } else {
+                None
+            };
+            let selected_base = explicit_base.clone().or(inferred_base);
             let proposal_metadata = ngit::push::ProposalMetadata {
                 target_branch: proposal_options.target_branch.clone(),
-                explicit_base: explicit_base.as_ref().map(|base| base.commit),
+                explicit_base: selected_base.as_ref().map(|base| base.commit),
             };
-            let (ahead, default_label) = if let Some(base) = &explicit_base {
+            let (ahead, default_label) = if let Some(base) = &selected_base {
                 (
                     commits_after_base(git_repo, base, &tip_of_pushed_branch)?,
                     base.description.clone(),

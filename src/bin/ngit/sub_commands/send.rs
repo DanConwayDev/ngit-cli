@@ -9,11 +9,11 @@ use ngit::{
         EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events, tag_value,
     },
     proposal_base::{
-        ExplicitBase, commits_after_base, merge_base_for_fast_forward_update,
-        resolve_explicit_base, resolve_target_branch_tip,
+        ExplicitBase, ProposalBaseInference, commits_after_base, infer_proposal_base,
+        merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
-    utils::{get_all_proposals, proposal_tip_is_pr_or_pr_update},
+    utils::{get_all_proposals, get_open_or_draft_proposals, proposal_tip_is_pr_or_pr_update},
 };
 use nostr::prelude::{ToBech32, event::Event, nip10::Nip10Tag, nip19::Nip19Event};
 
@@ -69,7 +69,8 @@ pub struct SubCommandArgs {
     /// branch this PR should target instead of the repository default
     #[clap(long)]
     pub(crate) target_branch: Option<String>,
-    /// commit, branch, root PR, or PR update to use as the proposal base
+    /// commit, branch, root PR, or PR update to use as the base for this
+    /// publication
     #[clap(long)]
     pub(crate) base: Option<String>,
 }
@@ -200,7 +201,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         None
     };
 
-    let selected_base = if let Some(reference) = &args.base {
+    let user_selected_base = if let Some(reference) = &args.base {
         Some(
             resolve_explicit_base(
                 &git_repo,
@@ -216,12 +217,32 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         None
     };
 
-    let proposal_details = root_proposal
-        .as_ref()
-        .and_then(|root| proposals.as_ref().and_then(|all| all.get(&root.id)));
+    let proposal_entry = root_proposal.as_ref().and_then(|selected_root| {
+        proposals.as_ref().and_then(|all| {
+            all.iter().find(|(root_id, (_, _, pr_upgrade_root))| {
+                **root_id == selected_root.id
+                    || pr_upgrade_root
+                        .as_ref()
+                        .is_some_and(|upgrade| upgrade.id == selected_root.id)
+            })
+        })
+    });
+    let canonical_root_id = proposal_entry
+        .map(|(root_id, _)| *root_id)
+        .or_else(|| root_proposal.as_ref().map(|root| root.id));
+    let proposal_details = proposal_entry.map(|(_, details)| details);
+    let proposal_author = proposal_details
+        .map(|(root, _, _)| root.pubkey)
+        .or_else(|| root_proposal.as_ref().map(|root| root.pubkey));
     let effective_root = proposal_details
         .and_then(|(_, _, pr_upgrade_root)| pr_upgrade_root.as_ref())
         .or(root_proposal.as_ref());
+    let existing_thread_is_pr = if let Some(root_id) = canonical_root_id {
+        proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_id).await?
+    } else {
+        false
+    };
+
     let target_branch = args
         .target_branch
         .clone()
@@ -234,19 +255,76 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         .transpose()?;
 
     let head = git_repo.get_head_commit()?;
-    let preserved_base = if selected_base.is_none() {
-        proposal_details
-            .and_then(|(_, events, _)| events.first())
-            .map(|latest| merge_base_for_fast_forward_update(&git_repo, latest, &head))
-            .transpose()?
-            .flatten()
-            .map(|commit| ExplicitBase {
-                commit,
-                description: "the previous PR merge base".to_string(),
-            })
+    let target_tips = if let Some(target_tip) = target_tip {
+        vec![target_tip]
     } else {
-        None
+        git_repo.get_default_branch_tips(None)?
     };
+
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
+        &cli_args.password,
+        Some(&client),
+        true,
+    )
+    .await?;
+
+    // Authorization is a UX guard, not enforcement (signatures can't be
+    // forged and the original author's events are immutable regardless).
+    // It applies only to *updates* of an existing PR thread — appending
+    // commits to someone else's pull request (a KIND_PULL_REQUEST_UPDATE
+    // threaded onto their proposal). It deliberately does NOT apply to a
+    // new patch *revision*, which is a fresh proposal root anyone may
+    // publish under NIP-34 (see tests/send_patch_revision.rs).
+    if existing_thread_is_pr {
+        if let Some(proposal_author) = proposal_author {
+            if proposal_author != user_ref.public_key
+                && !repo_ref.maintainers.contains(&user_ref.public_key)
+            {
+                bail!(
+                    "only the proposal author or a repository maintainer can update an existing pull request"
+                );
+            }
+        }
+    }
+
+    client.set_signer(signer.clone()).await;
+
+    let inference = if user_selected_base.is_none() {
+        infer_proposal_base(
+            &git_repo,
+            &repo_ref,
+            &get_open_or_draft_proposals(&git_repo, &repo_ref).await?,
+            canonical_root_id,
+            proposal_details.and_then(|(_, events, _)| events.first()),
+            proposal_author.unwrap_or(user_ref.public_key),
+            &head,
+            &target_tips,
+        )
+        .await?
+    } else {
+        ProposalBaseInference::NotFound
+    };
+    let inferred_base = match &inference {
+        ProposalBaseInference::Selected(base) => Some(base.clone()),
+        ProposalBaseInference::NotFound | ProposalBaseInference::ParentContainedByTarget => None,
+    };
+    let selected_base = user_selected_base.or(inferred_base);
+    let preserved_base =
+        if selected_base.is_none() && matches!(inference, ProposalBaseInference::NotFound) {
+            proposal_details
+                .and_then(|(_, events, _)| events.first())
+                .map(|latest| merge_base_for_fast_forward_update(&git_repo, latest, &head))
+                .transpose()?
+                .flatten()
+                .map(|commit| ExplicitBase {
+                    commit,
+                    description: "the previous PR merge base".to_string(),
+                })
+        } else {
+            None
+        };
     let explicit_base = selected_base.or(preserved_base);
 
     let proposal_metadata = ngit::push::ProposalMetadata {
@@ -357,11 +435,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let commits_too_big = git_repo.are_commits_too_big_for_patches(&commits);
     let has_submodules = git_repo.do_commits_contain_submodules(&commits);
     let repo_has_grasp_server = !repo_ref.grasp_servers().is_empty();
-    let existing_thread_is_pr = if let Some(root_proposal) = &root_proposal {
-        proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
-    } else {
-        false
-    };
     let should_be_pr = existing_thread_is_pr
         || commits_too_big
         || has_submodules
@@ -385,36 +458,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     } else {
         should_be_pr
     };
-
-    let (signer, user_ref, _) = login::login_or_signup(
-        &Some(&git_repo),
-        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
-        &cli_args.password,
-        Some(&client),
-        true,
-    )
-    .await?;
-
-    // Authorization is a UX guard, not enforcement (signatures can't be
-    // forged and the original author's events are immutable regardless).
-    // It applies only to *updates* of an existing PR thread — appending
-    // commits to someone else's pull request (a KIND_PULL_REQUEST_UPDATE
-    // threaded onto their proposal). It deliberately does NOT apply to a
-    // new patch *revision*, which is a fresh proposal root anyone may
-    // publish under NIP-34 (see tests/send_patch_revision.rs).
-    if existing_thread_is_pr {
-        if let Some(root_proposal) = &root_proposal {
-            if root_proposal.pubkey != user_ref.public_key
-                && !repo_ref.maintainers.contains(&user_ref.public_key)
-            {
-                bail!(
-                    "only the proposal author or a repository maintainer can update an existing pull request"
-                );
-            }
-        }
-    }
-
-    client.set_signer(signer.clone()).await;
 
     let cover_letter_title_description = if cli_args.interactive {
         // Interactive flow: prompt for cover letter confirm, title, description

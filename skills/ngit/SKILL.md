@@ -106,10 +106,13 @@ git push -u origin pr/my-feature \
 # Target a non-default branch
 git push -u origin pr/release-fix -o target-branch=release/2.x
 
-# Select an explicit proposal base (commit, branch, root PR, or PR update)
+# Stacks are inferred when this branch contains the unique latest tip of one
+# of your other open or draft PRs. Override the current publication for an
+# ambiguous stack, a cross-author parent, or a deliberately historical parent.
 git push -u origin pr/second-part -o base=<commit|branch|nevent>
 
-# Re-select the base when force-updating a stacked PR
+# An inferred child follows its parent's latest update after you rebase it.
+# Use base= only to override or pin that inference.
 git push --force origin pr/second-part -o base=<commit|branch|nevent>
 ```
 
@@ -150,10 +153,21 @@ ngit send HEAD~2 --subject "My Feature" --description "First paragraph.\n\nSecon
 ngit send --defaults                                    # non-interactive
 ngit send HEAD~2 --in-reply-to <PR-event-id>           # update existing PR
 ngit send --defaults --target-branch release/2.x        # target a non-default branch
-ngit send --defaults --base <commit|branch|nevent>      # select an explicit base
+ngit send --defaults --base <commit|branch|nevent>      # override this publication's inference
 ngit send --defaults --in-reply-to <PR-event-id> \
-  --base <commit|branch|nevent>                          # update a rewritten stack
+  --base <commit|branch|nevent>                          # override an inferred parent
 ```
+
+Both `git push` and `ngit send` automatically use the unique most-advanced tip
+of your other open or draft PRs when it is in the proposal's history and ahead
+of the target branch. An existing child remembers that parent lineage: after
+the parent advances, rebase the child onto its latest tip before updating it.
+ngit refuses stale children and unrelated ambiguous candidates instead of
+guessing. `--base` / `-o base=` is therefore optional for ordinary same-author
+stacks, but remains the explicit pin for cross-author, historical, or ambiguous
+cases. Repeat an explicit historical base on each later child update if the
+child should remain pinned there; otherwise the open parent lineage advances
+automatically.
 
 ### List / view / comment
 

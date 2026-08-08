@@ -1,5 +1,5 @@
-//! End-to-end coverage for explicit proposal bases through both user-facing
-//! creation paths.
+//! End-to-end coverage for inferred and explicit proposal bases through both
+//! user-facing creation paths.
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
@@ -150,6 +150,8 @@ async fn root_and_update_references_select_the_expected_base() -> Result<()> {
             "--force-pr",
             "--in-reply-to",
             &sent_child.id.to_hex(),
+            "--base",
+            &historical_update.id.to_hex(),
         ],
     )
     .await?;
@@ -243,6 +245,305 @@ async fn root_and_update_references_select_the_expected_base() -> Result<()> {
 }
 
 #[tokio::test]
+async fn stack_bases_follow_parent_updates_through_send_and_git_push() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("inferred-pr-base-test".into()),
+            ..Default::default()
+        })
+        .await?;
+    publisher
+        .git_ok(["checkout", "-b", "release/2.x"], "create release target")
+        .await?;
+    commit_file(
+        &publisher,
+        "release.md",
+        "release\n",
+        "create release target",
+    )
+    .await?;
+    publisher
+        .nostr_push(["-u", "origin", "release/2.x"])
+        .await?;
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "stack contributor".into(),
+            },
+        )
+        .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/parent", "origin/release/2.x"],
+            "create parent PR",
+        )
+        .await?;
+    commit_file(&contributor, "parent-one.md", "one\n", "parent one").await?;
+    let parent_one = contributor.rev_parse("HEAD").await?;
+    contributor
+        .nostr_push([
+            "-u",
+            "origin",
+            "pr/parent",
+            "-o",
+            "target-branch=release/2.x",
+        ])
+        .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/pushed-child", &parent_one],
+            "create pushed child",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "pushed-child-one.md",
+        "child one\n",
+        "pushed child one",
+    )
+    .await?;
+    contributor
+        .nostr_push([
+            "-u",
+            "origin",
+            "pr/pushed-child",
+            "-o",
+            "target-branch=release/2.x",
+        ])
+        .await?;
+    let pushed_child = find_pr(&harness, "pushed-child").await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "sent-child", &parent_one],
+            "create sent child",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "sent-child-one.md",
+        "child one\n",
+        "sent child one",
+    )
+    .await?;
+    ngit_ok(
+        &contributor,
+        &[
+            "send",
+            "--defaults",
+            "--force-pr",
+            "--target-branch",
+            "release/2.x",
+        ],
+    )
+    .await?;
+    let sent_child = find_pr(&harness, "sent-child").await?;
+
+    for child in [&pushed_child, &sent_child] {
+        assert_eq!(
+            tag_value(child, "merge-base").as_deref(),
+            Some(parent_one.as_str())
+        );
+        assert_eq!(tag_value(child, "b").as_deref(), Some("release/2.x"));
+    }
+
+    contributor
+        .git_ok(["checkout", "pr/parent"], "advance parent PR")
+        .await?;
+    commit_file(&contributor, "parent-two.md", "two\n", "parent two").await?;
+    let parent_two = contributor.rev_parse("HEAD").await?;
+    contributor.nostr_push(["origin", "pr/parent"]).await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-B", "pr/pushed-child", &parent_one],
+            "rewrite pushed child on stale parent",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "pushed-child-stale.md",
+        "stale\n",
+        "stale pushed child",
+    )
+    .await?;
+    contributor
+        .nostr_push_expecting_failure(["--force", "origin", "pr/pushed-child"])
+        .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-B", "sent-child", &parent_one],
+            "rewrite sent child on stale parent",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "sent-child-stale.md",
+        "stale\n",
+        "stale sent child",
+    )
+    .await?;
+    ngit_fails(
+        &contributor,
+        &[
+            "send",
+            "--defaults",
+            "--force-pr",
+            "--in-reply-to",
+            &sent_child.id.to_hex(),
+        ],
+    )
+    .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-B", "pr/pushed-child", &parent_two],
+            "rebase pushed child onto latest parent",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "pushed-child-two.md",
+        "child two\n",
+        "pushed child two",
+    )
+    .await?;
+    let pushed_update_tip = contributor.rev_parse("HEAD").await?;
+    contributor
+        .nostr_push(["--force", "origin", "pr/pushed-child"])
+        .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-B", "sent-child", &parent_two],
+            "rebase sent child onto latest parent",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "sent-child-two.md",
+        "child two\n",
+        "sent child two",
+    )
+    .await?;
+    let sent_update_tip = contributor.rev_parse("HEAD").await?;
+    ngit_ok(
+        &contributor,
+        &[
+            "send",
+            "--defaults",
+            "--force-pr",
+            "--in-reply-to",
+            &sent_child.id.to_hex(),
+        ],
+    )
+    .await?;
+
+    for update in [
+        find_pr_update_at(&harness, &pushed_update_tip).await?,
+        find_pr_update_at(&harness, &sent_update_tip).await?,
+    ] {
+        assert_eq!(
+            tag_value(&update, "merge-base").as_deref(),
+            Some(parent_two.as_str())
+        );
+        assert!(tag_value(&update, "b").is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unrelated_stack_candidates_fail_closed_through_send_and_git_push() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (_publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("ambiguous-pr-base-test".into()),
+            ..Default::default()
+        })
+        .await?;
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "ambiguous stack contributor".into(),
+            },
+        )
+        .await?;
+
+    contributor
+        .git_ok(["checkout", "-b", "pr/left"], "create left parent")
+        .await?;
+    commit_file(&contributor, "left.md", "left\n", "left parent").await?;
+    contributor.nostr_push(["-u", "origin", "pr/left"]).await?;
+
+    contributor
+        .git_ok(["checkout", "main"], "return to main")
+        .await?;
+    contributor
+        .git_ok(["checkout", "-b", "pr/right"], "create right parent")
+        .await?;
+    commit_file(&contributor, "right.md", "right\n", "right parent").await?;
+    contributor.nostr_push(["-u", "origin", "pr/right"]).await?;
+
+    contributor
+        .git_ok(["checkout", "pr/left"], "return to left parent")
+        .await?;
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/ambiguous-push"],
+            "create ambiguous pushed child",
+        )
+        .await?;
+    contributor
+        .git_ok(
+            ["merge", "--no-ff", "pr/right", "-m", "combine parents"],
+            "combine unrelated parent tips",
+        )
+        .await?;
+    let combined_tip = contributor.rev_parse("HEAD").await?;
+    contributor
+        .nostr_push_expecting_failure(["-u", "origin", "pr/ambiguous-push"])
+        .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "ambiguous-send", &combined_tip],
+            "create ambiguous sent child",
+        )
+        .await?;
+    ngit_fails(&contributor, &["send", "--defaults", "--force-pr"]).await?;
+
+    let proposals = harness
+        .grasp("repo")
+        .events(Filter::new().kind(KIND_PULL_REQUEST))
+        .await?;
+    assert!(proposals.iter().all(|event| {
+        !["ambiguous-push", "ambiguous-send"]
+            .contains(&event_branch_name_tag(event).unwrap_or_default().as_str())
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_bases_fail_through_send_and_git_push_without_events() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
@@ -327,7 +628,7 @@ async fn patch_to_pr_upgrade_roots_are_valid_bases_through_both_surfaces() -> Re
     .with_grasp_server("repo")
     .build()
     .await?;
-    let (_publisher, published) = harness
+    let (publisher, published) = harness
         .publish_repo(PublishRepoOpts {
             identifier: Some("pr-upgrade-base-test".into()),
             ..Default::default()
@@ -361,8 +662,9 @@ async fn patch_to_pr_upgrade_roots_are_valid_bases_through_both_surfaces() -> Re
         .into_iter()
         .find(|event| event_branch_name_tag(event).as_deref() == Some("upgrade-parent"))
         .context("missing patch proposal root")?;
+    ngit_ok(&publisher, &["pr", "checkout", &patch_root.id.to_hex()]).await?;
     ngit_ok(
-        &contributor,
+        &publisher,
         &[
             "send",
             "--defaults",
@@ -381,9 +683,38 @@ async fn patch_to_pr_upgrade_roots_are_valid_bases_through_both_surfaces() -> Re
     }
     .to_bech32()?;
 
+    commit_file(
+        &contributor,
+        "upgrade-parent-update.md",
+        "upgrade parent update\n",
+        "update maintainer-upgraded parent",
+    )
+    .await?;
+    let latest_upgrade_tip = contributor.rev_parse("HEAD").await?;
+    ngit_ok(
+        &contributor,
+        &[
+            "send",
+            "--defaults",
+            "--force-pr",
+            "--in-reply-to",
+            &upgrade_root.id.to_hex(),
+        ],
+    )
+    .await?;
+    assert_ne!(
+        tag_value(
+            &find_pr_update_at(&harness, &latest_upgrade_tip).await?,
+            "merge-base"
+        )
+        .as_deref(),
+        Some(upgrade_tip.as_str()),
+        "the upgraded PR must not infer its own previous tip as its parent"
+    );
+
     contributor
         .git_ok(
-            ["checkout", "-b", "pr/upgrade-push", &upgrade_tip],
+            ["checkout", "-b", "pr/upgrade-push", &latest_upgrade_tip],
             "create pushed child from upgrade root",
         )
         .await?;
@@ -406,7 +737,7 @@ async fn patch_to_pr_upgrade_roots_are_valid_bases_through_both_surfaces() -> Re
 
     contributor
         .git_ok(
-            ["checkout", "-b", "upgrade-send", &upgrade_tip],
+            ["checkout", "-b", "upgrade-send", &latest_upgrade_tip],
             "create sent child from upgrade root",
         )
         .await?;
@@ -423,13 +754,31 @@ async fn patch_to_pr_upgrade_roots_are_valid_bases_through_both_surfaces() -> Re
     )
     .await?;
 
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/upgrade-auto", &latest_upgrade_tip],
+            "create automatically based child from maintainer upgrade",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "upgrade-auto.md",
+        "upgrade auto\n",
+        "automatic upgrade child",
+    )
+    .await?;
+    contributor
+        .nostr_push(["-u", "origin", "pr/upgrade-auto"])
+        .await?;
+
     for proposal in [
         find_pr(&harness, "upgrade-push").await?,
         find_pr(&harness, "upgrade-send").await?,
+        find_pr(&harness, "upgrade-auto").await?,
     ] {
         assert_eq!(
             tag_value(&proposal, "merge-base").as_deref(),
-            Some(upgrade_tip.as_str())
+            Some(latest_upgrade_tip.as_str())
         );
     }
     Ok(())
