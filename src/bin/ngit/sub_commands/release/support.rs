@@ -9,7 +9,7 @@ use ngit::{
     NgitSigner,
     client::{
         Client, Connect, Params, fetch_filters_to_local_cache, fetching_with_report,
-        get_events_from_local_cache, get_repo_ref_from_cache,
+        get_events_from_local_cache, get_repo_ref_from_cache, send_events,
     },
     event_ordering::latest_event,
     git::{Repo, RepoActions},
@@ -293,6 +293,46 @@ impl ReleaseContext {
         }
     }
 
+    pub(super) fn require_application_author(
+        &self,
+        application: &SoftwareApplication,
+    ) -> Result<()> {
+        let authority = self.authority(application);
+        if authority.can_publish {
+            return Ok(());
+        }
+        let code = authority.blocker.as_deref().unwrap_or("publication_failed");
+        let code = match code {
+            "not_logged_in" => "not_logged_in",
+            "not_repository_maintainer" => "not_repository_maintainer",
+            "application_not_linked" => "application_not_linked",
+            "application_author_mismatch" => "application_author_mismatch",
+            _ => "publication_failed",
+        };
+        let signer = authority
+            .current_signer
+            .as_deref()
+            .unwrap_or("not logged in");
+        Err(coded_error_with_details(
+            code,
+            if code == "application_author_mismatch" {
+                format!(
+                    "only application author {} can publish; current signer is {signer}",
+                    application.raw_event.pubkey.to_bech32()?
+                )
+            } else {
+                format!(
+                    "cannot publish application {}: {code}",
+                    application.identifier
+                )
+            },
+            json!({
+                "current_signer": authority.current_signer,
+                "required_author": application.raw_event.pubkey.to_hex(),
+            }),
+        ))
+    }
+
     pub(super) fn require_owner_maintainer(&self, application: &SoftwareApplication) -> Result<()> {
         let signer = self
             .current_signer()
@@ -339,6 +379,43 @@ impl ReleaseContext {
         }
         dedup_relays(&mut relays);
         Ok(relays)
+    }
+
+    pub(super) async fn publish_batch(
+        &self,
+        events: Vec<Event>,
+        possible_orphan_asset_ids: &[EventId],
+        json_output: bool,
+    ) -> Result<Vec<(String, bool)>> {
+        let (user_write, repo_relays) = self.publication_relays();
+        let event_ids: Vec<String> = events.iter().map(|event| event.id.to_hex()).collect();
+        let results = send_events(
+            &self.client,
+            Some(self.git_repo_path()?),
+            events,
+            user_write,
+            repo_relays,
+            !json_output,
+            json_output,
+        )
+        .await?;
+        if !results.iter().any(|(_, accepted)| *accepted) {
+            return Err(coded_error_with_details(
+                "publication_failed",
+                "no relay accepted the complete event batch; check relay availability and retry the same command",
+                json!({
+                    "event_ids": event_ids,
+                    "possible_orphan_asset_ids": possible_orphan_asset_ids
+                        .iter().map(EventId::to_hex).collect::<Vec<_>>(),
+                    "retry": "inspect the release first, then rerun the same command; add --edit only if the release event became visible",
+                    "relays": results.iter().map(|(url, accepted)| json!({
+                        "url": url,
+                        "status": if *accepted { "accepted" } else { "rejected" },
+                    })).collect::<Vec<_>>(),
+                }),
+            ));
+        }
+        Ok(results)
     }
 
     pub(super) async fn add_author_relays(&mut self, author: PublicKey) -> Result<()> {

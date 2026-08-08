@@ -449,6 +449,8 @@ pub enum ReleaseCommands {
     List(ReleaseListArgs),
     /// view a release and all of its referenced assets
     View(ReleaseViewArgs),
+    /// publish a new release or explicitly edit an existing release
+    Publish(ReleasePublishArgs),
     /// work with software applications
     #[command(alias = "application")]
     App(ReleaseAppSubCommandArgs),
@@ -501,6 +503,47 @@ pub struct ReleaseViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReleasePublishArgs {
+    /// Exact release version; identifiers are not normalized
+    #[arg(value_name = "VERSION")]
+    pub release_version: String,
+    /// Application identifier, naddr, or application coordinate
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Release channel (defaults to main when creating)
+    #[arg(long, value_name = "CHANNEL")]
+    pub channel: Option<String>,
+    /// Release notes
+    #[arg(long, value_name = "TEXT", conflicts_with = "notes_file")]
+    pub notes: Option<String>,
+    /// Read release notes from a file
+    #[arg(long, value_name = "PATH", conflicts_with = "notes")]
+    pub notes_file: Option<PathBuf>,
+    /// Release date as Unix seconds (defaults to now when creating)
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub released_at: Option<u64>,
+    /// Reuse an existing kind 3063 asset event (repeatable)
+    #[arg(long = "asset-event", value_name = "ASSET")]
+    pub asset_events: Vec<String>,
+    /// Acknowledge reused asset events which have no platform tags
+    #[arg(long)]
+    pub accept_platform_agnostic_assets: bool,
+    /// Explicitly replace an existing release; never creates a missing release
+    #[arg(long)]
+    pub edit: bool,
+    /// Treat metadata warnings as errors
+    #[arg(long)]
+    pub strict_metadata: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -1501,6 +1544,24 @@ mod tests {
     }
 
     #[test]
+    fn release_publish_commands_parse() {
+        for args in [[
+            "ngit",
+            "release",
+            "publish",
+            "1.8.0",
+            "--asset-event",
+            "deadbeef",
+            "--json",
+        ]
+        .as_slice()]
+        {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
     fn release_asset_commands_parse() {
         for args in [
             [
@@ -1543,12 +1604,13 @@ mod tests {
     }
 
     #[test]
-    fn release_app_link_requires_edit() {
-        let args = ["ngit", "release", "app", "link", "ngit"];
-        assert!(
-            Cli::try_parse_from(args).is_err(),
-            "application link unexpectedly accepted without --edit"
-        );
+    fn release_replacement_commands_require_edit() {
+        for args in [["ngit", "release", "app", "link", "ngit"].as_slice()] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "command unexpectedly accepted without --edit: {args:?}"
+            );
+        }
     }
 
     #[test]
@@ -1563,7 +1625,24 @@ mod tests {
     }
 
     #[test]
-    fn release_application_command_type_is_exposed_to_dispatch() {
+    fn release_edit_fields_preserve_omission() {
+        let cli = Cli::try_parse_from(["ngit", "release", "publish", "1.8.0", "--edit"])
+            .expect("release edit should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::Publish(args) = release.release_command else {
+            panic!("expected release publish command");
+        };
+
+        assert!(args.edit);
+        assert!(args.channel.is_none());
+        assert!(args.notes.is_none());
+        assert!(args.released_at.is_none());
+    }
+
+    #[test]
+    fn release_nested_command_types_are_exposed_to_dispatch() {
         let cli = Cli::try_parse_from(["ngit", "release", "app", "list"])
             .expect("application list should parse");
         let Some(Commands::Release(release)) = cli.command else {

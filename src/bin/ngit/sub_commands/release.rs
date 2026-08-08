@@ -1,5 +1,6 @@
 mod read;
 mod support;
+mod write;
 mod write_app;
 
 use anyhow::Result;
@@ -16,11 +17,12 @@ pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
     let result = match &args.release_command {
         ReleaseCommands::List(args) => read::release_list(cli, args).await,
         ReleaseCommands::View(args) => read::release_view(cli, args).await,
+        ReleaseCommands::Publish(args) => write::release_publish(cli, args).await,
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(args) => read::app_list(cli, args).await,
             ReleaseAppCommands::View(args) => read::app_view(cli, args).await,
-            ReleaseAppCommands::Init(args) => write_app::app_init(cli, args).await,
-            ReleaseAppCommands::Link(args) => write_app::app_link(cli, args).await,
+            ReleaseAppCommands::Init(args) => write::app_init(cli, args).await,
+            ReleaseAppCommands::Link(args) => write::app_link(cli, args).await,
         },
         ReleaseCommands::Asset(args) => match &args.asset_command {
             ReleaseAssetCommands::List(args) => read::asset_list(cli, args).await,
@@ -90,6 +92,7 @@ fn wants_json(command: &ReleaseCommands) -> bool {
     match command {
         ReleaseCommands::List(args) => args.json,
         ReleaseCommands::View(args) => args.json,
+        ReleaseCommands::Publish(args) => args.json,
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(args) => args.json,
             ReleaseAppCommands::View(args) => args.json,
@@ -107,6 +110,7 @@ fn command_name(command: &ReleaseCommands) -> &'static str {
     match command {
         ReleaseCommands::List(_) => "release.list",
         ReleaseCommands::View(_) => "release.view",
+        ReleaseCommands::Publish(_) => "release.publish",
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(_) => "release.app.list",
             ReleaseAppCommands::View(_) => "release.app.view",
