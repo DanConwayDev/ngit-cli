@@ -499,6 +499,110 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
 }
 
 #[tokio::test]
+async fn local_apk_manifest_upload_preserves_android_metadata() -> Result<()> {
+    const APK_BYTES: &[u8] = b"manifest Android package fixture\n";
+    const CERTIFICATE_SHA256: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    let dist = publisher.dir().join("dist");
+    fs::create_dir_all(&dist).context("failed to create release artifact directory")?;
+    fs::write(dist.join("ngit-1.2.3.apk"), APK_BYTES)
+        .context("failed to write local Android release asset")?;
+
+    let hash = sha256_hex(APK_BYTES);
+    let blossom = BlossomHttpServer::descriptor(
+        "201 Created",
+        &hash,
+        APK_BYTES.len() as u64,
+        "application/vnd.android.package-archive",
+    )
+    .await?;
+    let manifest_dir = publisher.dir().join(".ngit");
+    fs::create_dir_all(&manifest_dir).context("failed to create release manifest directory")?;
+    let manifest = format!(
+        r#"schema: 1
+application: {APP_ID}
+notes: "Android metadata from a local manifest asset"
+assets:
+  - file: dist/ngit-{{version}}.apk
+    filename: ngit-{{version}}-android-arm64-v8a.apk
+    mime: application/vnd.android.package-archive
+    platforms: [android-arm64-v8a]
+    android:
+      version_code: 10203
+      min_allowed_version_code: 10100
+      certificate_sha256: [{CERTIFICATE_SHA256}]
+"#,
+    );
+    fs::write(manifest_dir.join("release.yaml"), manifest)
+        .context("failed to write local-file release manifest")?;
+
+    let output = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--manifest",
+            ".ngit/release.yaml",
+            "--blossom-server",
+            blossom.base_url(),
+            "--json",
+        ],
+    )
+    .await?;
+    let primary_url = blossom
+        .blob_url()
+        .context("Blossom descriptor URL missing")?
+        .to_owned();
+    let request = blossom.finish().await?;
+
+    ensure!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+    ensure!(request.body == APK_BYTES);
+    ensure!(output["result"]["blossom"]["server_selection"]["source"] == "explicit");
+    ensure!(output["result"]["blossom"]["uploads"][0]["sha256"] == hash);
+
+    let asset = SoftwareAsset::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+            "manifest-backed Android software asset",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(asset.url.as_deref() == Some(primary_url.as_str()));
+    ensure!(asset.filename.as_deref() == Some("ngit-1.2.3-android-arm64-v8a.apk"));
+    ensure!(asset.mime == "application/vnd.android.package-archive");
+    ensure!(asset.sha256 == hash);
+    ensure!(asset.size == Some(APK_BYTES.len() as u64));
+    ensure!(asset.platforms == ["android-arm64-v8a"]);
+    ensure!(asset.version_code == Some(10203));
+    ensure!(asset.min_allowed_version_code == Some(10100));
+    ensure!(asset.apk_certificate_hashes == [CERTIFICATE_SHA256]);
+
+    let release = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(RELEASE_IDENTIFIER),
+            "manifest-backed Android software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(release.assets[0].event_id == asset.raw_event.id);
+    ensure!(release.platforms == ["android-arm64-v8a"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> Result<()> {
     const ASSET_BYTES: &[u8] = b"orphaned Blossom release archive\n";
 

@@ -16,8 +16,8 @@ use ngit::{
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
     release_download::{UrlAssetRequest, download_url_asset},
     release_manifest::{
-        ResolvedReleaseManifest, ResolvedReleaseManifestAsset, load_release_manifest,
-        resolve_release_manifest_path,
+        ResolvedReleaseManifest, ResolvedReleaseManifestAsset, ResolvedReleaseManifestSource,
+        load_release_manifest, resolve_release_manifest_path,
     },
     software_release::{
         AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
@@ -119,6 +119,21 @@ pub(super) async fn release_publish(
     enforce_edit_guard(existing.as_ref(), args.edit, "release", &identifier)?;
     let commit = release_commit(&context, args, manifest.as_ref(), existing.as_ref())?;
 
+    let manifest_has_files = manifest.as_ref().is_some_and(|manifest| {
+        manifest
+            .assets
+            .iter()
+            .any(|asset| matches!(asset.source, ResolvedReleaseManifestSource::File(_)))
+    });
+    let has_local_files =
+        manifest_has_files || !args.files.is_empty() || !args.platform_agnostic_files.is_empty();
+    if !args.blossom_servers.is_empty() && !has_local_files {
+        return Err(coded_error(
+            "blossom_server_without_file",
+            "--blossom-server requires a local file from --file, --platform-agnostic-file, or the release manifest",
+        ));
+    }
+
     let mut assets = if let Some(release) = &existing {
         require_all_assets(&mut context, release).await?
     } else {
@@ -127,13 +142,36 @@ pub(super) async fn release_publish(
     let mut prepared_assets = Vec::new();
     if let Some(manifest) = &manifest {
         for asset in &manifest.assets {
-            let input = prepare_url_asset(
-                &mut context,
-                NewUrlAsset::from_manifest(asset, &application_target, &args.release_version),
-            )
-            .await?;
-            reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
-            prepared_assets.push(PreparedAsset::Ready(input));
+            let prepared = match &asset.source {
+                ResolvedReleaseManifestSource::Url(source) => {
+                    let input = prepare_url_asset(
+                        &mut context,
+                        NewUrlAsset::from_manifest(
+                            asset,
+                            source.clone(),
+                            &application_target,
+                            &args.release_version,
+                        ),
+                    )
+                    .await?;
+                    PreparedAsset::Ready(input)
+                }
+                ResolvedReleaseManifestSource::File(path) => {
+                    let pending = prepare_file_asset(
+                        &mut context,
+                        NewFileAsset::from_manifest(
+                            asset,
+                            path,
+                            &application_target,
+                            &args.release_version,
+                        ),
+                    )
+                    .await?;
+                    PreparedAsset::File(pending)
+                }
+            };
+            reject_duplicate_prepared_asset(&assets, &prepared_assets, prepared.input())?;
+            prepared_assets.push(prepared);
         }
     }
     for value in &args.assets {
@@ -1463,11 +1501,12 @@ impl NewUrlAsset {
 
     fn from_manifest(
         asset: &ResolvedReleaseManifestAsset,
+        source: String,
         application: &ApplicationTarget,
         release_version: &str,
     ) -> Self {
         Self {
-            source: asset.source.clone(),
+            source,
             application_coordinate: application.coordinate(),
             identifier: asset
                 .identifier
@@ -1552,6 +1591,23 @@ impl NewFileAsset {
         Self {
             source_path: source_path.to_path_buf(),
             metadata: NewUrlAsset::simple("", platforms, application, release_version),
+        }
+    }
+
+    fn from_manifest(
+        asset: &ResolvedReleaseManifestAsset,
+        source_path: &Path,
+        application: &ApplicationTarget,
+        release_version: &str,
+    ) -> Self {
+        Self {
+            source_path: source_path.to_path_buf(),
+            metadata: NewUrlAsset::from_manifest(
+                asset,
+                String::new(),
+                application,
+                release_version,
+            ),
         }
     }
 }
@@ -1646,7 +1702,7 @@ async fn resolve_blossom_server_selection(
         if !explicit_servers.is_empty() {
             return Err(coded_error(
                 "blossom_server_without_file",
-                "--blossom-server requires at least one --file or --platform-agnostic-file",
+                "--blossom-server requires a local file",
             ));
         }
         return Ok(None);

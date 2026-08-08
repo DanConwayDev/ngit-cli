@@ -62,8 +62,6 @@ alias.
 - Blossom payment negotiation, media optimization, deletion, and blob listing.
 - Publishing mirror URLs in NIP-82 extension tags. v1 publishes the primary
   Blossom URL and reports mirrors through command output.
-- Local-file entries in release manifests. A later additive schema change can
-  introduce a `file` field without overloading URL `source` detection.
 
 ## Protocol model
 
@@ -846,12 +844,20 @@ assets:
       - darwin-arm64
   - source: https://cdn.example.org/ngit/{version}/checksums.txt
     platform_agnostic: true
+  - file: dist/ngit-{version}-android-arm64-v8a.apk
+    filename: ngit-{version}-android-arm64-v8a.apk
+    mime: application/vnd.android.package-archive
+    platforms: [android-arm64-v8a]
+    android:
+      version_code: 10203
+      certificate_sha256:
+        - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ```
 
 Supported top-level fields are `schema`, `application`, `channel`, `notes`,
 release-wide `commit`, and `assets`. An asset supports:
 
-- `source` URL;
+- exactly one of an HTTP(S) `source` URL or a local `file` path;
 - `identifier` and `version`, defaulting to the application identifier and
   release version;
 - `filename` and `mime` overrides;
@@ -865,7 +871,10 @@ release-wide `commit`, and `assets`. An asset supports:
 
 Only the literal `{version}` and `{tag}` placeholders are expanded. `{version}`
 is the exact VERSION argument. `{tag}` is the exact resolved Git tag and MUST be
-provided explicitly when it differs from VERSION. No shell, environment
+provided explicitly when it differs from VERSION. URL substitutions are
+percent-encoded as URL components; filenames and local paths use the literal
+value. Relative local paths are resolved from the repository root and uploaded
+through the same ordered Blossom workflow as `--file`. No shell, environment
 variable, command, arbitrary template, or glob expansion is performed.
 
 CLI values override top-level manifest values. For release commit selection,
@@ -874,8 +883,8 @@ then `HEAD` on create. Release-wide and per-asset commit values are independent:
 the former identifies the source state represented by the release, while the
 latter may identify the source of one particular artifact. Direct asset flags
 append to manifest assets; they do not replace them. Duplicate final URLs or
-duplicate resolved filenames are rejected. Unknown schema versions and unknown
-keys are errors so a typo cannot silently discard metadata.
+local paths, or resolved filenames are rejected. Unknown schema versions and
+unknown keys are errors so a typo cannot silently discard metadata.
 
 ## Metadata policy
 
@@ -1298,12 +1307,11 @@ fail closed with an actionable error.
   must do the same.
 - CLI-over-manifest precedence must be field-specific and documented. Repeated
   assets append; scalar overrides must not duplicate singleton tags.
-- Relative manifest paths are resolved from the repository root, not the
-  caller's current subdirectory. Local asset paths are reserved for future
-  Blossom support and should be rejected in v1.
-- Symlinks, changing files, nondeterministic globs, and files modified during
-  upload will matter when local sources arrive. The future uploader should open
-  and hash one stable file handle and verify after upload.
+- Relative manifest and local asset paths are resolved from the repository
+  root, not the caller's current subdirectory.
+- Symlinks, changing files, and files modified during upload must not let the
+  described bytes drift. Local sources use the same stable private snapshot as
+  direct file arguments; path globs are never expanded.
 - Resolved manifests and JSON plans can expose credential-bearing URLs. Redact
   diagnostics, while warning that the URL itself would still be public in the
   signed event.
