@@ -465,6 +465,158 @@ async fn stack_bases_follow_parent_updates_through_send_and_git_push() -> Result
 }
 
 #[tokio::test]
+async fn children_remain_mergeable_after_parent_is_merged_with_no_ff_commit() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("merged-stack-base-test".into()),
+            ..Default::default()
+        })
+        .await?;
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "merged stack contributor".into(),
+            },
+        )
+        .await?;
+
+    contributor
+        .git_ok(["checkout", "-b", "pr/parent"], "create parent PR")
+        .await?;
+    commit_file(&contributor, "parent.md", "parent\n", "parent change").await?;
+    let parent_tip = contributor.rev_parse("HEAD").await?;
+    contributor
+        .nostr_push(["-u", "origin", "pr/parent"])
+        .await?;
+    let parent = find_pr(&harness, "parent").await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/pushed-child", &parent_tip],
+            "create pushed child",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "pushed-child.md",
+        "pushed child\n",
+        "pushed child change",
+    )
+    .await?;
+    contributor
+        .nostr_push(["-u", "origin", "pr/pushed-child"])
+        .await?;
+    let pushed_child = find_pr(&harness, "pushed-child").await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "sent-child", &parent_tip],
+            "create sent child",
+        )
+        .await?;
+    commit_file(
+        &contributor,
+        "sent-child.md",
+        "sent child\n",
+        "sent child change",
+    )
+    .await?;
+    ngit_ok(&contributor, &["send", "--defaults", "--force-pr"]).await?;
+    let sent_child = find_pr(&harness, "sent-child").await?;
+
+    for child in [&pushed_child, &sent_child] {
+        assert_eq!(
+            tag_value(child, "merge-base").as_deref(),
+            Some(parent_tip.as_str())
+        );
+    }
+
+    ngit_ok(&publisher, &["merge", &parent.id.to_hex()]).await?;
+    let parent_merge = publisher.rev_parse("main").await?;
+    assert_ne!(parent_merge, parent_tip);
+    assert_eq!(publisher.rev_parse("main^1").await?, published.initial_oid);
+    assert_eq!(publisher.rev_parse("main^2").await?, parent_tip);
+    publisher.nostr_push(["origin", "main"]).await?;
+
+    let applied = harness
+        .grasp("repo")
+        .events(Filter::new().kind(Kind::GitStatusApplied))
+        .await?;
+    assert!(
+        applied
+            .iter()
+            .any(|event| event_root_e_tag(event) == Some(parent.id))
+    );
+
+    contributor
+        .git_ok(["fetch", "origin"], "fetch merged parent")
+        .await?;
+    assert_eq!(contributor.rev_parse("origin/main").await?, parent_merge);
+
+    contributor
+        .git_ok(["checkout", "pr/pushed-child"], "update pushed child")
+        .await?;
+    commit_file(
+        &contributor,
+        "pushed-child-update.md",
+        "pushed child update\n",
+        "update pushed child",
+    )
+    .await?;
+    let pushed_update_tip = contributor.rev_parse("HEAD").await?;
+    contributor
+        .nostr_push(["origin", "pr/pushed-child"])
+        .await?;
+
+    contributor
+        .git_ok(["checkout", "sent-child"], "update sent child")
+        .await?;
+    commit_file(
+        &contributor,
+        "sent-child-update.md",
+        "sent child update\n",
+        "update sent child",
+    )
+    .await?;
+    let sent_update_tip = contributor.rev_parse("HEAD").await?;
+    ngit_ok(
+        &contributor,
+        &[
+            "send",
+            "--defaults",
+            "--force-pr",
+            "--in-reply-to",
+            &sent_child.id.to_hex(),
+        ],
+    )
+    .await?;
+
+    for update in [
+        find_pr_update_at(&harness, &pushed_update_tip).await?,
+        find_pr_update_at(&harness, &sent_update_tip).await?,
+    ] {
+        assert_eq!(
+            tag_value(&update, "merge-base").as_deref(),
+            Some(parent_tip.as_str())
+        );
+    }
+
+    ngit_ok(&publisher, &["merge", &pushed_child.id.to_hex()]).await?;
+    assert_eq!(publisher.rev_parse("main^1").await?, parent_merge);
+    assert_eq!(publisher.rev_parse("main^2").await?, pushed_update_tip);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unrelated_stack_candidates_fail_closed_through_send_and_git_push() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
@@ -802,6 +954,20 @@ async fn find_pr(harness: &Harness, branch: &str) -> Result<Event> {
         .into_iter()
         .find(|event| event_branch_name_tag(event).as_deref() == Some(branch))
         .with_context(|| format!("missing PR event for branch {branch}"))
+}
+
+fn event_root_e_tag(event: &Event) -> Option<EventId> {
+    event.tags.iter().find_map(|tag| {
+        let values = tag.as_slice();
+        if values.first().map(String::as_str) != Some("e")
+            || !values.iter().any(|value| value == "root")
+        {
+            return None;
+        }
+        values
+            .get(1)
+            .and_then(|value| EventId::from_hex(value).ok())
+    })
 }
 
 async fn commit_file(
