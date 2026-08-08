@@ -39,6 +39,12 @@ struct PushOptions {
     git_server: Option<String>,
     git_server_extras: Vec<String>,
     force_with_lease: HashMap<String, Option<String>>,
+    proposal: ProposalOptions,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ProposalOptions {
+    pub target_branch: Option<String>,
 }
 
 fn parse_cas_option(value: &str) -> Result<(String, Option<String>)> {
@@ -144,6 +150,19 @@ impl PushOptions {
     }
 }
 
+fn apply_ngit_push_option(push_options: &mut PushOptions, key: &str, value: &str) -> bool {
+    match key {
+        "title" => push_options.title = Some(decode_push_option_escapes(value)),
+        "description" => {
+            push_options.description = Some(decode_push_option_escapes(value));
+        }
+        "git-server" => push_options.git_server = Some(value.to_string()),
+        "target-branch" => push_options.proposal.target_branch = Some(value.to_string()),
+        _ => return false,
+    }
+    true
+}
+
 mod fetch;
 mod list;
 pub(crate) mod push;
@@ -221,21 +240,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             ["option", "push-option", rest @ ..] => {
                 let option = strip_git_quoting(&rest.join(" "));
                 let handled_by_ngit = if let Some((key, value)) = option.split_once('=') {
-                    match key {
-                        "title" => {
-                            push_options.title = Some(decode_push_option_escapes(value));
-                            true
-                        }
-                        "description" => {
-                            push_options.description = Some(decode_push_option_escapes(value));
-                            true
-                        }
-                        "git-server" => {
-                            push_options.git_server = Some(value.to_string());
-                            true
-                        }
-                        _ => false,
-                    }
+                    apply_ngit_push_option(&mut push_options, key, value)
                 } else {
                     false
                 };
@@ -270,6 +275,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                     title_description,
                     push_options.git_server_extras.clone(),
                     push_options.git_server.clone(),
+                    push_options.proposal.clone(),
                     &push_options.force_with_lease,
                 )
                 .await?;
@@ -444,6 +450,21 @@ mod tests {
         assert_eq!(
             decode_push_option_escapes(r"line1\nline2\\nstill line2\nline3"),
             "line1\nline2\\nstill line2\nline3"
+        );
+    }
+
+    #[test]
+    fn parses_target_push_option_without_forwarding_it() {
+        let mut options = PushOptions::default();
+
+        assert!(apply_ngit_push_option(
+            &mut options,
+            "target-branch",
+            "release/2.x"
+        ));
+        assert_eq!(
+            options.proposal.target_branch.as_deref(),
+            Some("release/2.x")
         );
     }
 

@@ -156,24 +156,35 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         git_repo.create_branch_at_commit(&branch_name, &tip_commit_str)?;
     }
 
-    // Resolve the default branch and check it out before merging.
-    let default_branch = git_repo
-        .get_default_branch_name(None)?
-        .context("could not determine the repository's default branch (e.g. main or master)")?;
+    // An explicit `b` tag overrides the repository default. The target is
+    // stored on the immutable root PR event, not on tip updates.
+    let target_branch = if let Ok(branch) = tag_value(&proposal, "b") {
+        branch
+    } else {
+        git_repo
+            .get_default_branch_name(None)?
+            .context("could not determine the repository's default branch (e.g. main or master)")?
+    };
 
     if !git_repo
         .get_local_branch_names()
         .context("failed to get local branch names")?
         .iter()
-        .any(|n| n.eq(&default_branch))
+        .any(|n| n.eq(&target_branch))
     {
-        bail!(
-            "default branch '{default_branch}' does not exist locally; check it out before merging"
-        );
+        let remote_target = format!("origin/{target_branch}");
+        let target_tip = git_repo
+            .get_tip_of_branch(&remote_target)
+            .with_context(|| {
+                format!(
+                    "target branch '{target_branch}' does not exist locally or as '{remote_target}'"
+                )
+            })?;
+        git_repo.create_branch_at_commit(&target_branch, &target_tip.to_string())?;
     }
 
-    git_repo.checkout(&default_branch).context(format!(
-        "failed to check out default branch '{default_branch}'"
+    git_repo.checkout(&target_branch).context(format!(
+        "failed to check out target branch '{target_branch}'"
     ))?;
 
     // Resolve the effective (latest edited) title via the #subject label
@@ -269,7 +280,7 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
             println!(
                 "{}",
                 console::style(format!(
-                    "the merge has conflicts that must be resolved manually on {default_branch}."
+                    "the merge has conflicts that must be resolved manually on {target_branch}."
                 ))
                 .yellow()
             );
@@ -291,7 +302,7 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
     println!(
         "{}",
         console::style(format!(
-            "merge commit created on {default_branch}. don't forget to push"
+            "merge commit created on {target_branch}. don't forget to push"
         ))
         .green()
     );

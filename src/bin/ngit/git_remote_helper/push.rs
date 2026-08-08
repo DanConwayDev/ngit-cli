@@ -22,7 +22,7 @@ use ngit::{
     git::{self, Repo, nostr_url::NostrUrlDecoded},
     git_events::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
-        get_status, sign_ordered_status_event, status_kinds,
+        get_status, sign_ordered_status_event, status_kinds, tag_value,
     },
     list::list_from_remotes,
     login::{existing::load_existing_login, user::UserRef},
@@ -64,6 +64,7 @@ pub(super) async fn run_push(
     title_description: Option<(String, String)>,
     git_server_push_options: Vec<String>,
     git_server: Option<String>,
+    proposal_options: super::ProposalOptions,
     force_with_lease: &HashMap<String, Option<String>>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
@@ -162,6 +163,7 @@ pub(super) async fn run_push(
             title_description.as_ref(),
             &git_server_push_options,
             git_server.as_deref(),
+            &proposal_options,
         )
         .await?;
 
@@ -395,6 +397,7 @@ async fn create_events_and_proposals(
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
     git_server: Option<&str>,
+    proposal_options: &super::ProposalOptions,
 ) -> Result<PushEventsPlan> {
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
@@ -566,6 +569,7 @@ async fn create_events_and_proposals(
         git_server_push_options,
         git_server,
         declared_default_branch.as_deref(),
+        proposal_options,
     )
     .await?;
     for e in proposal_events {
@@ -611,6 +615,7 @@ async fn process_proposal_refspecs(
     git_server_push_options: &[String],
     git_server: Option<&str>,
     default_branch: Option<&str>,
+    proposal_options: &super::ProposalOptions,
 ) -> Result<(Vec<Event>, Vec<String>)> {
     let mut events = vec![];
     let mut rejected_proposal_refspecs = vec![];
@@ -618,6 +623,20 @@ async fn process_proposal_refspecs(
         return Ok((events, rejected_proposal_refspecs));
     }
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
+    if let Some(branch) = &proposal_options.target_branch {
+        if branch.is_empty() || !git2::Reference::is_valid_name(&format!("refs/heads/{branch}")) {
+            bail!("invalid target branch name '{branch}'");
+        }
+        if git_repo.get_branch_tips(branch)?.is_empty() {
+            bail!("target branch '{branch}' does not exist locally or on a remote");
+        }
+        if git_repo.get_default_branch_name(default_branch)?.as_deref() == Some(branch) {
+            bail!("target branch '{branch}' is the repository default; omit target-branch");
+        }
+    }
+    let proposal_metadata = ngit::push::ProposalMetadata {
+        target_branch: proposal_options.target_branch.clone(),
+    };
     let current_user = user_ref.public_key;
 
     for refspec in proposal_refspecs {
@@ -628,6 +647,9 @@ async fn process_proposal_refspecs(
         if let Some((_, (proposal, patches, pr_upgrade_root))) =
             find_proposal_and_patches_by_branch_name(to, &all_proposals, Some(&current_user))
         {
+            if proposal_options.target_branch.is_some() {
+                bail!("target-branch can only be set when opening a new PR");
+            }
             // After a patch→PR upgrade, pr_upgrade_root is the KIND_PULL_REQUEST
             // event that should be referenced as the root of any subsequent PR
             // updates (its E tag).  For normal PRs (proposal is already PR kind)
@@ -660,6 +682,7 @@ async fn process_proposal_refspecs(
                         git_server_push_options,
                         git_server,
                         default_branch,
+                        &proposal_metadata,
                         patches.first(),
                     )
                     .await?
@@ -706,6 +729,7 @@ async fn process_proposal_refspecs(
                                 git_server_push_options,
                                 git_server,
                                 default_branch,
+                                &proposal_metadata,
                                 patches.first(),
                             )
                             .await?
@@ -759,8 +783,14 @@ async fn process_proposal_refspecs(
             }
         } else {
             // TODO new proposal / couldn't find exisiting proposal
-            let (ahead, default_label) =
-                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?;
+            let (ahead, default_label) = if let Some(branch) = &proposal_options.target_branch {
+                (
+                    git_repo.get_commits_ahead_of_branch(&tip_of_pushed_branch, branch)?,
+                    format!("target branch '{branch}'"),
+                )
+            } else {
+                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?
+            };
             if ahead.is_empty() {
                 bail!("cannot push '{from}' as proposal as branch isn't ahead of {default_label}");
             }
@@ -777,6 +807,7 @@ async fn process_proposal_refspecs(
                 git_server_push_options,
                 git_server,
                 default_branch,
+                &proposal_metadata,
                 None,
             )
             .await?
@@ -804,6 +835,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     git_server_push_options: &[String],
     git_server: Option<&str>,
     default_branch: Option<&str>,
+    proposal_metadata: &ngit::push::ProposalMetadata,
     ordering_reference: Option<&Event>,
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
@@ -839,10 +871,20 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         //     the stale value from the original PR event tag)
         // Using the git DAG directly means no stored event values can ever
         // propagate a stale or incorrect fork point.
-        let merge_base: Option<Sha1Hash> = git_repo
-            .get_most_advanced_merge_base_with_default(tip, default_branch)
-            .ok()
-            .flatten();
+        let merge_base: Option<Sha1Hash> = if let Some(branch) = &proposal_metadata.target_branch {
+            Some(
+                git_repo
+                    .get_most_advanced_merge_base_with_branch(tip, branch)?
+                    .with_context(|| {
+                        format!("proposal has no common history with target branch '{branch}'")
+                    })?,
+            )
+        } else {
+            git_repo
+                .get_most_advanced_merge_base_with_default(tip, default_branch)
+                .ok()
+                .flatten()
+        };
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
             git_repo,
@@ -850,6 +892,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             tip,
             first_commit,
             merge_base.as_ref(),
+            proposal_metadata,
             user_ref,
             root_proposal,
             &title_description.map(|(t, d)| (t.clone(), d.clone())),
@@ -1367,7 +1410,7 @@ async fn get_merged_status_events(
 
     for refspec in refspecs_to_git_server {
         let (from, to) = refspec_to_from_to(refspec)?;
-        if is_default_branch_ref(to, declared_default_branch) {
+        {
             let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
             let tip_of_remote_branch = if let Some(oid) = existing_state.get(to) {
                 Sha1Hash::from_str(oid)
@@ -1400,8 +1443,18 @@ async fn get_merged_status_events(
             )
             .await?;
 
-            let merged_proposals_info =
+            let mut merged_proposals_info =
                 get_merged_proposals_info(git_repo, &ahead, &commit_events).await?;
+            merged_proposals_info.retain(|proposal_id, _| {
+                let explicit_target = pr_roots
+                    .iter()
+                    .find(|event| event.id == *proposal_id)
+                    .and_then(|event| tag_value(event, "b").ok());
+                explicit_target.map_or_else(
+                    || is_default_branch_ref(to, declared_default_branch),
+                    |branch| to == format!("refs/heads/{branch}"),
+                )
+            });
 
             for event in create_merge_events(
                 term,

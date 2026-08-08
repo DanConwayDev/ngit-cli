@@ -60,6 +60,9 @@ pub struct SubCommandArgs {
     /// base URL (eg. relay.ngit.dev) or a full clone URL (eg.
     /// <https://github.com/user/repo.git>)
     pub(crate) git_server: Option<String>,
+    /// branch this PR should target instead of the repository default
+    #[clap(long)]
+    pub(crate) target_branch: Option<String>,
 }
 
 /// Validates send command arguments for non-interactive mode.
@@ -166,6 +169,45 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         get_root_proposal_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
             .await?;
 
+    if root_proposal.is_some() && args.target_branch.is_some() {
+        bail!("--target-branch can only be set when opening a new PR");
+    }
+
+    if let Some(branch) = &args.target_branch {
+        if branch.is_empty() || !git2::Reference::is_valid_name(&format!("refs/heads/{branch}")) {
+            bail!("invalid target branch name '{branch}'");
+        }
+        if git_repo.get_branch_tips(branch)?.is_empty() {
+            bail!("target branch '{branch}' does not exist locally or on a remote");
+        }
+        if git_repo.get_default_branch_name(None)?.as_deref() == Some(branch) {
+            bail!("target branch '{branch}' is the repository default; omit --target-branch");
+        }
+    }
+
+    let proposal_metadata = ngit::push::ProposalMetadata {
+        target_branch: args.target_branch.clone(),
+    };
+
+    let head = git_repo.get_head_commit()?;
+    let automatic_commits = if let Some(branch) = &args.target_branch {
+        Some(git_repo.get_commits_ahead_of_branch(&head, branch)?)
+    } else {
+        None
+    };
+
+    let (proposal_base_name, proposal_base_tip) = if let Some(branch) = &args.target_branch {
+        (
+            branch.clone(),
+            *git_repo
+                .get_branch_tips(branch)?
+                .first()
+                .context("target branch has no visible tip")?,
+        )
+    } else {
+        (main_branch_name.to_string(), main_tip)
+    };
+
     if let Some(root_ref) = args.in_reply_to.first() {
         if root_proposal.is_some() {
             println!("creating proposal revision for: {root_ref}");
@@ -174,7 +216,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     let mut commits: Vec<Sha1Hash> = {
         if args.since_or_range.is_empty() {
-            if cli_args.interactive {
+            if let Some(commits) = &automatic_commits {
+                commits.clone()
+            } else if cli_args.interactive {
                 let branch_name = git_repo.get_checked_out_branch_name()?;
                 let proposed_commits = if branch_name.eq(main_branch_name) {
                     vec![main_tip]
@@ -229,16 +273,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         );
     }
 
-    let (first_commit_ahead, behind) =
-        git_repo.get_commits_ahead_behind(&main_tip, commits.last().context("no commits")?)?;
+    let (first_commit_ahead, behind) = git_repo
+        .get_commits_ahead_behind(&proposal_base_tip, commits.last().context("no commits")?)?;
 
     check_commits_are_suitable_for_proposal(
         cli_args,
         &first_commit_ahead,
         &commits,
         &behind,
-        main_branch_name,
-        &main_tip,
+        &proposal_base_name,
+        &proposal_base_tip,
     )?;
 
     let commits_too_big = git_repo.are_commits_too_big_for_patches(&commits);
@@ -395,6 +439,17 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let events = if as_pr {
         let tip = commits.last().context("no commits")?; // commits has been reversed to oldest first
         let first_commit = commits.first().context("no commits")?;
+        let merge_base = if let Some(branch) = &proposal_metadata.target_branch {
+            Some(
+                git_repo
+                    .get_most_advanced_merge_base_with_branch(tip, branch)?
+                    .with_context(|| {
+                        format!("proposal has no common history with target branch '{branch}'")
+                    })?,
+            )
+        } else {
+            git_repo.get_commit_parent(first_commit).ok()
+        };
         {
             let push_options_refs: Vec<&str> =
                 args.push_options.iter().map(String::as_str).collect();
@@ -404,7 +459,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 &repo_ref,
                 tip,
                 first_commit,
-                git_repo.get_commit_parent(first_commit).ok().as_ref(),
+                merge_base.as_ref(),
+                &proposal_metadata,
                 &user_ref,
                 root_proposal.as_ref(),
                 &cover_letter_title_description,
