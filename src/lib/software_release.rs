@@ -1,9 +1,10 @@
 //! NIP-82 software application, release, and asset events.
 //!
 //! This module deliberately models NIP-82 independently from the release CLI.
-//! Parsers are strict: callers can use [`validate_application`] to retain and
-//! display the raw event alongside structured issues, and only construct a
-//! typed value after the event passes validation.
+//! Parsers are strict: callers can use [`validate_application`] or
+//! [`validate_asset`] to retain and display the raw event alongside
+//! structured issues, and only construct a typed value after the event passes
+//! validation.
 
 use std::{collections::BTreeSet, error::Error, fmt};
 
@@ -14,6 +15,7 @@ pub const SOFTWARE_APPLICATION_KIND: Kind = Kind::Custom(32_267);
 pub const SOFTWARE_RELEASE_KIND: Kind = Kind::Custom(30_063);
 pub const SOFTWARE_ASSET_KIND: Kind = Kind::Custom(3_063);
 const GIT_REPOSITORY_KIND: Kind = Kind::Custom(30_617);
+const ANDROID_APK_MIME: &str = "application/vnd.android.package-archive";
 
 /// Stable categories suitable for human diagnostics and JSON output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -167,6 +169,79 @@ impl SoftwareApplication {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SoftwareAsset {
+    pub raw_event: Event,
+    pub identifier: String,
+    pub version: String,
+    pub url: Option<String>,
+    pub filename: Option<String>,
+    pub mime: String,
+    pub sha256: String,
+    pub size: Option<u64>,
+    pub platforms: Vec<String>,
+    pub min_platform_version: Option<String>,
+    pub target_platform_version: Option<String>,
+    pub supported_nips: Vec<String>,
+    pub variant: Option<String>,
+    pub commit: Option<String>,
+    pub min_allowed_version: Option<String>,
+    pub version_code: Option<u64>,
+    pub min_allowed_version_code: Option<u64>,
+    pub apk_certificate_hashes: Vec<String>,
+    pub original_url: Option<String>,
+    pub extra_tags: Vec<Tag>,
+}
+
+impl SoftwareAsset {
+    pub fn parse(event: &Event) -> Result<Self, ValidationError> {
+        let issues = validate_asset(event);
+        if !issues.is_empty() {
+            return Err(ValidationError {
+                event_type: SoftwareEventType::Asset,
+                issues,
+            });
+        }
+
+        Ok(Self {
+            raw_event: event.clone(),
+            identifier: required_value(event, "i"),
+            version: required_value(event, "version"),
+            url: optional_value(event, "url"),
+            filename: optional_value(event, "filename"),
+            mime: required_value(event, "m"),
+            sha256: required_value(event, "x"),
+            size: optional_value(event, "size").map(|value| {
+                value
+                    .parse()
+                    .expect("validated asset size is an unsigned integer")
+            }),
+            platforms: unique_values(event, "f"),
+            min_platform_version: optional_value(event, "min_platform_version"),
+            target_platform_version: optional_value(event, "target_platform_version"),
+            supported_nips: repeated_values(event, "supported_nip"),
+            variant: optional_value(event, "variant"),
+            commit: optional_value(event, "commit"),
+            min_allowed_version: optional_value(event, "min_allowed_version"),
+            version_code: optional_value(event, "version_code").map(|value| {
+                value
+                    .parse()
+                    .expect("validated version code is an unsigned integer")
+            }),
+            min_allowed_version_code: optional_value(event, "min_allowed_version_code").map(
+                |value| {
+                    value
+                        .parse()
+                        .expect("validated minimum version code is an unsigned integer")
+                },
+            ),
+            apk_certificate_hashes: repeated_values(event, "apk_certificate_hash"),
+            original_url: optional_value(event, "r"),
+            extra_tags: extra_tags(event, is_asset_tag),
+        })
+    }
+}
+
 pub fn validate_application(event: &Event) -> Vec<ValidationIssue> {
     let mut issues = validate_kind(event, SOFTWARE_APPLICATION_KIND);
     validate_single_tag(event, "d", true, &mut issues);
@@ -182,6 +257,85 @@ pub fn validate_application(event: &Event) -> Vec<ValidationIssue> {
     validate_url_tag(event, "image", &mut issues);
     validate_url_tag(event, "url", &mut issues);
     validate_duplicate_values(event, "f", &mut issues);
+    issues
+}
+
+pub fn validate_asset(event: &Event) -> Vec<ValidationIssue> {
+    let mut issues = validate_kind(event, SOFTWARE_ASSET_KIND);
+    if !event.content.is_empty() {
+        issues.push(ValidationIssue::new(
+            ValidationCode::NonEmptyAssetContent,
+            None,
+            "software asset content must be empty".to_string(),
+        ));
+    }
+    for field in ["i", "m", "x", "version"] {
+        validate_single_tag(event, field, true, &mut issues);
+    }
+    for field in [
+        "url",
+        "filename",
+        "size",
+        "min_platform_version",
+        "target_platform_version",
+        "variant",
+        "commit",
+        "min_allowed_version",
+        "version_code",
+        "min_allowed_version_code",
+        "r",
+    ] {
+        validate_single_tag(event, field, false, &mut issues);
+    }
+    for field in ["f", "supported_nip", "apk_certificate_hash"] {
+        validate_repeated_tag(event, field, false, &mut issues);
+    }
+    validate_duplicate_values(event, "f", &mut issues);
+    validate_url_tag(event, "url", &mut issues);
+    validate_url_tag(event, "r", &mut issues);
+
+    if let Some(mime) = first_value(event, "m") {
+        if !valid_mime(mime) {
+            issues.push(ValidationIssue::field(
+                ValidationCode::InvalidMime,
+                "m",
+                format!("invalid MIME type {mime:?}"),
+            ));
+        }
+        if mime == ANDROID_APK_MIME {
+            if first_value(event, "version_code").is_none() {
+                issues.push(ValidationIssue::field(
+                    ValidationCode::MissingAndroidMetadata,
+                    "version_code",
+                    "Android APK assets require a version_code tag",
+                ));
+            }
+            if values(event, "apk_certificate_hash").next().is_none() {
+                issues.push(ValidationIssue::field(
+                    ValidationCode::MissingAndroidMetadata,
+                    "apk_certificate_hash",
+                    "Android APK assets require at least one certificate hash",
+                ));
+            }
+        }
+    }
+    if let Some(hash) = first_value(event, "x") {
+        validate_sha256(hash, "x", &mut issues);
+    }
+    for hash in values(event, "apk_certificate_hash") {
+        validate_sha256(hash, "apk_certificate_hash", &mut issues);
+    }
+    for field in ["size", "version_code", "min_allowed_version_code"] {
+        if let Some(value) = first_value(event, field) {
+            if value.parse::<u64>().is_err() {
+                issues.push(ValidationIssue::field(
+                    ValidationCode::InvalidInteger,
+                    field,
+                    format!("{field} must be an unsigned integer"),
+                ));
+            }
+        }
+    }
     issues
 }
 
@@ -258,6 +412,163 @@ pub fn application_event_builder(input: ApplicationInput) -> Result<EventBuilder
         builder = builder.custom_created_at(created_at);
     }
     Ok(builder)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AssetInput {
+    pub identifier: String,
+    pub version: String,
+    pub url: Option<String>,
+    pub filename: Option<String>,
+    pub mime: String,
+    pub sha256: String,
+    pub size: Option<u64>,
+    pub platforms: Vec<String>,
+    pub min_platform_version: Option<String>,
+    pub target_platform_version: Option<String>,
+    pub supported_nips: Vec<String>,
+    pub variant: Option<String>,
+    pub commit: Option<String>,
+    pub min_allowed_version: Option<String>,
+    pub version_code: Option<u64>,
+    pub min_allowed_version_code: Option<u64>,
+    pub apk_certificate_hashes: Vec<String>,
+    pub original_url: Option<String>,
+    pub extra_tags: Vec<Tag>,
+    pub created_at: Option<Timestamp>,
+}
+
+pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, ValidationError> {
+    let mut issues = Vec::new();
+    validate_input_required("i", &input.identifier, &mut issues);
+    validate_input_required("version", &input.version, &mut issues);
+    validate_input_required("m", &input.mime, &mut issues);
+    validate_input_required("x", &input.sha256, &mut issues);
+    if !input.mime.is_empty() && !valid_mime(&input.mime) {
+        issues.push(ValidationIssue::field(
+            ValidationCode::InvalidMime,
+            "m",
+            format!("invalid MIME type {:?}", input.mime),
+        ));
+    }
+    if !input.sha256.is_empty() {
+        validate_sha256(&input.sha256, "x", &mut issues);
+    }
+    validate_optional_url("url", input.url.as_deref(), &mut issues);
+    validate_optional_url("r", input.original_url.as_deref(), &mut issues);
+    for (field, value) in [
+        ("url", input.url.as_deref()),
+        ("filename", input.filename.as_deref()),
+        (
+            "min_platform_version",
+            input.min_platform_version.as_deref(),
+        ),
+        (
+            "target_platform_version",
+            input.target_platform_version.as_deref(),
+        ),
+        ("variant", input.variant.as_deref()),
+        ("commit", input.commit.as_deref()),
+        ("min_allowed_version", input.min_allowed_version.as_deref()),
+        ("r", input.original_url.as_deref()),
+    ] {
+        validate_optional_nonempty(field, value, &mut issues);
+    }
+    validate_input_values("supported_nip", &input.supported_nips, &mut issues);
+    reject_duplicate_strings("f", &input.platforms, &mut issues);
+    if input.mime == ANDROID_APK_MIME {
+        if input.version_code.is_none() {
+            issues.push(ValidationIssue::field(
+                ValidationCode::MissingAndroidMetadata,
+                "version_code",
+                "Android APK assets require a version_code tag",
+            ));
+        }
+        if input.apk_certificate_hashes.is_empty() {
+            issues.push(ValidationIssue::field(
+                ValidationCode::MissingAndroidMetadata,
+                "apk_certificate_hash",
+                "Android APK assets require at least one certificate hash",
+            ));
+        }
+    }
+    for hash in &input.apk_certificate_hashes {
+        validate_sha256(hash, "apk_certificate_hash", &mut issues);
+    }
+    if !issues.is_empty() {
+        return Err(ValidationError {
+            event_type: SoftwareEventType::Asset,
+            issues,
+        });
+    }
+
+    let mut tags = vec![
+        tag(["i", &input.identifier]),
+        tag(["m", &input.mime]),
+        tag(["x", &input.sha256.to_ascii_lowercase()]),
+        tag(["version", &input.version]),
+    ];
+    push_optional(&mut tags, "url", input.url);
+    push_optional(&mut tags, "filename", input.filename);
+    if let Some(size) = input.size {
+        tags.push(tag(["size".to_string(), size.to_string()]));
+    }
+    push_repeated(&mut tags, "f", sorted_unique(input.platforms));
+    push_optional(
+        &mut tags,
+        "min_platform_version",
+        input.min_platform_version,
+    );
+    push_optional(
+        &mut tags,
+        "target_platform_version",
+        input.target_platform_version,
+    );
+    push_repeated(&mut tags, "supported_nip", input.supported_nips);
+    push_optional(&mut tags, "variant", input.variant);
+    push_optional(&mut tags, "commit", input.commit);
+    push_optional(&mut tags, "min_allowed_version", input.min_allowed_version);
+    if let Some(version_code) = input.version_code {
+        tags.push(tag(["version_code".to_string(), version_code.to_string()]));
+    }
+    if let Some(version_code) = input.min_allowed_version_code {
+        tags.push(tag([
+            "min_allowed_version_code".to_string(),
+            version_code.to_string(),
+        ]));
+    }
+    push_repeated(
+        &mut tags,
+        "apk_certificate_hash",
+        input
+            .apk_certificate_hashes
+            .into_iter()
+            .map(|hash| hash.to_ascii_lowercase())
+            .collect(),
+    );
+    push_optional(&mut tags, "r", input.original_url);
+    tags.extend(
+        input
+            .extra_tags
+            .into_iter()
+            .filter(|tag| !is_asset_tag(tag.kind())),
+    );
+
+    let mut builder = EventBuilder::new(SOFTWARE_ASSET_KIND, "").tags(tags);
+    if let Some(created_at) = input.created_at {
+        builder = builder.custom_created_at(created_at);
+    }
+    Ok(builder)
+}
+
+/// Return a deterministic, deduplicated union of the supplied assets' target
+/// platforms. Asset identifiers and versions intentionally play no part.
+pub fn release_platforms<'a>(assets: impl IntoIterator<Item = &'a SoftwareAsset>) -> Vec<String> {
+    sorted_unique(
+        assets
+            .into_iter()
+            .flat_map(|asset| asset.platforms.iter().cloned()),
+    )
 }
 
 fn validate_kind(event: &Event, expected: Kind) -> Vec<ValidationIssue> {
@@ -553,6 +864,27 @@ fn validate_clean_value(field: &'static str, value: &str, issues: &mut Vec<Valid
     }
 }
 
+fn validate_sha256(hash: &str, field: &'static str, issues: &mut Vec<ValidationIssue>) {
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        issues.push(ValidationIssue::field(
+            ValidationCode::InvalidSha256,
+            field,
+            format!("{field} must be a 64-character hexadecimal SHA-256 hash"),
+        ));
+    }
+}
+
+fn valid_mime(mime: &str) -> bool {
+    let Some((top, subtype)) = mime.split_once('/') else {
+        return false;
+    };
+    !top.is_empty()
+        && !subtype.is_empty()
+        && !mime
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+}
+
 fn first_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
     values(event, name).next()
 }
@@ -661,6 +993,29 @@ fn is_application_tag(name: &str) -> bool {
     )
 }
 
+fn is_asset_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "i" | "url"
+            | "filename"
+            | "m"
+            | "x"
+            | "size"
+            | "version"
+            | "f"
+            | "min_platform_version"
+            | "target_platform_version"
+            | "supported_nip"
+            | "variant"
+            | "commit"
+            | "min_allowed_version"
+            | "version_code"
+            | "min_allowed_version_code"
+            | "apk_certificate_hash"
+            | "r"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use nostr::prelude::{FinalizeEvent, Keys};
@@ -668,6 +1023,8 @@ mod tests {
     use super::*;
 
     const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn keys() -> Keys {
         Keys::parse(SECRET_KEY).unwrap()
@@ -707,5 +1064,75 @@ mod tests {
         assert_eq!(parsed.repository_coordinates.len(), 1);
         assert_eq!(parsed.extra_tags, vec![foreign]);
         assert_eq!(values(&event, "name").collect::<Vec<_>>(), vec!["ngit"]);
+    }
+
+    #[test]
+    fn android_assets_require_version_code_and_certificate() {
+        let result = asset_event_builder(AssetInput {
+            identifier: "com.example.app".to_string(),
+            version: "1.0.0".to_string(),
+            mime: ANDROID_APK_MIME.to_string(),
+            sha256: HASH_B.to_string(),
+            ..Default::default()
+        });
+
+        let error = result.unwrap_err();
+        assert_eq!(
+            error
+                .issues
+                .iter()
+                .filter(|issue| issue.code == ValidationCode::MissingAndroidMetadata)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn builders_do_not_emit_optional_tags_that_their_parsers_reject() {
+        let error = application_event_builder(ApplicationInput {
+            identifier: "app".to_string(),
+            name: "name".to_string(),
+            summary: Some(String::new()),
+            ..Default::default()
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::EmptyValue)
+        );
+    }
+
+    #[test]
+    fn builders_reject_ambiguous_whitespace_and_control_characters() {
+        let application = application_event_builder(ApplicationInput {
+            identifier: " app".to_string(),
+            name: "name\nspoofed".to_string(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            application
+                .issues
+                .iter()
+                .all(|issue| issue.code == ValidationCode::InvalidValue)
+        );
+
+        let asset = asset_event_builder(AssetInput {
+            identifier: "app".to_string(),
+            version: "1 ".to_string(),
+            mime: "application/gzip".to_string(),
+            sha256: HASH_A.to_string(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            asset
+                .issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::InvalidValue)
+        );
     }
 }
