@@ -20,6 +20,8 @@ use reqwest::{
 };
 use serde::Serialize;
 
+use crate::software_release::valid_mime_essence;
+
 /// Default upper bound for a single downloaded asset (4 GiB).
 pub const DEFAULT_MAX_ASSET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -631,7 +633,7 @@ pub fn infer_mime_type(
                 "Content-Type parameters were omitted from the asset MIME type",
             ));
         }
-        if is_valid_mime(&normalized) {
+        if valid_mime_essence(&normalized) {
             Some(normalized)
         } else {
             warnings.push(DownloadWarning::new(
@@ -646,7 +648,7 @@ pub fn infer_mime_type(
         let Some((normalized, had_parameters)) = normalize_mime(explicit) else {
             bail!("explicit asset MIME type is empty");
         };
-        if !is_valid_mime(&normalized) {
+        if !valid_mime_essence(&normalized) {
             bail!("explicit asset MIME type is invalid");
         }
         if had_parameters {
@@ -708,40 +710,6 @@ fn normalize_mime(value: &str) -> Option<(String, bool)> {
         .split_once(';')
         .map_or((value, false), |(essence, _)| (essence, true));
     Some((essence.trim().to_ascii_lowercase(), parameters))
-}
-
-fn is_valid_mime(value: &str) -> bool {
-    let Some((top_level, subtype)) = value.split_once('/') else {
-        return false;
-    };
-    !top_level.is_empty()
-        && !subtype.is_empty()
-        && !subtype.contains('/')
-        && top_level.chars().all(is_mime_token_character)
-        && subtype.chars().all(is_mime_token_character)
-        && !top_level.contains('*')
-        && !subtype.contains('*')
-}
-
-fn is_mime_token_character(character: char) -> bool {
-    character.is_ascii_alphanumeric()
-        || matches!(
-            character,
-            '!' | '#'
-                | '$'
-                | '%'
-                | '&'
-                | '\''
-                | '*'
-                | '+'
-                | '-'
-                | '.'
-                | '^'
-                | '_'
-                | '`'
-                | '|'
-                | '~'
-        )
 }
 
 fn is_generic_mime(value: &str) -> bool {
@@ -939,6 +907,7 @@ mod tests {
     #[test]
     fn rejects_invalid_explicit_mime() {
         assert!(infer_mime_type(Some("not a mime"), None, "asset.bin").is_err());
+        assert!(infer_mime_type(Some("a/b/c"), None, "asset.bin").is_err());
         assert!(infer_mime_type(Some("*/*"), None, "asset.bin").is_err());
     }
 

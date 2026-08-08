@@ -451,7 +451,7 @@ pub fn validate_asset(event: &Event) -> Vec<ValidationIssue> {
     validate_url_tag(event, "r", &mut issues);
 
     if let Some(mime) = first_value(event, "m") {
-        if !valid_mime(mime) {
+        if !valid_mime_essence(mime) {
             issues.push(ValidationIssue::field(
                 ValidationCode::InvalidMime,
                 "m",
@@ -712,7 +712,7 @@ pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, Validation
     validate_input_required("version", &input.version, &mut issues);
     validate_input_required("m", &input.mime, &mut issues);
     validate_input_required("x", &input.sha256, &mut issues);
-    if !input.mime.is_empty() && !valid_mime(&input.mime) {
+    if !input.mime.is_empty() && !valid_mime_essence(&input.mime) {
         issues.push(ValidationIssue::field(
             ValidationCode::InvalidMime,
             "m",
@@ -1171,15 +1171,38 @@ fn validate_sha256(hash: &str, field: &'static str, issues: &mut Vec<ValidationI
     }
 }
 
-fn valid_mime(mime: &str) -> bool {
-    let Some((top, subtype)) = mime.split_once('/') else {
+pub(crate) fn valid_mime_essence(mime: &str) -> bool {
+    let Some((top_level, subtype)) = mime.split_once('/') else {
         return false;
     };
-    !top.is_empty()
+    !top_level.is_empty()
         && !subtype.is_empty()
-        && !mime
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        && !subtype.contains('/')
+        && top_level.chars().all(is_mime_token_character)
+        && subtype.chars().all(is_mime_token_character)
+        && !top_level.contains('*')
+        && !subtype.contains('*')
+}
+
+fn is_mime_token_character(character: char) -> bool {
+    character.is_ascii_alphanumeric()
+        || matches!(
+            character,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+        )
 }
 
 fn first_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
@@ -1548,6 +1571,28 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == ValidationCode::InvalidValue)
         );
+    }
+
+    #[test]
+    fn asset_builder_rejects_non_essence_mime_values() {
+        for mime in ["a/b/c", "text/plain;charset=utf-8", "text/*"] {
+            let error = asset_event_builder(AssetInput {
+                identifier: "app".to_string(),
+                version: "1".to_string(),
+                mime: mime.to_string(),
+                sha256: HASH_A.to_string(),
+                ..Default::default()
+            })
+            .unwrap_err();
+
+            assert!(
+                error
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == ValidationCode::InvalidMime),
+                "expected {mime:?} to be rejected"
+            );
+        }
     }
 
     #[test]
