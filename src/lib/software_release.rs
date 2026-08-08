@@ -1,14 +1,16 @@
 //! NIP-82 software application, release, and asset events.
 //!
 //! This module deliberately models NIP-82 independently from the release CLI.
-//! Parsers are strict: callers can use [`validate_application`] or
-//! [`validate_asset`] to retain and display the raw event alongside
-//! structured issues, and only construct a typed value after the event passes
-//! validation.
+//! Parsers are strict: callers can use [`validate_application`],
+//! [`validate_release`], or [`validate_asset`] to retain and display the raw
+//! event alongside structured issues, and only construct a typed value after
+//! the event passes validation.
 
 use std::{collections::BTreeSet, error::Error, fmt};
 
-use nostr::prelude::{Event, EventBuilder, Kind, RelayUrl, Tag, Timestamp, Url, nip01::Coordinate};
+use nostr::prelude::{
+    Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, Url, nip01::Coordinate,
+};
 use serde::Serialize;
 
 pub const SOFTWARE_APPLICATION_KIND: Kind = Kind::Custom(32_267);
@@ -169,6 +171,111 @@ impl SoftwareApplication {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AssetPointer {
+    pub event_id: EventId,
+    pub relay_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SoftwareRelease {
+    pub raw_event: Event,
+    pub application: AddressPointer,
+    pub application_identifier: String,
+    pub identifier: String,
+    pub version: String,
+    pub channel: String,
+    pub notes: String,
+    pub assets: Vec<AssetPointer>,
+    pub platforms: Vec<String>,
+    pub extra_tags: Vec<Tag>,
+}
+
+impl SoftwareRelease {
+    pub fn parse(event: &Event) -> Result<Self, ValidationError> {
+        let issues = validate_release(event);
+        if !issues.is_empty() {
+            return Err(ValidationError {
+                event_type: SoftwareEventType::Release,
+                issues,
+            });
+        }
+
+        Ok(Self {
+            raw_event: event.clone(),
+            application: address_pointers(event, "a")
+                .into_iter()
+                .next()
+                .expect("validated release has an application coordinate"),
+            application_identifier: required_value(event, "i"),
+            identifier: required_value(event, "d"),
+            version: required_value(event, "version"),
+            channel: required_value(event, "c"),
+            notes: event.content.clone(),
+            assets: asset_pointers(event),
+            platforms: unique_values(event, "f"),
+            extra_tags: extra_tags(event, is_release_tag),
+        })
+    }
+
+    pub fn coordinate(&self) -> Coordinate {
+        Coordinate::new(SOFTWARE_RELEASE_KIND, self.raw_event.pubkey)
+            .identifier(self.identifier.clone())
+    }
+
+    /// Validate resolved assets against this release's author, references, and
+    /// published platform aggregate. Missing assets are reported separately;
+    /// callers can therefore display incomplete releases without discarding
+    /// the release event.
+    pub fn validate_assets(&self, assets: &[SoftwareAsset]) -> Vec<ValidationIssue> {
+        let expected: BTreeSet<EventId> = self.assets.iter().map(|asset| asset.event_id).collect();
+        let actual: BTreeSet<EventId> = assets.iter().map(|asset| asset.raw_event.id).collect();
+        let mut issues = Vec::new();
+
+        for missing in expected.difference(&actual) {
+            issues.push(ValidationIssue::field(
+                ValidationCode::MissingReferencedAsset,
+                "e",
+                format!("referenced asset {missing} was not resolved"),
+            ));
+        }
+        for extra in actual.difference(&expected) {
+            issues.push(ValidationIssue::field(
+                ValidationCode::UnreferencedAsset,
+                "e",
+                format!("asset {extra} is not referenced by this release"),
+            ));
+        }
+        for asset in assets {
+            if asset.raw_event.pubkey != self.application.coordinate.public_key {
+                issues.push(ValidationIssue::field(
+                    ValidationCode::InvalidAssetAuthor,
+                    "author",
+                    format!(
+                        "asset {} is authored by {}, expected {}",
+                        asset.raw_event.id,
+                        asset.raw_event.pubkey,
+                        self.application.coordinate.public_key
+                    ),
+                ));
+            }
+        }
+
+        let derived = release_platforms(assets.iter());
+        if derived != sorted_unique(self.platforms.iter().cloned()) {
+            issues.push(ValidationIssue::field(
+                ValidationCode::PlatformUnionMismatch,
+                "f",
+                format!(
+                    "release platforms {:?} do not match asset platform union {:?}",
+                    self.platforms, derived
+                ),
+            ));
+        }
+        issues
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SoftwareAsset {
     pub raw_event: Event,
@@ -257,6 +364,55 @@ pub fn validate_application(event: &Event) -> Vec<ValidationIssue> {
     validate_url_tag(event, "image", &mut issues);
     validate_url_tag(event, "url", &mut issues);
     validate_duplicate_values(event, "f", &mut issues);
+    issues
+}
+
+pub fn validate_release(event: &Event) -> Vec<ValidationIssue> {
+    let mut issues = validate_kind(event, SOFTWARE_RELEASE_KIND);
+    for field in ["i", "version", "d", "c"] {
+        validate_single_tag(event, field, true, &mut issues);
+    }
+    validate_addresses(event, "a", SOFTWARE_APPLICATION_KIND, true, &mut issues);
+    validate_event_ids(event, "e", true, &mut issues);
+    validate_repeated_tag(event, "f", false, &mut issues);
+    validate_duplicate_values(event, "e", &mut issues);
+    validate_duplicate_values(event, "f", &mut issues);
+
+    if let (Some(application), Some(identifier), Some(version), Some(release_identifier)) = (
+        first_coordinate(event, "a"),
+        first_value(event, "i"),
+        first_value(event, "version"),
+        first_value(event, "d"),
+    ) {
+        if application.identifier != identifier {
+            issues.push(ValidationIssue::field(
+                ValidationCode::IdentifierMismatch,
+                "i",
+                format!(
+                    "application identifier {identifier:?} does not match coordinate identifier {:?}",
+                    application.identifier
+                ),
+            ));
+        }
+        if application.public_key != event.pubkey {
+            issues.push(ValidationIssue::field(
+                ValidationCode::ApplicationAuthorMismatch,
+                "a",
+                format!(
+                    "release author {} does not own application {}",
+                    event.pubkey, application.public_key
+                ),
+            ));
+        }
+        let expected = format!("{identifier}@{version}");
+        if release_identifier != expected {
+            issues.push(ValidationIssue::field(
+                ValidationCode::ReleaseIdentifierMismatch,
+                "d",
+                format!("release identifier must be {expected:?}"),
+            ));
+        }
+    }
     issues
 }
 
@@ -412,6 +568,118 @@ pub fn application_event_builder(input: ApplicationInput) -> Result<EventBuilder
         builder = builder.custom_created_at(created_at);
     }
     Ok(builder)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseAssetInput {
+    pub event_id: EventId,
+    pub author: PublicKey,
+    pub relay_hint: Option<String>,
+    pub platforms: Vec<String>,
+}
+
+impl ReleaseAssetInput {
+    pub fn from_asset(asset: &SoftwareAsset, relay_hint: Option<String>) -> Self {
+        Self {
+            event_id: asset.raw_event.id,
+            author: asset.raw_event.pubkey,
+            relay_hint,
+            platforms: asset.platforms.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReleaseInput {
+    pub application: AddressPointer,
+    pub version: String,
+    pub channel: String,
+    pub notes: String,
+    pub assets: Vec<ReleaseAssetInput>,
+    pub extra_tags: Vec<Tag>,
+    pub released_at: Timestamp,
+}
+
+pub fn release_event_builder(input: ReleaseInput) -> Result<EventBuilder, ValidationError> {
+    let mut issues = Vec::new();
+    validate_input_address(
+        &input.application,
+        SOFTWARE_APPLICATION_KIND,
+        "a",
+        &mut issues,
+    );
+    validate_input_required("i", &input.application.coordinate.identifier, &mut issues);
+    validate_input_required("version", &input.version, &mut issues);
+    validate_input_required("c", &input.channel, &mut issues);
+    if input.assets.is_empty() {
+        issues.push(ValidationIssue::field(
+            ValidationCode::MissingTag,
+            "e",
+            "release requires at least one asset",
+        ));
+    }
+    let mut seen_assets = BTreeSet::new();
+    for asset in &input.assets {
+        if !seen_assets.insert(asset.event_id) {
+            issues.push(ValidationIssue::field(
+                ValidationCode::DuplicateAsset,
+                "e",
+                format!("asset {} is referenced more than once", asset.event_id),
+            ));
+        }
+        if asset.author != input.application.coordinate.public_key {
+            issues.push(ValidationIssue::field(
+                ValidationCode::InvalidAssetAuthor,
+                "author",
+                format!(
+                    "asset {} is authored by {}, expected {}",
+                    asset.event_id, asset.author, input.application.coordinate.public_key
+                ),
+            ));
+        }
+        validate_relay_hint(asset.relay_hint.as_deref(), "e", &mut issues);
+        reject_duplicate_strings("f", &asset.platforms, &mut issues);
+    }
+    if !issues.is_empty() {
+        return Err(ValidationError {
+            event_type: SoftwareEventType::Release,
+            issues,
+        });
+    }
+
+    let application_identifier = input.application.coordinate.identifier.clone();
+    let identifier = format!("{application_identifier}@{}", input.version);
+    let mut tags = vec![
+        address_tag("a", input.application),
+        tag(["i", &application_identifier]),
+        tag(["version", &input.version]),
+        tag(["d", &identifier]),
+        tag(["c", &input.channel]),
+    ];
+    for asset in &input.assets {
+        let mut fields = vec!["e".to_string(), asset.event_id.to_hex()];
+        if let Some(hint) = &asset.relay_hint {
+            fields.push(hint.clone());
+        }
+        tags.push(tag(fields));
+    }
+    let platforms = sorted_unique(
+        input
+            .assets
+            .iter()
+            .flat_map(|asset| asset.platforms.iter().cloned()),
+    );
+    push_repeated(&mut tags, "f", platforms);
+    tags.extend(
+        input
+            .extra_tags
+            .into_iter()
+            .filter(|tag| !is_release_tag(tag.kind())),
+    );
+
+    Ok(EventBuilder::new(SOFTWARE_RELEASE_KIND, input.notes)
+        .tags(tags)
+        .custom_created_at(input.released_at))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -677,6 +945,35 @@ fn validate_addresses(
     }
 }
 
+fn validate_event_ids(
+    event: &Event,
+    name: &'static str,
+    required: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let tags: Vec<&Tag> = event.tags.iter().filter(|tag| tag.kind() == name).collect();
+    if required && tags.is_empty() {
+        issues.push(ValidationIssue::field(
+            ValidationCode::MissingTag,
+            name,
+            format!("missing required {name} tag"),
+        ));
+    }
+    for tag in tags {
+        validate_tag_shape(tag, name, true, issues);
+        if let Some(value) = tag.as_slice().get(1) {
+            if EventId::from_hex(value).is_err() {
+                issues.push(ValidationIssue::field(
+                    ValidationCode::InvalidEventId,
+                    name,
+                    format!("invalid event ID {value:?}"),
+                ));
+            }
+        }
+        validate_relay_hint(tag.as_slice().get(2).map(String::as_str), name, issues);
+    }
+}
+
 fn validate_tag_shape(
     tag: &Tag,
     name: &'static str,
@@ -916,6 +1213,10 @@ fn unique_values(event: &Event, name: &str) -> Vec<String> {
     sorted_unique(repeated_values(event, name))
 }
 
+fn first_coordinate(event: &Event, name: &str) -> Option<Coordinate> {
+    first_value(event, name).and_then(|value| Coordinate::parse(value).ok())
+}
+
 fn address_pointers(event: &Event, name: &str) -> Vec<AddressPointer> {
     event
         .tags
@@ -924,6 +1225,20 @@ fn address_pointers(event: &Event, name: &str) -> Vec<AddressPointer> {
         .filter_map(|tag| {
             Some(AddressPointer {
                 coordinate: Coordinate::parse(tag.content()?).ok()?,
+                relay_hint: tag.as_slice().get(2).cloned(),
+            })
+        })
+        .collect()
+}
+
+fn asset_pointers(event: &Event) -> Vec<AssetPointer> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind() == "e")
+        .filter_map(|tag| {
+            Some(AssetPointer {
+                event_id: EventId::from_hex(tag.content()?).ok()?,
                 relay_hint: tag.as_slice().get(2).cloned(),
             })
         })
@@ -993,6 +1308,10 @@ fn is_application_tag(name: &str) -> bool {
     )
 }
 
+fn is_release_tag(name: &str) -> bool {
+    matches!(name, "a" | "i" | "version" | "d" | "c" | "e" | "f")
+}
+
 fn is_asset_tag(name: &str) -> bool {
     matches!(
         name,
@@ -1023,11 +1342,32 @@ mod tests {
     use super::*;
 
     const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    const OTHER_SECRET_KEY: &str =
+        "0000000000000000000000000000000000000000000000000000000000000002";
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn keys() -> Keys {
         Keys::parse(SECRET_KEY).unwrap()
+    }
+
+    fn other_keys() -> Keys {
+        Keys::parse(OTHER_SECRET_KEY).unwrap()
+    }
+
+    fn asset(keys: &Keys, identifier: &str, version: &str, platforms: &[&str]) -> SoftwareAsset {
+        let event = asset_event_builder(AssetInput {
+            identifier: identifier.to_string(),
+            version: version.to_string(),
+            mime: "application/gzip".to_string(),
+            sha256: HASH_A.to_string(),
+            platforms: platforms.iter().map(|value| (*value).to_string()).collect(),
+            ..Default::default()
+        })
+        .unwrap()
+        .finalize(keys)
+        .unwrap();
+        SoftwareAsset::parse(&event).unwrap()
     }
 
     #[test]
@@ -1064,6 +1404,80 @@ mod tests {
         assert_eq!(parsed.repository_coordinates.len(), 1);
         assert_eq!(parsed.extra_tags, vec![foreign]);
         assert_eq!(values(&event, "name").collect::<Vec<_>>(), vec!["ngit"]);
+    }
+
+    #[test]
+    fn release_builder_uses_application_identity_and_asset_platform_union() {
+        let keys = keys();
+        let linux = asset(&keys, "org.ngit.linux", "1.0.0+linux", &["linux-x86_64"]);
+        let universal = asset(&keys, "org.ngit.checksums", "2026-08-08", &[]);
+        let darwin = asset(
+            &keys,
+            "org.ngit.mac",
+            "build-42",
+            &["darwin-arm64", "linux-x86_64"],
+        );
+        let event = release_event_builder(ReleaseInput {
+            application: AddressPointer {
+                coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, keys.public_key())
+                    .identifier("ngit"),
+                relay_hint: None,
+            },
+            version: "v1.0.0".to_string(),
+            channel: "main".to_string(),
+            notes: "First release".to_string(),
+            assets: [&linux, &universal, &darwin]
+                .into_iter()
+                .map(|asset| ReleaseAssetInput::from_asset(asset, None))
+                .collect(),
+            extra_tags: Vec::new(),
+            released_at: Timestamp::from(1_700_000_000),
+        })
+        .unwrap()
+        .finalize(&keys)
+        .unwrap();
+
+        let release = SoftwareRelease::parse(&event).unwrap();
+        assert_eq!(release.application_identifier, "ngit");
+        assert_eq!(release.identifier, "ngit@v1.0.0");
+        assert_eq!(release.assets.len(), 3);
+        assert_eq!(
+            release.platforms,
+            vec!["darwin-arm64".to_string(), "linux-x86_64".to_string()]
+        );
+        assert!(
+            release
+                .validate_assets(&[linux, universal, darwin])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn release_parser_rejects_cross_author_and_identity_mismatches() {
+        let keys = keys();
+        let asset = asset(&keys, "asset-id", "asset-version", &[]);
+        let event = EventBuilder::new(SOFTWARE_RELEASE_KIND, "")
+            .tags([
+                tag([
+                    "a".to_string(),
+                    Coordinate::new(SOFTWARE_APPLICATION_KIND, other_keys().public_key())
+                        .identifier("different-app")
+                        .to_string(),
+                ]),
+                tag(["i", "ngit"]),
+                tag(["version", "1.0.0"]),
+                tag(["d", "ngit@2.0.0"]),
+                tag(["c", "main"]),
+                tag(["e".to_string(), asset.raw_event.id.to_hex()]),
+            ])
+            .finalize(&keys)
+            .unwrap();
+
+        let error = SoftwareRelease::parse(&event).unwrap_err();
+        let codes: Vec<ValidationCode> = error.issues.iter().map(|issue| issue.code).collect();
+        assert!(codes.contains(&ValidationCode::IdentifierMismatch));
+        assert!(codes.contains(&ValidationCode::ApplicationAuthorMismatch));
+        assert!(codes.contains(&ValidationCode::ReleaseIdentifierMismatch));
     }
 
     #[test]
@@ -1133,6 +1547,73 @@ mod tests {
                 .issues
                 .iter()
                 .any(|issue| issue.code == ValidationCode::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn asset_identity_and_version_are_not_coupled_to_a_release() {
+        let keys = keys();
+        let asset = asset(&keys, "com.example.android", "42", &["android-x86_64"]);
+        let result = release_event_builder(ReleaseInput {
+            application: AddressPointer {
+                coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, keys.public_key())
+                    .identifier("org.example.product"),
+                relay_hint: None,
+            },
+            version: "v2.3.0".to_string(),
+            channel: "beta".to_string(),
+            notes: String::new(),
+            assets: vec![ReleaseAssetInput::from_asset(&asset, None)],
+            extra_tags: Vec::new(),
+            released_at: Timestamp::from(1_700_000_000),
+        });
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolved_asset_validation_reports_missing_wrong_author_and_platform_union() {
+        let keys = keys();
+        let expected = asset(&keys, "asset", "1", &["linux-x86_64"]);
+        let unreferenced = asset(&other_keys(), "other", "2", &["darwin-arm64"]);
+        let release_event = release_event_builder(ReleaseInput {
+            application: AddressPointer {
+                coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, keys.public_key())
+                    .identifier("app"),
+                relay_hint: None,
+            },
+            version: "1".to_string(),
+            channel: "main".to_string(),
+            notes: String::new(),
+            assets: vec![ReleaseAssetInput::from_asset(&expected, None)],
+            extra_tags: Vec::new(),
+            released_at: Timestamp::from(1_700_000_000),
+        })
+        .unwrap()
+        .finalize(&keys)
+        .unwrap();
+        let release = SoftwareRelease::parse(&release_event).unwrap();
+
+        let issues = release.validate_assets(&[unreferenced]);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::MissingReferencedAsset)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::UnreferencedAsset)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::InvalidAssetAuthor)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::PlatformUnionMismatch)
         );
     }
 }
