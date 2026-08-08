@@ -15,12 +15,12 @@ use ngit::{
     },
 };
 use nostr::prelude::{Event, Filter, Timestamp};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::support::{
-    CommandOutput, LoginMode, ReleaseContext, WarningJson, asset_json, coded_error,
-    coded_error_with_details, load_applications, load_assets, load_releases, release_json,
-    resolve_application, resolve_release,
+    AssetReuseOption, CommandOutput, LoginMode, ReleaseContext, WarningJson, asset_json,
+    coded_error, coded_error_with_details, load_applications, load_assets, load_releases,
+    release_json, resolve_application, resolve_release,
 };
 use crate::{
     cli::{Cli, ReleaseAppInitArgs, ReleaseAppLinkArgs, ReleaseAssetAddArgs, ReleasePublishArgs},
@@ -198,7 +198,12 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     let mut batch: Vec<Event> = assets.iter().map(|asset| asset.raw_event.clone()).collect();
     batch.push(release_event);
     let relay_results = context
-        .publish_batch(batch, &new_asset_event_ids, args.json)
+        .publish_batch(
+            batch,
+            &new_asset_event_ids,
+            AssetReuseOption::ReleasePublish,
+            args.json,
+        )
         .await?;
     let authority = context.authority(&application);
     let operation = if existing.is_some() {
@@ -213,9 +218,7 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
         "previous_event_id": existing.as_ref().map(|release| release.raw_event.id.to_hex()),
         "newly_published_asset_ids": new_asset_event_ids.iter().map(nostr::prelude::EventId::to_hex).collect::<Vec<_>>(),
         "reused_asset_ids": reused_asset_ids,
-        "relays": relay_json(&relay_results),
-        "events": mutation_events_json(&assets, &parsed_release, &relay_results),
-        "orphan_asset_ids": Vec::<String>::new(),
+        "publication": relay_results.json(),
     });
     Ok(CommandOutput::new(
         "release.publish",
@@ -347,7 +350,12 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
         Vec::new()
     };
     let relay_results = context
-        .publish_batch(batch, &possible_orphans, args.json)
+        .publish_batch(
+            batch,
+            &possible_orphans,
+            AssetReuseOption::AssetAdd,
+            args.json,
+        )
         .await?;
     let authority = context.authority(&application);
     let result = json!({
@@ -357,9 +365,7 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
         "previous_event_id": release.raw_event.id.to_hex(),
         "newly_published_asset_ids": if newly_published { vec![added_id.to_hex()] } else { Vec::<String>::new() },
         "reused_asset_ids": if newly_published { Vec::<String>::new() } else { vec![added_id.to_hex()] },
-        "relays": relay_json(&relay_results),
-        "events": mutation_events_json(&assets, &parsed_release, &relay_results),
-        "orphan_asset_ids": Vec::<String>::new(),
+        "publication": relay_results.json(),
     });
     Ok(CommandOutput::new(
         "release.asset.add",
@@ -1015,18 +1021,6 @@ fn is_metadata_warning(code: &str) -> bool {
     )
 }
 
-fn relay_json(results: &[(String, bool)]) -> Vec<Value> {
-    results
-        .iter()
-        .map(|(url, accepted)| {
-            json!({
-                "url": url,
-                "status": if *accepted { "accepted" } else { "rejected" },
-            })
-        })
-        .collect()
-}
-
 fn redacted_url(value: &str) -> String {
     let Ok(mut url) = reqwest::Url::parse(value) else {
         return "<invalid URL>".to_owned();
@@ -1036,43 +1030,6 @@ fn redacted_url(value: &str) -> String {
     }
     url.set_fragment(None);
     url.to_string()
-}
-
-fn mutation_events_json(
-    assets: &[SoftwareAsset],
-    release: &SoftwareRelease,
-    relay_results: &[(String, bool)],
-) -> Vec<Value> {
-    let relays = relay_results
-        .iter()
-        .map(|(url, accepted)| {
-            json!({
-                "url": url,
-                "status": if *accepted { "accepted" } else { "unknown" },
-                "message": if *accepted {
-                    Value::Null
-                } else {
-                    json!("the ordered batch did not complete on this relay; earlier asset events may have been accepted")
-                },
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut events: Vec<Value> = assets
-        .iter()
-        .map(|asset| {
-            json!({
-                "entity": "asset",
-                "event_id": asset.raw_event.id.to_hex(),
-                "relays": relays,
-            })
-        })
-        .collect();
-    events.push(json!({
-        "entity": "release",
-        "event_id": release.raw_event.id.to_hex(),
-        "relays": relays,
-    }));
-    events
 }
 
 #[cfg(test)]

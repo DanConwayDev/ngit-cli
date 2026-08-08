@@ -441,26 +441,32 @@ Mutation results add:
 {
   "operation": "edited",
   "previous_event_id": "...",
-  "event_id": "...",
-  "events": [
-    {
-      "entity": "release",
-      "event_id": "...",
-      "relays": [
-        {
-          "url": "wss://relay.example.org",
-          "status": "accepted",
-          "message": null
-        }
-      ]
-    }
-  ],
-  "orphan_asset_ids": []
+  "publication": {
+    "ordered_events": [
+      { "entity": "asset", "event_id": "..." },
+      { "entity": "release", "event_id": "..." }
+    ],
+    "relays": [
+      {
+        "url": "wss://relay.example.org",
+        "status": "complete",
+        "message": null
+      }
+    ],
+    "possible_orphan_asset_ids": [],
+    "recovery": null
+  }
 }
 ```
 
-Relay status is one of `already_present`, `accepted`, `rejected`, `timed_out`,
-or `not_attempted`. URLs and relay messages which may contain credentials are
+Release publication is reported as an ordered batch because the relay sender
+can only prove that the complete sequence was acknowledged. A relay batch
+status is `complete` or `incomplete`; ngit does not invent per-event results for
+an incomplete batch. `ordered_events` is the exact send order, with the release
+last. On total failure the same object is returned in `error.details`,
+`possible_orphan_asset_ids` contains only assets newly signed by this command,
+and `recovery` tells the caller which reuse flag is safe after checking those
+exact event IDs. URLs and relay messages which may contain credentials are
 redacted in diagnostics; signed event URLs remain exact because changing them
 would change the event.
 
@@ -721,7 +727,9 @@ The command first performs authority and release preflights, then downloads and
 hashes a URL asset. It publishes a new asset before publishing the replacement
 release. If release publication fails after the asset succeeds, the asset is an
 unreferenced but valid event; JSON and human output MUST report its ID and give
-an idempotent retry command.
+safe recovery steps. The user must inspect the exact release and asset event
+IDs, then reuse a visible asset with `--event`; ngit must not suggest blindly
+repeating the URL command because that would sign a different immutable event.
 
 The command preserves release notes, channel, original release date, unknown
 tags, existing asset order, and existing asset IDs. It appends the new event ID
@@ -834,14 +842,14 @@ replacement may use ngit's normal same-timestamp ordering and next-timestamp
 fallback policy described in
 [event created-at ordering](architecture/event-created-at-ordering.md).
 
-Every required event is attempted on each selected publication relay. Existing
-signed assets MAY be re-published verbatim. A mutation succeeds only when at
-least one common relay accepts or already stores every required asset and the
-final release event. Partial relay acceptance is a warning and is present in
-JSON. The release MUST NOT be sent to a relay which rejected or could not
-confirm every referenced asset in the operation. If no common relay is
-available, the operation fails and reports any already-published orphan asset
-IDs.
+Required events are sent to each selected publication relay in asset order with
+the release last; sending stops on that relay at the first unacknowledged event.
+Existing signed assets MAY be re-published verbatim. A mutation succeeds only
+when at least one relay acknowledges the complete ordered batch. Partial batch
+completion is present in JSON, but it is not expanded into per-event certainty:
+an event whose acknowledgement failed may still have reached the relay. If no
+complete relay is available, the operation fails and reports only the newly
+signed asset IDs which may now be orphaned.
 
 ## Discovery and validation
 
@@ -1135,7 +1143,9 @@ fail closed with an actionable error.
 - Update notices, signer prompts, logging, and spinners can corrupt JSON stdout.
   Test that every `--json` path emits exactly one parseable object.
 - Failures after some events publish still need one terminal JSON object listing
-  every successful event and relay result. Never stream partial JSON entities.
+  the ordered event IDs, batch-level relay results, possible orphan asset IDs,
+  and safe recovery guidance. Never stream partial JSON entities or claim an
+  exact per-event result when an acknowledgement is uncertain.
 - Deterministic ordering matters for tests and consumers: sort discovered
   entities, but preserve semantically ordered event tags such as release assets.
 - Distinguish `null`, empty arrays, empty strings, missing remote data, and
@@ -1154,15 +1164,17 @@ fail closed with an actionable error.
 
 ### Publication and retry behavior
 
-- Relays can accept assets and reject the release, accept the release but not
-  every asset, time out after accepting, or return conflicting acknowledgements.
-  Record per-event, per-relay outcomes and make retries idempotent.
+- Relays can accept assets and reject the release, accept an event before timing
+  out, or return conflicting acknowledgements. Report whether each relay
+  completed the ordered batch, without inferring which prefix is visible.
 - The release must be published last, but Nostr offers no multi-event atomic
   transaction. Consumers must tolerate temporarily missing assets and producers
   must expose partial failure precisely.
 - A retry after uncertain acknowledgement should first query the exact event ID
-  and addressable coordinate, then avoid creating a different asset event for
-  the same bytes and metadata.
+  and addressable coordinate. Reuse any visible asset with `--asset-event` for
+  `release publish` or `--event` for `release asset add`; only rerun once the
+  observed state determines safe arguments, and never create a different asset
+  event for the same bytes and metadata by default.
 - Different relays may impose different maximum event sizes or reject old
   release timestamps. Preflight cannot guarantee acceptance; surface relay
   policy failures without changing event semantics per relay.

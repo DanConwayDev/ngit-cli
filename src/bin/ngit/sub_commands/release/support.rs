@@ -16,8 +16,8 @@ use ngit::{
     login::{self, existing::load_existing_login, user::UserRef},
     repo_ref::{RepoRef, get_resolved_repo_coordinate_when_remote_unknown},
     software_release::{
-        SOFTWARE_APPLICATION_KIND, SOFTWARE_RELEASE_KIND, SoftwareApplication, SoftwareAsset,
-        SoftwareRelease, ValidationIssue, release_platforms,
+        SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND, SoftwareApplication,
+        SoftwareAsset, SoftwareRelease, ValidationIssue, release_platforms,
     },
 };
 use nostr::prelude::{
@@ -96,6 +96,137 @@ pub(super) fn coded_error_with_details(
         details,
     }
     .into()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AssetReuseOption {
+    ReleasePublish,
+    AssetAdd,
+}
+
+impl AssetReuseOption {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::ReleasePublish => "--asset-event",
+            Self::AssetAdd => "--event",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OrderedPublicationEvent {
+    entity: &'static str,
+    event_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PublicationBatchResult {
+    ordered_events: Vec<OrderedPublicationEvent>,
+    relays: Vec<(String, bool)>,
+}
+
+impl PublicationBatchResult {
+    fn from_events(events: &[Event], relays: Vec<(String, bool)>) -> Self {
+        let ordered_events = events
+            .iter()
+            .map(|event| OrderedPublicationEvent {
+                entity: if event.kind == SOFTWARE_ASSET_KIND {
+                    "asset"
+                } else if event.kind == SOFTWARE_RELEASE_KIND {
+                    "release"
+                } else {
+                    "event"
+                },
+                event_id: event.id.to_hex(),
+            })
+            .collect();
+        Self {
+            ordered_events,
+            relays,
+        }
+    }
+
+    pub(super) fn json(&self) -> Value {
+        publication_json(self, &[], None)
+    }
+
+    fn release_event_id(&self) -> Option<&str> {
+        self.ordered_events
+            .iter()
+            .rev()
+            .find(|event| event.entity == "release")
+            .map(|event| event.event_id.as_str())
+    }
+}
+
+fn publication_json(
+    publication: &PublicationBatchResult,
+    possible_orphan_asset_ids: &[EventId],
+    recovery: Option<&str>,
+) -> Value {
+    json!({
+        "ordered_events": publication.ordered_events.iter().map(|event| json!({
+            "entity": event.entity,
+            "event_id": event.event_id,
+        })).collect::<Vec<_>>(),
+        "relays": publication.relays.iter().map(|(url, complete)| json!({
+            "url": url,
+            "status": if *complete { "complete" } else { "incomplete" },
+            "message": if *complete {
+                Value::Null
+            } else {
+                json!("the relay did not acknowledge the complete ordered batch; one or more leading events may still be present")
+            },
+        })).collect::<Vec<_>>(),
+        "possible_orphan_asset_ids": possible_orphan_asset_ids
+            .iter()
+            .map(EventId::to_hex)
+            .collect::<Vec<_>>(),
+        "recovery": recovery,
+    })
+}
+
+fn publication_recovery(
+    publication: &PublicationBatchResult,
+    reuse_option: AssetReuseOption,
+) -> String {
+    let release_id = publication.release_event_id().unwrap_or("<missing>");
+    let asset_ids = publication
+        .ordered_events
+        .iter()
+        .filter(|event| event.entity == "asset")
+        .map(|event| event.event_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "inspect exact release event {release_id} and asset events [{asset_ids}]. Then reuse any visible possible orphan asset with `{}`; only rerun after the observed state determines that the command is safe",
+        reuse_option.flag()
+    )
+}
+
+fn publication_failure_message(
+    publication: &PublicationBatchResult,
+    possible_orphan_asset_ids: &[EventId],
+    recovery: &str,
+) -> String {
+    let ordered_events = publication
+        .ordered_events
+        .iter()
+        .map(|event| format!("{} {}", event.entity, event.event_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let possible_orphans = if possible_orphan_asset_ids.is_empty() {
+        "none".to_owned()
+    } else {
+        possible_orphan_asset_ids
+            .iter()
+            .map(EventId::to_hex)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "no relay acknowledged the complete ordered publication batch\nordered event IDs: {ordered_events}\npossible orphan asset IDs: {possible_orphans}\nrecovery: {recovery}"
+    )
 }
 
 pub(super) struct ReleaseContext {
@@ -385,37 +516,32 @@ impl ReleaseContext {
         &self,
         events: Vec<Event>,
         possible_orphan_asset_ids: &[EventId],
+        reuse_option: AssetReuseOption,
         json_output: bool,
-    ) -> Result<Vec<(String, bool)>> {
+    ) -> Result<PublicationBatchResult> {
         let (user_write, repo_relays) = self.publication_relays();
-        let event_ids: Vec<String> = events.iter().map(|event| event.id.to_hex()).collect();
         let results = send_events(
             &self.client,
             Some(self.git_repo_path()?),
-            events,
+            events.clone(),
             user_write,
             repo_relays,
             !json_output,
             json_output,
         )
         .await?;
-        if !results.iter().any(|(_, accepted)| *accepted) {
+        let publication = PublicationBatchResult::from_events(&events, results);
+        if !publication.relays.iter().any(|(_, accepted)| *accepted) {
+            let recovery = publication_recovery(&publication, reuse_option);
+            let message =
+                publication_failure_message(&publication, possible_orphan_asset_ids, &recovery);
             return Err(coded_error_with_details(
                 "publication_failed",
-                "no relay accepted the complete event batch; check relay availability and retry the same command",
-                json!({
-                    "event_ids": event_ids,
-                    "possible_orphan_asset_ids": possible_orphan_asset_ids
-                        .iter().map(EventId::to_hex).collect::<Vec<_>>(),
-                    "retry": "inspect the release first, then rerun the same command; add --edit only if the release event became visible",
-                    "relays": results.iter().map(|(url, accepted)| json!({
-                        "url": url,
-                        "status": if *accepted { "accepted" } else { "rejected" },
-                    })).collect::<Vec<_>>(),
-                }),
+                message,
+                publication_json(&publication, possible_orphan_asset_ids, Some(&recovery)),
             ));
         }
-        Ok(results)
+        Ok(publication)
     }
 
     pub(super) async fn add_author_relays(&mut self, author: PublicKey) -> Result<()> {
@@ -967,4 +1093,74 @@ fn event_id_bech32(event: &Event) -> Option<String> {
         .kind(event.kind)
         .to_bech32()
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::prelude::EventId;
+
+    use super::{
+        AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult,
+        publication_failure_message, publication_json, publication_recovery,
+    };
+
+    #[test]
+    fn publication_json_reports_only_ordered_batch_outcomes() {
+        let orphan = EventId::from_hex(&"22".repeat(32)).unwrap();
+        let publication = publication_fixture();
+
+        let value = publication_json(
+            &publication,
+            &[orphan],
+            Some("inspect observed state before retrying"),
+        );
+
+        assert_eq!(value["ordered_events"][0]["entity"], "asset");
+        assert!(value["ordered_events"][0].get("relays").is_none());
+        assert_eq!(value["relays"][0]["status"], "complete");
+        assert_eq!(value["relays"][1]["status"], "incomplete");
+        assert_eq!(value["possible_orphan_asset_ids"][0], orphan.to_hex());
+        assert_eq!(value["recovery"], "inspect observed state before retrying");
+    }
+
+    #[test]
+    fn publication_failure_names_ids_and_safe_reuse_option() {
+        let orphan = EventId::from_hex(&"22".repeat(32)).unwrap();
+        let publication = publication_fixture();
+        let recovery = publication_recovery(&publication, AssetReuseOption::ReleasePublish);
+        let message = publication_failure_message(&publication, &[orphan], &recovery);
+
+        assert!(message.contains(&"11".repeat(32)));
+        assert!(message.contains(&"22".repeat(32)));
+        assert!(message.contains(&"33".repeat(32)));
+        assert!(message.contains("--asset-event"));
+        assert!(message.contains("only rerun after the observed state"));
+
+        let asset_add_recovery = publication_recovery(&publication, AssetReuseOption::AssetAdd);
+        assert!(asset_add_recovery.contains("--event"));
+        assert!(!asset_add_recovery.contains("--asset-event"));
+    }
+
+    fn publication_fixture() -> PublicationBatchResult {
+        PublicationBatchResult {
+            ordered_events: vec![
+                OrderedPublicationEvent {
+                    entity: "asset",
+                    event_id: "11".repeat(32),
+                },
+                OrderedPublicationEvent {
+                    entity: "asset",
+                    event_id: "22".repeat(32),
+                },
+                OrderedPublicationEvent {
+                    entity: "release",
+                    event_id: "33".repeat(32),
+                },
+            ],
+            relays: vec![
+                ("wss://complete.example".to_owned(), true),
+                ("wss://incomplete.example".to_owned(), false),
+            ],
+        }
+    }
 }
