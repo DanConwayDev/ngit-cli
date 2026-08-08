@@ -231,6 +231,7 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<CommandOutput> {
     let mut context = ReleaseContext::load(cli, false, &args.relays, LoginMode::Required).await?;
     let applications = trusted_applications_for_write(&mut context).await?;
@@ -245,20 +246,85 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
     context.require_application_author(&application)?;
 
     let mut assets = require_all_assets(&mut context, &release).await?;
-    let asset = load_asset_event(&mut context, &args.event, true).await?;
-    validate_reused_asset(&application, &asset, args.platform_agnostic)?;
-    reject_duplicate_asset(&assets, &asset)?;
-    let added_id = asset.raw_event.id;
-    assets.push(asset);
-
-    ensure_release_state_unchanged(&mut context, &application, &release.version, Some(&release))
-        .await?;
-    context.emit_human_warnings_before_signing(args.json);
     let signer = context
         .signer
         .as_ref()
         .context("nostr signer was not initialized")?
         .clone();
+
+    let (asset, newly_published) = if let Some(url) = &args.url {
+        if args.platforms.is_empty() && !args.platform_agnostic {
+            return Err(coded_error(
+                "asset_platform_required",
+                "provide at least one --platform or explicitly use --platform-agnostic",
+            ));
+        }
+        let proposed = NewUrlAsset {
+            source: url.clone(),
+            identifier: args
+                .asset_id
+                .clone()
+                .unwrap_or_else(|| application.identifier.clone()),
+            version: args
+                .asset_version
+                .clone()
+                .unwrap_or_else(|| release.version.clone()),
+            filename: args.filename.clone(),
+            mime: args.mime.clone(),
+            platforms: args.platforms.clone(),
+            min_platform_version: args.min_platform_version.clone(),
+            target_platform_version: args.target_platform_version.clone(),
+            supported_nips: args.supported_nips.clone(),
+            variant: args.variant.clone(),
+            commit: args.commit.clone(),
+            min_allowed_version: args.min_allowed_version.clone(),
+            version_code: args.android_version_code,
+            min_allowed_version_code: args.android_min_allowed_version_code,
+            apk_certificate_hashes: args.android_certificate_sha256.clone(),
+            original_url: args.original_url.clone(),
+        };
+        let input = prepare_url_asset(&mut context, proposed).await?;
+        reject_duplicate_prepared_asset(&assets, &[], &input)?;
+        ensure_release_state_unchanged(
+            &mut context,
+            &application,
+            &release.version,
+            Some(&release),
+        )
+        .await?;
+        enforce_metadata_policy(&context, args.strict_metadata)?;
+        context.emit_human_warnings_before_signing(args.json);
+        (sign_asset_input(input, &signer).await?, true)
+    } else {
+        let selector = args.event.as_deref().context("--event is required")?;
+        let asset = load_asset_event(&mut context, selector, true).await?;
+        validate_reused_asset(&application, &asset, args.platform_agnostic)?;
+        (asset, false)
+    };
+    reject_duplicate_asset(&assets, &asset)?;
+    if !newly_published {
+        ensure_release_state_unchanged(
+            &mut context,
+            &application,
+            &release.version,
+            Some(&release),
+        )
+        .await?;
+        enforce_metadata_policy(&context, args.strict_metadata)?;
+        context.emit_human_warnings_before_signing(args.json);
+    }
+    let added_id = asset.raw_event.id;
+    assets.push(asset);
+
+    if newly_published {
+        ensure_release_state_unchanged(
+            &mut context,
+            &application,
+            &release.version,
+            Some(&release),
+        )
+        .await?;
+    }
     let release_event = build_release_event(
         &context,
         &application,
@@ -275,15 +341,22 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
 
     let mut batch: Vec<Event> = assets.iter().map(|asset| asset.raw_event.clone()).collect();
     batch.push(release_event);
-    let relay_results = context.publish_batch(batch, &[], args.json).await?;
+    let possible_orphans = if newly_published {
+        vec![added_id]
+    } else {
+        Vec::new()
+    };
+    let relay_results = context
+        .publish_batch(batch, &possible_orphans, args.json)
+        .await?;
     let authority = context.authority(&application);
     let result = json!({
         "operation": "asset_added",
         "release": release_json(&parsed_release, &assets),
         "asset": assets.last().map(asset_json),
         "previous_event_id": release.raw_event.id.to_hex(),
-        "newly_published_asset_ids": Vec::<String>::new(),
-        "reused_asset_ids": vec![added_id.to_hex()],
+        "newly_published_asset_ids": if newly_published { vec![added_id.to_hex()] } else { Vec::<String>::new() },
+        "reused_asset_ids": if newly_published { Vec::<String>::new() } else { vec![added_id.to_hex()] },
         "relays": relay_json(&relay_results),
         "events": mutation_events_json(&assets, &parsed_release, &relay_results),
         "orphan_asset_ids": Vec::<String>::new(),

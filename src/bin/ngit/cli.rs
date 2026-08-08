@@ -793,6 +793,7 @@ pub struct ReleaseAssetViewArgs {
 }
 
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ReleaseAssetAddArgs {
     /// Release app@version, naddr, event-id, nevent, or unambiguous version
     #[arg(value_name = "RELEASE")]
@@ -800,15 +801,79 @@ pub struct ReleaseAssetAddArgs {
     /// Application context for a bare release version
     #[arg(long, value_name = "APP")]
     pub app: Option<String>,
+    /// URL of a new asset to download, hash, and publish
+    #[arg(
+        long,
+        value_name = "URL",
+        required_unless_present = "event",
+        conflicts_with = "event"
+    )]
+    pub url: Option<String>,
     /// Existing kind 3063 asset event to attach
-    #[arg(long, value_name = "ASSET", required = true)]
-    pub event: String,
-    /// Acknowledge an existing asset with no target platform
-    #[arg(long)]
+    #[arg(long, value_name = "ASSET", required_unless_present = "url")]
+    pub event: Option<String>,
+    /// Target platform (repeatable)
+    #[arg(
+        long = "platform",
+        value_name = "PLATFORM",
+        conflicts_with_all = ["event", "platform_agnostic"]
+    )]
+    pub platforms: Vec<String>,
+    /// Explicitly acknowledge that the asset has no target platform
+    #[arg(long, conflicts_with = "platforms")]
     pub platform_agnostic: bool,
+    /// Asset identifier (defaults to the application identifier)
+    #[arg(long, value_name = "ID", conflicts_with = "event")]
+    pub asset_id: Option<String>,
+    /// Asset version (defaults to the release version)
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub asset_version: Option<String>,
+    /// Published filename override
+    #[arg(long, value_name = "NAME", conflicts_with = "event")]
+    pub filename: Option<String>,
+    /// MIME type override
+    #[arg(long, value_name = "MIME", conflicts_with = "event")]
+    pub mime: Option<String>,
+    /// Minimum supported platform version
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub min_platform_version: Option<String>,
+    /// Target platform version
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub target_platform_version: Option<String>,
+    /// Supported NIP number (repeatable)
+    #[arg(long = "supported-nip", value_name = "NIP", conflicts_with = "event")]
+    pub supported_nips: Vec<String>,
+    /// Build variant
+    #[arg(long, value_name = "VARIANT", conflicts_with = "event")]
+    pub variant: Option<String>,
+    /// Source commit identifier
+    #[arg(long, value_name = "COMMIT", conflicts_with = "event")]
+    pub commit: Option<String>,
+    /// Minimum allowed asset version
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub min_allowed_version: Option<String>,
+    /// Android version code
+    #[arg(long, value_name = "CODE", conflicts_with = "event")]
+    pub android_version_code: Option<u64>,
+    /// Minimum allowed Android version code
+    #[arg(long, value_name = "CODE", conflicts_with = "event")]
+    pub android_min_allowed_version_code: Option<u64>,
+    /// Android signing certificate SHA-256 (repeatable)
+    #[arg(
+        long = "android-certificate-sha256",
+        value_name = "SHA256",
+        conflicts_with = "event"
+    )]
+    pub android_certificate_sha256: Vec<String>,
+    /// Original web source when it differs from the asset URL
+    #[arg(long, value_name = "URL", conflicts_with = "event")]
+    pub original_url: Option<String>,
     /// Confirm replacement of the existing release event
     #[arg(long, required = true)]
     pub edit: bool,
+    /// Treat metadata warnings as errors
+    #[arg(long)]
+    pub strict_metadata: bool,
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
@@ -1696,6 +1761,68 @@ mod tests {
             "ngit", "release", "app", "list", "--author", "deadbeef", "--linked",
         ])
         .expect("--author --linked should parse");
+    }
+
+    #[test]
+    fn release_asset_add_requires_exactly_one_source() {
+        assert!(
+            Cli::try_parse_from(["ngit", "release", "asset", "add", "ngit@1.8.0", "--edit",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "release",
+                "asset",
+                "add",
+                "ngit@1.8.0",
+                "--url",
+                "https://example.com/ngit.tar.gz",
+                "--event",
+                "deadbeef",
+                "--edit",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn release_asset_add_preserves_detailed_url_metadata() {
+        let cli = Cli::try_parse_from([
+            "ngit",
+            "release",
+            "asset",
+            "add",
+            "ngit@1.8.0",
+            "--url",
+            "https://example.com/ngit.apk",
+            "--platform",
+            "android-arm64-v8a",
+            "--filename",
+            "ngit.apk",
+            "--mime",
+            "application/vnd.android.package-archive",
+            "--android-version-code",
+            "42",
+            "--supported-nip",
+            "82",
+            "--edit",
+        ])
+        .expect("detailed URL asset should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::Asset(asset) = release.release_command else {
+            panic!("expected release asset command");
+        };
+        let ReleaseAssetCommands::Add(args) = asset.asset_command else {
+            panic!("expected release asset add command");
+        };
+
+        assert_eq!(args.filename.as_deref(), Some("ngit.apk"));
+        assert_eq!(args.platforms, ["android-arm64-v8a"]);
+        assert_eq!(args.android_version_code, Some(42));
+        assert_eq!(args.supported_nips, ["82"]);
     }
 
     #[test]
