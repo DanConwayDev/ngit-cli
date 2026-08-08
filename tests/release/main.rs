@@ -209,6 +209,170 @@ assets:
 }
 
 #[tokio::test]
+async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
+    const X86_BYTES: &[u8] = b"direct x86_64 archive\n";
+    const ARM_BYTES: &[u8] = b"added aarch64 archive\n";
+    const RELEASED_AT: &str = "1700000000";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    let server = AssetHttpServer::spawn(vec![
+        ServedAsset {
+            path: "/ngit-1.2.3-linux-x86_64.tar.gz",
+            body: X86_BYTES,
+            content_type: "application/gzip",
+        },
+        ServedAsset {
+            path: "/ngit-1.2.3-linux-aarch64.tar.gz",
+            body: ARM_BYTES,
+            content_type: "application/octet-stream",
+        },
+    ])
+    .await?;
+    let x86_url = format!("{}/ngit-1.2.3-linux-x86_64.tar.gz", server.base_url());
+    let x86_asset_argument = format!("linux-x86_64={x86_url}");
+    run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--asset",
+            &x86_asset_argument,
+            "--channel",
+            "stable",
+            "--notes",
+            "Release state which must survive asset add",
+            "--released-at",
+            RELEASED_AT,
+            "--json",
+        ],
+    )
+    .await?;
+
+    let initial = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(RELEASE_IDENTIFIER),
+            "initial URL-backed software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let initial_asset_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(initial_asset_events.len() == 1);
+    let x86 =
+        SoftwareAsset::parse(&initial_asset_events[0]).map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(x86.url.as_deref() == Some(x86_url.as_str()));
+    ensure!(x86.filename.as_deref() == Some("ngit-1.2.3-linux-x86_64.tar.gz"));
+    ensure!(x86.mime == "application/gzip");
+    ensure!(x86.sha256 == sha256_hex(X86_BYTES));
+    ensure!(x86.size == Some(X86_BYTES.len() as u64));
+    ensure!(x86.platforms == ["linux-x86_64"]);
+    ensure!(initial.assets[0].event_id == x86.raw_event.id);
+
+    let arm_url = format!("{}/ngit-1.2.3-linux-aarch64.tar.gz", server.base_url());
+    let added = run_json(
+        &publisher,
+        &[
+            "release",
+            "asset",
+            "add",
+            RELEASE_IDENTIFIER,
+            "--url",
+            &arm_url,
+            "--platform",
+            "linux-aarch64",
+            "--filename",
+            "ngit-1.2.3-linux-aarch64.tar.gz",
+            "--mime",
+            "application/gzip",
+            "--min-platform-version",
+            "5.15",
+            "--supported-nip",
+            "82",
+            "--variant",
+            "portable",
+            "--commit",
+            "cafebabe",
+            "--original-url",
+            "https://downloads.example.invalid/ngit-1.2.3-linux-aarch64.tar.gz",
+            "--edit",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(added["result"]["operation"] == "asset_added");
+    ensure!(added["result"]["previous_event_id"] == initial.raw_event.id.to_hex());
+    server.finish().await?;
+
+    let replacement = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(RELEASE_IDENTIFIER),
+            "replacement URL-backed software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(replacement.raw_event.id != initial.raw_event.id);
+    ensure!(replacement.raw_event.created_at == initial.raw_event.created_at);
+    ensure!(replacement.channel == initial.channel);
+    ensure!(replacement.notes == initial.notes);
+    ensure!(replacement.application == initial.application);
+    ensure!(replacement.platforms == ["linux-aarch64", "linux-x86_64"]);
+
+    let asset_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(asset_events.len() == 2);
+    let assets = asset_events
+        .iter()
+        .map(SoftwareAsset::parse)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let arm = asset_named(&assets, "ngit-1.2.3-linux-aarch64.tar.gz")?;
+    ensure!(arm.identifier == APP_ID);
+    ensure!(arm.version == RELEASE_VERSION);
+    ensure!(arm.url.as_deref() == Some(arm_url.as_str()));
+    ensure!(arm.mime == "application/gzip");
+    ensure!(arm.sha256 == sha256_hex(ARM_BYTES));
+    ensure!(arm.size == Some(ARM_BYTES.len() as u64));
+    ensure!(arm.platforms == ["linux-aarch64"]);
+    ensure!(arm.min_platform_version.as_deref() == Some("5.15"));
+    ensure!(arm.supported_nips == ["82"]);
+    ensure!(arm.variant.as_deref() == Some("portable"));
+    ensure!(arm.commit.as_deref() == Some("cafebabe"));
+    ensure!(
+        arm.original_url.as_deref()
+            == Some("https://downloads.example.invalid/ngit-1.2.3-linux-aarch64.tar.gz")
+    );
+    ensure!(replacement.assets[0] == initial.assets[0]);
+    ensure!(replacement.assets[1].event_id == arm.raw_event.id);
+    Ok(())
+}
+
+#[tokio::test]
 async fn release_publish_reuses_an_asset_event_and_is_readable() -> Result<()> {
     let (harness, publisher, published) = setup(0).await?;
     create_application(&publisher).await?;
