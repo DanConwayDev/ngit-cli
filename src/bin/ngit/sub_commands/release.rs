@@ -1,5 +1,6 @@
 mod read;
 mod support;
+mod write_app;
 
 use anyhow::Result;
 use serde_json::json;
@@ -18,6 +19,8 @@ pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(args) => read::app_list(cli, args).await,
             ReleaseAppCommands::View(args) => read::app_view(cli, args).await,
+            ReleaseAppCommands::Init(args) => write_app::app_init(cli, args).await,
+            ReleaseAppCommands::Link(args) => write_app::app_link(cli, args).await,
         },
         ReleaseCommands::Asset(args) => match &args.asset_command {
             ReleaseAssetCommands::List(args) => read::asset_list(cli, args).await,
@@ -90,6 +93,8 @@ fn wants_json(command: &ReleaseCommands) -> bool {
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(args) => args.json,
             ReleaseAppCommands::View(args) => args.json,
+            ReleaseAppCommands::Init(args) => args.json,
+            ReleaseAppCommands::Link(args) => args.json,
         },
         ReleaseCommands::Asset(args) => match &args.asset_command {
             ReleaseAssetCommands::List(args) => args.json,
@@ -105,6 +110,8 @@ fn command_name(command: &ReleaseCommands) -> &'static str {
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(_) => "release.app.list",
             ReleaseAppCommands::View(_) => "release.app.view",
+            ReleaseAppCommands::Init(_) => "release.app.init",
+            ReleaseAppCommands::Link(_) => "release.app.link",
         },
         ReleaseCommands::Asset(args) => match &args.asset_command {
             ReleaseAssetCommands::List(_) => "release.asset.list",

@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use ngit::{
+    NgitSigner,
     client::{
         Client, Connect, Params, fetch_filters_to_local_cache, fetching_with_report,
         get_events_from_local_cache, get_repo_ref_from_cache,
@@ -102,6 +103,7 @@ pub(super) struct ReleaseContext {
     pub client: Client,
     pub selected_coordinate: Nip19Coordinate,
     pub repo_ref: RepoRef,
+    pub signer: Option<Arc<NgitSigner>>,
     pub user_ref: Option<UserRef>,
     pub explicit_relays: Vec<RelayUrl>,
     pub discovery_relays: Vec<RelayUrl>,
@@ -150,11 +152,11 @@ impl ReleaseContext {
                 .await?,
             ),
         };
-        let user_ref = if let Some((signer, user_ref, _)) = login {
+        let (signer, user_ref) = if let Some((signer, user_ref, _)) = login {
             client.set_signer(Arc::clone(&signer)).await;
-            Some(user_ref)
+            (Some(signer), Some(user_ref))
         } else {
-            None
+            (None, None)
         };
 
         let explicit_relays = parse_relays(explicit_relays)?;
@@ -172,6 +174,7 @@ impl ReleaseContext {
             client,
             selected_coordinate: selected.coordinate,
             repo_ref,
+            signer,
             user_ref,
             explicit_relays,
             discovery_relays,
@@ -184,8 +187,33 @@ impl ReleaseContext {
         self.git_repo.get_path()
     }
 
+    pub(super) async fn refresh_repository(&mut self) -> Result<()> {
+        fetching_with_report(
+            self.git_repo_path()?,
+            &self.client,
+            &self.selected_coordinate,
+        )
+        .await?;
+        self.repo_ref =
+            get_repo_ref_from_cache(Some(self.git_repo_path()?), &self.selected_coordinate).await?;
+        Ok(())
+    }
+
     pub(super) fn current_signer(&self) -> Option<PublicKey> {
         self.user_ref.as_ref().map(|user| user.public_key)
+    }
+
+    pub(super) fn emit_human_warnings_before_signing(&mut self, json_output: bool) {
+        if json_output {
+            return;
+        }
+        for warning in &self.warnings {
+            eprintln!("warning: {}", warning.message);
+        }
+        // Human output has already shown these at the last safe point before
+        // the signer is invoked. Keep JSON warnings for the final envelope,
+        // but avoid repeating human warnings after publication.
+        self.warnings.clear();
     }
 
     pub(super) fn repo_coordinate_keys(&self) -> BTreeSet<String> {
@@ -197,6 +225,19 @@ impl ReleaseContext {
                     &Coordinate::new(Kind::GitRepoAnnouncement, author)
                         .identifier(self.repo_ref.identifier.clone()),
                 )
+            })
+            .collect()
+    }
+
+    pub(super) fn ordered_repo_coordinates(&self) -> Vec<ngit::software_release::AddressPointer> {
+        let relay_hint = self.repo_ref.relays.first().map(ToString::to_string);
+        self.repo_ref
+            .maintainers_for_announcement_tags()
+            .into_iter()
+            .map(|author| ngit::software_release::AddressPointer {
+                coordinate: Coordinate::new(Kind::GitRepoAnnouncement, author)
+                    .identifier(self.repo_ref.identifier.clone()),
+                relay_hint: relay_hint.clone(),
             })
             .collect()
     }
@@ -250,6 +291,33 @@ impl ReleaseContext {
             can_publish: blocker.is_none(),
             blocker: blocker.map(str::to_owned),
         }
+    }
+
+    pub(super) fn require_owner_maintainer(&self, application: &SoftwareApplication) -> Result<()> {
+        let signer = self
+            .current_signer()
+            .ok_or_else(|| coded_error("not_logged_in", "nostr account required"))?;
+        if !self.repo_ref.maintainers.contains(&signer) {
+            return Err(coded_error(
+                "not_repository_maintainer",
+                "the active signer is not a current repository maintainer",
+            ));
+        }
+        if signer != application.raw_event.pubkey {
+            return Err(coded_error_with_details(
+                "application_author_mismatch",
+                format!(
+                    "only application author {} can edit it; current signer is {}",
+                    application.raw_event.pubkey.to_bech32()?,
+                    signer.to_bech32()?
+                ),
+                json!({
+                    "current_signer": signer.to_hex(),
+                    "required_author": application.raw_event.pubkey.to_hex(),
+                }),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn publication_relays(&self) -> (Vec<String>, Vec<RelayUrl>) {

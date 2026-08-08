@@ -118,6 +118,11 @@ path = "tests/git_push_state/main.rs"
 name = "git_push_pr"
 path = "tests/git_push_pr/main.rs"
 
+# NIP-82 software application/release/asset command workflows.
+[[test]]
+name = "release"
+path = "tests/release/main.rs"
+
 [profile.release]
 lto = true
 strip = "symbols"

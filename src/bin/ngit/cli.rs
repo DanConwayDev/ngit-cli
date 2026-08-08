@@ -519,6 +519,10 @@ pub enum ReleaseAppCommands {
     List(ReleaseAppListArgs),
     /// view an application and its publication authority
     View(ReleaseAppViewArgs),
+    /// create a linked application or explicitly edit one
+    Init(ReleaseAppInitArgs),
+    /// link an existing application to this repository
+    Link(ReleaseAppLinkArgs),
 }
 
 #[derive(clap::Args)]
@@ -559,6 +563,114 @@ pub struct ReleaseAppViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReleaseAppInitArgs {
+    /// Application identifier (defaults to the repository identifier)
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
+    /// Application display name (required when no repository default exists)
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Application description
+    #[arg(
+        long,
+        value_name = "TEXT",
+        conflicts_with_all = ["description_file", "clear_description"]
+    )]
+    pub description: Option<String>,
+    /// Read the application description from a file
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["description", "clear_description"]
+    )]
+    pub description_file: Option<PathBuf>,
+    /// Remove the application description when editing
+    #[arg(long, conflicts_with_all = ["description", "description_file"])]
+    pub clear_description: bool,
+    /// Short application summary
+    #[arg(long, value_name = "TEXT", conflicts_with = "clear_summary")]
+    pub summary: Option<String>,
+    /// Remove the application summary when editing
+    #[arg(long, conflicts_with = "summary")]
+    pub clear_summary: bool,
+    /// Application icon URL
+    #[arg(long, value_name = "URL", conflicts_with = "clear_icon")]
+    pub icon: Option<String>,
+    /// Remove the application icon when editing
+    #[arg(long, conflicts_with = "icon")]
+    pub clear_icon: bool,
+    /// Application image URL (repeatable)
+    #[arg(long = "image", value_name = "URL", conflicts_with = "clear_images")]
+    pub images: Vec<String>,
+    /// Remove all application images when editing
+    #[arg(long, conflicts_with = "images")]
+    pub clear_images: bool,
+    /// Application topic (repeatable)
+    #[arg(long = "topic", value_name = "TOPIC", conflicts_with = "clear_topics")]
+    pub topics: Vec<String>,
+    /// Remove all application topics when editing
+    #[arg(long, conflicts_with = "topics")]
+    pub clear_topics: bool,
+    /// Application website URL
+    #[arg(long, value_name = "URL", conflicts_with = "clear_website")]
+    pub website: Option<String>,
+    /// Remove the application website when editing
+    #[arg(long, conflicts_with = "website")]
+    pub clear_website: bool,
+    /// Canonical repository clone URL
+    #[arg(long, value_name = "URL", conflicts_with = "clear_repository")]
+    pub repository: Option<String>,
+    /// Remove the canonical repository clone URL when editing
+    #[arg(long, conflicts_with = "repository")]
+    pub clear_repository: bool,
+    /// Supported platform (repeatable)
+    #[arg(
+        long = "platform",
+        value_name = "PLATFORM",
+        conflicts_with = "clear_platforms"
+    )]
+    pub platforms: Vec<String>,
+    /// Remove all application platform hints when editing
+    #[arg(long, conflicts_with = "platforms")]
+    pub clear_platforms: bool,
+    /// SPDX license expression
+    #[arg(long, value_name = "SPDX", conflicts_with = "clear_license")]
+    pub license: Option<String>,
+    /// Remove the application license when editing
+    #[arg(long, conflicts_with = "license")]
+    pub clear_license: bool,
+    /// Explicitly replace an existing application; never creates a missing app
+    #[arg(long)]
+    pub edit: bool,
+    /// Treat metadata warnings as errors
+    #[arg(long)]
+    pub strict_metadata: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAppLinkArgs {
+    /// Application identifier, naddr, or application coordinate
+    #[arg(value_name = "APP")]
+    pub app: String,
+    /// Confirm replacement of the existing application event
+    #[arg(long, required = true)]
+    pub edit: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -1361,6 +1473,8 @@ mod tests {
                 "--offline",
             ]
             .as_slice(),
+            ["ngit", "release", "app", "init", "--name", "ngit", "--json"].as_slice(),
+            ["ngit", "release", "app", "link", "ngit", "--edit", "--json"].as_slice(),
         ] {
             Cli::try_parse_from(args)
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
@@ -1426,6 +1540,15 @@ mod tests {
             panic!("expected asset command group");
         };
         assert!(matches!(asset.asset_command, ReleaseAssetCommands::View(_)));
+    }
+
+    #[test]
+    fn release_app_link_requires_edit() {
+        let args = ["ngit", "release", "app", "link", "ngit"];
+        assert!(
+            Cli::try_parse_from(args).is_err(),
+            "application link unexpectedly accepted without --edit"
+        );
     }
 
     #[test]
