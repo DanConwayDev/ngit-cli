@@ -103,6 +103,7 @@ pub(super) struct ReleaseContext {
     pub selected_coordinate: Nip19Coordinate,
     pub repo_ref: RepoRef,
     pub user_ref: Option<UserRef>,
+    pub explicit_relays: Vec<RelayUrl>,
     pub discovery_relays: Vec<RelayUrl>,
     pub offline: bool,
     pub warnings: Vec<WarningJson>,
@@ -156,8 +157,9 @@ impl ReleaseContext {
             None
         };
 
+        let explicit_relays = parse_relays(explicit_relays)?;
         let mut discovery_relays = repo_ref.relays.clone();
-        discovery_relays.extend(parse_relays(explicit_relays)?);
+        discovery_relays.extend(explicit_relays.iter().cloned());
         if let Some(user_ref) = &user_ref {
             discovery_relays.extend(parse_relays(&user_ref.relays.read())?);
             discovery_relays.extend(parse_relays(&user_ref.relays.write())?);
@@ -171,6 +173,7 @@ impl ReleaseContext {
             selected_coordinate: selected.coordinate,
             repo_ref,
             user_ref,
+            explicit_relays,
             discovery_relays,
             offline,
             warnings: Vec::new(),
@@ -249,6 +252,27 @@ impl ReleaseContext {
         }
     }
 
+    pub(super) fn publication_relays(&self) -> (Vec<String>, Vec<RelayUrl>) {
+        let user_write = self
+            .user_ref
+            .as_ref()
+            .map_or_else(Vec::new, |user| user.relays.write());
+        let mut repo = self.repo_ref.relays.clone();
+        repo.extend(self.explicit_relays.iter().cloned());
+        dedup_relays(&mut repo);
+        (user_write, repo)
+    }
+
+    fn publication_query_relays(&self) -> Result<Vec<RelayUrl>> {
+        let (user_write, mut relays) = self.publication_relays();
+        relays.extend(parse_relays(&user_write)?);
+        if relays.is_empty() {
+            relays.extend(parse_relays(self.client.get_relay_default_set())?);
+        }
+        dedup_relays(&mut relays);
+        Ok(relays)
+    }
+
     pub(super) async fn add_author_relays(&mut self, author: PublicKey) -> Result<()> {
         if let Ok(user) =
             ngit::login::user::get_user_ref_from_cache(Some(self.git_repo_path()?), &author).await
@@ -262,12 +286,17 @@ impl ReleaseContext {
         Ok(())
     }
 
-    pub(super) async fn query(&mut self, filters: Vec<Filter>) -> Result<Vec<Event>> {
+    pub(super) async fn query(&mut self, filters: Vec<Filter>, strict: bool) -> Result<Vec<Event>> {
         if !self.offline {
+            let relays = if strict {
+                self.publication_query_relays()?
+            } else {
+                self.discovery_relays.clone()
+            };
             let results = fetch_filters_to_local_cache(
                 &self.client,
                 self.git_repo_path()?,
-                &self.discovery_relays,
+                &relays,
                 &filters,
             )
             .await;
@@ -275,6 +304,16 @@ impl ReleaseContext {
                 .iter()
                 .filter_map(|(relay, result)| result.as_ref().err().map(|_| relay.to_string()))
                 .collect();
+            if strict && !failed.is_empty() {
+                return Err(coded_error_with_details(
+                    "relay_preflight_incomplete",
+                    format!(
+                        "release preflight did not complete on: {}",
+                        failed.join(", ")
+                    ),
+                    json!({ "relays": failed }),
+                ));
+            }
             if !failed.is_empty() {
                 self.warnings.push(
                     WarningJson::new(
@@ -336,12 +375,13 @@ fn latest_addressable(events: Vec<Event>) -> Vec<Event> {
 pub(super) async fn load_applications(
     context: &mut ReleaseContext,
     authors: Vec<PublicKey>,
+    strict: bool,
 ) -> Result<Vec<SoftwareApplication>> {
     let mut filter = Filter::new().kind(SOFTWARE_APPLICATION_KIND);
     if !authors.is_empty() {
         filter = filter.authors(authors);
     }
-    let events = latest_addressable(context.query(vec![filter]).await?);
+    let events = latest_addressable(context.query(vec![filter], strict).await?);
     let mut applications = Vec::new();
     for event in events {
         match SoftwareApplication::parse(&event) {
@@ -364,7 +404,7 @@ pub(super) async fn load_trusted_linked_applications(
     context: &mut ReleaseContext,
 ) -> Result<Vec<SoftwareApplication>> {
     let maintainers = context.repo_ref.maintainers.clone();
-    let applications = load_applications(context, maintainers).await?;
+    let applications = load_applications(context, maintainers, false).await?;
     Ok(applications
         .into_iter()
         .filter(|application| context.application_is_trusted(application))
@@ -374,6 +414,7 @@ pub(super) async fn load_trusted_linked_applications(
 pub(super) async fn load_releases(
     context: &mut ReleaseContext,
     applications: &[SoftwareApplication],
+    strict: bool,
 ) -> Result<Vec<SoftwareRelease>> {
     if applications.is_empty() {
         return Ok(Vec::new());
@@ -393,7 +434,7 @@ pub(super) async fn load_releases(
         .kind(SOFTWARE_RELEASE_KIND)
         .authors(authors)
         .custom_tags(SingleLetterTag::LOWERCASE_I, identifiers);
-    let events = latest_addressable(context.query(vec![filter]).await?);
+    let events = latest_addressable(context.query(vec![filter], strict).await?);
     let application_coordinates: HashSet<String> = applications
         .iter()
         .map(|application| coordinate_key(&application.coordinate()))
@@ -438,6 +479,7 @@ pub(super) async fn load_releases(
 pub(super) async fn load_assets(
     context: &mut ReleaseContext,
     releases: &[&SoftwareRelease],
+    strict: bool,
 ) -> Result<Vec<SoftwareAsset>> {
     let ids: BTreeSet<EventId> = releases
         .iter()
@@ -450,7 +492,7 @@ pub(super) async fn load_assets(
     // the wrong kind is retained in cache and can be reported as invalid
     // rather than indistinguishable from a missing event.
     let filter = Filter::new().ids(ids);
-    let events = context.query(vec![filter]).await?;
+    let events = context.query(vec![filter], strict).await?;
     let mut assets = Vec::new();
     for event in events {
         match SoftwareAsset::parse(&event) {

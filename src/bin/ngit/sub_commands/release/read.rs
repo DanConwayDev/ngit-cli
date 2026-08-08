@@ -53,7 +53,7 @@ pub(super) async fn app_list(cli: &Cli, args: &ReleaseAppListArgs) -> Result<Com
     for author in &authors {
         context.add_author_relays(*author).await?;
     }
-    let mut applications = load_applications(&mut context, authors).await?;
+    let mut applications = load_applications(&mut context, authors, false).await?;
     if !args.mine && args.author.is_none() {
         applications.retain(|application| context.application_is_trusted(application));
     }
@@ -120,7 +120,8 @@ pub(super) async fn app_view(cli: &Cli, args: &ReleaseAppViewArgs) -> Result<Com
     for author in &authors {
         context.add_author_relays(*author).await?;
     }
-    let applications = load_applications(&mut context, authors.into_iter().collect()).await?;
+    let applications =
+        load_applications(&mut context, authors.into_iter().collect(), false).await?;
     let application = resolve_application(&applications, &args.app)?;
     let authority = context.authority(application);
     let result = json!({ "application": application_json(&context, application) });
@@ -166,7 +167,7 @@ pub(super) async fn release_list(cli: &Cli, args: &ReleaseListArgs) -> Result<Co
         }
         applications.retain(|application| application.raw_event.pubkey == author);
     }
-    let mut releases = load_releases(&mut context, &applications).await?;
+    let mut releases = load_releases(&mut context, &applications, false).await?;
     if let Some(channel) = &args.channel {
         releases.retain(|release| release.channel == *channel);
     }
@@ -280,7 +281,7 @@ pub(super) async fn asset_view(cli: &Cli, args: &ReleaseAssetViewArgs) -> Result
     let (asset, authority, release_value, application_value) =
         if let Some(release_selector) = &args.release {
             let applications = load_trusted_linked_applications(&mut context).await?;
-            let releases = load_releases(&mut context, &applications).await?;
+            let releases = load_releases(&mut context, &applications, false).await?;
             let (release, is_latest, latest_event_id) = resolve_release_for_read(
                 &mut context,
                 &applications,
@@ -289,7 +290,7 @@ pub(super) async fn asset_view(cli: &Cli, args: &ReleaseAssetViewArgs) -> Result
                 args.app.as_deref(),
             )
             .await?;
-            let assets = load_assets(&mut context, &[&release]).await?;
+            let assets = load_assets(&mut context, &[&release], false).await?;
             let asset = resolve_asset(&assets, &args.asset)?.clone();
             let application = application_for_release(&applications, &release)?;
             let mut release_value = release_json(&release, &assets);
@@ -309,7 +310,10 @@ pub(super) async fn asset_view(cli: &Cli, args: &ReleaseAssetViewArgs) -> Result
                 )
             })?;
             let events = context
-                .query(vec![Filter::new().kind(SOFTWARE_ASSET_KIND).id(event_id)])
+                .query(
+                    vec![Filter::new().kind(SOFTWARE_ASSET_KIND).id(event_id)],
+                    false,
+                )
                 .await?;
             let event = events
                 .iter()
@@ -356,7 +360,7 @@ async fn view_release(
 ) -> Result<CommandOutput> {
     let mut context = ReleaseContext::load(cli, offline, relays, LoginMode::Optional).await?;
     let applications = load_trusted_linked_applications(&mut context).await?;
-    let releases = load_releases(&mut context, &applications).await?;
+    let releases = load_releases(&mut context, &applications, false).await?;
     let (release, is_latest, latest_event_id) = resolve_release_for_read(
         &mut context,
         &applications,
@@ -365,7 +369,7 @@ async fn view_release(
         app_selector,
     )
     .await?;
-    let assets = load_assets(&mut context, &[&release]).await?;
+    let assets = load_assets(&mut context, &[&release], false).await?;
     let application = application_for_release(&applications, &release)?;
     let authority = context.authority(application);
     let resolved_ids: BTreeSet<_> = assets.iter().map(|asset| asset.raw_event.id).collect();
@@ -543,7 +547,9 @@ async fn resolve_release_for_read(
         return Ok((release.clone(), true, Some(release.raw_event.id.to_hex())));
     };
 
-    let events = context.query(vec![Filter::new().id(event_id)]).await?;
+    let events = context
+        .query(vec![Filter::new().id(event_id)], false)
+        .await?;
     let event = events
         .iter()
         .find(|event| event.id == event_id)
