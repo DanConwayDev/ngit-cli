@@ -825,12 +825,25 @@ pub struct ReleaseAssetAddArgs {
     #[arg(
         long,
         value_name = "URL",
-        required_unless_present = "event",
-        conflicts_with = "event"
+        required_unless_present_any = ["event", "file"],
+        conflicts_with_all = ["event", "file"]
     )]
     pub url: Option<String>,
+    /// Local asset to upload to Blossom
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present_any = ["url", "event"],
+        conflicts_with_all = ["url", "event"]
+    )]
+    pub file: Option<PathBuf>,
     /// Existing kind 3063 asset event to attach
-    #[arg(long, value_name = "ASSET", required_unless_present = "url")]
+    #[arg(
+        long,
+        value_name = "ASSET",
+        required_unless_present_any = ["url", "file"],
+        conflicts_with_all = ["url", "file"]
+    )]
     pub event: Option<String>,
     /// Target platform (repeatable)
     #[arg(
@@ -894,6 +907,14 @@ pub struct ReleaseAssetAddArgs {
     /// Permit a non-main release to omit application platforms
     #[arg(long)]
     pub allow_partial_platforms: bool,
+    /// Override kind-10063 discovery with an ordered Blossom server
+    /// (repeatable)
+    #[arg(
+        long = "blossom-server",
+        value_name = "URL",
+        conflicts_with_all = ["url", "event"]
+    )]
+    pub blossom_servers: Vec<String>,
     /// Confirm replacement of the existing release event
     #[arg(long, required = true)]
     pub edit: bool,

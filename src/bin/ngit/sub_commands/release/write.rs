@@ -461,17 +461,31 @@ pub(super) async fn asset_add(
     let application_target = ApplicationTarget::from(&application);
 
     let mut assets = require_all_assets(&mut context, &release).await?;
-    let (prepared_asset, reused_asset) = if let Some(url) = &args.url {
-        if args.platforms.is_empty() && !args.platform_agnostic {
-            return Err(coded_error(
-                "asset_platform_required",
-                "provide at least one --platform or explicitly use --platform-agnostic",
-            ));
-        }
+    if (args.url.is_some() || args.file.is_some())
+        && args.platforms.is_empty()
+        && !args.platform_agnostic
+    {
+        return Err(coded_error(
+            "asset_platform_required",
+            "provide at least one --platform or explicitly use --platform-agnostic",
+        ));
+    }
+    let (mut prepared_asset, reused_asset) = if let Some(url) = &args.url {
         let proposed = asset_add_metadata(args, url.clone(), &application, &release);
         let input = prepare_url_asset(&mut context, proposed).await?;
         reject_duplicate_prepared_asset(&assets, &[], &input)?;
-        (Some(input), None)
+        (Some(PreparedAsset::Ready(input)), None)
+    } else if let Some(path) = &args.file {
+        let pending = prepare_file_asset(
+            &mut context,
+            NewFileAsset {
+                source_path: path.clone(),
+                metadata: asset_add_metadata(args, String::new(), &application, &release),
+            },
+        )
+        .await?;
+        reject_duplicate_prepared_asset(&assets, &[], &pending.input)?;
+        (Some(PreparedAsset::File(pending)), None)
     } else {
         let selector = args.event.as_deref().context("--event is required")?;
         let asset = load_asset_event(&mut context, selector, true).await?;
@@ -479,13 +493,20 @@ pub(super) async fn asset_add(
         reject_duplicate_asset(&assets, &asset)?;
         (None, Some(asset))
     };
+    let blossom_selection = resolve_blossom_server_selection(
+        &mut context,
+        &application_target,
+        &args.blossom_servers,
+        matches!(prepared_asset, Some(PreparedAsset::File(_))),
+    )
+    .await?;
     let release_platforms = assets
         .iter()
         .flat_map(|asset| asset.platforms.iter())
         .chain(
             prepared_asset
                 .iter()
-                .flat_map(|asset| asset.platforms.iter()),
+                .flat_map(|asset| asset.input().platforms.iter()),
         )
         .chain(reused_asset.iter().flat_map(|asset| asset.platforms.iter()))
         .cloned()
@@ -516,6 +537,21 @@ pub(super) async fn asset_add(
         .as_ref()
         .context("nostr signer was not initialized")?
         .clone();
+    let blossom = match (prepared_asset.as_mut(), blossom_selection.as_ref()) {
+        (Some(prepared), Some(selection)) => {
+            upload_prepared_file_assets(std::slice::from_mut(prepared), selection, &signer).await?
+        }
+        _ => BlossomPublication::empty(),
+    };
+    ensure_release_state_unchanged(
+        &mut context,
+        &application_target,
+        Some(&existing_application),
+        &release.version,
+        Some(&release),
+    )
+    .await
+    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", false, false))?;
     let application = if platform_policy.application_platforms_added.is_empty() {
         application
     } else {
@@ -524,14 +560,24 @@ pub(super) async fn asset_add(
             &platform_policy.resulting_application_platforms,
             &signer,
         )
-        .await?
+        .await
+        .map_err(|error| {
+            preserve_completed_blossom(error, &blossom, "application_signing", false, false)
+        })?
     };
     let newly_published = prepared_asset.is_some();
-    let asset = if let Some(input) = prepared_asset {
-        sign_asset_input(input, &signer).await?
+    let asset = if let Some(prepared) = prepared_asset {
+        let input = match prepared {
+            PreparedAsset::Ready(input) => input,
+            PreparedAsset::File(pending) => pending.input,
+        };
+        sign_asset_input(input, &signer).await.map_err(|error| {
+            preserve_completed_blossom(error, &blossom, "asset_signing", true, false)
+        })?
     } else {
         reused_asset.context("asset add requires one URL or event source")?
     };
+
     reject_duplicate_asset(&assets, &asset)?;
     let added_id = asset.raw_event.id;
     assets.push(asset);
@@ -543,7 +589,8 @@ pub(super) async fn asset_add(
         &release.version,
         Some(&release),
     )
-    .await?;
+    .await
+    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", true, false))?;
     context.require_application_author(&application)?;
     let release_event = build_release_event(
         &context,
@@ -557,8 +604,13 @@ pub(super) async fn asset_add(
         release.raw_event.created_at,
         &signer,
     )
-    .await?;
-    let parsed_release = SoftwareRelease::parse(&release_event)?;
+    .await
+    .map_err(|error| {
+        preserve_completed_blossom(error, &blossom, "release_signing", false, false)
+    })?;
+    let parsed_release = SoftwareRelease::parse(&release_event).map_err(|error| {
+        preserve_completed_blossom(error.into(), &blossom, "release_validation", true, false)
+    })?;
 
     let mut batch = vec![application.raw_event.clone()];
     batch.extend(assets.iter().map(|asset| asset.raw_event.clone()));
@@ -575,7 +627,10 @@ pub(super) async fn asset_add(
             AssetReuseOption::AssetAdd,
             args.json,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            preserve_completed_blossom(error, &blossom, "relay_publication", true, false)
+        })?;
     let authority = context.authority(&application);
     let result = json!({
         "operation": "asset_added",
@@ -589,6 +644,7 @@ pub(super) async fn asset_add(
         "newly_published_asset_ids": if newly_published { vec![added_id.to_hex()] } else { Vec::<String>::new() },
         "reused_asset_ids": if newly_published { Vec::<String>::new() } else { vec![added_id.to_hex()] },
         "publication": relay_results.json(),
+        "blossom": blossom.json,
     });
     Ok(CommandOutput::new(
         "release.asset.add",
