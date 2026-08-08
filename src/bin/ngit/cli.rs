@@ -445,9 +445,60 @@ pub struct ReleaseSubCommandArgs {
 
 #[derive(Subcommand)]
 pub enum ReleaseCommands {
+    /// list releases for applications linked to this repository
+    List(ReleaseListArgs),
+    /// view a release and its publication authority
+    View(ReleaseViewArgs),
     /// work with software applications
     #[command(alias = "application")]
     App(ReleaseAppSubCommandArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseListArgs {
+    /// Filter by application identifier, naddr, or application coordinate
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Filter by release channel
+    #[arg(long, value_name = "CHANNEL")]
+    pub channel: Option<String>,
+    /// Filter by target platform (repeatable, OR logic)
+    #[arg(long = "platform", value_name = "PLATFORM")]
+    pub platforms: Vec<String>,
+    /// Filter by an explicit trusted application author
+    #[arg(long, value_name = "PUBKEY")]
+    pub author: Option<String>,
+    /// Limit the number of releases returned
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseViewArgs {
+    /// Release app@version, naddr, event-id, nevent, or unambiguous version
+    #[arg(value_name = "RELEASE")]
+    pub release: String,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Parser)]
@@ -1252,6 +1303,25 @@ mod tests {
     }
 
     #[test]
+    fn release_read_commands_parse() {
+        for args in [
+            ["ngit", "release", "list", "--json", "--offline"].as_slice(),
+            [
+                "ngit",
+                "releases",
+                "view",
+                "ngit@1.8.0",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
     fn release_app_link_filters_require_an_author_scope() {
         assert!(Cli::try_parse_from(["ngit", "release", "app", "list", "--unlinked"]).is_err());
         Cli::try_parse_from(["ngit", "release", "app", "list", "--mine", "--unlinked"])
@@ -1269,7 +1339,9 @@ mod tests {
         let Some(Commands::Release(release)) = cli.command else {
             panic!("expected release command");
         };
-        let ReleaseCommands::App(app) = release.release_command;
+        let ReleaseCommands::App(app) = release.release_command else {
+            panic!("expected application command group");
+        };
         assert!(matches!(app.app_command, ReleaseAppCommands::List(_)));
     }
 }

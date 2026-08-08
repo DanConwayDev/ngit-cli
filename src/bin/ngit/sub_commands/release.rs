@@ -13,6 +13,8 @@ pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
     let json_output = wants_json(&args.release_command);
     let command = command_name(&args.release_command);
     let result = match &args.release_command {
+        ReleaseCommands::List(args) => read::release_list(cli, args).await,
+        ReleaseCommands::View(args) => read::release_view(cli, args).await,
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(args) => read::app_list(cli, args).await,
             ReleaseAppCommands::View(args) => read::app_view(cli, args).await,
@@ -79,6 +81,8 @@ pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
 
 fn wants_json(command: &ReleaseCommands) -> bool {
     match command {
+        ReleaseCommands::List(args) => args.json,
+        ReleaseCommands::View(args) => args.json,
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(args) => args.json,
             ReleaseAppCommands::View(args) => args.json,
@@ -88,6 +92,8 @@ fn wants_json(command: &ReleaseCommands) -> bool {
 
 fn command_name(command: &ReleaseCommands) -> &'static str {
     match command {
+        ReleaseCommands::List(_) => "release.list",
+        ReleaseCommands::View(_) => "release.view",
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(_) => "release.app.list",
             ReleaseAppCommands::View(_) => "release.app.view",

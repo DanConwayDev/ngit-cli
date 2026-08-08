@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ngit::{
     client::{
         Client, Connect, Params, fetch_filters_to_local_cache, fetching_with_report,
@@ -14,15 +14,22 @@ use ngit::{
     git::{Repo, RepoActions},
     login::{self, existing::load_existing_login, user::UserRef},
     repo_ref::{RepoRef, get_resolved_repo_coordinate_when_remote_unknown},
-    software_release::{SOFTWARE_APPLICATION_KIND, SoftwareApplication, ValidationIssue},
+    software_release::{
+        SOFTWARE_APPLICATION_KIND, SOFTWARE_RELEASE_KIND, SoftwareApplication, SoftwareRelease,
+        ValidationIssue,
+    },
 };
 use nostr::prelude::{
-    Coordinate, Event, Filter, Kind, PublicKey, RelayUrl, ToBech32, nip19::Nip19Coordinate,
+    Coordinate, Event, Filter, FromBech32, Kind, PublicKey, RelayUrl, SingleLetterTag, ToBech32,
+    nip19::Nip19Coordinate,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::cli::{Cli, extract_signer_cli_arguments};
+use crate::{
+    cli::{Cli, extract_signer_cli_arguments},
+    sub_commands::id_resolver::parse_event_id,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LoginMode {
@@ -352,12 +359,85 @@ pub(super) async fn load_applications(
     Ok(applications)
 }
 
+pub(super) async fn load_trusted_linked_applications(
+    context: &mut ReleaseContext,
+) -> Result<Vec<SoftwareApplication>> {
+    let maintainers = context.repo_ref.maintainers.clone();
+    let applications = load_applications(context, maintainers).await?;
+    Ok(applications
+        .into_iter()
+        .filter(|application| context.application_is_trusted(application))
+        .collect())
+}
+
+pub(super) async fn load_releases(
+    context: &mut ReleaseContext,
+    applications: &[SoftwareApplication],
+) -> Result<Vec<SoftwareRelease>> {
+    if applications.is_empty() {
+        return Ok(Vec::new());
+    }
+    let authors: BTreeSet<PublicKey> = applications
+        .iter()
+        .map(|application| application.raw_event.pubkey)
+        .collect();
+    let identifiers: BTreeSet<String> = applications
+        .iter()
+        .map(|application| application.identifier.clone())
+        .collect();
+    for author in &authors {
+        context.add_author_relays(*author).await?;
+    }
+    let filter = Filter::new()
+        .kind(SOFTWARE_RELEASE_KIND)
+        .authors(authors)
+        .custom_tags(SingleLetterTag::LOWERCASE_I, identifiers);
+    let events = latest_addressable(context.query(vec![filter]).await?);
+    let application_coordinates: HashSet<String> = applications
+        .iter()
+        .map(|application| coordinate_key(&application.coordinate()))
+        .collect();
+    let mut releases = Vec::new();
+    for event in events {
+        match SoftwareRelease::parse(&event) {
+            Ok(release)
+                if application_coordinates
+                    .contains(&coordinate_key(&release.application.coordinate)) =>
+            {
+                releases.push(release);
+            }
+            Ok(_) => context.warnings.push(
+                WarningJson::new(
+                    "release_application_mismatch",
+                    "release does not reference one of the selected applications",
+                )
+                .with_details(json!({ "event_id": event.id.to_hex() })),
+            ),
+            Err(error) => context.warnings.push(
+                WarningJson::new("invalid_release", error.to_string())
+                    .with_details(json!({ "event_id": event.id.to_hex() })),
+            ),
+        }
+    }
+    releases.sort_by(|left, right| {
+        right
+            .raw_event
+            .created_at
+            .cmp(&left.raw_event.created_at)
+            .then_with(|| {
+                left.application_identifier
+                    .cmp(&right.application_identifier)
+            })
+            .then_with(|| left.version.cmp(&right.version))
+            .then_with(|| left.raw_event.id.cmp(&right.raw_event.id))
+    });
+    Ok(releases)
+}
+
 pub(super) fn resolve_application<'a>(
     applications: &'a [SoftwareApplication],
     selector: &str,
 ) -> Result<&'a SoftwareApplication> {
-    use nostr::prelude::FromBech32;
-
     let selector = selector.trim();
     let explicit = Nip19Coordinate::from_bech32(selector)
         .ok()
@@ -393,6 +473,80 @@ pub(super) fn resolve_application<'a>(
                 "coordinates": matches
                     .iter()
                     .map(|application| coordinate_key(&application.coordinate()))
+                    .collect::<Vec<_>>()
+            }),
+        )),
+    }
+}
+
+pub(super) fn resolve_release<'a>(
+    releases: &'a [SoftwareRelease],
+    applications: &'a [SoftwareApplication],
+    selector: &str,
+    app_selector: Option<&str>,
+) -> Result<&'a SoftwareRelease> {
+    let selector = selector.trim();
+    if let Ok(pointer) = Nip19Coordinate::from_bech32(selector) {
+        if pointer.coordinate.kind != SOFTWARE_RELEASE_KIND {
+            return Err(coded_error(
+                "release_not_found",
+                "selector is not a software release coordinate",
+            ));
+        }
+        return unique_release(
+            releases
+                .iter()
+                .filter(|release| release.coordinate() == pointer.coordinate)
+                .collect(),
+            selector,
+        );
+    }
+    if let Ok(event_id) = parse_event_id(selector) {
+        return unique_release(
+            releases
+                .iter()
+                .filter(|release| release.raw_event.id == event_id)
+                .collect(),
+            selector,
+        );
+    }
+
+    let matches = if let Some(app_selector) = app_selector {
+        let application = resolve_application(applications, app_selector)?;
+        releases
+            .iter()
+            .filter(|release| {
+                release.application.coordinate == application.coordinate()
+                    && (release.version == selector || release.identifier == selector)
+            })
+            .collect()
+    } else {
+        releases
+            .iter()
+            .filter(|release| release.identifier == selector || release.version == selector)
+            .collect()
+    };
+    unique_release(matches, selector)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn unique_release<'a>(
+    matches: Vec<&'a SoftwareRelease>,
+    selector: &str,
+) -> Result<&'a SoftwareRelease> {
+    match matches.as_slice() {
+        [release] => Ok(release),
+        [] => Err(coded_error(
+            "release_not_found",
+            format!("software release {selector:?} was not found"),
+        )),
+        _ => Err(coded_error_with_details(
+            "ambiguous_selector",
+            format!("release selector {selector:?} is ambiguous; provide --app"),
+            json!({
+                "coordinates": matches
+                    .iter()
+                    .map(|release| coordinate_key(&release.coordinate()))
                     .collect::<Vec<_>>()
             }),
         )),
@@ -494,4 +648,35 @@ pub(super) fn application_json(
         "validation": Vec::<ValidationIssue>::new(),
         "raw_event": application.raw_event,
     })
+}
+
+pub(super) fn release_json(release: &SoftwareRelease) -> Value {
+    json!({
+        "coordinate": coordinate_key(&release.coordinate()),
+        "event_id": release.raw_event.id.to_hex(),
+        "event_id_bech32": release.raw_event.id.to_bech32().ok(),
+        "author": release.raw_event.pubkey.to_hex(),
+        "author_npub": release.raw_event.pubkey.to_bech32().ok(),
+        "application_coordinate": coordinate_key(&release.application.coordinate),
+        "application_identifier": release.application_identifier,
+        "version": release.version,
+        "channel": release.channel,
+        "released_at": release.raw_event.created_at.as_secs(),
+        "notes": release.notes,
+        "asset_ids": release.assets.iter().map(|asset| asset.event_id.to_hex()).collect::<Vec<_>>(),
+        "published_platforms": release.platforms,
+        "derived_platforms": null,
+        "validation": Vec::<ValidationIssue>::new(),
+        "raw_event": release.raw_event,
+    })
+}
+
+pub(super) fn application_for_release<'a>(
+    applications: &'a [SoftwareApplication],
+    release: &SoftwareRelease,
+) -> Result<&'a SoftwareApplication> {
+    applications
+        .iter()
+        .find(|application| application.coordinate() == release.application.coordinate)
+        .ok_or_else(|| anyhow!("release application was not resolved"))
 }
