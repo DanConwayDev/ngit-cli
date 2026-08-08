@@ -92,13 +92,79 @@ pub struct BlobDescriptor {
     pub uploaded: u64,
 }
 
-/// Result of uploading one blob, including whether this request stored it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct BlobUpload {
-    pub descriptor: BlobDescriptor,
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BlobUpload {
+    descriptor: BlobDescriptor,
     /// `true` for `201 Created`; `false` for `200 OK` (already present).
-    pub newly_stored: bool,
+    newly_stored: bool,
 }
+
+/// Operation assigned to one server in a multi-server upload plan.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlossomServerOperation {
+    Upload,
+    Mirror,
+}
+
+/// Observable result for one planned Blossom server operation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlossomServerStatus {
+    /// The server returned `201 Created` with a valid descriptor.
+    Stored,
+    /// The server returned `200 OK` with a valid descriptor.
+    AlreadyPresent,
+    /// The server definitely rejected the request or its descriptor.
+    Failed,
+    /// The transport ended without proving whether the server stored the blob.
+    Unknown,
+    /// An earlier operation failed, so this server was not contacted.
+    NotAttempted,
+}
+
+/// Stable per-server output from a multi-server upload plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BlossomServerOutcome {
+    pub server: Url,
+    pub operation: BlossomServerOperation,
+    pub status: BlossomServerStatus,
+    pub descriptor: Option<BlobDescriptor>,
+    pub message: Option<String>,
+}
+
+/// A blob which a failed workflow may have stored without publishing a release.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PossibleOrphanBlob {
+    pub server: Url,
+    pub sha256: String,
+    pub url: Option<Url>,
+}
+
+/// Successful result of uploading once and mirroring to every remaining server.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MultiServerUpload {
+    /// The first server's descriptor; this URL is suitable for a NIP-82 `url`
+    /// tag.
+    pub primary: BlobDescriptor,
+    pub servers: Vec<BlossomServerOutcome>,
+}
+
+/// Complete failure record for an ordered multi-server upload plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MultiServerUploadError {
+    pub message: String,
+    pub servers: Vec<BlossomServerOutcome>,
+    pub possible_orphan_blobs: Vec<PossibleOrphanBlob>,
+}
+
+impl std::fmt::Display for MultiServerUploadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for MultiServerUploadError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestFailureKind {
@@ -129,17 +195,6 @@ impl BlobRequestError {
             possible_orphan,
         }
     }
-
-    fn into_anyhow(self) -> anyhow::Error {
-        let mut error = anyhow!(self.message);
-        if self.kind == RequestFailureKind::Unknown {
-            error = error.context("the Blossom server result is unknown");
-        }
-        if self.possible_orphan {
-            error = error.context("the Blossom server may now contain an unreferenced blob");
-        }
-        error
-    }
 }
 
 impl std::fmt::Display for BlobRequestError {
@@ -149,20 +204,6 @@ impl std::fmt::Display for BlobRequestError {
 }
 
 impl std::error::Error for BlobRequestError {}
-
-/// Upload a stable local snapshot to one Blossom server.
-///
-/// The request follows BUD-02 and BUD-11. Authenticated redirects are disabled
-/// so the narrowly scoped authorization event is never forwarded elsewhere.
-pub async fn upload_snapshot(
-    server_url: &str,
-    snapshot: &FileSnapshot,
-    signer: &NgitSigner,
-) -> Result<BlobUpload> {
-    upload_snapshot_with_timeout(server_url, snapshot, signer, TOTAL_TIMEOUT)
-        .await
-        .map_err(BlobRequestError::into_anyhow)
-}
 
 async fn upload_snapshot_with_timeout(
     server_url: &str,
@@ -212,30 +253,142 @@ async fn upload_snapshot_inner(
         .map_err(|_| {
             BlobRequestError::unknown(anyhow!("Blossom upload exceeded its total timeout"), true)
         })?
-        .map_err(|error| {
-            BlobRequestError::unknown(
-                anyhow!(error).context("failed to send the Blossom upload"),
-                true,
-            )
-        })?;
+        .map_err(|error| classify_send_error(error, "upload"))?;
 
     read_store_response(response, snapshot, deadline, "upload").await
 }
 
-/// Ask a Blossom server to mirror a previously uploaded blob.
+/// Upload to the first server, then mirror sequentially to every other server.
 ///
-/// The request follows BUD-04 and BUD-11. The source URL is sent in the JSON
-/// body while the expected immutable blob properties are repeated in headers.
-/// Authenticated redirects are disabled.
-pub async fn mirror_snapshot(
-    server_url: &str,
-    primary_url: &Url,
+/// The first failure stops network activity. The returned error still contains
+/// every planned server in caller-provided order and marks untouched suffixes
+/// as `not_attempted` so callers do not have to infer partial completion.
+pub async fn upload_snapshot_to_servers(
+    servers: &[Url],
     snapshot: &FileSnapshot,
     signer: &NgitSigner,
-) -> Result<BlobUpload> {
-    mirror_snapshot_with_timeout(server_url, primary_url, snapshot, signer, TOTAL_TIMEOUT)
+) -> std::result::Result<MultiServerUpload, MultiServerUploadError> {
+    let mut outcomes = servers
+        .iter()
+        .enumerate()
+        .map(|(index, server)| BlossomServerOutcome {
+            server: server.clone(),
+            operation: if index == 0 {
+                BlossomServerOperation::Upload
+            } else {
+                BlossomServerOperation::Mirror
+            },
+            status: BlossomServerStatus::NotAttempted,
+            descriptor: None,
+            message: None,
+        })
+        .collect::<Vec<_>>();
+    let Some(primary_server) = servers.first() else {
+        return Err(MultiServerUploadError {
+            message: "at least one Blossom server is required".to_owned(),
+            servers: outcomes,
+            possible_orphan_blobs: Vec::new(),
+        });
+    };
+
+    let primary = match upload_snapshot_with_timeout(
+        primary_server.as_str(),
+        snapshot,
+        signer,
+        TOTAL_TIMEOUT,
+    )
+    .await
+    {
+        Ok(upload) => {
+            record_server_success(&mut outcomes[0], &upload);
+            upload.descriptor
+        }
+        Err(error) => return Err(record_server_failure(outcomes, 0, snapshot, error)),
+    };
+
+    for index in 1..servers.len() {
+        match mirror_snapshot_with_timeout(
+            servers[index].as_str(),
+            &primary.url,
+            snapshot,
+            signer,
+            TOTAL_TIMEOUT,
+        )
         .await
-        .map_err(BlobRequestError::into_anyhow)
+        {
+            Ok(upload) => record_server_success(&mut outcomes[index], &upload),
+            Err(error) => {
+                return Err(record_server_failure(outcomes, index, snapshot, error));
+            }
+        }
+    }
+
+    Ok(MultiServerUpload {
+        primary,
+        servers: outcomes,
+    })
+}
+
+fn record_server_success(outcome: &mut BlossomServerOutcome, upload: &BlobUpload) {
+    outcome.status = if upload.newly_stored {
+        BlossomServerStatus::Stored
+    } else {
+        BlossomServerStatus::AlreadyPresent
+    };
+    outcome.descriptor = Some(upload.descriptor.clone());
+}
+
+fn record_server_failure(
+    mut outcomes: Vec<BlossomServerOutcome>,
+    failed_index: usize,
+    snapshot: &FileSnapshot,
+    error: BlobRequestError,
+) -> MultiServerUploadError {
+    let operation = outcomes[failed_index].operation;
+    let message = format!(
+        "Blossom {} at {} failed: {}",
+        operation_label(operation),
+        outcomes[failed_index].server,
+        error.message
+    );
+    outcomes[failed_index].status = match error.kind {
+        RequestFailureKind::Definite => BlossomServerStatus::Failed,
+        RequestFailureKind::Unknown => BlossomServerStatus::Unknown,
+    };
+    outcomes[failed_index].message = Some(error.message);
+
+    let mut possible_orphan_blobs = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == BlossomServerStatus::Stored)
+        .map(|outcome| PossibleOrphanBlob {
+            server: outcome.server.clone(),
+            sha256: snapshot.sha256.clone(),
+            url: outcome
+                .descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.url.clone()),
+        })
+        .collect::<Vec<_>>();
+    if error.possible_orphan {
+        possible_orphan_blobs.push(PossibleOrphanBlob {
+            server: outcomes[failed_index].server.clone(),
+            sha256: snapshot.sha256.clone(),
+            url: None,
+        });
+    }
+
+    MultiServerUploadError {
+        message,
+        servers: outcomes,
+        possible_orphan_blobs,
+    }
+}
+
+fn operation_label(operation: BlossomServerOperation) -> &'static str {
+    match operation {
+        BlossomServerOperation::Upload => "upload",
+        BlossomServerOperation::Mirror => "mirror",
+    }
 }
 
 async fn mirror_snapshot_with_timeout(
@@ -276,14 +429,19 @@ async fn mirror_snapshot_with_timeout(
         .map_err(|_| {
             BlobRequestError::unknown(anyhow!("Blossom mirror exceeded its total timeout"), true)
         })?
-        .map_err(|error| {
-            BlobRequestError::unknown(
-                anyhow!(error).context("failed to send the Blossom mirror request"),
-                true,
-            )
-        })?;
+        .map_err(|error| classify_send_error(error, "mirror"))?;
 
     read_store_response(response, snapshot, deadline, "mirror").await
+}
+
+fn classify_send_error(error: reqwest::Error, operation: &str) -> BlobRequestError {
+    let definitely_not_stored = error.is_builder() || error.is_connect();
+    let error = anyhow!(error).context(format!("failed to send the Blossom {operation} request"));
+    if definitely_not_stored {
+        BlobRequestError::definite(error, false)
+    } else {
+        BlobRequestError::unknown(error, true)
+    }
 }
 
 fn blossom_http_client() -> Result<reqwest::Client> {
@@ -639,7 +797,14 @@ pub fn canonicalize_blossom_server_root(value: &str) -> Result<Url> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Read as _, time::Duration};
+    use std::{
+        io::Read as _,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use anyhow::{Result, anyhow, bail};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -674,6 +839,13 @@ mod tests {
     async fn spawn_one_shot_server(
         response: impl FnOnce(&str) -> TestResponse,
     ) -> Result<(String, JoinHandle<Result<CapturedRequest>>)> {
+        spawn_observed_server(response, || Ok(())).await
+    }
+
+    async fn spawn_observed_server(
+        response: impl FnOnce(&str) -> TestResponse,
+        observe: impl FnOnce() -> Result<()> + Send + 'static,
+    ) -> Result<(String, JoinHandle<Result<CapturedRequest>>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base_url = format!("http://{}", listener.local_addr()?);
         let response = response(&base_url);
@@ -682,6 +854,7 @@ mod tests {
                 .await
                 .context("timed out waiting for Blossom request")??;
             let request = read_request(&mut stream).await?;
+            observe()?;
             let mut wire_response = format!(
                 "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
                 response.status,
@@ -695,6 +868,21 @@ mod tests {
             tokio::time::timeout(SERVER_TIMEOUT, stream.write_all(wire_response.as_bytes()))
                 .await
                 .context("timed out writing Blossom response")??;
+            Ok(request)
+        });
+        Ok((base_url, task))
+    }
+
+    async fn spawn_dropped_response_server() -> Result<(String, JoinHandle<Result<CapturedRequest>>)>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom request")??;
+            let request = read_request(&mut stream).await?;
+            drop(stream);
             Ok(request)
         });
         Ok((base_url, task))
@@ -1048,7 +1236,9 @@ mod tests {
             })
             .await?;
 
-            let upload = upload_snapshot(&server_url, &snapshot, &signer).await?;
+            let upload =
+                upload_snapshot_with_timeout(&server_url, &snapshot, &signer, TOTAL_TIMEOUT)
+                    .await?;
             let request = completed_request(server).await?;
 
             assert!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
@@ -1110,7 +1300,14 @@ mod tests {
             })
             .await?;
 
-            let mirrored = mirror_snapshot(&server_url, &source, &snapshot, &signer).await?;
+            let mirrored = mirror_snapshot_with_timeout(
+                &server_url,
+                &source,
+                &snapshot,
+                &signer,
+                TOTAL_TIMEOUT,
+            )
+            .await?;
             let request = completed_request(server).await?;
 
             assert!(request.head.starts_with("PUT /mirror HTTP/1.1\r\n"));
@@ -1167,9 +1364,10 @@ mod tests {
             body: String::new(),
         })
         .await?;
-        let error = mirror_snapshot(&redirect_url, &source, &snapshot, &signer)
-            .await
-            .unwrap_err();
+        let error =
+            mirror_snapshot_with_timeout(&redirect_url, &source, &snapshot, &signer, TOTAL_TIMEOUT)
+                .await
+                .unwrap_err();
         assert!(format!("{error:#}").contains("307 Temporary Redirect"));
         let request = completed_request(redirect_server).await?;
         assert!(request.head.starts_with("PUT /mirror HTTP/1.1\r\n"));
@@ -1182,11 +1380,212 @@ mod tests {
             body: descriptor_json(base_url, &"0".repeat(64), expected_size, &expected_mime),
         })
         .await?;
-        let error = mirror_snapshot(&invalid_url, &source, &snapshot, &signer)
-            .await
-            .unwrap_err();
+        let error =
+            mirror_snapshot_with_timeout(&invalid_url, &source, &snapshot, &signer, TOTAL_TIMEOUT)
+                .await
+                .unwrap_err();
         assert!(format!("{error:#}").contains("descriptor SHA-256"));
         completed_request(invalid_server).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_server_upload_preserves_order_and_statuses() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let signer = NgitSigner::Keys(Keys::generate());
+        let request_order = Arc::new(AtomicUsize::new(0));
+        let mut servers = Vec::new();
+        let mut tasks = Vec::new();
+
+        for (index, status) in ["201 Created", "200 OK", "201 Created"]
+            .into_iter()
+            .enumerate()
+        {
+            let expected_hash = snapshot.sha256.clone();
+            let expected_mime = snapshot.mime_type.clone();
+            let expected_size = snapshot.size;
+            let request_order = Arc::clone(&request_order);
+            let (server_url, task) = spawn_observed_server(
+                move |base_url| TestResponse {
+                    status,
+                    headers: Vec::new(),
+                    body: descriptor_json(base_url, &expected_hash, expected_size, &expected_mime),
+                },
+                move || {
+                    let observed = request_order.fetch_add(1, Ordering::SeqCst);
+                    if observed != index {
+                        bail!("server {index} was contacted at position {observed}");
+                    }
+                    Ok(())
+                },
+            )
+            .await?;
+            servers.push(Url::parse(&server_url)?);
+            tasks.push(task);
+        }
+
+        let uploaded = upload_snapshot_to_servers(&servers, &snapshot, &signer).await?;
+        let requests =
+            futures::future::try_join_all(tasks.into_iter().map(completed_request)).await?;
+
+        assert!(requests[0].head.starts_with("PUT /upload HTTP/1.1\r\n"));
+        assert!(requests[1].head.starts_with("PUT /mirror HTTP/1.1\r\n"));
+        assert!(requests[2].head.starts_with("PUT /mirror HTTP/1.1\r\n"));
+        assert_eq!(
+            uploaded
+                .servers
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [
+                BlossomServerStatus::Stored,
+                BlossomServerStatus::AlreadyPresent,
+                BlossomServerStatus::Stored,
+            ]
+        );
+        assert_eq!(
+            uploaded.primary.url,
+            uploaded.servers[0].descriptor.as_ref().unwrap().url
+        );
+        let json = serde_json::to_value(&uploaded)?;
+        assert_eq!(json["servers"][0]["operation"], "upload");
+        assert_eq!(json["servers"][1]["operation"], "mirror");
+        assert_eq!(json["servers"][0]["status"], "stored");
+        assert_eq!(json["servers"][1]["status"], "already_present");
+        assert_eq!(request_order.load(Ordering::SeqCst), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failure_retains_plan_and_only_new_blobs_as_orphans() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let expected_hash = snapshot.sha256.clone();
+        let expected_mime = snapshot.mime_type.clone();
+        let expected_size = snapshot.size;
+        let (primary_url, primary_task) = spawn_one_shot_server(move |base_url| TestResponse {
+            status: "201 Created",
+            headers: Vec::new(),
+            body: descriptor_json(base_url, &expected_hash, expected_size, &expected_mime),
+        })
+        .await?;
+        let expected_hash = snapshot.sha256.clone();
+        let expected_mime = snapshot.mime_type.clone();
+        let expected_size = snapshot.size;
+        let (existing_url, existing_task) = spawn_one_shot_server(move |base_url| TestResponse {
+            status: "200 OK",
+            headers: Vec::new(),
+            body: descriptor_json(base_url, &expected_hash, expected_size, &expected_mime),
+        })
+        .await?;
+        let expected_mime = snapshot.mime_type.clone();
+        let expected_size = snapshot.size;
+        let (rejected_url, rejected_task) = spawn_one_shot_server(move |base_url| TestResponse {
+            status: "201 Created",
+            headers: Vec::new(),
+            body: descriptor_json(base_url, &"0".repeat(64), expected_size, &expected_mime),
+        })
+        .await?;
+        let untouched = Url::parse("http://127.0.0.1:9/")?;
+        let servers = [
+            Url::parse(&primary_url)?,
+            Url::parse(&existing_url)?,
+            Url::parse(&rejected_url)?,
+            untouched,
+        ];
+
+        let error = upload_snapshot_to_servers(&servers, &snapshot, &signer)
+            .await
+            .unwrap_err();
+        completed_request(primary_task).await?;
+        completed_request(existing_task).await?;
+        completed_request(rejected_task).await?;
+
+        assert_eq!(
+            error
+                .servers
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [
+                BlossomServerStatus::Stored,
+                BlossomServerStatus::AlreadyPresent,
+                BlossomServerStatus::Failed,
+                BlossomServerStatus::NotAttempted,
+            ]
+        );
+        assert_eq!(error.possible_orphan_blobs.len(), 2);
+        assert_eq!(error.possible_orphan_blobs[0].server, servers[0]);
+        assert!(error.possible_orphan_blobs[0].url.is_some());
+        assert_eq!(error.possible_orphan_blobs[1].server, servers[2]);
+        assert!(error.possible_orphan_blobs[1].url.is_none());
+        assert!(
+            error
+                .possible_orphan_blobs
+                .iter()
+                .all(|orphan| orphan.server != servers[1])
+        );
+        let json = serde_json::to_value(&error)?;
+        assert_eq!(json["servers"][2]["status"], "failed");
+        assert_eq!(json["servers"][3]["status"], "not_attempted");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambiguous_mirror_is_unknown_and_possible_orphan() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let expected_hash = snapshot.sha256.clone();
+        let expected_mime = snapshot.mime_type.clone();
+        let expected_size = snapshot.size;
+        let (primary_url, primary_task) = spawn_one_shot_server(move |base_url| TestResponse {
+            status: "200 OK",
+            headers: Vec::new(),
+            body: descriptor_json(base_url, &expected_hash, expected_size, &expected_mime),
+        })
+        .await?;
+        let (ambiguous_url, ambiguous_task) = spawn_dropped_response_server().await?;
+        let servers = [
+            Url::parse(&primary_url)?,
+            Url::parse(&ambiguous_url)?,
+            Url::parse("http://127.0.0.1:9/")?,
+        ];
+
+        let error = upload_snapshot_to_servers(&servers, &snapshot, &signer)
+            .await
+            .unwrap_err();
+        completed_request(primary_task).await?;
+        let request = completed_request(ambiguous_task).await?;
+
+        assert!(request.head.starts_with("PUT /mirror HTTP/1.1\r\n"));
+        assert_eq!(
+            error
+                .servers
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [
+                BlossomServerStatus::AlreadyPresent,
+                BlossomServerStatus::Unknown,
+                BlossomServerStatus::NotAttempted,
+            ]
+        );
+        assert_eq!(
+            error.possible_orphan_blobs,
+            [PossibleOrphanBlob {
+                server: servers[1].clone(),
+                sha256: snapshot.sha256.clone(),
+                url: None,
+            }]
+        );
         Ok(())
     }
 
@@ -1202,9 +1601,14 @@ mod tests {
         })
         .await?;
 
-        let error = upload_snapshot(&server_url, &snapshot, &NgitSigner::Keys(Keys::generate()))
-            .await
-            .unwrap_err();
+        let error = upload_snapshot_with_timeout(
+            &server_url,
+            &snapshot,
+            &NgitSigner::Keys(Keys::generate()),
+            TOTAL_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{error:#}").contains("307 Temporary Redirect"));
         let request = completed_request(server).await?;
         assert!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
@@ -1301,9 +1705,10 @@ mod tests {
             })
             .await?;
 
-            let error = upload_snapshot(&server_url, &snapshot, &signer)
-                .await
-                .unwrap_err();
+            let error =
+                upload_snapshot_with_timeout(&server_url, &snapshot, &signer, TOTAL_TIMEOUT)
+                    .await
+                    .unwrap_err();
             assert!(
                 format!("{error:#}").contains(expected_error),
                 "wrong error for {field}: {error:#}"
