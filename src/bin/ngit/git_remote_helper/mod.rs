@@ -45,6 +45,7 @@ struct PushOptions {
 #[derive(Clone, Debug, Default)]
 pub(super) struct ProposalOptions {
     pub target_branch: Option<String>,
+    pub base: Option<String>,
 }
 
 fn parse_cas_option(value: &str) -> Result<(String, Option<String>)> {
@@ -158,6 +159,7 @@ fn apply_ngit_push_option(push_options: &mut PushOptions, key: &str, value: &str
         }
         "git-server" => push_options.git_server = Some(value.to_string()),
         "target-branch" => push_options.proposal.target_branch = Some(value.to_string()),
+        "base" => push_options.proposal.base = Some(value.to_string()),
         _ => return false,
     }
     true
@@ -454,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_target_push_option_without_forwarding_it() {
+    fn parses_target_and_base_push_options_without_forwarding_them() {
         let mut options = PushOptions::default();
 
         assert!(apply_ngit_push_option(
@@ -462,10 +464,17 @@ mod tests {
             "target-branch",
             "release/2.x"
         ));
+        assert!(apply_ngit_push_option(
+            &mut options,
+            "base",
+            "nevent1parent"
+        ));
+
         assert_eq!(
             options.proposal.target_branch.as_deref(),
             Some("release/2.x")
         );
+        assert_eq!(options.proposal.base.as_deref(), Some("nevent1parent"));
     }
 
     #[test]

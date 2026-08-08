@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Pull requests can target a non-default branch with `git push -o target-branch=<branch>` or `ngit send --target-branch <branch>`. Root PR events expose the target as an indexed `b` tag, and listing, viewing, merging, and applied-status detection honor it; omitting the option retains default-branch behavior.
+- Pull requests can select an explicit Git base with `git push -o base=<commit|branch|event>` or `ngit send --base <commit|branch|event>`. PR roots follow their latest authorized update, specific PR-update events select their historical commit, and unique event-ID prefixes are accepted; ngit validates ancestry and emits only the standard `merge-base` tag.
 - Add a multi-stage `Containerfile` for building a minimal Alpine-based ngit image, plus a CI smoke test that builds the image and runs `ngit --version`.
 - Add an opt-in `native-tls-roots` build feature that trusts certificate authorities installed on the host alongside WebPKI roots, enabling WSS connections to relays and GRASP servers using private, corporate, or development CAs.
 - `ngit repo --json` now exposes `selected_maintainer`, `confirmed_maintainers`, `invited_maintainers`, `lead_maintainer`, and the directional `maintainer_edges` alongside the backward-compatible full `maintainers` set.
@@ -22,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- PR updates now retain an immutable non-default target and preserve the prior `merge-base` across fast-forward revisions. Rewritten stacked PRs can select their new base again with `-o base=...` or `ngit send --base ...`; targeted and explicit-base proposals always use PR-kind events so their metadata cannot be dropped.
 - Global event caching now falls back to an in-memory cache when persistent storage is unavailable, allowing ngit to operate in restricted or sandboxed environments. Set `NGIT_CACHE_DIR` to select a writable persistent cache directory; repository caches remain strict and require the Git common directory to be writable.
 - Upgrade NostrDevKit dependencies from the `0.45.0-alpha.2` prerelease series to the stable `0.45.0` release.
 - Align maintainer terminology with gitworkshop: every pubkey in the directional maintainer graph has maintainer rights, while "invited" identifies an unreciprocated relationship rather than reduced authority. Reciprocal graph membership confirms co-maintainers, and a unique highest-listed confirmed maintainer is shown as a coordination-only lead. `ngit repo` describes whom each confirmed maintainer lists and, when informative, who invited an unconfirmed maintainer. Acceptance defaults now reciprocate the sole confirmed maintainer or unique lead, retaining the selected maintainer only for ambiguous non-interactive cases.

@@ -106,6 +106,11 @@ git push -u origin pr/my-feature \
 # Target a non-default branch
 git push -u origin pr/release-fix -o target-branch=release/2.x
 
+# Select an explicit proposal base (commit, branch, root PR, or PR update)
+git push -u origin pr/second-part -o base=<commit|branch|nevent>
+
+# Re-select the base when force-updating a stacked PR
+git push --force origin pr/second-part -o base=<commit|branch|nevent>
 ```
 
 When there is only one commit, omitting `-o title=` and `-o description=` is preferred — ngit uses the commit subject as the title and the commit body as the description. Pass `-d` (or `--defaults`) to confirm this automatically. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
@@ -145,6 +150,9 @@ ngit send HEAD~2 --subject "My Feature" --description "First paragraph.\n\nSecon
 ngit send --defaults                                    # non-interactive
 ngit send HEAD~2 --in-reply-to <PR-event-id>           # update existing PR
 ngit send --defaults --target-branch release/2.x        # target a non-default branch
+ngit send --defaults --base <commit|branch|nevent>      # select an explicit base
+ngit send --defaults --in-reply-to <PR-event-id> \
+  --base <commit|branch|nevent>                          # update a rewritten stack
 ```
 
 ### List / view / comment

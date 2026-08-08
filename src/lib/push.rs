@@ -41,6 +41,7 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct ProposalMetadata {
     pub target_branch: Option<String>,
+    pub explicit_base: Option<Sha1Hash>,
 }
 
 // returns a HashMap of refs responded to and any related cancellation reasons

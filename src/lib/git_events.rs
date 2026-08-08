@@ -1370,6 +1370,7 @@ mod tests {
     fn proposal_metadata_uses_indexable_target_tag() -> Result<()> {
         let metadata = crate::push::ProposalMetadata {
             target_branch: Some("release/2.x".to_string()),
+            explicit_base: None,
         };
         let tags = make_proposal_metadata_tags(&metadata);
 

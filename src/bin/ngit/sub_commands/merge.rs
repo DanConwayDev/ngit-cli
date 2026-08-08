@@ -12,6 +12,7 @@ use ngit::{
         process_subject, tag_value,
     },
     login::{get_curent_user, user::extract_user_metadata},
+    proposal_base::resolve_target_branch_tip,
     utils::get_open_or_draft_proposals,
 };
 use nostr::prelude::{EventId, PublicKey, RelayUrl, ToBech32, nip19::Nip19Event};
@@ -158,29 +159,27 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
 
     // An explicit `b` tag overrides the repository default. The target is
     // stored on the immutable root PR event, not on tip updates.
-    let target_branch = if let Ok(branch) = tag_value(&proposal, "b") {
-        branch
+    let explicit_target = tag_value(&proposal, "b").ok();
+    let target_branch = if let Some(branch) = &explicit_target {
+        branch.clone()
     } else {
         git_repo
             .get_default_branch_name(None)?
             .context("could not determine the repository's default branch (e.g. main or master)")?
     };
 
-    if !git_repo
+    if explicit_target.is_some() {
+        let target_tip = resolve_target_branch_tip(&git_repo, &target_branch, None, false)?;
+        git_repo.create_branch_at_commit(&target_branch, &target_tip.to_string())?;
+    } else if !git_repo
         .get_local_branch_names()
         .context("failed to get local branch names")?
         .iter()
         .any(|n| n.eq(&target_branch))
     {
-        let remote_target = format!("origin/{target_branch}");
-        let target_tip = git_repo
-            .get_tip_of_branch(&remote_target)
-            .with_context(|| {
-                format!(
-                    "target branch '{target_branch}' does not exist locally or as '{remote_target}'"
-                )
-            })?;
-        git_repo.create_branch_at_commit(&target_branch, &target_tip.to_string())?;
+        bail!(
+            "default branch '{target_branch}' does not exist locally; check it out before merging"
+        );
     }
 
     git_repo.checkout(&target_branch).context(format!(

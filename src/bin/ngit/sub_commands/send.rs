@@ -5,9 +5,15 @@ use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Style;
 use ngit::{
     client::{Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events},
-    git_events::{EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events},
+    git_events::{
+        EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events, tag_value,
+    },
+    proposal_base::{
+        ExplicitBase, commits_after_base, merge_base_for_fast_forward_update,
+        resolve_explicit_base, resolve_target_branch_tip,
+    },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
-    utils::proposal_tip_is_pr_or_pr_update,
+    utils::{get_all_proposals, proposal_tip_is_pr_or_pr_update},
 };
 use nostr::prelude::{ToBech32, event::Event, nip10::Nip10Tag, nip19::Nip19Event};
 
@@ -63,6 +69,9 @@ pub struct SubCommandArgs {
     /// branch this PR should target instead of the repository default
     #[clap(long)]
     pub(crate) target_branch: Option<String>,
+    /// commit, branch, root PR, or PR update to use as the proposal base
+    #[clap(long)]
+    pub(crate) base: Option<String>,
 }
 
 /// Validates send command arguments for non-interactive mode.
@@ -172,37 +181,97 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     if root_proposal.is_some() && args.target_branch.is_some() {
         bail!("--target-branch can only be set when opening a new PR");
     }
-
-    if let Some(branch) = &args.target_branch {
-        if branch.is_empty() || !git2::Reference::is_valid_name(&format!("refs/heads/{branch}")) {
-            bail!("invalid target branch name '{branch}'");
-        }
-        if git_repo.get_branch_tips(branch)?.is_empty() {
-            bail!("target branch '{branch}' does not exist locally or on a remote");
-        }
-        if git_repo.get_default_branch_name(None)?.as_deref() == Some(branch) {
-            bail!("target branch '{branch}' is the repository default; omit --target-branch");
-        }
+    if args.target_branch.is_some() && args.force_patch {
+        bail!("--target-branch cannot be combined with --force-patch");
+    }
+    if args.target_branch.is_some() && args.no_cover_letter {
+        bail!("--target-branch cannot be combined with --no-cover-letter");
+    }
+    if args.base.is_some() && args.force_patch {
+        bail!("--base cannot be combined with --force-patch");
+    }
+    if args.base.is_some() && args.no_cover_letter {
+        bail!("--base cannot be combined with --no-cover-letter");
     }
 
-    let proposal_metadata = ngit::push::ProposalMetadata {
-        target_branch: args.target_branch.clone(),
-    };
-
-    let head = git_repo.get_head_commit()?;
-    let automatic_commits = if let Some(branch) = &args.target_branch {
-        Some(git_repo.get_commits_ahead_of_branch(&head, branch)?)
+    let proposals = if root_proposal.is_some() || args.base.is_some() {
+        Some(get_all_proposals(&git_repo, &repo_ref).await?)
     } else {
         None
     };
 
-    let (proposal_base_name, proposal_base_tip) = if let Some(branch) = &args.target_branch {
+    let selected_base = if let Some(reference) = &args.base {
+        Some(
+            resolve_explicit_base(
+                &git_repo,
+                &repo_ref,
+                reference,
+                proposals
+                    .as_ref()
+                    .context("proposal cache was not loaded")?,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let proposal_details = root_proposal
+        .as_ref()
+        .and_then(|root| proposals.as_ref().and_then(|all| all.get(&root.id)));
+    let effective_root = proposal_details
+        .and_then(|(_, _, pr_upgrade_root)| pr_upgrade_root.as_ref())
+        .or(root_proposal.as_ref());
+    let target_branch = args
+        .target_branch
+        .clone()
+        .or_else(|| effective_root.and_then(|root| tag_value(root, "b").ok()));
+    let target_tip = target_branch
+        .as_deref()
+        .map(|branch| {
+            resolve_target_branch_tip(&git_repo, branch, None, args.target_branch.is_some())
+        })
+        .transpose()?;
+
+    let head = git_repo.get_head_commit()?;
+    let preserved_base = if selected_base.is_none() {
+        proposal_details
+            .and_then(|(_, events, _)| events.first())
+            .map(|latest| merge_base_for_fast_forward_update(&git_repo, latest, &head))
+            .transpose()?
+            .flatten()
+            .map(|commit| ExplicitBase {
+                commit,
+                description: "the previous PR merge base".to_string(),
+            })
+    } else {
+        None
+    };
+    let explicit_base = selected_base.or(preserved_base);
+
+    let proposal_metadata = ngit::push::ProposalMetadata {
+        target_branch: target_branch.clone(),
+        explicit_base: explicit_base.as_ref().map(|base| base.commit),
+    };
+
+    let automatic_commits = if let Some(base) = &explicit_base {
+        let mut commits = commits_after_base(&git_repo, base, &head)?;
+        commits.reverse();
+        Some(commits)
+    } else if let Some(branch) = &target_branch {
+        let mut commits = git_repo.get_commits_ahead_of_branch(&head, branch)?;
+        commits.reverse();
+        Some(commits)
+    } else {
+        None
+    };
+
+    let (proposal_base_name, proposal_base_tip) = if let Some(base) = &explicit_base {
+        (base.description.clone(), base.commit)
+    } else if let Some(branch) = &target_branch {
         (
             branch.clone(),
-            *git_repo
-                .get_branch_tips(branch)?
-                .first()
-                .context("target branch has no visible tip")?,
+            target_tip.context("target branch has no visible tip")?,
         )
     } else {
         (main_branch_name.to_string(), main_tip)
@@ -296,6 +365,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let should_be_pr = existing_thread_is_pr
         || commits_too_big
         || has_submodules
+        || target_branch.is_some()
+        || proposal_metadata.explicit_base.is_some()
         || (root_proposal.is_none() && repo_has_grasp_server);
 
     let as_pr = if args.force_patch {
@@ -439,7 +510,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let events = if as_pr {
         let tip = commits.last().context("no commits")?; // commits has been reversed to oldest first
         let first_commit = commits.first().context("no commits")?;
-        let merge_base = if let Some(branch) = &proposal_metadata.target_branch {
+        let merge_base = if let Some(base) = &proposal_metadata.explicit_base {
+            Some(*base)
+        } else if let Some(branch) = &proposal_metadata.target_branch {
             Some(
                 git_repo
                     .get_most_advanced_merge_base_with_branch(tip, branch)?

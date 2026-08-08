@@ -10,6 +10,7 @@ pub mod git_events;
 pub mod list;
 pub mod login;
 pub mod mbox_parser;
+pub mod proposal_base;
 pub mod push;
 pub mod repo_ref;
 pub mod repo_state;

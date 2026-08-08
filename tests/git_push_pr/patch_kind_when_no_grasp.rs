@@ -39,6 +39,10 @@
 //!    traditional patch-kind path.
 //! 3. The root patch's `branch-name` tag equals `"feature"` — confirms the
 //!    `pr/` prefix is stripped correctly even on the patch-kind path.
+//! 4. Adding `target-branch=release/2.x` forces kind 1618 and retains both the
+//!    target and target-relative merge base even without a GRASP server.
+//! 5. Selecting `base=main` also forces kind 1618 and retains its merge base
+//!    through both `git push` and `ngit send` without a GRASP server.
 
 use std::sync::Arc;
 
@@ -68,7 +72,7 @@ const GIT_REPO_PATH: &str = "/repo.git";
 
 /// All observable side-effects of one `git push -u origin pr/feature`
 /// against a no-GRASP repo, captured once by [`capture_snapshot`] and
-/// shared read-only across the three `#[rstest]` cases via [`SNAPSHOT`].
+/// shared read-only across the `#[rstest]` cases via [`SNAPSHOT`].
 struct Snapshot {
     /// Total KIND_PULL_REQUEST events authored by the contributor on the
     /// relay. Must equal 0 (case 1) — the GRASP-default PR path must not
@@ -88,6 +92,17 @@ struct Snapshot {
     /// Value of the `branch-name` tag on `cover_letter_event_or_first_patch`.
     /// Must equal `"feature"` (case 3).
     patch_event_branch_name_tag: Option<String>,
+
+    /// Targeted proposals must use kind 1618 even without a GRASP server so
+    /// their immutable target metadata is not discarded.
+    targeted_pr: Event,
+    target_tip: String,
+
+    /// Explicit bases also require kind 1618 because patch events have no
+    /// proposal-level merge-base field.
+    base_push_pr: Event,
+    base_send_pr: Event,
+    main_tip: String,
 }
 
 static SNAPSHOT: OnceCell<Arc<Snapshot>> = OnceCell::const_new();
@@ -218,6 +233,27 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .nostr_push(["-u", "origin", "main"])
         .await
         .context("git push -u origin main (graduation) failed")?;
+    let main_tip = publisher.rev_parse("main").await?;
+    publisher
+        .git_ok(
+            ["checkout", "-b", "release/2.x"],
+            "create non-default target",
+        )
+        .await?;
+    std::fs::write(publisher.dir().join("release.md"), "release\n")?;
+    publisher
+        .git_ok(["add", "release.md"], "stage release baseline")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "release baseline", "--no-gpg-sign"],
+            "commit release baseline",
+        )
+        .await?;
+    let target_tip = publisher.rev_parse("HEAD").await?;
+    publisher
+        .nostr_push(["-u", "origin", "release/2.x"])
+        .await?;
 
     // --- 3. Clone as a fresh contributor ------------------------------------
     let contributor = harness
@@ -296,6 +332,97 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await
         .context("nostr_push -u origin pr/feature failed")?;
 
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/targeted", "origin/release/2.x"],
+            "create targeted proposal",
+        )
+        .await?;
+    std::fs::write(contributor.dir().join("targeted.md"), "targeted\n")?;
+    contributor
+        .git_ok(["add", "targeted.md"], "stage targeted change")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "targeted change", "--no-gpg-sign"],
+            "commit targeted change",
+        )
+        .await?;
+    contributor
+        .nostr_push([
+            "-u",
+            "origin",
+            "pr/targeted",
+            "-o",
+            "target-branch=release/2.x",
+            "-o",
+            &format!("git-server={git_server_url}"),
+        ])
+        .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/base-push", "origin/main"],
+            "create explicit-base push proposal",
+        )
+        .await?;
+    std::fs::write(contributor.dir().join("base-push.md"), "base push\n")?;
+    contributor
+        .git_ok(["add", "base-push.md"], "stage explicit-base push")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "base push", "--no-gpg-sign"],
+            "commit explicit-base push",
+        )
+        .await?;
+    contributor
+        .nostr_push([
+            "-u",
+            "origin",
+            "pr/base-push",
+            "-o",
+            "base=main",
+            "-o",
+            &format!("git-server={git_server_url}"),
+        ])
+        .await?;
+
+    contributor
+        .git_ok(
+            ["checkout", "-b", "base-send", "origin/main"],
+            "create explicit-base send proposal",
+        )
+        .await?;
+    std::fs::write(contributor.dir().join("base-send.md"), "base send\n")?;
+    contributor
+        .git_ok(["add", "base-send.md"], "stage explicit-base send")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "base send", "--no-gpg-sign"],
+            "commit explicit-base send",
+        )
+        .await?;
+    let send = contributor
+        .ngit([
+            "send",
+            "--defaults",
+            "--base",
+            "main",
+            "--git-server",
+            &git_server_url,
+        ])
+        .output()
+        .await?;
+    if !send.status.success() {
+        bail!(
+            "explicit-base ngit send failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&send.stdout),
+            String::from_utf8_lossy(&send.stderr),
+        );
+    }
+
     // --- 6. Capture events from the vanilla relay ---------------------------
     let pr_events = harness
         .relay("default")
@@ -305,7 +432,24 @@ async fn capture_snapshot() -> Result<Snapshot> {
                 .kind(KIND_PULL_REQUEST),
         )
         .await?;
-    let pr_count = pr_events.len();
+    let pr_count = pr_events
+        .iter()
+        .filter(|event| tag_value(event, "branch-name").as_deref() == Some(BRANCH))
+        .count();
+    let targeted_pr = pr_events
+        .iter()
+        .find(|event| tag_value(event, "branch-name").as_deref() == Some("targeted"))
+        .cloned()
+        .context("targeted push did not publish a PR event")?;
+    let base_push_pr = pr_events
+        .iter()
+        .find(|event| tag_value(event, "branch-name").as_deref() == Some("base-push"))
+        .cloned()
+        .context("explicit-base push did not publish a PR event")?;
+    let base_send_pr = pr_events
+        .into_iter()
+        .find(|event| tag_value(event, "branch-name").as_deref() == Some("base-send"))
+        .context("explicit-base send did not publish a PR event")?;
 
     let patch_events: Vec<Event> = harness
         .relay("default")
@@ -344,6 +488,11 @@ async fn capture_snapshot() -> Result<Snapshot> {
         patch_count,
         cover_letter_event_or_first_patch,
         patch_event_branch_name_tag,
+        targeted_pr,
+        target_tip,
+        base_push_pr,
+        base_send_pr,
+        main_tip,
     })
 }
 
@@ -435,5 +584,35 @@ async fn patch_event_branch_name_tag_is_feature(#[future] snapshot: Arc<Snapshot
         BRANCH,
         s.patch_event_branch_name_tag,
     );
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn targeted_push_uses_pr_kind_without_grasp(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+    let s = snapshot.await;
+    assert_eq!(
+        tag_value(&s.targeted_pr, "b").as_deref(),
+        Some("release/2.x")
+    );
+    assert_eq!(
+        tag_value(&s.targeted_pr, "merge-base").as_deref(),
+        Some(s.target_tip.as_str())
+    );
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_bases_use_pr_kind_without_grasp_through_both_surfaces(
+    #[future] snapshot: Arc<Snapshot>,
+) -> Result<()> {
+    let s = snapshot.await;
+    for proposal in [&s.base_push_pr, &s.base_send_pr] {
+        assert_eq!(
+            tag_value(proposal, "merge-base").as_deref(),
+            Some(s.main_tip.as_str())
+        );
+    }
     Ok(())
 }

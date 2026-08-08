@@ -284,13 +284,11 @@ impl RepoActions for Repo {
     }
 
     fn get_default_branch_name(&self, declared: Option<&str>) -> Result<Option<String>> {
-        let local = self.get_local_branch_names().unwrap_or_default();
-        let remotes = self.get_remote_branch_names().unwrap_or_default();
         // a branch name is usable if a copy of it exists locally or on any
         // remote (`<remote>/<name>`).
-        let exists = |name: &str| -> bool {
-            let suffix = format!("/{name}");
-            local.iter().any(|b| b == name) || remotes.iter().any(|b| b.ends_with(&suffix))
+        let exists = |name: &str| {
+            self.get_branch_tips(name)
+                .is_ok_and(|tips| !tips.is_empty())
         };
 
         // 1. the nostr-declared default branch, when it actually exists.
@@ -345,6 +343,12 @@ impl RepoActions for Repo {
     }
 
     fn get_branch_tips(&self, branch: &str) -> Result<Vec<Sha1Hash>> {
+        // `refs/remotes/<remote>/HEAD` is a symbolic convenience ref, not a
+        // branch named `HEAD`. Treating it as one makes an explicit Git
+        // revision such as `--base HEAD` resolve to the remote default branch.
+        if branch == "HEAD" {
+            return Ok(vec![]);
+        }
         let mut branch_names: Vec<String> = vec![];
 
         // local copy of the default branch.
@@ -357,12 +361,15 @@ impl RepoActions for Repo {
             branch_names.push(branch.to_string());
         }
 
-        // every remote's copy of the default branch (origin/<d>, gitlab/<d>...)
-        let suffix = format!("/{branch}");
-        if let Ok(remote) = self.get_remote_branch_names() {
-            for name in &remote {
-                if name.ends_with(&suffix) {
-                    branch_names.push(name.clone());
+        // Every configured remote's exact copy of the branch. Suffix matching
+        // is unsafe here: `origin/release/2.x` is not a branch named `2.x`.
+        if let (Ok(remote_branches), Ok(remote_names)) =
+            (self.get_remote_branch_names(), self.git_repo.remotes())
+        {
+            for remote in remote_names.iter().flatten().flatten() {
+                let name = format!("{remote}/{branch}");
+                if remote_branches.contains(&name) {
+                    branch_names.push(name);
                 }
             }
         }
@@ -534,7 +541,7 @@ impl RepoActions for Repo {
                 oid
             } else {
                 self.git_repo
-                    .find_reference(sha1_or_reference)?
+                    .revparse_single(sha1_or_reference)?
                     .peel_to_commit()?
                     .id()
             }
