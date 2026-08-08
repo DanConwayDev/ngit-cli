@@ -356,7 +356,7 @@ pub enum Commands {
     Merge(MergeSubCommandArgs),
     /// work with issues
     Issue(IssueSubCommandArgs),
-    /// work with software applications and their releases
+    /// work with software applications, releases, and release assets
     #[command(alias = "releases")]
     Release(ReleaseSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
@@ -447,11 +447,13 @@ pub struct ReleaseSubCommandArgs {
 pub enum ReleaseCommands {
     /// list releases for applications linked to this repository
     List(ReleaseListArgs),
-    /// view a release and its publication authority
+    /// view a release and all of its referenced assets
     View(ReleaseViewArgs),
     /// work with software applications
     #[command(alias = "application")]
     App(ReleaseAppSubCommandArgs),
+    /// work with release assets
+    Asset(ReleaseAssetSubCommandArgs),
 }
 
 #[derive(clap::Args)]
@@ -490,6 +492,9 @@ pub struct ReleaseViewArgs {
     /// Application context for a bare release version
     #[arg(long, value_name = "APP")]
     pub app: Option<String>,
+    /// Download release assets and verify their hashes and sizes
+    #[arg(long)]
+    pub verify: bool,
     /// Extend discovery with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
@@ -548,6 +553,65 @@ pub struct ReleaseAppViewArgs {
     /// Application identifier, naddr, or application coordinate
     #[arg(value_name = "APP")]
     pub app: String,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Parser)]
+pub struct ReleaseAssetSubCommandArgs {
+    #[command(subcommand)]
+    pub asset_command: ReleaseAssetCommands,
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum ReleaseAssetCommands {
+    /// list the assets referenced by a release
+    List(ReleaseAssetListArgs),
+    /// view complete metadata for a release asset
+    View(ReleaseAssetViewArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAssetListArgs {
+    /// Release app@version, naddr, event-id, nevent, or unambiguous version
+    #[arg(value_name = "RELEASE")]
+    pub release: String,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAssetViewArgs {
+    /// Asset event-id, nevent, or a filename unique within --release
+    #[arg(value_name = "ASSET")]
+    pub asset: String,
+    /// Release context used to validate membership and authority
+    #[arg(long, value_name = "RELEASE")]
+    pub release: Option<String>,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP", requires = "release")]
+    pub app: Option<String>,
+    /// Download the asset and verify its hash and size
+    #[arg(long)]
+    pub verify: bool,
     /// Extend discovery with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
@@ -956,7 +1020,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AccountCommands, Cli, Commands, ReleaseAppCommands, ReleaseCommands,
+        AccountCommands, Cli, Commands, ReleaseAppCommands, ReleaseAssetCommands,
+        ReleaseCommands,
         extract_signer_cli_arguments, read_nsec_file,
     };
 
@@ -1319,6 +1384,48 @@ mod tests {
             Cli::try_parse_from(args)
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
         }
+    }
+
+    #[test]
+    fn release_asset_commands_parse() {
+        for args in [
+            [
+                "ngit",
+                "release",
+                "asset",
+                "list",
+                "ngit@1.8.0",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "release",
+                "asset",
+                "view",
+                "deadbeef",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn release_asset_command_type_is_exposed_to_dispatch() {
+        let cli = Cli::try_parse_from(["ngit", "release", "asset", "view", "deadbeef"])
+            .expect("asset view should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::Asset(asset) = release.release_command else {
+            panic!("expected asset command group");
+        };
+        assert!(matches!(asset.asset_command, ReleaseAssetCommands::View(_)));
     }
 
     #[test]

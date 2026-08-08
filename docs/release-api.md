@@ -291,6 +291,11 @@ including when empty. Timestamps are integer Unix seconds. Byte sizes and other
 potentially 64-bit counters MUST be decimal strings so JavaScript consumers do
 not lose precision.
 
+Entity `event_id` and `author` fields are canonical lowercase protocol hex.
+Their adjacent `event_id_bech32` and `author_npub` fields provide explicit
+user-facing encodings; callers MUST NOT infer the encoding from a field's
+contents.
+
 Runtime errors use `ok: false`, `result: null`, and:
 
 ```json
@@ -345,7 +350,9 @@ An application object has this shape:
 {
   "coordinate": "32267:<author>:ngit",
   "event_id": "...",
+  "event_id_bech32": "nevent1...",
   "author": "<author>",
+  "author_npub": "npub1...",
   "identifier": "ngit",
   "name": "ngit",
   "summary": "nostr git tooling",
@@ -370,7 +377,9 @@ A release object has this shape:
 {
   "coordinate": "30063:<author>:ngit@1.8.0",
   "event_id": "...",
+  "event_id_bech32": "nevent1...",
   "author": "<author>",
+  "author_npub": "npub1...",
   "application_coordinate": "32267:<author>:ngit",
   "application_identifier": "ngit",
   "version": "1.8.0",
@@ -390,7 +399,9 @@ An asset object has this shape:
 ```json
 {
   "event_id": "...",
+  "event_id_bech32": "nevent1...",
   "author": "<author>",
+  "author_npub": "npub1...",
   "identifier": "org.ngit.cli",
   "version": "1.8.0+linux.1",
   "url": "https://cdn.example.org/ngit.tar.gz",

@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    cli::{Cli, ReleaseAppCommands, ReleaseCommands, ReleaseSubCommandArgs},
+    cli::{Cli, ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands, ReleaseSubCommandArgs},
     cli_interactor::CliError,
 };
 
@@ -18,6 +18,10 @@ pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(args) => read::app_list(cli, args).await,
             ReleaseAppCommands::View(args) => read::app_view(cli, args).await,
+        },
+        ReleaseCommands::Asset(args) => match &args.asset_command {
+            ReleaseAssetCommands::List(args) => read::asset_list(cli, args).await,
+            ReleaseAssetCommands::View(args) => read::asset_view(cli, args).await,
         },
     };
 
@@ -87,6 +91,10 @@ fn wants_json(command: &ReleaseCommands) -> bool {
             ReleaseAppCommands::List(args) => args.json,
             ReleaseAppCommands::View(args) => args.json,
         },
+        ReleaseCommands::Asset(args) => match &args.asset_command {
+            ReleaseAssetCommands::List(args) => args.json,
+            ReleaseAssetCommands::View(args) => args.json,
+        },
     }
 }
 
@@ -97,6 +105,10 @@ fn command_name(command: &ReleaseCommands) -> &'static str {
         ReleaseCommands::App(args) => match &args.app_command {
             ReleaseAppCommands::List(_) => "release.app.list",
             ReleaseAppCommands::View(_) => "release.app.view",
+        },
+        ReleaseCommands::Asset(args) => match &args.asset_command {
+            ReleaseAssetCommands::List(_) => "release.asset.list",
+            ReleaseAssetCommands::View(_) => "release.asset.view",
         },
     }
 }

@@ -15,13 +15,14 @@ use ngit::{
     login::{self, existing::load_existing_login, user::UserRef},
     repo_ref::{RepoRef, get_resolved_repo_coordinate_when_remote_unknown},
     software_release::{
-        SOFTWARE_APPLICATION_KIND, SOFTWARE_RELEASE_KIND, SoftwareApplication, SoftwareRelease,
-        ValidationIssue,
+        SOFTWARE_APPLICATION_KIND, SOFTWARE_RELEASE_KIND, SoftwareApplication, SoftwareAsset,
+        SoftwareRelease, ValidationIssue, release_platforms,
     },
 };
 use nostr::prelude::{
-    Coordinate, Event, Filter, FromBech32, Kind, PublicKey, RelayUrl, SingleLetterTag, ToBech32,
-    nip19::Nip19Coordinate,
+    Coordinate, Event, EventId, Filter, FromBech32, Kind, PublicKey, RelayUrl, SingleLetterTag,
+    ToBech32,
+    nip19::{Nip19Coordinate, Nip19Event},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -434,6 +435,37 @@ pub(super) async fn load_releases(
     Ok(releases)
 }
 
+pub(super) async fn load_assets(
+    context: &mut ReleaseContext,
+    releases: &[&SoftwareRelease],
+) -> Result<Vec<SoftwareAsset>> {
+    let ids: BTreeSet<EventId> = releases
+        .iter()
+        .flat_map(|release| release.assets.iter().map(|asset| asset.event_id))
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Fetch by immutable ID without a kind constraint so a referenced event of
+    // the wrong kind is retained in cache and can be reported as invalid
+    // rather than indistinguishable from a missing event.
+    let filter = Filter::new().ids(ids);
+    let events = context.query(vec![filter]).await?;
+    let mut assets = Vec::new();
+    for event in events {
+        match SoftwareAsset::parse(&event) {
+            Ok(asset) => assets.push(asset),
+            Err(error) => context.warnings.push(
+                WarningJson::new("invalid_asset_metadata", error.to_string())
+                    .with_details(json!({ "event_id": event.id.to_hex() })),
+            ),
+        }
+    }
+    assets.sort_by_key(|asset| asset.raw_event.id);
+    assets.dedup_by_key(|asset| asset.raw_event.id);
+    Ok(assets)
+}
+
 pub(super) fn resolve_application<'a>(
     applications: &'a [SoftwareApplication],
     selector: &str,
@@ -553,6 +585,34 @@ fn unique_release<'a>(
     }
 }
 
+pub(super) fn resolve_asset<'a>(
+    assets: &'a [SoftwareAsset],
+    selector: &str,
+) -> Result<&'a SoftwareAsset> {
+    let matches: Vec<&SoftwareAsset> = if let Ok(event_id) = parse_event_id(selector) {
+        assets
+            .iter()
+            .filter(|asset| asset.raw_event.id == event_id)
+            .collect()
+    } else {
+        assets
+            .iter()
+            .filter(|asset| asset.filename.as_deref() == Some(selector))
+            .collect()
+    };
+    match matches.as_slice() {
+        [asset] => Ok(asset),
+        [] => Err(coded_error(
+            "asset_not_found",
+            format!("software asset {selector:?} was not found"),
+        )),
+        _ => Err(coded_error(
+            "ambiguous_selector",
+            format!("asset filename {selector:?} is not unique"),
+        )),
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct RepositoryJson {
     pub selected_coordinate: String,
@@ -624,7 +684,7 @@ pub(super) fn application_json(
     json!({
         "coordinate": coordinate_key(&application.coordinate()),
         "event_id": application.raw_event.id.to_hex(),
-        "event_id_bech32": application.raw_event.id.to_bech32().ok(),
+        "event_id_bech32": event_id_bech32(&application.raw_event),
         "author": application.raw_event.pubkey.to_hex(),
         "author_npub": application.raw_event.pubkey.to_bech32().ok(),
         "identifier": application.identifier,
@@ -650,11 +710,11 @@ pub(super) fn application_json(
     })
 }
 
-pub(super) fn release_json(release: &SoftwareRelease) -> Value {
+pub(super) fn release_json(release: &SoftwareRelease, assets: &[SoftwareAsset]) -> Value {
     json!({
         "coordinate": coordinate_key(&release.coordinate()),
         "event_id": release.raw_event.id.to_hex(),
-        "event_id_bech32": release.raw_event.id.to_bech32().ok(),
+        "event_id_bech32": event_id_bech32(&release.raw_event),
         "author": release.raw_event.pubkey.to_hex(),
         "author_npub": release.raw_event.pubkey.to_bech32().ok(),
         "application_coordinate": coordinate_key(&release.application.coordinate),
@@ -665,9 +725,42 @@ pub(super) fn release_json(release: &SoftwareRelease) -> Value {
         "notes": release.notes,
         "asset_ids": release.assets.iter().map(|asset| asset.event_id.to_hex()).collect::<Vec<_>>(),
         "published_platforms": release.platforms,
-        "derived_platforms": null,
-        "validation": Vec::<ValidationIssue>::new(),
+        "derived_platforms": release_platforms(assets.iter()),
+        "validation": release.validate_assets(assets),
         "raw_event": release.raw_event,
+    })
+}
+
+pub(super) fn asset_json(asset: &SoftwareAsset) -> Value {
+    json!({
+        "event_id": asset.raw_event.id.to_hex(),
+        "event_id_bech32": event_id_bech32(&asset.raw_event),
+        "author": asset.raw_event.pubkey.to_hex(),
+        "author_npub": asset.raw_event.pubkey.to_bech32().ok(),
+        "identifier": asset.identifier,
+        "version": asset.version,
+        "url": asset.url,
+        "filename": asset.filename,
+        "mime": asset.mime,
+        "sha256": asset.sha256,
+        "size": asset.size.map(|size| size.to_string()),
+        "platforms": asset.platforms,
+        "min_platform_version": asset.min_platform_version,
+        "target_platform_version": asset.target_platform_version,
+        "supported_nips": asset.supported_nips,
+        "variant": asset.variant,
+        "commit": asset.commit,
+        "min_allowed_version": asset.min_allowed_version,
+        "android": {
+            "version_code": asset.version_code.map(|value| value.to_string()),
+            "min_allowed_version_code": asset.min_allowed_version_code.map(|value| value.to_string()),
+            "certificate_sha256": asset.apk_certificate_hashes,
+        },
+        "original_url": asset.original_url,
+        "resolution": "resolved",
+        "verification": null,
+        "validation": Vec::<ValidationIssue>::new(),
+        "raw_event": asset.raw_event,
     })
 }
 
@@ -679,4 +772,12 @@ pub(super) fn application_for_release<'a>(
         .iter()
         .find(|application| application.coordinate() == release.application.coordinate)
         .ok_or_else(|| anyhow!("release application was not resolved"))
+}
+
+fn event_id_bech32(event: &Event) -> Option<String> {
+    Nip19Event::new(event.id)
+        .author(event.pubkey)
+        .kind(event.kind)
+        .to_bech32()
+        .ok()
 }

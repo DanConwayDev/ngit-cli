@@ -1,17 +1,31 @@
-use std::{collections::BTreeSet, fmt::Write as _};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt::Write as _,
+};
 
 use anyhow::{Context, Result};
-use ngit::software_release::{SoftwareApplication, SoftwareRelease};
-use nostr::prelude::{Coordinate, Filter, FromBech32, PublicKey, ToBech32, nip19::Nip19Coordinate};
+use ngit::{
+    client::get_events_from_local_cache,
+    release_download::{UrlAssetRequest, download_url_asset},
+    software_release::{SOFTWARE_ASSET_KIND, SoftwareApplication, SoftwareAsset, SoftwareRelease},
+};
+use nostr::prelude::{
+    Coordinate, Event, EventId, Filter, FromBech32, PublicKey, ToBech32,
+    nip19::{Nip19Coordinate, Nip19Event},
+};
 use serde_json::{Value, json};
 
 use super::support::{
     AuthorityJson, CommandOutput, LoginMode, ReleaseContext, application_for_release,
-    application_json, coded_error, load_applications, load_releases,
-    load_trusted_linked_applications, release_json, resolve_application, resolve_release,
+    application_json, asset_json, coded_error, load_applications, load_assets, load_releases,
+    load_trusted_linked_applications, release_json, resolve_application, resolve_asset,
+    resolve_release,
 };
 use crate::{
-    cli::{Cli, ReleaseAppListArgs, ReleaseAppViewArgs, ReleaseListArgs, ReleaseViewArgs},
+    cli::{
+        Cli, ReleaseAppListArgs, ReleaseAppViewArgs, ReleaseAssetListArgs, ReleaseAssetViewArgs,
+        ReleaseListArgs, ReleaseViewArgs,
+    },
     sub_commands::id_resolver::parse_event_id,
 };
 
@@ -224,26 +238,187 @@ pub(super) async fn release_list(cli: &Cli, args: &ReleaseListArgs) -> Result<Co
 }
 
 pub(super) async fn release_view(cli: &Cli, args: &ReleaseViewArgs) -> Result<CommandOutput> {
+    view_release(
+        cli,
+        &args.release,
+        args.app.as_deref(),
+        args.verify,
+        args.offline,
+        &args.relays,
+        "release.view",
+    )
+    .await
+}
+
+pub(super) async fn asset_list(cli: &Cli, args: &ReleaseAssetListArgs) -> Result<CommandOutput> {
+    let mut output = view_release(
+        cli,
+        &args.release,
+        args.app.as_deref(),
+        false,
+        args.offline,
+        &args.relays,
+        "release.asset.list",
+    )
+    .await?;
+    let assets = output
+        .result
+        .get("assets")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    output.result = json!({ "assets": assets });
+    output.human = assets_human(&output.result["assets"]);
+    Ok(output)
+}
+
+pub(super) async fn asset_view(cli: &Cli, args: &ReleaseAssetViewArgs) -> Result<CommandOutput> {
     let mut context =
         ReleaseContext::load(cli, args.offline, &args.relays, LoginMode::Optional).await?;
+    let (asset, authority, release_value, application_value) =
+        if let Some(release_selector) = &args.release {
+            let applications = load_trusted_linked_applications(&mut context).await?;
+            let releases = load_releases(&mut context, &applications).await?;
+            let (release, is_latest, latest_event_id) = resolve_release_for_read(
+                &mut context,
+                &applications,
+                &releases,
+                release_selector,
+                args.app.as_deref(),
+            )
+            .await?;
+            let assets = load_assets(&mut context, &[&release]).await?;
+            let asset = resolve_asset(&assets, &args.asset)?.clone();
+            let application = application_for_release(&applications, &release)?;
+            let mut release_value = release_json(&release, &assets);
+            release_value["is_latest"] = json!(is_latest);
+            release_value["latest_event_id"] = json!(latest_event_id);
+            (
+                asset,
+                context.authority(application),
+                Some(release_value),
+                Some(application_json(&context, application)),
+            )
+        } else {
+            let event_id = parse_event_id(&args.asset).map_err(|_| {
+                coded_error(
+                    "asset_not_found",
+                    "asset view without --release requires an event ID or nevent",
+                )
+            })?;
+            let events = context
+                .query(vec![Filter::new().kind(SOFTWARE_ASSET_KIND).id(event_id)])
+                .await?;
+            let event = events
+                .iter()
+                .find(|event| event.id == event_id)
+                .ok_or_else(|| coded_error("asset_not_found", "software asset was not found"))?;
+            let asset = SoftwareAsset::parse(event)
+                .map_err(|error| coded_error("invalid_asset_metadata", error.to_string()))?;
+            (
+                asset,
+                AuthorityJson::unknown(context.current_signer()),
+                None,
+                None,
+            )
+        };
+
+    let mut value = asset_json(&asset);
+    if args.verify {
+        value["verification"] = verify_asset(&asset).await?;
+    }
+    let result = json!({
+        "application": application_value,
+        "release": release_value,
+        "asset": value,
+    });
+    let human = format_asset(&asset, args.verify);
+    Ok(CommandOutput::new(
+        "release.asset.view",
+        &mut context,
+        authority,
+        result,
+        human,
+    ))
+}
+
+#[allow(clippy::too_many_lines)]
+async fn view_release(
+    cli: &Cli,
+    selector: &str,
+    app_selector: Option<&str>,
+    verify: bool,
+    offline: bool,
+    relays: &[String],
+    command: &'static str,
+) -> Result<CommandOutput> {
+    let mut context = ReleaseContext::load(cli, offline, relays, LoginMode::Optional).await?;
     let applications = load_trusted_linked_applications(&mut context).await?;
     let releases = load_releases(&mut context, &applications).await?;
     let (release, is_latest, latest_event_id) = resolve_release_for_read(
         &mut context,
         &applications,
         &releases,
-        &args.release,
-        args.app.as_deref(),
+        selector,
+        app_selector,
     )
     .await?;
+    let assets = load_assets(&mut context, &[&release]).await?;
     let application = application_for_release(&applications, &release)?;
     let authority = context.authority(application);
-    let mut release_value = release_json(&release);
+    let resolved_ids: BTreeSet<_> = assets.iter().map(|asset| asset.raw_event.id).collect();
+    let raw_asset_events = get_events_from_local_cache(
+        context.git_repo_path()?,
+        vec![Filter::new().ids(release.assets.iter().map(|asset| asset.event_id))],
+    )
+    .await?;
+    let raw_assets_by_id: HashMap<_, _> = raw_asset_events
+        .into_iter()
+        .map(|event| (event.id, event))
+        .collect();
+    let unresolved_asset_ids: Vec<String> = release
+        .assets
+        .iter()
+        .filter(|pointer| !resolved_ids.contains(&pointer.event_id))
+        .map(|pointer| pointer.event_id.to_hex())
+        .collect();
+
+    let mut asset_values = Vec::new();
+    for pointer in &release.assets {
+        if let Some(asset) = assets
+            .iter()
+            .find(|asset| asset.raw_event.id == pointer.event_id)
+        {
+            let mut value = asset_json(asset);
+            if asset.raw_event.pubkey != release.raw_event.pubkey {
+                value["resolution"] = json!("invalid");
+                value["validation"] = json!([{
+                    "code": "invalid_asset_author",
+                    "message": "asset author does not match the release author",
+                    "details": {
+                        "asset_author": asset.raw_event.pubkey.to_hex(),
+                        "release_author": release.raw_event.pubkey.to_hex(),
+                    }
+                }]);
+            }
+            if verify {
+                value["verification"] = verify_asset(asset).await?;
+            }
+            asset_values.push(value);
+        } else {
+            asset_values.push(unresolved_asset_json(
+                pointer.event_id,
+                raw_assets_by_id.get(&pointer.event_id),
+            ));
+        }
+    }
+    let mut release_value = release_json(&release, &assets);
     release_value["is_latest"] = json!(is_latest);
     release_value["latest_event_id"] = json!(latest_event_id);
     let result = json!({
         "application": application_json(&context, application),
         "release": release_value,
+        "assets": asset_values,
+        "unresolved_asset_ids": unresolved_asset_ids,
     });
     let mut human = format!(
         "{} {} ({})\nreleased: {}\nauthor: {}\nplatforms: {}\n\n{}",
@@ -255,6 +430,17 @@ pub(super) async fn release_view(cli: &Cli, args: &ReleaseViewArgs) -> Result<Co
         release.platforms.join(", "),
         release.notes
     );
+    human.push_str("\n\nassets:\n");
+    human.push_str(
+        &assets
+            .iter()
+            .map(|asset| format!("  {}", format_asset(asset, verify)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    if !unresolved_asset_ids.is_empty() {
+        let _ = write!(human, "\n  missing: {}", unresolved_asset_ids.join(", "));
+    }
     if !authority.can_publish {
         let _ = write!(
             human,
@@ -270,12 +456,79 @@ pub(super) async fn release_view(cli: &Cli, args: &ReleaseViewArgs) -> Result<Co
         }
     }
     Ok(CommandOutput::new(
-        "release.view",
+        command,
         &mut context,
         authority,
         result,
         human,
     ))
+}
+
+fn unresolved_asset_json(event_id: EventId, event: Option<&Event>) -> Value {
+    let (resolution, author, author_npub, validation, raw_event) = event.map_or_else(
+        || {
+            (
+                "missing",
+                None,
+                None,
+                json!([{
+                    "code": "missing_referenced_asset",
+                    "message": "referenced asset was not resolved",
+                    "details": {},
+                }]),
+                Value::Null,
+            )
+        },
+        |event| {
+            let validation = SoftwareAsset::parse(event)
+                .err()
+                .map_or_else(Vec::new, |error| error.issues);
+            (
+                "invalid",
+                Some(event.pubkey.to_hex()),
+                event.pubkey.to_bech32().ok(),
+                json!(validation),
+                json!(event),
+            )
+        },
+    );
+    json!({
+        "event_id": event_id.to_hex(),
+        "event_id_bech32": event.map_or_else(
+            || Nip19Event::new(event_id).to_bech32().ok(),
+            |event| Nip19Event::new(event.id)
+                .author(event.pubkey)
+                .kind(event.kind)
+                .to_bech32()
+                .ok(),
+        ),
+        "author": author,
+        "author_npub": author_npub,
+        "identifier": null,
+        "version": null,
+        "url": null,
+        "filename": null,
+        "mime": null,
+        "sha256": null,
+        "size": null,
+        "platforms": [],
+        "min_platform_version": null,
+        "target_platform_version": null,
+        "supported_nips": [],
+        "variant": null,
+        "commit": null,
+        "min_allowed_version": null,
+        "android": {
+            "version_code": null,
+            "min_allowed_version_code": null,
+            "certificate_sha256": [],
+        },
+        "original_url": null,
+        "resolution": resolution,
+        "verification": null,
+        "validation": validation,
+        "raw_event": raw_event,
+    })
 }
 
 async fn resolve_release_for_read(
@@ -317,9 +570,40 @@ async fn resolve_release_for_read(
     ))
 }
 
+async fn verify_asset(asset: &SoftwareAsset) -> Result<Value> {
+    let url = asset
+        .url
+        .as_ref()
+        .ok_or_else(|| coded_error("asset_integrity_mismatch", "asset has no URL to verify"))?;
+    let mut request = UrlAssetRequest::new(url);
+    request.filename.clone_from(&asset.filename);
+    request.mime_type = Some(asset.mime.clone());
+    let downloaded = download_url_asset(request).await?;
+    if !downloaded.sha256.eq_ignore_ascii_case(&asset.sha256)
+        || asset.size.is_some_and(|size| size != downloaded.size)
+    {
+        return Err(coded_error(
+            "asset_integrity_mismatch",
+            format!(
+                "asset {} does not match its published hash or size",
+                asset.raw_event.id
+            ),
+        ));
+    }
+    Ok(json!({
+        "ok": true,
+        "observed_final_url": downloaded.final_url,
+        "observed_sha256": downloaded.sha256,
+        "observed_size": downloaded.size.to_string(),
+        "warnings": downloaded.warnings,
+    }))
+}
+
 fn release_summary_json(release: &SoftwareRelease) -> Value {
-    let mut value = release_json(release);
+    let mut value = release_json(release, &[]);
     value["asset_count"] = json!(release.assets.len());
+    value["derived_platforms"] = Value::Null;
+    value["validation"] = json!([]);
     value
 }
 
@@ -355,5 +639,42 @@ fn format_application(application: &SoftwareApplication, context: &ReleaseContex
         application.license.as_deref().unwrap_or("-"),
         application.platforms.join(", "),
         application.description,
+    )
+}
+
+fn format_asset(asset: &SoftwareAsset, verified: bool) -> String {
+    format!(
+        "{}\n    id: {}\n    url: {}\n    mime: {}\n    size: {}\n    sha256: {}\n    platforms: {}{}",
+        asset.filename.as_deref().unwrap_or("<unnamed>"),
+        asset.raw_event.id,
+        asset.url.as_deref().unwrap_or("-"),
+        asset.mime,
+        asset
+            .size
+            .map_or_else(|| "-".to_string(), |size| size.to_string()),
+        asset.sha256,
+        asset.platforms.join(", "),
+        if verified { "\n    verified: yes" } else { "" },
+    )
+}
+
+fn assets_human(assets: &Value) -> String {
+    assets.as_array().map_or_else(
+        || "no assets".to_string(),
+        |assets| {
+            assets
+                .iter()
+                .map(|asset| {
+                    format!(
+                        "{}\t{}\t{}\t{}",
+                        asset["event_id"].as_str().unwrap_or("-"),
+                        asset["filename"].as_str().unwrap_or("-"),
+                        asset["mime"].as_str().unwrap_or("-"),
+                        asset["resolution"].as_str().unwrap_or("missing"),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
     )
 }
