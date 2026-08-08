@@ -45,6 +45,8 @@ const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalFileRequest {
     pub source_path: PathBuf,
+    /// Caller-supplied published filename, taking precedence over the basename.
+    pub filename: Option<String>,
     /// Caller-supplied MIME type. The filename extension is used when absent.
     pub mime_type: Option<String>,
     /// Maximum number of bytes copied into the stable snapshot.
@@ -55,6 +57,7 @@ impl LocalFileRequest {
     pub fn new(source_path: impl Into<PathBuf>) -> Self {
         Self {
             source_path: source_path.into(),
+            filename: None,
             mime_type: None,
             max_bytes: DEFAULT_MAX_ASSET_BYTES,
         }
@@ -604,7 +607,8 @@ pub async fn snapshot_local_file(request: LocalFileRequest) -> Result<FileSnapsh
         bail!("asset byte limit must be greater than zero");
     }
 
-    let (filename, mut warnings) = source_filename(&request.source_path)?;
+    let (filename, mut warnings) =
+        source_filename(&request.source_path, request.filename.as_deref())?;
     let mime = infer_mime_type(request.mime_type.as_deref(), None, &filename)?;
     warnings.extend(mime.warnings);
 
@@ -678,12 +682,15 @@ fn snapshot_local_file_sync(
     })
 }
 
-fn source_filename(path: &Path) -> Result<(String, Vec<DownloadWarning>)> {
-    let original = path
-        .file_name()
-        .ok_or_else(|| anyhow!("local asset path has no filename"))?
-        .to_str()
-        .ok_or_else(|| anyhow!("local asset filename is not valid UTF-8"))?;
+fn source_filename(path: &Path, explicit: Option<&str>) -> Result<(String, Vec<DownloadWarning>)> {
+    let original = match explicit {
+        Some(explicit) => explicit,
+        None => path
+            .file_name()
+            .ok_or_else(|| anyhow!("local asset path has no filename"))?
+            .to_str()
+            .ok_or_else(|| anyhow!("local asset filename is not valid UTF-8"))?,
+    };
     let filename = sanitize_filename(original)
         .ok_or_else(|| anyhow!("local asset filename is empty or unsafe"))?;
     let warnings = if filename == original {
@@ -1211,6 +1218,21 @@ mod tests {
             snapshot.warnings[0].code,
             DownloadWarningCode::FilenameSanitized
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_filename_controls_published_name_and_mime_inference() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("build-output.bin");
+        std::fs::write(&path, b"asset")?;
+        let mut request = LocalFileRequest::new(path);
+        request.filename = Some("ngit-release.zip".to_owned());
+
+        let snapshot = snapshot_local_file(request).await?;
+
+        assert_eq!(snapshot.filename, "ngit-release.zip");
+        assert_eq!(snapshot.mime_type, "application/zip");
         Ok(())
     }
 
