@@ -341,8 +341,10 @@ codes MUST NOT change meaning within `format_version: 1`.
 ### JSON entity shapes
 
 Semantic entities have stable field names even when their source event is
-invalid. Validation issues are objects containing `code`, `message`, and
-`details`.
+invalid. Validation issues are objects containing `code`, `field`, and
+`message`. `field` names the relevant NIP-82 tag or semantic field, and is
+`null` when no individual field applies. The `details` object belongs only to
+the separate runtime error and warning envelopes.
 
 An application object has this shape:
 

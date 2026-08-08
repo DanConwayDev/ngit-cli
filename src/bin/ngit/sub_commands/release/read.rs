@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use ngit::{
     client::get_events_from_local_cache,
     release_download::{UrlAssetRequest, download_url_asset},
-    software_release::{SOFTWARE_ASSET_KIND, SoftwareApplication, SoftwareAsset, SoftwareRelease},
+    software_release::{
+        SOFTWARE_ASSET_KIND, SoftwareApplication, SoftwareAsset, SoftwareRelease, ValidationCode,
+        ValidationIssue,
+    },
 };
 use nostr::prelude::{
     Coordinate, Event, EventId, Filter, FromBech32, PublicKey, ToBech32,
@@ -391,13 +394,10 @@ async fn view_release(
             let mut value = asset_json(asset);
             if asset.raw_event.pubkey != release.raw_event.pubkey {
                 value["resolution"] = json!("invalid");
-                value["validation"] = json!([{
-                    "code": "invalid_asset_author",
-                    "message": "asset author does not match the release author",
-                    "details": {
-                        "asset_author": asset.raw_event.pubkey.to_hex(),
-                        "release_author": release.raw_event.pubkey.to_hex(),
-                    }
+                value["validation"] = json!([ValidationIssue {
+                    code: ValidationCode::InvalidAssetAuthor,
+                    field: Some("author".to_string()),
+                    message: "asset author does not match the release author".to_string(),
                 }]);
             }
             if verify {
@@ -471,10 +471,10 @@ fn unresolved_asset_json(event_id: EventId, event: Option<&Event>) -> Value {
                 "missing",
                 None,
                 None,
-                json!([{
-                    "code": "missing_referenced_asset",
-                    "message": "referenced asset was not resolved",
-                    "details": {},
+                json!([ValidationIssue {
+                    code: ValidationCode::MissingReferencedAsset,
+                    field: Some("e".to_string()),
+                    message: "referenced asset was not resolved".to_string(),
                 }]),
                 Value::Null,
             )

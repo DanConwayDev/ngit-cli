@@ -1596,6 +1596,38 @@ mod tests {
     }
 
     #[test]
+    fn validation_issue_json_has_a_stable_shape() {
+        let issues = [
+            ValidationIssue::field(
+                ValidationCode::MissingReferencedAsset,
+                "e",
+                "referenced asset was not resolved",
+            ),
+            ValidationIssue::new(
+                ValidationCode::NonEmptyAssetContent,
+                None,
+                "software asset content must be empty".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(issues).expect("serialize validation issues"),
+            serde_json::json!([
+                {
+                    "code": "missing_referenced_asset",
+                    "field": "e",
+                    "message": "referenced asset was not resolved",
+                },
+                {
+                    "code": "non_empty_asset_content",
+                    "field": null,
+                    "message": "software asset content must be empty",
+                },
+            ])
+        );
+    }
+
+    #[test]
     fn asset_identity_and_version_are_not_coupled_to_a_release() {
         let keys = keys();
         let asset = asset(&keys, "com.example.android", "42", &["android-x86_64"]);
