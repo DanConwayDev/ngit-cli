@@ -5,6 +5,10 @@ use ngit::{
     client::{sign_draft_event, sign_event},
     event_ordering::finalize_fixed_timestamp_ordered_unsigned,
     release_download::{UrlAssetRequest, download_url_asset},
+    release_manifest::{
+        ResolvedReleaseManifest, ResolvedReleaseManifestAsset, load_release_manifest,
+        resolve_release_manifest_path,
+    },
     software_release::{
         AddressPointer, AssetInput, ReleaseAssetInput, ReleaseInput, SoftwareApplication,
         SoftwareAsset, SoftwareRelease, asset_event_builder, release_event_builder,
@@ -33,8 +37,14 @@ pub(super) async fn app_link(cli: &Cli, args: &ReleaseAppLinkArgs) -> Result<Com
 #[allow(clippy::too_many_lines)]
 pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Result<CommandOutput> {
     let mut context = ReleaseContext::load(cli, false, &args.relays, LoginMode::Required).await?;
+    let manifest = resolve_manifest(&context, args)?;
+    let app_selector = args.app.as_deref().or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.application.as_deref())
+    });
     let applications = trusted_applications_for_write(&mut context).await?;
-    let application = select_application(&applications, args.app.as_deref())?.clone();
+    let application = select_application(&applications, app_selector)?.clone();
     context.require_application_author(&application)?;
 
     let identifier = format!("{}@{}", application.identifier, args.release_version);
@@ -47,6 +57,17 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
         Vec::new()
     };
     let mut prepared_assets = Vec::new();
+    if let Some(manifest) = &manifest {
+        for asset in &manifest.assets {
+            let input = prepare_url_asset(
+                &mut context,
+                NewUrlAsset::from_manifest(asset, &application, &args.release_version),
+            )
+            .await?;
+            reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
+            prepared_assets.push(input);
+        }
+    }
     for value in &args.assets {
         let (platform, url) = value.split_once('=').ok_or_else(|| {
             coded_error(
@@ -62,10 +83,12 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
         }
         let input = prepare_url_asset(
             &mut context,
-            url,
-            &application.identifier,
-            &args.release_version,
-            vec![platform.to_owned()],
+            NewUrlAsset::simple(
+                url,
+                vec![platform.to_owned()],
+                &application,
+                &args.release_version,
+            ),
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
@@ -74,10 +97,7 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     for url in &args.platform_agnostic_assets {
         let input = prepare_url_asset(
             &mut context,
-            url,
-            &application.identifier,
-            &args.release_version,
-            Vec::new(),
+            NewUrlAsset::simple(url, Vec::new(), &application, &args.release_version),
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
@@ -103,16 +123,21 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
         ));
     }
 
-    let notes = release_notes(&context, args, existing.as_ref())?;
+    let notes = release_notes(&context, args, manifest.as_ref(), existing.as_ref())?;
     let channel = args
         .channel
         .clone()
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|manifest| manifest.channel.clone())
+        })
         .or_else(|| existing.as_ref().map(|release| release.channel.clone()))
         .unwrap_or_else(|| "main".to_owned());
     if notes.trim().is_empty() {
         context.warnings.push(WarningJson::new(
             "release_notes_missing",
-            "release notes are empty; provide --notes or --notes-file",
+            "release notes are empty; provide --notes, --notes-file, or manifest notes",
         ));
     }
     ensure_release_state_unchanged(
@@ -258,9 +283,33 @@ fn enforce_edit_guard(
     }
 }
 
+fn resolve_manifest(
+    context: &ReleaseContext,
+    args: &ReleasePublishArgs,
+) -> Result<Option<ResolvedReleaseManifest>> {
+    let has_direct_assets = !args.assets.is_empty()
+        || !args.asset_events.is_empty()
+        || !args.platform_agnostic_assets.is_empty();
+    let requested = args.manifest.as_deref();
+    let should_load = requested.is_some()
+        || (!args.edit
+            && !has_direct_assets
+            && resolve_release_manifest_path(context.git_repo_path()?, None)?.exists());
+    if !should_load {
+        return Ok(None);
+    }
+    let loaded = load_release_manifest(context.git_repo_path()?, requested)?;
+    Ok(Some(
+        loaded
+            .manifest
+            .resolve(&args.release_version, args.tag.as_deref())?,
+    ))
+}
+
 fn release_notes(
     context: &ReleaseContext,
     args: &ReleasePublishArgs,
+    manifest: Option<&ResolvedReleaseManifest>,
     existing: Option<&SoftwareRelease>,
 ) -> Result<String> {
     if let Some(notes) = &args.notes {
@@ -271,8 +320,9 @@ fn release_notes(
         return fs::read_to_string(&path)
             .with_context(|| format!("failed to read release notes {}", path.display()));
     }
-    Ok(existing
-        .map(|release| release.notes.clone())
+    Ok(manifest
+        .and_then(|manifest| manifest.notes.clone())
+        .or_else(|| existing.map(|release| release.notes.clone()))
         .unwrap_or_default())
 }
 
@@ -557,16 +607,107 @@ fn reject_asset_against_prepared(prepared: &[AssetInput], proposed: &SoftwareAss
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+struct NewUrlAsset {
+    source: String,
+    identifier: String,
+    version: String,
+    filename: Option<String>,
+    mime: Option<String>,
+    platforms: Vec<String>,
+    min_platform_version: Option<String>,
+    target_platform_version: Option<String>,
+    supported_nips: Vec<String>,
+    variant: Option<String>,
+    commit: Option<String>,
+    min_allowed_version: Option<String>,
+    version_code: Option<u64>,
+    min_allowed_version_code: Option<u64>,
+    apk_certificate_hashes: Vec<String>,
+    original_url: Option<String>,
+}
+
+impl NewUrlAsset {
+    fn simple(
+        source: &str,
+        platforms: Vec<String>,
+        application: &SoftwareApplication,
+        release_version: &str,
+    ) -> Self {
+        Self {
+            source: source.to_owned(),
+            identifier: application.identifier.clone(),
+            version: release_version.to_owned(),
+            filename: None,
+            mime: None,
+            platforms,
+            min_platform_version: None,
+            target_platform_version: None,
+            supported_nips: Vec::new(),
+            variant: None,
+            commit: None,
+            min_allowed_version: None,
+            version_code: None,
+            min_allowed_version_code: None,
+            apk_certificate_hashes: Vec::new(),
+            original_url: None,
+        }
+    }
+
+    fn from_manifest(
+        asset: &ResolvedReleaseManifestAsset,
+        application: &SoftwareApplication,
+        release_version: &str,
+    ) -> Self {
+        Self {
+            source: asset.source.clone(),
+            identifier: asset
+                .identifier
+                .clone()
+                .unwrap_or_else(|| application.identifier.clone()),
+            version: asset
+                .version
+                .clone()
+                .unwrap_or_else(|| release_version.to_owned()),
+            filename: asset.filename.clone(),
+            mime: asset.mime.clone(),
+            platforms: asset.platforms.clone(),
+            min_platform_version: asset.min_platform_version.clone(),
+            target_platform_version: asset.target_platform_version.clone(),
+            supported_nips: asset.supported_nips.clone(),
+            variant: asset.variant.clone(),
+            commit: asset.commit.clone(),
+            min_allowed_version: asset.min_allowed_version.clone(),
+            version_code: asset
+                .android
+                .as_ref()
+                .and_then(|android| android.version_code),
+            min_allowed_version_code: asset
+                .android
+                .as_ref()
+                .and_then(|android| android.min_allowed_version_code),
+            apk_certificate_hashes: asset
+                .android
+                .as_ref()
+                .map_or_else(Vec::new, |android| android.certificate_sha256.clone()),
+            original_url: asset.original_url.clone(),
+        }
+    }
+}
+
 async fn prepare_url_asset(
     context: &mut ReleaseContext,
-    source: &str,
-    identifier: &str,
-    version: &str,
-    platforms: Vec<String>,
+    proposed: NewUrlAsset,
 ) -> Result<AssetInput> {
-    let downloaded = download_url_asset(UrlAssetRequest::new(source))
-        .await
-        .with_context(|| format!("failed to acquire release asset {}", redacted_url(source)))?;
+    let mut request = UrlAssetRequest::new(&proposed.source);
+    request.filename = proposed.filename.clone();
+    request.mime_type = proposed.mime.clone();
+    let downloaded = download_url_asset(request).await.with_context(|| {
+        format!(
+            "failed to acquire release asset {}",
+            redacted_url(&proposed.source)
+        )
+    })?;
     for warning in &downloaded.warnings {
         let code = serde_json::to_value(warning.code)?
             .as_str()
@@ -577,15 +718,26 @@ async fn prepare_url_asset(
             .push(WarningJson::new(code, warning.message.clone()));
     }
     let input = AssetInput {
-        identifier: identifier.to_owned(),
-        version: version.to_owned(),
+        identifier: proposed.identifier,
+        version: proposed.version,
         url: Some(downloaded.source_url),
         filename: Some(downloaded.filename),
         mime: downloaded.mime_type,
         sha256: downloaded.sha256,
         size: Some(downloaded.size),
-        platforms,
-        ..Default::default()
+        platforms: proposed.platforms,
+        min_platform_version: proposed.min_platform_version,
+        target_platform_version: proposed.target_platform_version,
+        supported_nips: proposed.supported_nips,
+        variant: proposed.variant,
+        commit: proposed.commit,
+        min_allowed_version: proposed.min_allowed_version,
+        version_code: proposed.version_code,
+        min_allowed_version_code: proposed.min_allowed_version_code,
+        apk_certificate_hashes: proposed.apk_certificate_hashes,
+        original_url: proposed.original_url,
+        extra_tags: Vec::new(),
+        created_at: None,
     };
     asset_event_builder(input.clone()).map_err(|error| {
         coded_error_with_details(

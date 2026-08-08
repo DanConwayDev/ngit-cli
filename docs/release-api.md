@@ -731,9 +731,11 @@ an error. ngit MUST never silently detach the older asset.
 ## Release manifest
 
 The default project manifest location is `.ngit/release.yaml`. v1 reads it when
-`--manifest` is supplied or when the default file exists and no direct asset
-flags are given. A missing default manifest is not an error when direct assets
-are provided.
+`--manifest` is supplied or, for release creation, when the default file exists
+and no direct asset flags are given. Edits load a manifest only when
+`--manifest` is explicit, so a metadata-only `--edit` cannot accidentally
+re-append the creation assets. A missing default manifest is not an error when
+direct assets are provided.
 
 ```yaml
 schema: 1

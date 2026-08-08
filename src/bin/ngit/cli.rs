@@ -529,6 +529,12 @@ pub struct ReleasePublishArgs {
     /// Release date as Unix seconds (defaults to now when creating)
     #[arg(long, value_name = "UNIX_SECONDS")]
     pub released_at: Option<u64>,
+    /// Git tag used for {tag} manifest expansion
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+    /// Release manifest; creation also discovers .ngit/release.yaml
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
     /// Add a URL-backed asset as PLATFORM=URL (repeatable)
     #[arg(long = "asset", value_name = "PLATFORM=URL")]
     pub assets: Vec<String>,
