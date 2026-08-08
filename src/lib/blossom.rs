@@ -100,6 +100,56 @@ pub struct BlobUpload {
     pub newly_stored: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestFailureKind {
+    Definite,
+    Unknown,
+}
+
+#[derive(Debug)]
+struct BlobRequestError {
+    kind: RequestFailureKind,
+    message: String,
+    possible_orphan: bool,
+}
+
+impl BlobRequestError {
+    fn definite(error: anyhow::Error, possible_orphan: bool) -> Self {
+        Self {
+            kind: RequestFailureKind::Definite,
+            message: format!("{error:#}"),
+            possible_orphan,
+        }
+    }
+
+    fn unknown(error: anyhow::Error, possible_orphan: bool) -> Self {
+        Self {
+            kind: RequestFailureKind::Unknown,
+            message: format!("{error:#}"),
+            possible_orphan,
+        }
+    }
+
+    fn into_anyhow(self) -> anyhow::Error {
+        let mut error = anyhow!(self.message);
+        if self.kind == RequestFailureKind::Unknown {
+            error = error.context("the Blossom server result is unknown");
+        }
+        if self.possible_orphan {
+            error = error.context("the Blossom server may now contain an unreferenced blob");
+        }
+        error
+    }
+}
+
+impl std::fmt::Display for BlobRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BlobRequestError {}
+
 /// Upload a stable local snapshot to one Blossom server.
 ///
 /// The request follows BUD-02 and BUD-11. Authenticated redirects are disabled
@@ -109,7 +159,9 @@ pub async fn upload_snapshot(
     snapshot: &FileSnapshot,
     signer: &NgitSigner,
 ) -> Result<BlobUpload> {
-    upload_snapshot_with_timeout(server_url, snapshot, signer, TOTAL_TIMEOUT).await
+    upload_snapshot_with_timeout(server_url, snapshot, signer, TOTAL_TIMEOUT)
+        .await
+        .map_err(BlobRequestError::into_anyhow)
 }
 
 async fn upload_snapshot_with_timeout(
@@ -117,32 +169,36 @@ async fn upload_snapshot_with_timeout(
     snapshot: &FileSnapshot,
     signer: &NgitSigner,
     total_timeout: Duration,
-) -> Result<BlobUpload> {
-    tokio::time::timeout(
-        total_timeout,
-        upload_snapshot_inner(server_url, snapshot, signer),
-    )
-    .await
-    .map_err(|_| anyhow!("Blossom upload exceeded its total timeout"))?
+) -> std::result::Result<BlobUpload, BlobRequestError> {
+    let deadline = tokio::time::Instant::now() + total_timeout;
+    upload_snapshot_inner(server_url, snapshot, signer, deadline).await
 }
 
 async fn upload_snapshot_inner(
     server_url: &str,
     snapshot: &FileSnapshot,
     signer: &NgitSigner,
-) -> Result<BlobUpload> {
-    let upload_url = blossom_upload_url(server_url)?;
-    let event = upload_authorization(snapshot, signer).await?;
-    let authorization = authorization_header(&event)?;
-    let file = snapshot.reopen()?;
+    deadline: tokio::time::Instant,
+) -> std::result::Result<BlobUpload, BlobRequestError> {
+    let upload_url = blossom_endpoint_url(server_url, "upload")
+        .map_err(|error| BlobRequestError::definite(error, false))?;
+    let event = tokio::time::timeout_at(deadline, upload_authorization(snapshot, signer))
+        .await
+        .map_err(|_| {
+            BlobRequestError::definite(
+                anyhow!("Blossom upload authorization exceeded its total timeout"),
+                false,
+            )
+        })?
+        .map_err(|error| BlobRequestError::definite(error, false))?;
+    let authorization =
+        authorization_header(&event).map_err(|error| BlobRequestError::definite(error, false))?;
+    let file = snapshot
+        .reopen()
+        .map_err(|error| BlobRequestError::definite(error, false))?;
     let body = reqwest::Body::wrap_stream(ReaderStream::new(tokio::fs::File::from_std(file)));
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(IDLE_TIMEOUT)
-        .redirect(Policy::none())
-        .build()
-        .context("failed to create the Blossom HTTP client")?;
+    let client = blossom_http_client().map_err(|error| BlobRequestError::definite(error, false))?;
     let request = client
         .put(upload_url)
         .header(CONTENT_LENGTH, snapshot.size)
@@ -151,17 +207,161 @@ async fn upload_snapshot_inner(
         .header(AUTHORIZATION, authorization)
         .body(body);
 
-    let response = request
-        .send()
+    let response = tokio::time::timeout_at(deadline, request.send())
         .await
-        .context("failed to send the Blossom upload")?;
+        .map_err(|_| {
+            BlobRequestError::unknown(anyhow!("Blossom upload exceeded its total timeout"), true)
+        })?
+        .map_err(|error| {
+            BlobRequestError::unknown(
+                anyhow!(error).context("failed to send the Blossom upload"),
+                true,
+            )
+        })?;
+
+    read_store_response(response, snapshot, deadline, "upload").await
+}
+
+/// Ask a Blossom server to mirror a previously uploaded blob.
+///
+/// The request follows BUD-04 and BUD-11. The source URL is sent in the JSON
+/// body while the expected immutable blob properties are repeated in headers.
+/// Authenticated redirects are disabled.
+pub async fn mirror_snapshot(
+    server_url: &str,
+    primary_url: &Url,
+    snapshot: &FileSnapshot,
+    signer: &NgitSigner,
+) -> Result<BlobUpload> {
+    mirror_snapshot_with_timeout(server_url, primary_url, snapshot, signer, TOTAL_TIMEOUT)
+        .await
+        .map_err(BlobRequestError::into_anyhow)
+}
+
+async fn mirror_snapshot_with_timeout(
+    server_url: &str,
+    primary_url: &Url,
+    snapshot: &FileSnapshot,
+    signer: &NgitSigner,
+    total_timeout: Duration,
+) -> std::result::Result<BlobUpload, BlobRequestError> {
+    let deadline = tokio::time::Instant::now() + total_timeout;
+    let mirror_url = blossom_endpoint_url(server_url, "mirror")
+        .map_err(|error| BlobRequestError::definite(error, false))?;
+    validate_blob_url(primary_url, &snapshot.sha256)
+        .context("invalid Blossom mirror source URL")
+        .map_err(|error| BlobRequestError::definite(error, false))?;
+    let event = tokio::time::timeout_at(deadline, upload_authorization(snapshot, signer))
+        .await
+        .map_err(|_| {
+            BlobRequestError::definite(
+                anyhow!("Blossom mirror authorization exceeded its total timeout"),
+                false,
+            )
+        })?
+        .map_err(|error| BlobRequestError::definite(error, false))?;
+    let authorization =
+        authorization_header(&event).map_err(|error| BlobRequestError::definite(error, false))?;
+    let client = blossom_http_client().map_err(|error| BlobRequestError::definite(error, false))?;
+    let request = client
+        .put(mirror_url)
+        .header("X-SHA-256", &snapshot.sha256)
+        .header("X-Content-Length", snapshot.size)
+        .header("X-Content-Type", &snapshot.mime_type)
+        .header(AUTHORIZATION, authorization)
+        .json(&serde_json::json!({ "url": primary_url }));
+
+    let response = tokio::time::timeout_at(deadline, request.send())
+        .await
+        .map_err(|_| {
+            BlobRequestError::unknown(anyhow!("Blossom mirror exceeded its total timeout"), true)
+        })?
+        .map_err(|error| {
+            BlobRequestError::unknown(
+                anyhow!(error).context("failed to send the Blossom mirror request"),
+                true,
+            )
+        })?;
+
+    read_store_response(response, snapshot, deadline, "mirror").await
+}
+
+fn blossom_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(IDLE_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+        .context("failed to create the Blossom HTTP client")
+}
+
+async fn read_store_response(
+    mut response: reqwest::Response,
+    snapshot: &FileSnapshot,
+    deadline: tokio::time::Instant,
+    operation: &str,
+) -> std::result::Result<BlobUpload, BlobRequestError> {
     let status = response.status();
     if status != StatusCode::OK && status != StatusCode::CREATED {
-        bail!("Blossom upload returned HTTP {status}");
+        return Err(BlobRequestError::definite(
+            anyhow!("Blossom {operation} returned HTTP {status}"),
+            false,
+        ));
+    }
+    let possible_orphan = status == StatusCode::CREATED;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_DESCRIPTOR_BYTES)
+    {
+        return Err(BlobRequestError::definite(
+            anyhow!("Blossom descriptor exceeds the response size limit"),
+            possible_orphan,
+        ));
     }
 
-    let descriptor = read_descriptor(response).await?;
-    validate_descriptor(&descriptor, snapshot)?;
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, response.chunk())
+            .await
+            .map_err(|_| {
+                BlobRequestError::unknown(
+                    anyhow!("Blossom {operation} exceeded its total timeout"),
+                    possible_orphan,
+                )
+            })?
+            .map_err(|error| {
+                BlobRequestError::unknown(
+                    anyhow!(error).context("failed while reading the Blossom descriptor"),
+                    possible_orphan,
+                )
+            })?;
+        let Some(chunk) = chunk else { break };
+        let length = u64::try_from(bytes.len())
+            .ok()
+            .and_then(|length| length.checked_add(u64::try_from(chunk.len()).ok()?))
+            .ok_or_else(|| {
+                BlobRequestError::definite(
+                    anyhow!("Blossom descriptor length overflowed u64"),
+                    possible_orphan,
+                )
+            })?;
+        if length > MAX_DESCRIPTOR_BYTES {
+            return Err(BlobRequestError::definite(
+                anyhow!("Blossom descriptor exceeds the response size limit"),
+                possible_orphan,
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    let descriptor: BlobDescriptor = serde_json::from_slice(&bytes).map_err(|error| {
+        BlobRequestError::definite(
+            anyhow!(error).context("Blossom server returned an invalid blob descriptor"),
+            possible_orphan,
+        )
+    })?;
+    validate_descriptor(&descriptor, snapshot)
+        .map_err(|error| BlobRequestError::definite(error, possible_orphan))?;
     Ok(BlobUpload {
         descriptor,
         newly_stored: status == StatusCode::CREATED,
@@ -187,7 +387,7 @@ fn authorization_header(event: &Event) -> Result<HeaderValue> {
         .context("failed to construct the Blossom Authorization header")
 }
 
-fn blossom_upload_url(server_url: &str) -> Result<Url> {
+fn blossom_endpoint_url(server_url: &str, endpoint: &str) -> Result<Url> {
     let mut server = Url::parse(server_url).context("invalid Blossom server URL")?;
     if !matches!(server.scheme(), "http" | "https") || server.host_str().is_none() {
         bail!("Blossom server URL must be an absolute HTTP or HTTPS URL");
@@ -201,35 +401,8 @@ fn blossom_upload_url(server_url: &str) -> Result<Url> {
     }
     server.set_path("/");
     server
-        .join("upload")
-        .context("failed to construct the Blossom upload URL")
-}
-
-async fn read_descriptor(mut response: reqwest::Response) -> Result<BlobDescriptor> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DESCRIPTOR_BYTES)
-    {
-        bail!("Blossom descriptor exceeds the response size limit");
-    }
-
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("failed while reading the Blossom descriptor")?
-    {
-        let length = u64::try_from(bytes.len())
-            .ok()
-            .and_then(|length| length.checked_add(u64::try_from(chunk.len()).ok()?))
-            .ok_or_else(|| anyhow!("Blossom descriptor length overflowed u64"))?;
-        if length > MAX_DESCRIPTOR_BYTES {
-            bail!("Blossom descriptor exceeds the response size limit");
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-
-    serde_json::from_slice(&bytes).context("Blossom server returned an invalid blob descriptor")
+        .join(endpoint)
+        .with_context(|| format!("failed to construct the Blossom {endpoint} URL"))
 }
 
 fn validate_descriptor(descriptor: &BlobDescriptor, snapshot: &FileSnapshot) -> Result<()> {
@@ -914,6 +1087,106 @@ mod tests {
             assert_eq!(upload.descriptor.mime_type, snapshot.mime_type);
             assert_eq!(upload.newly_stored, status == "201 Created");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mirror_sends_exact_blob_claim_with_scoped_authorization() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let source = Url::parse(&format!("https://primary.example/{}.apk", snapshot.sha256))?;
+        let signer_keys = Keys::generate();
+        let signer = NgitSigner::Keys(signer_keys.clone());
+
+        for status in ["200 OK", "201 Created"] {
+            let expected_hash = snapshot.sha256.clone();
+            let expected_mime = snapshot.mime_type.clone();
+            let expected_size = snapshot.size;
+            let (server_url, server) = spawn_one_shot_server(move |base_url| TestResponse {
+                status,
+                headers: Vec::new(),
+                body: descriptor_json(base_url, &expected_hash, expected_size, &expected_mime),
+            })
+            .await?;
+
+            let mirrored = mirror_snapshot(&server_url, &source, &snapshot, &signer).await?;
+            let request = completed_request(server).await?;
+
+            assert!(request.head.starts_with("PUT /mirror HTTP/1.1\r\n"));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request.body)?,
+                serde_json::json!({ "url": source })
+            );
+            assert_eq!(
+                request_header(&request.head, "content-type"),
+                Some("application/json")
+            );
+            assert_eq!(
+                request_header(&request.head, "x-sha-256"),
+                Some(snapshot.sha256.as_str())
+            );
+            assert_eq!(
+                request_header(&request.head, "x-content-length"),
+                Some(snapshot.size.to_string().as_str())
+            );
+            assert_eq!(
+                request_header(&request.head, "x-content-type"),
+                Some(snapshot.mime_type.as_str())
+            );
+
+            let authorization = request_header(&request.head, "authorization")
+                .context("mirror omitted Authorization")?
+                .strip_prefix("Nostr ")
+                .context("mirror authorization used the wrong scheme")?;
+            let event: Event = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(authorization)?)?;
+            event.verify()?;
+            assert_eq!(event.kind, Kind::BlossomAuth);
+            assert_eq!(event.pubkey, signer_keys.public_key());
+            assert_eq!(event_tag(&event, "t"), Some("upload"));
+            assert_eq!(event_tag(&event, "x"), Some(snapshot.sha256.as_str()));
+            assert!(event_tag(&event, "expiration").is_some());
+
+            assert_eq!(mirrored.descriptor.sha256, snapshot.sha256);
+            assert_eq!(mirrored.newly_stored, status == "201 Created");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mirror_rejects_redirects_and_mismatched_descriptors() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let source = Url::parse(&format!("https://primary.example/{}.apk", snapshot.sha256))?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let (redirect_url, redirect_server) = spawn_one_shot_server(|base_url| TestResponse {
+            status: "307 Temporary Redirect",
+            headers: vec![("Location".to_owned(), format!("{base_url}/elsewhere"))],
+            body: String::new(),
+        })
+        .await?;
+        let error = mirror_snapshot(&redirect_url, &source, &snapshot, &signer)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("307 Temporary Redirect"));
+        let request = completed_request(redirect_server).await?;
+        assert!(request.head.starts_with("PUT /mirror HTTP/1.1\r\n"));
+
+        let expected_mime = snapshot.mime_type.clone();
+        let expected_size = snapshot.size;
+        let (invalid_url, invalid_server) = spawn_one_shot_server(move |base_url| TestResponse {
+            status: "201 Created",
+            headers: Vec::new(),
+            body: descriptor_json(base_url, &"0".repeat(64), expected_size, &expected_mime),
+        })
+        .await?;
+        let error = mirror_snapshot(&invalid_url, &source, &snapshot, &signer)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("descriptor SHA-256"));
+        completed_request(invalid_server).await?;
         Ok(())
     }
 
