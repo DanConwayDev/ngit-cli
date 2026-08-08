@@ -385,6 +385,193 @@ assets:
 }
 
 #[tokio::test]
+async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Result<()> {
+    const ASSET_BYTES: &[u8] = b"local Blossom release archive\n";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    fs::write(publisher.dir().join("ngit-release.zip"), ASSET_BYTES)
+        .context("failed to write local release asset")?;
+
+    let hash = sha256_hex(ASSET_BYTES);
+    let primary = BlossomHttpServer::descriptor(
+        "201 Created",
+        &hash,
+        ASSET_BYTES.len() as u64,
+        "application/zip",
+    )
+    .await?;
+    let mirror = BlossomHttpServer::descriptor(
+        "201 Created",
+        &hash,
+        ASSET_BYTES.len() as u64,
+        "application/zip",
+    )
+    .await?;
+    let server_list = EventBuilder::new(Kind::Custom(10_063), "")
+        .tags([
+            Tag::parse(["server", primary.base_url()])?,
+            Tag::parse(["server", mirror.base_url()])?,
+        ])
+        .finalize(&published.maintainer_keys)?;
+    publish_to_default_relay(&harness, &server_list).await?;
+    wait_for_relay_event(&harness, server_list.id).await?;
+
+    let output = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--file",
+            "linux-x86_64=ngit-release.zip",
+            "--notes",
+            "Uploaded through Blossom",
+            "--json",
+        ],
+    )
+    .await?;
+    let primary_url = primary
+        .blob_url()
+        .context("primary descriptor URL missing")?
+        .to_owned();
+    let primary_root = primary.base_url_with_slash();
+    let mirror_root = mirror.base_url_with_slash();
+    let primary_request = primary.finish().await?;
+    let mirror_request = mirror.finish().await?;
+
+    ensure!(primary_request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+    ensure!(primary_request.body == ASSET_BYTES);
+    ensure!(request_header(&primary_request.head, "authorization").is_some());
+    ensure!(mirror_request.head.starts_with("PUT /mirror HTTP/1.1\r\n"));
+    ensure!(
+        serde_json::from_slice::<Value>(&mirror_request.body)?
+            == serde_json::json!({ "url": primary_url })
+    );
+
+    let blossom = &output["result"]["blossom"];
+    ensure!(blossom["server_selection"]["source"] == "kind_10063");
+    ensure!(blossom["server_selection"]["event_id"] == server_list.id.to_hex());
+    ensure!(blossom["server_selection"]["servers"][0] == primary_root);
+    ensure!(blossom["server_selection"]["servers"][1] == mirror_root);
+    ensure!(blossom["uploads"][0]["sha256"] == hash);
+    ensure!(blossom["uploads"][0]["size"] == ASSET_BYTES.len().to_string());
+    ensure!(blossom["uploads"][0]["primary_url"] == primary_url);
+    ensure!(blossom["uploads"][0]["servers"][0]["operation"] == "upload");
+    ensure!(blossom["uploads"][0]["servers"][0]["status"] == "stored");
+    ensure!(blossom["uploads"][0]["servers"][1]["operation"] == "mirror");
+    ensure!(blossom["uploads"][0]["servers"][1]["status"] == "stored");
+
+    let asset_event = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_ASSET_KIND)
+            .author(published.maintainer_keys.public_key()),
+        "Blossom-backed software asset",
+    )
+    .await?;
+    let asset = SoftwareAsset::parse(&asset_event).map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(asset.url.as_deref() == Some(primary_url.as_str()));
+    ensure!(asset.filename.as_deref() == Some("ngit-release.zip"));
+    ensure!(asset.mime == "application/zip");
+    ensure!(asset.sha256 == hash);
+    ensure!(asset.size == Some(ASSET_BYTES.len() as u64));
+    ensure!(asset.platforms == ["linux-x86_64"]);
+
+    let release = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(RELEASE_IDENTIFIER),
+            "Blossom-backed software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(release.assets.len() == 1);
+    ensure!(release.assets[0].event_id == asset.raw_event.id);
+    ensure!(release.platforms == ["linux-x86_64"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> Result<()> {
+    const ASSET_BYTES: &[u8] = b"orphaned Blossom release archive\n";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    fs::write(publisher.dir().join("orphan.zip"), ASSET_BYTES)
+        .context("failed to write local release asset")?;
+
+    let hash = sha256_hex(ASSET_BYTES);
+    let primary = BlossomHttpServer::descriptor(
+        "201 Created",
+        &hash,
+        ASSET_BYTES.len() as u64,
+        "application/zip",
+    )
+    .await?;
+    let mirror = BlossomHttpServer::error("500 Internal Server Error", "mirror rejected").await?;
+    let failure = run_json_expecting_failure(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--file",
+            "linux-x86_64=orphan.zip",
+            "--blossom-server",
+            primary.base_url(),
+            "--blossom-server",
+            mirror.base_url(),
+            "--notes",
+            "This release must not be published",
+            "--json",
+        ],
+    )
+    .await?;
+    let primary_root = primary.base_url_with_slash();
+    let primary_url = primary
+        .blob_url()
+        .context("primary descriptor URL missing")?
+        .to_owned();
+    primary.finish().await?;
+    mirror.finish().await?;
+
+    ensure!(failure["error"]["code"] == "blossom_publication_failed");
+    let details = &failure["error"]["details"];
+    ensure!(details["stage"] == "mirror");
+    ensure!(details["release_events_signed"] == false);
+    ensure!(details["release_events_published"] == false);
+    ensure!(details["blossom"]["uploads"][0]["servers"][0]["status"] == "stored");
+    ensure!(details["blossom"]["uploads"][0]["servers"][1]["status"] == "failed");
+    ensure!(details["possible_orphan_blobs"].as_array().map(Vec::len) == Some(1));
+    ensure!(details["possible_orphan_blobs"][0]["server"] == primary_root);
+    ensure!(details["possible_orphan_blobs"][0]["sha256"] == hash);
+    ensure!(details["possible_orphan_blobs"][0]["url"] == primary_url);
+
+    let release_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kinds([SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND])
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(
+        release_events.is_empty(),
+        "failed Blossom mirroring still published NIP-82 events"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
     const X86_BYTES: &[u8] = b"direct x86_64 archive\n";
     const ARM_BYTES: &[u8] = b"added aarch64 archive\n";
@@ -551,6 +738,138 @@ async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
     );
     ensure!(replacement.assets[0] == initial.assets[0]);
     ensure!(replacement.assets[1].event_id == arm.raw_event.id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_file_asset_add_preserves_the_existing_release() -> Result<()> {
+    const ADDED_BYTES: &[u8] = b"locally added aarch64 archive\n";
+    const RELEASED_AT: &str = "1700000000";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    let first = asset_event(&published, "ngit-linux-x86_64.tar.gz", "11", "linux-x86_64")?;
+    publish_to_default_relay(&harness, &first).await?;
+    wait_for_relay_event(&harness, first.id).await?;
+    run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--asset-event",
+            &first.id.to_hex(),
+            "--channel",
+            "stable",
+            "--notes",
+            "Release state which must survive local asset add",
+            "--released-at",
+            RELEASED_AT,
+            "--json",
+        ],
+    )
+    .await?;
+    let initial = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(RELEASE_IDENTIFIER),
+            "initial software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+
+    fs::write(publisher.dir().join("added-arm.zip"), ADDED_BYTES)
+        .context("failed to write local asset-add fixture")?;
+    let hash = sha256_hex(ADDED_BYTES);
+    let primary = BlossomHttpServer::descriptor(
+        "201 Created",
+        &hash,
+        ADDED_BYTES.len() as u64,
+        "application/zip",
+    )
+    .await?;
+    let added = run_json(
+        &publisher,
+        &[
+            "release",
+            "asset",
+            "add",
+            RELEASE_IDENTIFIER,
+            "--file",
+            "added-arm.zip",
+            "--platform",
+            "linux-aarch64",
+            "--filename",
+            "ngit-1.2.3-linux-aarch64.zip",
+            "--mime",
+            "application/zip",
+            "--blossom-server",
+            primary.base_url(),
+            "--edit",
+            "--json",
+        ],
+    )
+    .await?;
+    let primary_url = primary
+        .blob_url()
+        .context("primary descriptor URL missing")?
+        .to_owned();
+    let request = primary.finish().await?;
+
+    ensure!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+    ensure!(request.body == ADDED_BYTES);
+    ensure!(added["result"]["operation"] == "asset_added");
+    ensure!(added["result"]["previous_event_id"] == initial.raw_event.id.to_hex());
+    ensure!(added["result"]["blossom"]["uploads"][0]["primary_url"] == primary_url);
+
+    let replacement = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(RELEASE_IDENTIFIER),
+            "replacement software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(replacement.raw_event.id != initial.raw_event.id);
+    ensure!(replacement.raw_event.created_at == initial.raw_event.created_at);
+    ensure!(replacement.channel == initial.channel);
+    ensure!(replacement.notes == initial.notes);
+    ensure!(replacement.application == initial.application);
+    ensure!(replacement.assets.len() == 2);
+    ensure!(replacement.assets[0] == initial.assets[0]);
+    ensure!(replacement.platforms == ["linux-aarch64", "linux-x86_64"]);
+
+    let asset_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(asset_events.len() == 2);
+    let assets = asset_events
+        .iter()
+        .map(SoftwareAsset::parse)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let asset = asset_named(&assets, "ngit-1.2.3-linux-aarch64.zip")?;
+    ensure!(asset.url.as_deref() == Some(primary_url.as_str()));
+    ensure!(asset.mime == "application/zip");
+    ensure!(asset.sha256 == hash);
+    ensure!(asset.size == Some(ADDED_BYTES.len() as u64));
+    ensure!(asset.platforms == ["linux-aarch64"]);
+    ensure!(replacement.assets[1].event_id == asset.raw_event.id);
     Ok(())
 }
 
@@ -1243,6 +1562,170 @@ fn asset_named<'a>(assets: &'a [SoftwareAsset], filename: &str) -> Result<&'a So
 
 fn sha256_hex(bytes: &[u8]) -> String {
     sha256::Hash::hash(bytes).to_string()
+}
+
+struct CapturedBlossomRequest {
+    head: String,
+    body: Vec<u8>,
+}
+
+struct BlossomHttpServer {
+    base_url: String,
+    blob_url: Option<String>,
+    task: Option<JoinHandle<Result<CapturedBlossomRequest>>>,
+}
+
+impl BlossomHttpServer {
+    async fn descriptor(status: &'static str, sha256: &str, size: u64, mime: &str) -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind Blossom fixture")?;
+        let address = listener
+            .local_addr()
+            .context("failed to inspect Blossom fixture address")?;
+        let base_url = format!("http://{address}");
+        let blob_url = format!("{base_url}/{sha256}.zip");
+        let body = serde_json::json!({
+            "url": blob_url,
+            "sha256": sha256,
+            "size": size,
+            "type": mime,
+            "uploaded": 1,
+        })
+        .to_string();
+        let task = tokio::spawn(serve_blossom_request(listener, status, body));
+        Ok(Self {
+            base_url,
+            blob_url: Some(blob_url),
+            task: Some(task),
+        })
+    }
+
+    async fn error(status: &'static str, body: &str) -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind Blossom fixture")?;
+        let address = listener
+            .local_addr()
+            .context("failed to inspect Blossom fixture address")?;
+        let base_url = format!("http://{address}");
+        let task = tokio::spawn(serve_blossom_request(listener, status, body.to_owned()));
+        Ok(Self {
+            base_url,
+            blob_url: None,
+            task: Some(task),
+        })
+    }
+
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn base_url_with_slash(&self) -> String {
+        format!("{}/", self.base_url)
+    }
+
+    fn blob_url(&self) -> Option<&str> {
+        self.blob_url.as_deref()
+    }
+
+    async fn finish(mut self) -> Result<CapturedBlossomRequest> {
+        let task = self.task.take().context("Blossom server task missing")?;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .context("Blossom server did not terminate")?
+            .context("Blossom server task panicked")?
+    }
+}
+
+impl Drop for BlossomHttpServer {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+async fn serve_blossom_request(
+    listener: TcpListener,
+    status: &'static str,
+    response_body: String,
+) -> Result<CapturedBlossomRequest> {
+    let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .context("timed out waiting for a Blossom request")?
+        .context("failed to accept a Blossom request")?;
+    let request = read_blossom_request(&mut stream).await?;
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+        response_body.len(),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write Blossom response")?;
+    stream
+        .shutdown()
+        .await
+        .context("failed to finish Blossom response")?;
+    Ok(request)
+}
+
+async fn read_blossom_request(
+    stream: &mut tokio::net::TcpStream,
+) -> Result<CapturedBlossomRequest> {
+    const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+    let mut bytes = Vec::new();
+    let header_end = loop {
+        if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break offset + 4;
+        }
+        ensure!(
+            bytes.len() < MAX_REQUEST_BYTES,
+            "Blossom request headers exceeded the fixture limit"
+        );
+        let mut chunk = [0_u8; 8192];
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .context("timed out reading Blossom request headers")?
+            .context("failed to read Blossom request headers")?;
+        ensure!(read != 0, "Blossom client closed before sending headers");
+        bytes.extend_from_slice(&chunk[..read]);
+    };
+    let head = String::from_utf8(bytes[..header_end].to_vec())
+        .context("Blossom request headers were not UTF-8")?;
+    let content_length = request_header(&head, "content-length")
+        .context("Blossom request omitted Content-Length")?
+        .parse::<usize>()
+        .context("Blossom request used an invalid Content-Length")?;
+    let request_length = header_end
+        .checked_add(content_length)
+        .context("Blossom request length overflowed")?;
+    ensure!(
+        request_length <= MAX_REQUEST_BYTES,
+        "Blossom request body exceeded the fixture limit"
+    );
+    while bytes.len() < request_length {
+        let mut chunk = [0_u8; 8192];
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .context("timed out reading Blossom request body")?
+            .context("failed to read Blossom request body")?;
+        ensure!(read != 0, "Blossom client closed before sending its body");
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    Ok(CapturedBlossomRequest {
+        head,
+        body: bytes[header_end..request_length].to_vec(),
+    })
+}
+
+fn request_header<'a>(head: &'a str, wanted: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(wanted).then(|| value.trim())
+    })
 }
 
 #[derive(Clone, Copy)]
