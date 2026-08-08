@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use ngit::{
     client::{sign_draft_event, sign_event},
     event_ordering::finalize_fixed_timestamp_ordered_unsigned,
+    release_download::{UrlAssetRequest, download_url_asset},
     software_release::{
-        AddressPointer, ReleaseAssetInput, ReleaseInput, SoftwareApplication, SoftwareAsset,
-        SoftwareRelease, release_event_builder,
+        AddressPointer, AssetInput, ReleaseAssetInput, ReleaseInput, SoftwareApplication,
+        SoftwareAsset, SoftwareRelease, asset_event_builder, release_event_builder,
     },
 };
 use nostr::prelude::{Event, Filter, Timestamp};
@@ -45,16 +46,57 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     } else {
         Vec::new()
     };
+    let mut prepared_assets = Vec::new();
+    for value in &args.assets {
+        let (platform, url) = value.split_once('=').ok_or_else(|| {
+            coded_error(
+                "invalid_asset_argument",
+                format!("asset {value:?} must use PLATFORM=URL"),
+            )
+        })?;
+        if platform.trim().is_empty() || url.trim().is_empty() {
+            return Err(coded_error(
+                "invalid_asset_argument",
+                format!("asset {value:?} must contain a platform and URL"),
+            ));
+        }
+        let input = prepare_url_asset(
+            &mut context,
+            url,
+            &application.identifier,
+            &args.release_version,
+            vec![platform.to_owned()],
+        )
+        .await?;
+        reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
+        prepared_assets.push(input);
+    }
+    for url in &args.platform_agnostic_assets {
+        let input = prepare_url_asset(
+            &mut context,
+            url,
+            &application.identifier,
+            &args.release_version,
+            Vec::new(),
+        )
+        .await?;
+        reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
+        prepared_assets.push(input);
+    }
+
+    let mut reused_assets = Vec::new();
     let mut reused_asset_ids = Vec::new();
     for selector in &args.asset_events {
         let asset = load_asset_event(&mut context, selector, true).await?;
         validate_reused_asset(&application, &asset, args.accept_platform_agnostic_assets)?;
         reject_duplicate_asset(&assets, &asset)?;
+        reject_duplicate_asset(&reused_assets, &asset)?;
+        reject_asset_against_prepared(&prepared_assets, &asset)?;
         reused_asset_ids.push(asset.raw_event.id.to_hex());
-        assets.push(asset);
+        reused_assets.push(asset);
     }
 
-    if assets.is_empty() {
+    if assets.is_empty() && prepared_assets.is_empty() && reused_assets.is_empty() {
         return Err(coded_error(
             "release_assets_required",
             "a release requires at least one asset",
@@ -83,6 +125,27 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     enforce_metadata_policy(&context, args.strict_metadata)?;
     context.emit_human_warnings_before_signing(args.json);
 
+    let signer = context
+        .signer
+        .as_ref()
+        .context("nostr signer was not initialized")?
+        .clone();
+    let mut new_asset_event_ids = Vec::new();
+    for input in prepared_assets {
+        let asset = sign_asset_input(input, &signer).await?;
+        reject_duplicate_asset(&assets, &asset)?;
+        new_asset_event_ids.push(asset.raw_event.id);
+        assets.push(asset);
+    }
+    assets.extend(reused_assets);
+    ensure_release_state_unchanged(
+        &mut context,
+        &application,
+        &args.release_version,
+        existing.as_ref(),
+    )
+    .await?;
+
     let released_at = Timestamp::from_secs(
         args.released_at
             .or_else(|| {
@@ -92,11 +155,6 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
             })
             .unwrap_or_else(|| Timestamp::now().as_secs()),
     );
-    let signer = context
-        .signer
-        .as_ref()
-        .context("nostr signer was not initialized")?
-        .clone();
     let release_event = build_release_event(
         &context,
         &application,
@@ -113,7 +171,9 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
 
     let mut batch: Vec<Event> = assets.iter().map(|asset| asset.raw_event.clone()).collect();
     batch.push(release_event);
-    let relay_results = context.publish_batch(batch, &[], args.json).await?;
+    let relay_results = context
+        .publish_batch(batch, &new_asset_event_ids, args.json)
+        .await?;
     let authority = context.authority(&application);
     let operation = if existing.is_some() {
         "edited"
@@ -125,7 +185,7 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
         "release": release_json(&parsed_release, &assets),
         "assets": assets.iter().map(asset_json).collect::<Vec<_>>(),
         "previous_event_id": existing.as_ref().map(|release| release.raw_event.id.to_hex()),
-        "newly_published_asset_ids": Vec::<String>::new(),
+        "newly_published_asset_ids": new_asset_event_ids.iter().map(nostr::prelude::EventId::to_hex).collect::<Vec<_>>(),
         "reused_asset_ids": reused_asset_ids,
         "relays": relay_json(&relay_results),
         "events": mutation_events_json(&assets, &parsed_release, &relay_results),
@@ -458,6 +518,100 @@ fn reject_duplicate_asset(existing: &[SoftwareAsset], proposed: &SoftwareAsset) 
     Ok(())
 }
 
+fn reject_duplicate_prepared_asset(
+    existing: &[SoftwareAsset],
+    prepared: &[AssetInput],
+    proposed: &AssetInput,
+) -> Result<()> {
+    let Some(filename) = proposed.filename.as_deref() else {
+        return Ok(());
+    };
+    if existing
+        .iter()
+        .any(|asset| asset.filename.as_deref() == Some(filename))
+        || prepared
+            .iter()
+            .any(|asset| asset.filename.as_deref() == Some(filename))
+    {
+        return Err(coded_error(
+            "duplicate_asset_filename",
+            format!("an attached or proposed asset already uses filename {filename:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_asset_against_prepared(prepared: &[AssetInput], proposed: &SoftwareAsset) -> Result<()> {
+    let Some(filename) = proposed.filename.as_deref() else {
+        return Ok(());
+    };
+    if prepared
+        .iter()
+        .any(|asset| asset.filename.as_deref() == Some(filename))
+    {
+        return Err(coded_error(
+            "duplicate_asset_filename",
+            format!("a proposed asset already uses filename {filename:?}"),
+        ));
+    }
+    Ok(())
+}
+
+async fn prepare_url_asset(
+    context: &mut ReleaseContext,
+    source: &str,
+    identifier: &str,
+    version: &str,
+    platforms: Vec<String>,
+) -> Result<AssetInput> {
+    let downloaded = download_url_asset(UrlAssetRequest::new(source))
+        .await
+        .with_context(|| format!("failed to acquire release asset {}", redacted_url(source)))?;
+    for warning in &downloaded.warnings {
+        let code = serde_json::to_value(warning.code)?
+            .as_str()
+            .unwrap_or("asset_download_warning")
+            .to_owned();
+        context
+            .warnings
+            .push(WarningJson::new(code, warning.message.clone()));
+    }
+    let input = AssetInput {
+        identifier: identifier.to_owned(),
+        version: version.to_owned(),
+        url: Some(downloaded.source_url),
+        filename: Some(downloaded.filename),
+        mime: downloaded.mime_type,
+        sha256: downloaded.sha256,
+        size: Some(downloaded.size),
+        platforms,
+        ..Default::default()
+    };
+    asset_event_builder(input.clone()).map_err(|error| {
+        coded_error_with_details(
+            "invalid_asset_metadata",
+            error.to_string(),
+            json!({ "validation": error.issues }),
+        )
+    })?;
+    Ok(input)
+}
+
+async fn sign_asset_input(
+    input: AssetInput,
+    signer: &std::sync::Arc<ngit::NgitSigner>,
+) -> Result<SoftwareAsset> {
+    let builder = asset_event_builder(input).map_err(|error| {
+        coded_error_with_details(
+            "invalid_asset_metadata",
+            error.to_string(),
+            json!({ "validation": error.issues }),
+        )
+    })?;
+    let event = sign_event(builder, signer, "software release asset".to_owned()).await?;
+    Ok(SoftwareAsset::parse(&event)?)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_release_event(
     context: &ReleaseContext,
@@ -576,6 +730,17 @@ fn relay_json(results: &[(String, bool)]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn redacted_url(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return "<invalid URL>".to_owned();
+    };
+    if url.query().is_some() {
+        url.set_query(Some("REDACTED"));
+    }
+    url.set_fragment(None);
+    url.to_string()
 }
 
 fn mutation_events_json(

@@ -529,9 +529,15 @@ pub struct ReleasePublishArgs {
     /// Release date as Unix seconds (defaults to now when creating)
     #[arg(long, value_name = "UNIX_SECONDS")]
     pub released_at: Option<u64>,
+    /// Add a URL-backed asset as PLATFORM=URL (repeatable)
+    #[arg(long = "asset", value_name = "PLATFORM=URL")]
+    pub assets: Vec<String>,
     /// Reuse an existing kind 3063 asset event (repeatable)
     #[arg(long = "asset-event", value_name = "ASSET")]
     pub asset_events: Vec<String>,
+    /// Add a URL-backed asset with no target platform (repeatable)
+    #[arg(long = "platform-agnostic-asset", value_name = "URL")]
+    pub platform_agnostic_assets: Vec<String>,
     /// Acknowledge reused asset events which have no platform tags
     #[arg(long)]
     pub accept_platform_agnostic_assets: bool,
@@ -1545,17 +1551,28 @@ mod tests {
 
     #[test]
     fn release_publish_commands_parse() {
-        for args in [[
-            "ngit",
-            "release",
-            "publish",
-            "1.8.0",
-            "--asset-event",
-            "deadbeef",
-            "--json",
-        ]
-        .as_slice()]
-        {
+        for args in [
+            [
+                "ngit",
+                "release",
+                "publish",
+                "1.8.0",
+                "--asset-event",
+                "deadbeef",
+                "--json",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "release",
+                "publish",
+                "1.8.0",
+                "--asset",
+                "linux-x86_64=https://example.com/ngit.tar.gz",
+                "--json",
+            ]
+            .as_slice(),
+        ] {
             Cli::try_parse_from(args)
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
         }
