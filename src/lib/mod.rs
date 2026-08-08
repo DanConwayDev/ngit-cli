@@ -15,6 +15,7 @@ pub mod proposal_base;
 pub mod push;
 pub mod relay_auth;
 pub mod relay_information;
+pub mod release_download;
 pub mod release_manifest;
 pub mod repo_ref;
 pub mod repo_state;
