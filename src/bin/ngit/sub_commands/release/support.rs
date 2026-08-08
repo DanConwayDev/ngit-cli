@@ -36,6 +36,13 @@ pub(super) enum LoginMode {
     Required,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueryPolicy {
+    Discovery,
+    AtLeastOneDiscoveryRoute,
+    PublicationPreflight,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct WarningJson {
     pub code: String,
@@ -559,8 +566,29 @@ impl ReleaseContext {
     }
 
     pub(super) async fn query(&mut self, filters: Vec<Filter>, strict: bool) -> Result<Vec<Event>> {
+        let policy = if strict {
+            QueryPolicy::PublicationPreflight
+        } else {
+            QueryPolicy::Discovery
+        };
+        self.query_with_policy(filters, policy).await
+    }
+
+    pub(super) async fn query_with_required_discovery_route(
+        &mut self,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Event>> {
+        self.query_with_policy(filters, QueryPolicy::AtLeastOneDiscoveryRoute)
+            .await
+    }
+
+    async fn query_with_policy(
+        &mut self,
+        filters: Vec<Filter>,
+        policy: QueryPolicy,
+    ) -> Result<Vec<Event>> {
         if !self.offline {
-            let relays = if strict {
+            let relays = if policy == QueryPolicy::PublicationPreflight {
                 self.publication_query_relays()?
             } else {
                 self.discovery_relays.clone()
@@ -576,13 +604,22 @@ impl ReleaseContext {
                 .iter()
                 .filter_map(|(relay, result)| result.as_ref().err().map(|_| relay.to_string()))
                 .collect();
-            if strict && !failed.is_empty() {
+            if policy == QueryPolicy::PublicationPreflight && !failed.is_empty() {
                 return Err(coded_error_with_details(
                     "relay_preflight_incomplete",
                     format!(
                         "release preflight did not complete on: {}",
                         failed.join(", ")
                     ),
+                    json!({ "relays": failed }),
+                ));
+            }
+            if policy == QueryPolicy::AtLeastOneDiscoveryRoute
+                && (results.is_empty() || failed.len() == results.len())
+            {
+                return Err(coded_error_with_details(
+                    "relay_discovery_unavailable",
+                    "Blossom server discovery did not complete on any relay; provide --blossom-server or retry",
                     json!({ "relays": failed }),
                 ));
             }

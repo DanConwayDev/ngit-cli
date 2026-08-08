@@ -329,6 +329,7 @@ fn read_nsec_file(path: &Path) -> Result<String> {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// publish a repository to nostr; signal you are its maintainer accepting
     /// PRs and issues
@@ -541,12 +542,18 @@ pub struct ReleasePublishArgs {
     /// Add a URL-backed asset as PLATFORM=URL (repeatable)
     #[arg(long = "asset", value_name = "PLATFORM=URL")]
     pub assets: Vec<String>,
+    /// Upload a local asset to Blossom as PLATFORM=PATH (repeatable)
+    #[arg(long = "file", value_name = "PLATFORM=PATH")]
+    pub files: Vec<String>,
     /// Reuse an existing kind 3063 asset event (repeatable)
     #[arg(long = "asset-event", value_name = "ASSET")]
     pub asset_events: Vec<String>,
     /// Add a URL-backed asset with no target platform (repeatable)
     #[arg(long = "platform-agnostic-asset", value_name = "URL")]
     pub platform_agnostic_assets: Vec<String>,
+    /// Upload a local platform-agnostic asset to Blossom (repeatable)
+    #[arg(long = "platform-agnostic-file", value_name = "PATH")]
+    pub platform_agnostic_files: Vec<PathBuf>,
     /// Acknowledge reused asset events which have no platform tags
     #[arg(long)]
     pub accept_platform_agnostic_assets: bool,
@@ -556,6 +563,10 @@ pub struct ReleasePublishArgs {
     /// Permit a non-main release to omit application platforms
     #[arg(long)]
     pub allow_partial_platforms: bool,
+    /// Override kind-10063 discovery with an ordered Blossom server
+    /// (repeatable)
+    #[arg(long = "blossom-server", value_name = "URL")]
+    pub blossom_servers: Vec<String>,
     /// Explicitly replace an existing release; never creates a missing release
     #[arg(long)]
     pub edit: bool,

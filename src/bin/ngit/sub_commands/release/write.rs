@@ -6,6 +6,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use ngit::{
+    blossom::{
+        BlossomServerList, BlossomServerOutcome, BlossomServerStatus, FileSnapshot,
+        LocalFileRequest, MultiServerUpload, MultiServerUploadError, PossibleOrphanBlob,
+        blossom_server_list_filter, blossom_server_list_from_events,
+        canonicalize_blossom_server_root, snapshot_local_file, upload_snapshot_to_servers,
+    },
     client::{sign_draft_event, sign_event},
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
     release_download::{UrlAssetRequest, download_url_asset},
@@ -22,13 +28,14 @@ use ngit::{
 use nostr::prelude::{
     Coordinate, Event, Filter, FromBech32, PublicKey, Timestamp, nip19::Nip19Coordinate,
 };
+use reqwest::Url;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::support::{
-    AssetReuseOption, CommandOutput, LoginMode, ReleaseContext, WarningJson, application_json,
-    asset_json, coded_error, coded_error_with_details, load_applications, load_assets,
-    load_releases, release_json, resolve_application, resolve_release,
+    AssetReuseOption, CommandOutput, LoginMode, ReleaseContext, ReleaseError, WarningJson,
+    application_json, asset_json, coded_error, coded_error_with_details, load_applications,
+    load_assets, load_releases, release_json, resolve_application, resolve_release,
 };
 use crate::{
     cli::{
@@ -123,7 +130,7 @@ pub(super) async fn release_publish(
             )
             .await?;
             reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
-            prepared_assets.push(input);
+            prepared_assets.push(PreparedAsset::Ready(input));
         }
     }
     for value in &args.assets {
@@ -150,7 +157,7 @@ pub(super) async fn release_publish(
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
-        prepared_assets.push(input);
+        prepared_assets.push(PreparedAsset::Ready(input));
     }
     for url in &args.platform_agnostic_assets {
         let input = prepare_url_asset(
@@ -159,7 +166,42 @@ pub(super) async fn release_publish(
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
-        prepared_assets.push(input);
+        prepared_assets.push(PreparedAsset::Ready(input));
+    }
+    for value in &args.files {
+        let (platform, path) = value.split_once('=').ok_or_else(|| {
+            coded_error(
+                "invalid_file_argument",
+                format!("file {value:?} must use PLATFORM=PATH"),
+            )
+        })?;
+        if platform.trim().is_empty() || path.trim().is_empty() {
+            return Err(coded_error(
+                "invalid_file_argument",
+                format!("file {value:?} must contain a platform and path"),
+            ));
+        }
+        let pending = prepare_file_asset(
+            &mut context,
+            NewFileAsset::simple(
+                Path::new(path),
+                vec![platform.to_owned()],
+                &application_target,
+                &args.release_version,
+            ),
+        )
+        .await?;
+        reject_duplicate_prepared_asset(&assets, &prepared_assets, &pending.input)?;
+        prepared_assets.push(PreparedAsset::File(pending));
+    }
+    for path in &args.platform_agnostic_files {
+        let pending = prepare_file_asset(
+            &mut context,
+            NewFileAsset::simple(path, Vec::new(), &application_target, &args.release_version),
+        )
+        .await?;
+        reject_duplicate_prepared_asset(&assets, &prepared_assets, &pending.input)?;
+        prepared_assets.push(PreparedAsset::File(pending));
     }
 
     let mut reused_assets = Vec::new();
@@ -184,6 +226,16 @@ pub(super) async fn release_publish(
             "a release requires at least one asset",
         ));
     }
+
+    let blossom_selection = resolve_blossom_server_selection(
+        &mut context,
+        &application_target,
+        &args.blossom_servers,
+        prepared_assets
+            .iter()
+            .any(|asset| matches!(asset, PreparedAsset::File(_))),
+    )
+    .await?;
 
     let notes = release_notes(&context, args, manifest.as_ref(), existing.as_ref())?;
     let channel = args
@@ -236,6 +288,22 @@ pub(super) async fn release_publish(
         .as_ref()
         .context("nostr signer was not initialized")?
         .clone();
+    let blossom = match blossom_selection.as_ref() {
+        Some(selection) => {
+            upload_prepared_file_assets(&mut prepared_assets, selection, &signer).await?
+        }
+        None => BlossomPublication::empty(),
+    };
+    ensure_release_state_unchanged(
+        &mut context,
+        &application_target,
+        existing_application.as_ref(),
+        &args.release_version,
+        existing.as_ref(),
+    )
+    .await
+    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", false, false))?;
+
     let application = if let Some(application) = existing_application.as_ref() {
         if platform_policy.application_platforms_added.is_empty() {
             application.clone()
@@ -245,7 +313,10 @@ pub(super) async fn release_publish(
                 &platform_policy.resulting_application_platforms,
                 &signer,
             )
-            .await?
+            .await
+            .map_err(|error| {
+                preserve_completed_blossom(error, &blossom, "application_signing", false, false)
+            })?
         }
     } else {
         sign_bootstrap_application(
@@ -253,12 +324,23 @@ pub(super) async fn release_publish(
             &application_target,
             &signer,
         )
-        .await?
+        .await
+        .map_err(|error| {
+            preserve_completed_blossom(error, &blossom, "application_signing", false, false)
+        })?
     };
     let mut new_asset_event_ids = Vec::new();
-    for input in prepared_assets {
-        let asset = sign_asset_input(input, &signer).await?;
-        reject_duplicate_asset(&assets, &asset)?;
+    for prepared in prepared_assets {
+        let input = match prepared {
+            PreparedAsset::Ready(input) => input,
+            PreparedAsset::File(pending) => pending.input,
+        };
+        let asset = sign_asset_input(input, &signer).await.map_err(|error| {
+            preserve_completed_blossom(error, &blossom, "asset_signing", false, false)
+        })?;
+        reject_duplicate_asset(&assets, &asset).map_err(|error| {
+            preserve_completed_blossom(error, &blossom, "asset_validation", true, false)
+        })?;
         new_asset_event_ids.push(asset.raw_event.id);
         assets.push(asset);
     }
@@ -270,7 +352,8 @@ pub(super) async fn release_publish(
         &args.release_version,
         existing.as_ref(),
     )
-    .await?;
+    .await
+    .map_err(|error| preserve_completed_blossom(error, &blossom, "state_recheck", true, false))?;
     context.require_application_author(&application)?;
 
     let released_at = Timestamp::from_secs(
@@ -294,8 +377,13 @@ pub(super) async fn release_publish(
         released_at,
         &signer,
     )
-    .await?;
-    let parsed_release = SoftwareRelease::parse(&release_event)?;
+    .await
+    .map_err(|error| {
+        preserve_completed_blossom(error, &blossom, "release_signing", false, false)
+    })?;
+    let parsed_release = SoftwareRelease::parse(&release_event).map_err(|error| {
+        preserve_completed_blossom(error.into(), &blossom, "release_validation", true, false)
+    })?;
 
     let mut batch = vec![application.raw_event.clone()];
     batch.extend(assets.iter().map(|asset| asset.raw_event.clone()));
@@ -307,7 +395,10 @@ pub(super) async fn release_publish(
             AssetReuseOption::ReleasePublish,
             args.json,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            preserve_completed_blossom(error, &blossom, "relay_publication", true, false)
+        })?;
     let authority = context.authority(&application);
     let operation = if existing.is_some() {
         "edited"
@@ -333,6 +424,7 @@ pub(super) async fn release_publish(
         "newly_published_asset_ids": new_asset_event_ids.iter().map(nostr::prelude::EventId::to_hex).collect::<Vec<_>>(),
         "reused_asset_ids": reused_asset_ids,
         "publication": relay_results.json(),
+        "blossom": blossom.json,
     });
     Ok(CommandOutput::new(
         "release.publish",
@@ -376,31 +468,7 @@ pub(super) async fn asset_add(
                 "provide at least one --platform or explicitly use --platform-agnostic",
             ));
         }
-        let proposed = NewUrlAsset {
-            source: url.clone(),
-            application_coordinate: application.coordinate(),
-            identifier: args
-                .asset_id
-                .clone()
-                .unwrap_or_else(|| application.identifier.clone()),
-            version: args
-                .asset_version
-                .clone()
-                .unwrap_or_else(|| release.version.clone()),
-            filename: args.filename.clone(),
-            mime: args.mime.clone(),
-            platforms: args.platforms.clone(),
-            min_platform_version: args.min_platform_version.clone(),
-            target_platform_version: args.target_platform_version.clone(),
-            supported_nips: args.supported_nips.clone(),
-            variant: args.variant.clone(),
-            commit: args.commit.clone(),
-            min_allowed_version: args.min_allowed_version.clone(),
-            version_code: args.android_version_code,
-            min_allowed_version_code: args.android_min_allowed_version_code,
-            apk_certificate_hashes: args.android_certificate_sha256.clone(),
-            original_url: args.original_url.clone(),
-        };
+        let proposed = asset_add_metadata(args, url.clone(), &application, &release);
         let input = prepare_url_asset(&mut context, proposed).await?;
         reject_duplicate_prepared_asset(&assets, &[], &input)?;
         (Some(input), None)
@@ -568,13 +636,17 @@ impl From<&SoftwareApplication> for ApplicationTarget {
 
 fn proposed_platforms(
     existing: &[SoftwareAsset],
-    prepared: &[AssetInput],
+    prepared: &[PreparedAsset],
     reused: &[SoftwareAsset],
 ) -> Vec<String> {
     existing
         .iter()
         .flat_map(|asset| asset.platforms.iter())
-        .chain(prepared.iter().flat_map(|asset| asset.platforms.iter()))
+        .chain(
+            prepared
+                .iter()
+                .flat_map(|asset| asset.input().platforms.iter()),
+        )
         .chain(reused.iter().flat_map(|asset| asset.platforms.iter()))
         .cloned()
         .collect::<BTreeSet<_>>()
@@ -863,8 +935,10 @@ fn resolve_manifest(
     args: &ReleasePublishArgs,
 ) -> Result<Option<ResolvedReleaseManifest>> {
     let has_direct_assets = !args.assets.is_empty()
+        || !args.files.is_empty()
         || !args.asset_events.is_empty()
-        || !args.platform_agnostic_assets.is_empty();
+        || !args.platform_agnostic_assets.is_empty()
+        || !args.platform_agnostic_files.is_empty();
     let requested = args.manifest.as_deref();
     let should_load = requested.is_some()
         || (!args.edit
@@ -1166,7 +1240,7 @@ fn reject_duplicate_asset(existing: &[SoftwareAsset], proposed: &SoftwareAsset) 
 
 fn reject_duplicate_prepared_asset(
     existing: &[SoftwareAsset],
-    prepared: &[AssetInput],
+    prepared: &[PreparedAsset],
     proposed: &AssetInput,
 ) -> Result<()> {
     let Some(filename) = proposed.filename.as_deref() else {
@@ -1177,7 +1251,7 @@ fn reject_duplicate_prepared_asset(
         .any(|asset| asset.filename.as_deref() == Some(filename))
         || prepared
             .iter()
-            .any(|asset| asset.filename.as_deref() == Some(filename))
+            .any(|asset| asset.input().filename.as_deref() == Some(filename))
     {
         return Err(coded_error(
             "duplicate_asset_filename",
@@ -1187,13 +1261,16 @@ fn reject_duplicate_prepared_asset(
     Ok(())
 }
 
-fn reject_asset_against_prepared(prepared: &[AssetInput], proposed: &SoftwareAsset) -> Result<()> {
+fn reject_asset_against_prepared(
+    prepared: &[PreparedAsset],
+    proposed: &SoftwareAsset,
+) -> Result<()> {
     let Some(filename) = proposed.filename.as_deref() else {
         return Ok(());
     };
     if prepared
         .iter()
-        .any(|asset| asset.filename.as_deref() == Some(filename))
+        .any(|asset| asset.input().filename.as_deref() == Some(filename))
     {
         return Err(coded_error(
             "duplicate_asset_filename",
@@ -1294,6 +1371,404 @@ impl NewUrlAsset {
     }
 }
 
+fn asset_add_metadata(
+    args: &ReleaseAssetAddArgs,
+    source: String,
+    application: &SoftwareApplication,
+    release: &SoftwareRelease,
+) -> NewUrlAsset {
+    NewUrlAsset {
+        source,
+        application_coordinate: application.coordinate(),
+        identifier: args
+            .asset_id
+            .clone()
+            .unwrap_or_else(|| application.identifier.clone()),
+        version: args
+            .asset_version
+            .clone()
+            .unwrap_or_else(|| release.version.clone()),
+        filename: args.filename.clone(),
+        mime: args.mime.clone(),
+        platforms: args.platforms.clone(),
+        min_platform_version: args.min_platform_version.clone(),
+        target_platform_version: args.target_platform_version.clone(),
+        supported_nips: args.supported_nips.clone(),
+        variant: args.variant.clone(),
+        commit: args.commit.clone(),
+        min_allowed_version: args.min_allowed_version.clone(),
+        version_code: args.android_version_code,
+        min_allowed_version_code: args.android_min_allowed_version_code,
+        apk_certificate_hashes: args.android_certificate_sha256.clone(),
+        original_url: args.original_url.clone(),
+    }
+}
+
+#[derive(Debug)]
+struct NewFileAsset {
+    source_path: std::path::PathBuf,
+    metadata: NewUrlAsset,
+}
+
+impl NewFileAsset {
+    fn simple(
+        source_path: &Path,
+        platforms: Vec<String>,
+        application: &ApplicationTarget,
+        release_version: &str,
+    ) -> Self {
+        Self {
+            source_path: source_path.to_path_buf(),
+            metadata: NewUrlAsset::simple("", platforms, application, release_version),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingFileAsset {
+    source_path: String,
+    input: AssetInput,
+    snapshot: FileSnapshot,
+}
+
+#[derive(Debug)]
+enum PreparedAsset {
+    Ready(AssetInput),
+    File(PendingFileAsset),
+}
+
+impl PreparedAsset {
+    fn input(&self) -> &AssetInput {
+        match self {
+            Self::Ready(input) => input,
+            Self::File(pending) => &pending.input,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct BlossomServerSelection {
+    source: &'static str,
+    event_id: Option<String>,
+    author: String,
+    servers: Vec<Url>,
+}
+
+async fn prepare_file_asset(
+    context: &mut ReleaseContext,
+    proposed: NewFileAsset,
+) -> Result<PendingFileAsset> {
+    let source_path = repository_relative_path(context.git_repo_path()?, &proposed.source_path);
+    let mut request = LocalFileRequest::new(&source_path);
+    request.filename = proposed.metadata.filename.clone();
+    request.mime_type = proposed.metadata.mime.clone();
+    let snapshot = snapshot_local_file(request).await.with_context(|| {
+        format!(
+            "failed to snapshot release asset {}",
+            proposed.source_path.display()
+        )
+    })?;
+    append_download_warnings(context, &snapshot.warnings)?;
+
+    let input = AssetInput {
+        application: Some(AddressPointer {
+            coordinate: proposed.metadata.application_coordinate,
+            relay_hint: context.repo_ref.relays.first().map(ToString::to_string),
+        }),
+        identifier: proposed.metadata.identifier,
+        version: proposed.metadata.version,
+        url: None,
+        filename: Some(snapshot.filename.clone()),
+        mime: snapshot.mime_type.clone(),
+        sha256: snapshot.sha256.clone(),
+        size: Some(snapshot.size),
+        platforms: proposed.metadata.platforms,
+        min_platform_version: proposed.metadata.min_platform_version,
+        target_platform_version: proposed.metadata.target_platform_version,
+        supported_nips: proposed.metadata.supported_nips,
+        variant: proposed.metadata.variant,
+        commit: proposed.metadata.commit,
+        min_allowed_version: proposed.metadata.min_allowed_version,
+        version_code: proposed.metadata.version_code,
+        min_allowed_version_code: proposed.metadata.min_allowed_version_code,
+        apk_certificate_hashes: proposed.metadata.apk_certificate_hashes,
+        original_url: proposed.metadata.original_url,
+        extra_tags: Vec::new(),
+        created_at: None,
+    };
+    validate_asset_input(&input)?;
+    Ok(PendingFileAsset {
+        source_path: proposed.source_path.display().to_string(),
+        input,
+        snapshot,
+    })
+}
+
+async fn resolve_blossom_server_selection(
+    context: &mut ReleaseContext,
+    application: &ApplicationTarget,
+    explicit_servers: &[String],
+    required: bool,
+) -> Result<Option<BlossomServerSelection>> {
+    if !required {
+        if !explicit_servers.is_empty() {
+            return Err(coded_error(
+                "blossom_server_without_file",
+                "--blossom-server requires at least one --file or --platform-agnostic-file",
+            ));
+        }
+        return Ok(None);
+    }
+
+    let author = application.author;
+    if !explicit_servers.is_empty() {
+        let mut servers = Vec::new();
+        for value in explicit_servers {
+            let server = canonicalize_blossom_server_root(value).map_err(|error| {
+                coded_error_with_details(
+                    "invalid_blossom_server",
+                    error.to_string(),
+                    json!({ "server": value }),
+                )
+            })?;
+            if !servers.contains(&server) {
+                servers.push(server);
+            }
+        }
+        return Ok(Some(BlossomServerSelection {
+            source: "explicit",
+            event_id: None,
+            author: author.to_hex(),
+            servers,
+        }));
+    }
+
+    context.add_author_relays(author).await?;
+    let events = context
+        .query_with_required_discovery_route(vec![blossom_server_list_filter(author)])
+        .await?;
+    let BlossomServerList {
+        event_id, servers, ..
+    } = blossom_server_list_from_events(author, &events).map_err(|error| {
+        coded_error_with_details(
+            "blossom_servers_not_found",
+            format!("{error}; provide --blossom-server to override discovery"),
+            json!({ "author": author.to_hex() }),
+        )
+    })?;
+    Ok(Some(BlossomServerSelection {
+        source: "kind_10063",
+        event_id: Some(event_id.to_hex()),
+        author: author.to_hex(),
+        servers,
+    }))
+}
+
+#[derive(Debug)]
+struct BlossomPublication {
+    json: Value,
+    possible_orphan_blobs: Vec<PossibleOrphanBlob>,
+}
+
+impl BlossomPublication {
+    fn empty() -> Self {
+        Self {
+            json: json!({
+                "server_selection": null,
+                "uploads": [],
+            }),
+            possible_orphan_blobs: Vec::new(),
+        }
+    }
+
+    fn has_uploads(&self) -> bool {
+        self.json["uploads"]
+            .as_array()
+            .is_some_and(|uploads| !uploads.is_empty())
+    }
+}
+
+async fn upload_prepared_file_assets(
+    prepared_assets: &mut [PreparedAsset],
+    selection: &BlossomServerSelection,
+    signer: &std::sync::Arc<ngit::NgitSigner>,
+) -> Result<BlossomPublication> {
+    let mut uploads = Vec::new();
+    let mut possible_orphan_blobs = Vec::new();
+    for prepared in prepared_assets {
+        let PreparedAsset::File(pending) = prepared else {
+            continue;
+        };
+        let upload = match upload_snapshot_to_servers(&selection.servers, &pending.snapshot, signer)
+            .await
+        {
+            Ok(upload) => upload,
+            Err(error) => {
+                let (stage, server) = failed_blossom_operation(&error);
+                possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
+                uploads.push(failed_blossom_upload_json(pending, &error));
+                return Err(coded_error_with_details(
+                    "blossom_publication_failed",
+                    error.message,
+                    json!({
+                        "stage": stage,
+                        "server": server,
+                        "blossom": blossom_json(selection, &uploads),
+                        "possible_orphan_blobs": possible_orphan_blobs,
+                        "release_events_signed": false,
+                        "release_events_published": false,
+                        "recovery": "Blossom blobs are content-addressed. Correct the server list and rerun the command; no NIP-82 event was signed or published.",
+                    }),
+                ));
+            }
+        };
+        pending.input.url = Some(upload.primary.url.to_string());
+        uploads.push(blossom_upload_json(pending, &upload));
+        possible_orphan_blobs.extend(possible_orphans_from_upload(&pending.snapshot, &upload));
+        if let Err(error) = validate_asset_input(&pending.input) {
+            let publication = BlossomPublication {
+                json: blossom_json(selection, &uploads),
+                possible_orphan_blobs,
+            };
+            return Err(preserve_completed_blossom(
+                error,
+                &publication,
+                "asset_metadata",
+                false,
+                false,
+            ));
+        }
+    }
+    Ok(BlossomPublication {
+        json: blossom_json(selection, &uploads),
+        possible_orphan_blobs,
+    })
+}
+
+fn blossom_json(selection: &BlossomServerSelection, uploads: &[Value]) -> Value {
+    json!({
+        "server_selection": selection,
+        "uploads": uploads,
+    })
+}
+
+fn blossom_upload_json(pending: &PendingFileAsset, upload: &MultiServerUpload) -> Value {
+    json!({
+        "source": pending.source_path,
+        "filename": pending.snapshot.filename,
+        "sha256": pending.snapshot.sha256,
+        "size": pending.snapshot.size.to_string(),
+        "mime": pending.snapshot.mime_type,
+        "primary_url": upload.primary.url,
+        "servers": upload.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
+    })
+}
+
+fn failed_blossom_upload_json(pending: &PendingFileAsset, error: &MultiServerUploadError) -> Value {
+    json!({
+        "source": pending.source_path,
+        "filename": pending.snapshot.filename,
+        "sha256": pending.snapshot.sha256,
+        "size": pending.snapshot.size.to_string(),
+        "mime": pending.snapshot.mime_type,
+        "primary_url": error.servers.first().and_then(|outcome| outcome.descriptor.as_ref()).map(|descriptor| descriptor.url.as_str()),
+        "servers": error.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
+    })
+}
+
+fn blossom_server_outcome_json(outcome: &BlossomServerOutcome) -> Value {
+    json!({
+        "server": outcome.server.as_str(),
+        "operation": outcome.operation,
+        "status": outcome.status,
+        "url": outcome.descriptor.as_ref().map(|descriptor| descriptor.url.as_str()),
+        "message": outcome.message.as_deref(),
+    })
+}
+
+fn failed_blossom_operation(error: &MultiServerUploadError) -> (Value, Value) {
+    error
+        .servers
+        .iter()
+        .find(|outcome| {
+            matches!(
+                outcome.status,
+                BlossomServerStatus::Failed | BlossomServerStatus::Unknown
+            )
+        })
+        .map_or((Value::Null, Value::Null), |outcome| {
+            (json!(outcome.operation), json!(outcome.server))
+        })
+}
+
+fn possible_orphans_from_upload(
+    snapshot: &FileSnapshot,
+    upload: &MultiServerUpload,
+) -> Vec<PossibleOrphanBlob> {
+    upload
+        .servers
+        .iter()
+        .filter(|outcome| outcome.status == BlossomServerStatus::Stored)
+        .map(|outcome| PossibleOrphanBlob {
+            server: outcome.server.clone(),
+            sha256: snapshot.sha256.clone(),
+            url: outcome
+                .descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.url.clone()),
+        })
+        .collect()
+}
+
+fn preserve_completed_blossom(
+    error: anyhow::Error,
+    blossom: &BlossomPublication,
+    stage: &'static str,
+    release_events_signed: bool,
+    release_events_published: bool,
+) -> anyhow::Error {
+    if !blossom.has_uploads() {
+        return error;
+    }
+    let (code, message, details) = match error.downcast::<ReleaseError>() {
+        Ok(error) => (error.code, error.message, error.details),
+        Err(error) => (
+            "operation_failed_after_blossom",
+            format!("{error:#}"),
+            json!({}),
+        ),
+    };
+    let mut details = match details {
+        Value::Object(details) => details,
+        details => serde_json::Map::from_iter([("cause".to_owned(), details)]),
+    };
+    details.insert("stage".to_owned(), json!(stage));
+    details.insert("blossom".to_owned(), blossom.json.clone());
+    details.insert(
+        "possible_orphan_blobs".to_owned(),
+        json!(blossom.possible_orphan_blobs),
+    );
+    details.insert(
+        "release_events_signed".to_owned(),
+        json!(release_events_signed),
+    );
+    details.insert(
+        "release_events_published".to_owned(),
+        json!(release_events_published),
+    );
+    details.insert(
+        "blossom_recovery".to_owned(),
+        json!("The uploaded blobs are content-addressed and may be reused by rerunning after resolving this failure; no automatic deletion was attempted."),
+    );
+    coded_error_with_details(
+        code,
+        format!(
+            "{message}\nBlossom uploads completed before this failure; inspect the possible orphan blob details"
+        ),
+        Value::Object(details),
+    )
+}
+
 async fn prepare_url_asset(
     context: &mut ReleaseContext,
     proposed: NewUrlAsset,
@@ -1307,15 +1782,7 @@ async fn prepare_url_asset(
             redacted_url(&proposed.source)
         )
     })?;
-    for warning in &downloaded.warnings {
-        let code = serde_json::to_value(warning.code)?
-            .as_str()
-            .unwrap_or("asset_download_warning")
-            .to_owned();
-        context
-            .warnings
-            .push(WarningJson::new(code, warning.message.clone()));
-    }
+    append_download_warnings(context, &downloaded.warnings)?;
     let input = AssetInput {
         application: Some(AddressPointer {
             coordinate: proposed.application_coordinate,
@@ -1342,6 +1809,27 @@ async fn prepare_url_asset(
         extra_tags: Vec::new(),
         created_at: None,
     };
+    validate_asset_input(&input)?;
+    Ok(input)
+}
+
+fn append_download_warnings(
+    context: &mut ReleaseContext,
+    warnings: &[ngit::release_download::DownloadWarning],
+) -> Result<()> {
+    for warning in warnings {
+        let code = serde_json::to_value(warning.code)?
+            .as_str()
+            .unwrap_or("asset_download_warning")
+            .to_owned();
+        context
+            .warnings
+            .push(WarningJson::new(code, warning.message.clone()));
+    }
+    Ok(())
+}
+
+fn validate_asset_input(input: &AssetInput) -> Result<()> {
     asset_event_builder(input.clone()).map_err(|error| {
         coded_error_with_details(
             "invalid_asset_metadata",
@@ -1349,7 +1837,7 @@ async fn prepare_url_asset(
             json!({ "validation": error.issues }),
         )
     })?;
-    Ok(input)
+    Ok(())
 }
 
 async fn sign_asset_input(
