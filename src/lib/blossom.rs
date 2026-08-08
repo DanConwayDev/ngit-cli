@@ -40,6 +40,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
+const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
 /// A local file which should be staged for a Blossom upload.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -464,8 +465,18 @@ async fn read_store_response(
 ) -> std::result::Result<BlobUpload, BlobRequestError> {
     let status = response.status();
     if status != StatusCode::OK && status != StatusCode::CREATED {
+        let body = read_error_response_snippet(&mut response, deadline).await;
+        let guidance = match status {
+            StatusCode::UNAUTHORIZED => {
+                "authentication challenge flows are not supported for release uploads"
+            }
+            StatusCode::PAYMENT_REQUIRED => {
+                "paid Blossom uploads are not supported; choose a server which accepts this blob"
+            }
+            _ => "the Blossom server rejected the request",
+        };
         return Err(BlobRequestError::definite(
-            anyhow!("Blossom {operation} returned HTTP {status}"),
+            anyhow!("Blossom {operation} returned HTTP {status}: {guidance}{body}"),
             false,
         ));
     }
@@ -527,6 +538,61 @@ async fn read_store_response(
         descriptor,
         newly_stored: status == StatusCode::CREATED,
     })
+}
+
+async fn read_error_response_snippet(
+    response: &mut reqwest::Response,
+    deadline: tokio::time::Instant,
+) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_ERROR_BODY_BYTES {
+        let chunk = match tokio::time::timeout_at(deadline, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => return " (response body could not be read)".to_owned(),
+            Err(_) => return " (response body timed out)".to_owned(),
+        };
+        let remaining = MAX_ERROR_BODY_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            break;
+        }
+    }
+    let body = terminal_safe_remote_text(&String::from_utf8_lossy(&bytes))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!("; server response: {body}")
+    }
+}
+
+fn terminal_safe_remote_text(input: &str) -> String {
+    input
+        .chars()
+        .filter_map(|character| {
+            if character.is_whitespace() {
+                Some(' ')
+            } else if character.is_control() || is_bidi_control(character) {
+                None
+            } else {
+                Some(character)
+            }
+        })
+        .collect()
+}
+
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
 }
 
 async fn upload_authorization(snapshot: &FileSnapshot, signer: &NgitSigner) -> Result<Event> {
@@ -1634,6 +1700,74 @@ mod tests {
         assert!(format!("{error:#}").contains("307 Temporary Redirect"));
         let request = completed_request(server).await?;
         assert!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_authentication_and_payment_responses_are_actionable() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        for (status, body, expected) in [
+            (
+                "401 Unauthorized",
+                "challenge required",
+                "authentication challenge flows are not supported",
+            ),
+            (
+                "402 Payment Required",
+                "invoice required",
+                "paid Blossom uploads are not supported",
+            ),
+        ] {
+            let (server_url, server) = spawn_one_shot_server(move |_| TestResponse {
+                status,
+                headers: Vec::new(),
+                body: body.to_owned(),
+            })
+            .await?;
+
+            let error =
+                upload_snapshot_with_timeout(&server_url, &snapshot, &signer, TOTAL_TIMEOUT)
+                    .await
+                    .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(expected));
+            assert!(message.contains(body));
+            completed_request(server).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_response_bodies_are_terminal_safe() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let body = "\x1b[31mred\u{202e}evil\u{0007}\nnext";
+        let (server_url, server) = spawn_one_shot_server(move |_| TestResponse {
+            status: "400 Bad Request",
+            headers: Vec::new(),
+            body: body.to_owned(),
+        })
+        .await?;
+
+        let error = upload_snapshot_with_timeout(
+            &server_url,
+            &snapshot,
+            &NgitSigner::Keys(Keys::generate()),
+            TOTAL_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("[31mredevil next"));
+        assert!(!message.contains('\x1b'));
+        assert!(!message.contains('\u{202e}'));
+        assert!(!message.contains('\u{0007}'));
+        completed_request(server).await?;
         Ok(())
     }
 
