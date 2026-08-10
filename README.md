@@ -71,6 +71,9 @@ Secrets are kept in the OS credential store where possible; see
 [docs/credential-storage.md](docs/credential-storage.md) for the storage
 model, plaintext migration, and how to opt out.
 
+See [publishing releases](docs/releases.md) for local files, release manifests,
+multi-platform assets, and ngit-ci artifact workflows.
+
 ## contributions welcome!
 
 [gitworkshop.dev/danconwaydev.com/ngit](https://gitworkshop.dev/danconwaydev.com/ngit) to report issues and see PRs

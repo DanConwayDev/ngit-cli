@@ -7,6 +7,9 @@ applications, releases, and release assets using the NIP-82 event model. It is
 the contract for both the human-facing CLI and the machine-facing `--json`
 interface.
 
+For task-oriented examples, including `.ngit/release.yaml` and ngit-ci
+artifacts, see [Publishing releases](releases.md).
+
 The canonical command group is `ngit release`, matching ngit's singular
 `ngit pr` and `ngit issue` groups. `ngit releases` should be accepted as an
 alias.
