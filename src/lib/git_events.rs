@@ -521,6 +521,7 @@ pub async fn generate_unsigned_pr_or_update_event(
     tip: &Sha1Hash,
     first_commit: &Sha1Hash,
     merge_base: Option<&Sha1Hash>,
+    proposal_metadata: &crate::push::ProposalMetadata,
     clone_url_hint: &[&str],
     mentions: &[nostr::prelude::Tag],
     git_repo_path: Option<&Path>,
@@ -602,6 +603,12 @@ pub async fn generate_unsigned_pr_or_update_event(
         vec![]
     };
 
+    let proposal_metadata_tags = if root_proposal.is_none() {
+        make_proposal_metadata_tags(proposal_metadata)
+    } else {
+        vec![]
+    };
+
     // NIP-21 mention tags from PR description content (only for new PRs, not
     // updates)
     let is_pr_update = root_proposal.is_some() && root_patch_cover_letter.is_none();
@@ -653,6 +660,7 @@ pub async fn generate_unsigned_pr_or_update_event(
                 .expect("valid clone tag"),
             ],
             merge_base_tag,
+            proposal_metadata_tags,
             repo_ref
                 .maintainers_for_announcement_tags()
                 .iter()
@@ -678,6 +686,14 @@ pub async fn generate_unsigned_pr_or_update_event(
     } else {
         Ok(builder.finalize_unsigned(*signing_public_key))
     }
+}
+
+fn make_proposal_metadata_tags(metadata: &crate::push::ProposalMetadata) -> Vec<Tag> {
+    let mut tags = vec![];
+    if let Some(target_branch) = &metadata.target_branch {
+        tags.push(Tag::parse(["b", target_branch]).expect("valid target branch tag"));
+    }
+    tags
 }
 
 fn make_branch_name_tag_from_check_out_branch(git_repo: &Repo) -> Option<Tag> {
@@ -1349,6 +1365,22 @@ mod tests {
     use nostr::event::FinalizeEvent;
 
     use super::*;
+
+    #[test]
+    fn proposal_metadata_uses_indexable_target_tag() -> Result<()> {
+        let metadata = crate::push::ProposalMetadata {
+            target_branch: Some("release/2.x".to_string()),
+            explicit_base: None,
+        };
+        let tags = make_proposal_metadata_tags(&metadata);
+
+        assert!(
+            tags.iter()
+                .any(|tag| tag.as_slice() == ["b", "release/2.x"])
+        );
+        assert!(tags.iter().all(|tag| tag.kind() != "s"));
+        Ok(())
+    }
 
     mod get_commit_id_from_patch {
         use super::*;

@@ -5,9 +5,15 @@ use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Style;
 use ngit::{
     client::{Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events},
-    git_events::{EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events},
+    git_events::{
+        EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events, tag_value,
+    },
+    proposal_base::{
+        ExplicitBase, ProposalBaseInference, commits_after_base, infer_proposal_base,
+        merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
+    },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
-    utils::proposal_tip_is_pr_or_pr_update,
+    utils::{get_all_proposals, get_open_or_draft_proposals, proposal_tip_is_pr_or_pr_update},
 };
 use nostr::prelude::{ToBech32, event::Event, nip10::Nip10Tag, nip19::Nip19Event};
 
@@ -60,6 +66,13 @@ pub struct SubCommandArgs {
     /// base URL (eg. relay.ngit.dev) or a full clone URL (eg.
     /// <https://github.com/user/repo.git>)
     pub(crate) git_server: Option<String>,
+    /// branch this PR should target instead of the repository default
+    #[clap(long)]
+    pub(crate) target_branch: Option<String>,
+    /// commit, branch, root PR, or PR update to use as the base for this
+    /// publication
+    #[clap(long)]
+    pub(crate) base: Option<String>,
 }
 
 /// Validates send command arguments for non-interactive mode.
@@ -166,6 +179,182 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         get_root_proposal_and_mentions_from_in_reply_to(git_repo.get_path()?, &args.in_reply_to)
             .await?;
 
+    if root_proposal.is_some() && args.target_branch.is_some() {
+        bail!("--target-branch can only be set when opening a new PR");
+    }
+    if args.target_branch.is_some() && args.force_patch {
+        bail!("--target-branch cannot be combined with --force-patch");
+    }
+    if args.target_branch.is_some() && args.no_cover_letter {
+        bail!("--target-branch cannot be combined with --no-cover-letter");
+    }
+    if args.base.is_some() && args.force_patch {
+        bail!("--base cannot be combined with --force-patch");
+    }
+    if args.base.is_some() && args.no_cover_letter {
+        bail!("--base cannot be combined with --no-cover-letter");
+    }
+
+    let proposals = if root_proposal.is_some() || args.base.is_some() {
+        Some(get_all_proposals(&git_repo, &repo_ref).await?)
+    } else {
+        None
+    };
+
+    let user_selected_base = if let Some(reference) = &args.base {
+        Some(
+            resolve_explicit_base(
+                &git_repo,
+                &repo_ref,
+                reference,
+                proposals
+                    .as_ref()
+                    .context("proposal cache was not loaded")?,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let proposal_entry = root_proposal.as_ref().and_then(|selected_root| {
+        proposals.as_ref().and_then(|all| {
+            all.iter().find(|(root_id, (_, _, pr_upgrade_root))| {
+                **root_id == selected_root.id
+                    || pr_upgrade_root
+                        .as_ref()
+                        .is_some_and(|upgrade| upgrade.id == selected_root.id)
+            })
+        })
+    });
+    let canonical_root_id = proposal_entry
+        .map(|(root_id, _)| *root_id)
+        .or_else(|| root_proposal.as_ref().map(|root| root.id));
+    let proposal_details = proposal_entry.map(|(_, details)| details);
+    let proposal_author = proposal_details
+        .map(|(root, _, _)| root.pubkey)
+        .or_else(|| root_proposal.as_ref().map(|root| root.pubkey));
+    let effective_root = proposal_details
+        .and_then(|(_, _, pr_upgrade_root)| pr_upgrade_root.as_ref())
+        .or(root_proposal.as_ref());
+    let existing_thread_is_pr = if let Some(root_id) = canonical_root_id {
+        proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_id).await?
+    } else {
+        false
+    };
+
+    let target_branch = args
+        .target_branch
+        .clone()
+        .or_else(|| effective_root.and_then(|root| tag_value(root, "b").ok()));
+    let target_tip = target_branch
+        .as_deref()
+        .map(|branch| {
+            resolve_target_branch_tip(&git_repo, branch, None, args.target_branch.is_some())
+        })
+        .transpose()?;
+
+    let head = git_repo.get_head_commit()?;
+    let target_tips = if let Some(target_tip) = target_tip {
+        vec![target_tip]
+    } else {
+        git_repo.get_default_branch_tips(None)?
+    };
+
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
+        &cli_args.password,
+        Some(&client),
+        true,
+    )
+    .await?;
+
+    // Authorization is a UX guard, not enforcement (signatures can't be
+    // forged and the original author's events are immutable regardless).
+    // It applies only to *updates* of an existing PR thread — appending
+    // commits to someone else's pull request (a KIND_PULL_REQUEST_UPDATE
+    // threaded onto their proposal). It deliberately does NOT apply to a
+    // new patch *revision*, which is a fresh proposal root anyone may
+    // publish under NIP-34 (see tests/send_patch_revision.rs).
+    if existing_thread_is_pr {
+        if let Some(proposal_author) = proposal_author {
+            if proposal_author != user_ref.public_key
+                && !repo_ref.maintainers.contains(&user_ref.public_key)
+            {
+                bail!(
+                    "only the proposal author or a repository maintainer can update an existing pull request"
+                );
+            }
+        }
+    }
+
+    client.set_signer(signer.clone()).await;
+
+    let inference = if user_selected_base.is_none() {
+        infer_proposal_base(
+            &git_repo,
+            &repo_ref,
+            &get_open_or_draft_proposals(&git_repo, &repo_ref).await?,
+            canonical_root_id,
+            proposal_details.and_then(|(_, events, _)| events.first()),
+            proposal_author.unwrap_or(user_ref.public_key),
+            &head,
+            &target_tips,
+        )
+        .await?
+    } else {
+        ProposalBaseInference::NotFound
+    };
+    let inferred_base = match &inference {
+        ProposalBaseInference::Selected(base) => Some(base.clone()),
+        ProposalBaseInference::NotFound | ProposalBaseInference::ParentContainedByTarget => None,
+    };
+    let selected_base = user_selected_base.or(inferred_base);
+    let preserved_base =
+        if selected_base.is_none() && matches!(inference, ProposalBaseInference::NotFound) {
+            proposal_details
+                .and_then(|(_, events, _)| events.first())
+                .map(|latest| merge_base_for_fast_forward_update(&git_repo, latest, &head))
+                .transpose()?
+                .flatten()
+                .map(|commit| ExplicitBase {
+                    commit,
+                    description: "the previous PR merge base".to_string(),
+                })
+        } else {
+            None
+        };
+    let explicit_base = selected_base.or(preserved_base);
+
+    let proposal_metadata = ngit::push::ProposalMetadata {
+        target_branch: target_branch.clone(),
+        explicit_base: explicit_base.as_ref().map(|base| base.commit),
+    };
+
+    let automatic_commits = if let Some(base) = &explicit_base {
+        let mut commits = commits_after_base(&git_repo, base, &head)?;
+        commits.reverse();
+        Some(commits)
+    } else if let Some(branch) = &target_branch {
+        let mut commits = git_repo.get_commits_ahead_of_branch(&head, branch)?;
+        commits.reverse();
+        Some(commits)
+    } else {
+        None
+    };
+
+    let (proposal_base_name, proposal_base_tip) = if let Some(base) = &explicit_base {
+        (base.description.clone(), base.commit)
+    } else if let Some(branch) = &target_branch {
+        (
+            branch.clone(),
+            target_tip.context("target branch has no visible tip")?,
+        )
+    } else {
+        (main_branch_name.to_string(), main_tip)
+    };
+
     if let Some(root_ref) = args.in_reply_to.first() {
         if root_proposal.is_some() {
             println!("creating proposal revision for: {root_ref}");
@@ -174,7 +363,9 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
 
     let mut commits: Vec<Sha1Hash> = {
         if args.since_or_range.is_empty() {
-            if cli_args.interactive {
+            if let Some(commits) = &automatic_commits {
+                commits.clone()
+            } else if cli_args.interactive {
                 let branch_name = git_repo.get_checked_out_branch_name()?;
                 let proposed_commits = if branch_name.eq(main_branch_name) {
                     vec![main_tip]
@@ -229,29 +420,26 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
         );
     }
 
-    let (first_commit_ahead, behind) =
-        git_repo.get_commits_ahead_behind(&main_tip, commits.last().context("no commits")?)?;
+    let (first_commit_ahead, behind) = git_repo
+        .get_commits_ahead_behind(&proposal_base_tip, commits.last().context("no commits")?)?;
 
     check_commits_are_suitable_for_proposal(
         cli_args,
         &first_commit_ahead,
         &commits,
         &behind,
-        main_branch_name,
-        &main_tip,
+        &proposal_base_name,
+        &proposal_base_tip,
     )?;
 
     let commits_too_big = git_repo.are_commits_too_big_for_patches(&commits);
     let has_submodules = git_repo.do_commits_contain_submodules(&commits);
     let repo_has_grasp_server = !repo_ref.grasp_servers().is_empty();
-    let existing_thread_is_pr = if let Some(root_proposal) = &root_proposal {
-        proposal_tip_is_pr_or_pr_update(git_repo_path, &repo_ref, &root_proposal.id).await?
-    } else {
-        false
-    };
     let should_be_pr = existing_thread_is_pr
         || commits_too_big
         || has_submodules
+        || target_branch.is_some()
+        || proposal_metadata.explicit_base.is_some()
         || (root_proposal.is_none() && repo_has_grasp_server);
 
     let as_pr = if args.force_patch {
@@ -270,36 +458,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     } else {
         should_be_pr
     };
-
-    let (signer, user_ref, _) = login::login_or_signup(
-        &Some(&git_repo),
-        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
-        &cli_args.password,
-        Some(&client),
-        true,
-    )
-    .await?;
-
-    // Authorization is a UX guard, not enforcement (signatures can't be
-    // forged and the original author's events are immutable regardless).
-    // It applies only to *updates* of an existing PR thread — appending
-    // commits to someone else's pull request (a KIND_PULL_REQUEST_UPDATE
-    // threaded onto their proposal). It deliberately does NOT apply to a
-    // new patch *revision*, which is a fresh proposal root anyone may
-    // publish under NIP-34 (see tests/send_patch_revision.rs).
-    if existing_thread_is_pr {
-        if let Some(root_proposal) = &root_proposal {
-            if root_proposal.pubkey != user_ref.public_key
-                && !repo_ref.maintainers.contains(&user_ref.public_key)
-            {
-                bail!(
-                    "only the proposal author or a repository maintainer can update an existing pull request"
-                );
-            }
-        }
-    }
-
-    client.set_signer(signer.clone()).await;
 
     let cover_letter_title_description = if cli_args.interactive {
         // Interactive flow: prompt for cover letter confirm, title, description
@@ -395,6 +553,19 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
     let events = if as_pr {
         let tip = commits.last().context("no commits")?; // commits has been reversed to oldest first
         let first_commit = commits.first().context("no commits")?;
+        let merge_base = if let Some(base) = &proposal_metadata.explicit_base {
+            Some(*base)
+        } else if let Some(branch) = &proposal_metadata.target_branch {
+            Some(
+                git_repo
+                    .get_most_advanced_merge_base_with_branch(tip, branch)?
+                    .with_context(|| {
+                        format!("proposal has no common history with target branch '{branch}'")
+                    })?,
+            )
+        } else {
+            git_repo.get_commit_parent(first_commit).ok()
+        };
         {
             let push_options_refs: Vec<&str> =
                 args.push_options.iter().map(String::as_str).collect();
@@ -404,7 +575,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, no_fetch: bool) -> Re
                 &repo_ref,
                 tip,
                 first_commit,
-                git_repo.get_commit_parent(first_commit).ok().as_ref(),
+                merge_base.as_ref(),
+                &proposal_metadata,
                 &user_ref,
                 root_proposal.as_ref(),
                 &cover_letter_title_description,

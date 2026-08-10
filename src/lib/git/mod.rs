@@ -82,6 +82,8 @@ pub trait RepoActions {
     /// a proposal regardless of which remote has the most advanced view of the
     /// default branch.
     fn get_default_branch_tips(&self, declared: Option<&str>) -> Result<Vec<Sha1Hash>>;
+    /// Collect every visible local and remote tip for a named branch.
+    fn get_branch_tips(&self, branch: &str) -> Result<Vec<Sha1Hash>>;
     /// Given a proposal tip, choose the merge-base against the most advanced
     /// default branch tip (the one that excludes the most commits from the
     /// proposal). Returns `None` if no default branch is visible. `declared` is
@@ -91,6 +93,15 @@ pub trait RepoActions {
         tip: &Sha1Hash,
         declared: Option<&str>,
     ) -> Result<Option<Sha1Hash>>;
+    /// Compute the most advanced merge base against every visible copy of a
+    /// named target branch.
+    fn get_most_advanced_merge_base_with_branch(
+        &self,
+        tip: &Sha1Hash,
+        branch: &str,
+    ) -> Result<Option<Sha1Hash>>;
+    /// Commits in `tip` that are not reachable from a named target branch.
+    fn get_commits_ahead_of_branch(&self, tip: &Sha1Hash, branch: &str) -> Result<Vec<Sha1Hash>>;
     /// Commits in `tip` that are not reachable from any visible default branch
     /// (local or any remote). Returns the commits oldest-first (already
     /// reversed) and a human label for the default branch used as the base.
@@ -273,13 +284,11 @@ impl RepoActions for Repo {
     }
 
     fn get_default_branch_name(&self, declared: Option<&str>) -> Result<Option<String>> {
-        let local = self.get_local_branch_names().unwrap_or_default();
-        let remotes = self.get_remote_branch_names().unwrap_or_default();
         // a branch name is usable if a copy of it exists locally or on any
         // remote (`<remote>/<name>`).
-        let exists = |name: &str| -> bool {
-            let suffix = format!("/{name}");
-            local.iter().any(|b| b == name) || remotes.iter().any(|b| b.ends_with(&suffix))
+        let exists = |name: &str| {
+            self.get_branch_tips(name)
+                .is_ok_and(|tips| !tips.is_empty())
         };
 
         // 1. the nostr-declared default branch, when it actually exists.
@@ -330,6 +339,16 @@ impl RepoActions for Repo {
             return Ok(vec![]);
         };
 
+        self.get_branch_tips(&default)
+    }
+
+    fn get_branch_tips(&self, branch: &str) -> Result<Vec<Sha1Hash>> {
+        // `refs/remotes/<remote>/HEAD` is a symbolic convenience ref, not a
+        // branch named `HEAD`. Treating it as one makes an explicit Git
+        // revision such as `--base HEAD` resolve to the remote default branch.
+        if branch == "HEAD" {
+            return Ok(vec![]);
+        }
         let mut branch_names: Vec<String> = vec![];
 
         // local copy of the default branch.
@@ -337,17 +356,20 @@ impl RepoActions for Repo {
             .get_local_branch_names()
             .unwrap_or_default()
             .iter()
-            .any(|b| b == &default)
+            .any(|b| b == branch)
         {
-            branch_names.push(default.clone());
+            branch_names.push(branch.to_string());
         }
 
-        // every remote's copy of the default branch (origin/<d>, gitlab/<d>...)
-        let suffix = format!("/{default}");
-        if let Ok(remote) = self.get_remote_branch_names() {
-            for name in &remote {
-                if name.ends_with(&suffix) {
-                    branch_names.push(name.clone());
+        // Every configured remote's exact copy of the branch. Suffix matching
+        // is unsafe here: `origin/release/2.x` is not a branch named `2.x`.
+        if let (Ok(remote_branches), Ok(remote_names)) =
+            (self.get_remote_branch_names(), self.git_repo.remotes())
+        {
+            for remote in remote_names.iter().flatten().flatten() {
+                let name = format!("{remote}/{branch}");
+                if remote_branches.contains(&name) {
+                    branch_names.push(name);
                 }
             }
         }
@@ -375,8 +397,19 @@ impl RepoActions for Repo {
         // default branch that has advanced on any remote (or locally) is
         // respected even when another remote's view of the default branch is
         // stale.
+        let Some(default) = self.get_default_branch_name(declared)? else {
+            return Ok(None);
+        };
+        self.get_most_advanced_merge_base_with_branch(tip, &default)
+    }
+
+    fn get_most_advanced_merge_base_with_branch(
+        &self,
+        tip: &Sha1Hash,
+        branch: &str,
+    ) -> Result<Option<Sha1Hash>> {
         let candidate_bases: Vec<Sha1Hash> = self
-            .get_default_branch_tips(declared)?
+            .get_branch_tips(branch)?
             .iter()
             .filter_map(|default_tip| self.get_merge_base(tip, default_tip).ok())
             .collect();
@@ -399,6 +432,17 @@ impl RepoActions for Repo {
             };
         }
         Ok(best)
+    }
+
+    fn get_commits_ahead_of_branch(&self, tip: &Sha1Hash, branch: &str) -> Result<Vec<Sha1Hash>> {
+        let base = self
+            .get_most_advanced_merge_base_with_branch(tip, branch)?
+            .with_context(|| {
+                format!("target branch '{branch}' does not exist locally or on a remote")
+            })?;
+        let (mut ahead, _) = self.get_commits_ahead_behind(&base, tip)?;
+        ahead.reverse();
+        Ok(ahead)
     }
 
     fn get_commits_ahead_of_default(
@@ -497,7 +541,7 @@ impl RepoActions for Repo {
                 oid
             } else {
                 self.git_repo
-                    .find_reference(sha1_or_reference)?
+                    .revparse_single(sha1_or_reference)?
                     .peel_to_commit()?
                     .id()
             }
@@ -3379,6 +3423,35 @@ index ce01362..a21e91c 100644\n\
                 base,
                 oid_to_sha1(&stale),
                 "merge-base must not be the stale origin/main baseline",
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn named_target_branch_controls_merge_base_and_ahead_commits() -> Result<()> {
+            let test_repo = GitTestRepo::default();
+            test_repo.populate()?;
+            test_repo.create_branch("release/2.x")?;
+            test_repo.checkout("release/2.x")?;
+            fs::write(test_repo.dir.join("release.md"), "release")?;
+            let release_tip = test_repo.stage_and_commit("advance release")?;
+
+            test_repo.create_branch("pr/fix")?;
+            test_repo.checkout("pr/fix")?;
+            fs::write(test_repo.dir.join("fix.md"), "fix")?;
+            let proposal_tip = test_repo.stage_and_commit("fix release")?;
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+
+            assert_eq!(
+                git_repo.get_most_advanced_merge_base_with_branch(
+                    &oid_to_sha1(&proposal_tip),
+                    "release/2.x",
+                )?,
+                Some(oid_to_sha1(&release_tip)),
+            );
+            assert_eq!(
+                git_repo.get_commits_ahead_of_branch(&oid_to_sha1(&proposal_tip), "release/2.x",)?,
+                vec![oid_to_sha1(&proposal_tip)],
             );
             Ok(())
         }

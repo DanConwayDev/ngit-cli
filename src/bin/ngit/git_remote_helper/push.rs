@@ -22,17 +22,21 @@ use ngit::{
     git::{self, Repo, nostr_url::NostrUrlDecoded},
     git_events::{
         self, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, get_event_root,
-        get_status, sign_ordered_status_event, status_kinds,
+        get_status, sign_ordered_status_event, status_kinds, tag_value,
     },
     list::list_from_remotes,
     login::{existing::load_existing_login, user::UserRef},
+    proposal_base::{
+        ProposalBaseInference, commits_after_base, infer_proposal_base,
+        merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
+    },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
     repo_ref::{self, get_repo_config_from_yaml},
     repo_state,
     signer::NgitSigner,
     utils::{
-        find_proposal_and_patches_by_branch_name, get_all_proposals, get_remote_name_by_url,
-        get_short_git_server_name, read_line,
+        find_proposal_and_patches_by_branch_name, get_all_proposals, get_open_or_draft_proposals,
+        get_remote_name_by_url, get_short_git_server_name, read_line,
     },
 };
 use nostr::prelude::{
@@ -64,6 +68,7 @@ pub(super) async fn run_push(
     title_description: Option<(String, String)>,
     git_server_push_options: Vec<String>,
     git_server: Option<String>,
+    proposal_options: super::ProposalOptions,
     force_with_lease: &HashMap<String, Option<String>>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
@@ -162,6 +167,7 @@ pub(super) async fn run_push(
             title_description.as_ref(),
             &git_server_push_options,
             git_server.as_deref(),
+            &proposal_options,
         )
         .await?;
 
@@ -395,6 +401,7 @@ async fn create_events_and_proposals(
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
     git_server: Option<&str>,
+    proposal_options: &super::ProposalOptions,
 ) -> Result<PushEventsPlan> {
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
@@ -566,6 +573,7 @@ async fn create_events_and_proposals(
         git_server_push_options,
         git_server,
         declared_default_branch.as_deref(),
+        proposal_options,
     )
     .await?;
     for e in proposal_events {
@@ -611,6 +619,7 @@ async fn process_proposal_refspecs(
     git_server_push_options: &[String],
     git_server: Option<&str>,
     default_branch: Option<&str>,
+    proposal_options: &super::ProposalOptions,
 ) -> Result<(Vec<Event>, Vec<String>)> {
     let mut events = vec![];
     let mut rejected_proposal_refspecs = vec![];
@@ -618,6 +627,16 @@ async fn process_proposal_refspecs(
         return Ok((events, rejected_proposal_refspecs));
     }
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
+    let explicit_base = if let Some(reference) = &proposal_options.base {
+        Some(resolve_explicit_base(git_repo, repo_ref, reference, &all_proposals).await?)
+    } else {
+        None
+    };
+    let open_proposals = if explicit_base.is_none() {
+        get_open_or_draft_proposals(git_repo, repo_ref).await?
+    } else {
+        HashMap::new()
+    };
     let current_user = user_ref.public_key;
 
     for refspec in proposal_refspecs {
@@ -628,20 +647,91 @@ async fn process_proposal_refspecs(
         if let Some((_, (proposal, patches, pr_upgrade_root))) =
             find_proposal_and_patches_by_branch_name(to, &all_proposals, Some(&current_user))
         {
+            if proposal_options.target_branch.is_some() {
+                bail!("target-branch can only be set when opening a new PR");
+            }
             // After a patch→PR upgrade, pr_upgrade_root is the KIND_PULL_REQUEST
             // event that should be referenced as the root of any subsequent PR
             // updates (its E tag).  For normal PRs (proposal is already PR kind)
             // and plain patch threads there is no pr_upgrade_root so we fall back
             // to the proposal event itself.
             let effective_root: &Event = pr_upgrade_root.as_ref().unwrap_or(proposal);
+            let inherited_target = tag_value(effective_root, "b").ok();
+            let target_tips = if let Some(branch) = &inherited_target {
+                vec![resolve_target_branch_tip(
+                    git_repo,
+                    branch,
+                    default_branch,
+                    false,
+                )?]
+            } else {
+                git_repo.get_default_branch_tips(default_branch)?
+            };
+            let inference = if explicit_base.is_none() {
+                infer_proposal_base(
+                    git_repo,
+                    repo_ref,
+                    &open_proposals,
+                    Some(proposal.id),
+                    patches.first(),
+                    proposal.pubkey,
+                    &tip_of_pushed_branch,
+                    &target_tips,
+                )
+                .await?
+            } else {
+                ProposalBaseInference::NotFound
+            };
+            let inferred_base = match &inference {
+                ProposalBaseInference::Selected(base) => Some(base.clone()),
+                ProposalBaseInference::NotFound
+                | ProposalBaseInference::ParentContainedByTarget => None,
+            };
+            let selected_base = explicit_base.clone().or(inferred_base);
+            let preserved_base = if selected_base.is_none()
+                && matches!(inference, ProposalBaseInference::NotFound)
+                && !refspec.starts_with('+')
+            {
+                merge_base_for_fast_forward_update(
+                    git_repo,
+                    patches
+                        .first()
+                        .context("existing proposal has no tip event")?,
+                    &tip_of_pushed_branch,
+                )?
+            } else {
+                None
+            };
+            if let Some(base) = &selected_base {
+                commits_after_base(git_repo, base, &tip_of_pushed_branch)?;
+            }
+            let proposal_metadata = ngit::push::ProposalMetadata {
+                target_branch: inherited_target,
+                explicit_base: selected_base
+                    .as_ref()
+                    .map(|base| base.commit)
+                    .or(preserved_base),
+            };
             if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
                 .concat()
                 .contains(&user_ref.public_key)
             {
                 if refspec.starts_with('+') {
                     // force push
-                    let (ahead, default_label) = git_repo
-                        .get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?;
+                    let (ahead, default_label) = if let Some(base) = &selected_base {
+                        (
+                            commits_after_base(git_repo, base, &tip_of_pushed_branch)?,
+                            base.description.clone(),
+                        )
+                    } else if let Some(branch) = &proposal_metadata.target_branch {
+                        (
+                            git_repo.get_commits_ahead_of_branch(&tip_of_pushed_branch, branch)?,
+                            format!("target branch '{branch}'"),
+                        )
+                    } else {
+                        git_repo
+                            .get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?
+                    };
                     if ahead.is_empty() {
                         bail!(
                             "cannot push '{from}' as proposal as branch isn't ahead of {default_label}"
@@ -660,6 +750,7 @@ async fn process_proposal_refspecs(
                         git_server_push_options,
                         git_server,
                         default_branch,
+                        &proposal_metadata,
                         patches.first(),
                     )
                     .await?
@@ -706,6 +797,7 @@ async fn process_proposal_refspecs(
                                 git_server_push_options,
                                 git_server,
                                 default_branch,
+                                &proposal_metadata,
                                 patches.first(),
                             )
                             .await?
@@ -759,8 +851,54 @@ async fn process_proposal_refspecs(
             }
         } else {
             // TODO new proposal / couldn't find exisiting proposal
-            let (ahead, default_label) =
-                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?;
+            let target_tips = if let Some(branch) = &proposal_options.target_branch {
+                vec![resolve_target_branch_tip(
+                    git_repo,
+                    branch,
+                    default_branch,
+                    true,
+                )?]
+            } else {
+                git_repo.get_default_branch_tips(default_branch)?
+            };
+            let inferred_base = if explicit_base.is_none() {
+                match infer_proposal_base(
+                    git_repo,
+                    repo_ref,
+                    &open_proposals,
+                    None,
+                    None,
+                    current_user,
+                    &tip_of_pushed_branch,
+                    &target_tips,
+                )
+                .await?
+                {
+                    ProposalBaseInference::Selected(base) => Some(base),
+                    ProposalBaseInference::NotFound
+                    | ProposalBaseInference::ParentContainedByTarget => None,
+                }
+            } else {
+                None
+            };
+            let selected_base = explicit_base.clone().or(inferred_base);
+            let proposal_metadata = ngit::push::ProposalMetadata {
+                target_branch: proposal_options.target_branch.clone(),
+                explicit_base: selected_base.as_ref().map(|base| base.commit),
+            };
+            let (ahead, default_label) = if let Some(base) = &selected_base {
+                (
+                    commits_after_base(git_repo, base, &tip_of_pushed_branch)?,
+                    base.description.clone(),
+                )
+            } else if let Some(branch) = &proposal_options.target_branch {
+                (
+                    git_repo.get_commits_ahead_of_branch(&tip_of_pushed_branch, branch)?,
+                    format!("target branch '{branch}'"),
+                )
+            } else {
+                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?
+            };
             if ahead.is_empty() {
                 bail!("cannot push '{from}' as proposal as branch isn't ahead of {default_label}");
             }
@@ -777,6 +915,7 @@ async fn process_proposal_refspecs(
                 git_server_push_options,
                 git_server,
                 default_branch,
+                &proposal_metadata,
                 None,
             )
             .await?
@@ -804,6 +943,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     git_server_push_options: &[String],
     git_server: Option<&str>,
     default_branch: Option<&str>,
+    proposal_metadata: &ngit::push::ProposalMetadata,
     ordering_reference: Option<&Event>,
 ) -> Result<Vec<Event>> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
@@ -813,6 +953,8 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     let use_pr = parent_is_pr
         || commits_too_big
         || has_submodules
+        || proposal_metadata.target_branch.is_some()
+        || proposal_metadata.explicit_base.is_some()
         || (root_proposal.is_none() && repo_has_grasp_server);
 
     if use_pr {
@@ -839,10 +981,22 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         //     the stale value from the original PR event tag)
         // Using the git DAG directly means no stored event values can ever
         // propagate a stale or incorrect fork point.
-        let merge_base: Option<Sha1Hash> = git_repo
-            .get_most_advanced_merge_base_with_default(tip, default_branch)
-            .ok()
-            .flatten();
+        let merge_base: Option<Sha1Hash> = if let Some(base) = &proposal_metadata.explicit_base {
+            Some(*base)
+        } else if let Some(branch) = &proposal_metadata.target_branch {
+            Some(
+                git_repo
+                    .get_most_advanced_merge_base_with_branch(tip, branch)?
+                    .with_context(|| {
+                        format!("proposal has no common history with target branch '{branch}'")
+                    })?,
+            )
+        } else {
+            git_repo
+                .get_most_advanced_merge_base_with_default(tip, default_branch)
+                .ok()
+                .flatten()
+        };
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
             git_repo,
@@ -850,6 +1004,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             tip,
             first_commit,
             merge_base.as_ref(),
+            proposal_metadata,
             user_ref,
             root_proposal,
             &title_description.map(|(t, d)| (t.clone(), d.clone())),
@@ -865,6 +1020,10 @@ async fn generate_patches_or_pr_event_or_pr_updates(
                 "couldn't generate PR update event."
             } else if commits_too_big || has_submodules {
                 "a commit in your proposal is too big for a nostr patch so we tried to create it as a nostr PR instead. Unfortunately this failed."
+            } else if proposal_metadata.target_branch.is_some() {
+                "the proposal targets a non-default branch so it must be submitted as a PR kind, but creating the PR failed."
+            } else if proposal_metadata.explicit_base.is_some() {
+                "the proposal selects an explicit base so it must be submitted as a PR kind, but creating the PR failed."
             } else {
                 "the repository uses a GRASP server so the proposal was submitted as a PR kind, but creating the PR failed."
             },
@@ -1367,7 +1526,7 @@ async fn get_merged_status_events(
 
     for refspec in refspecs_to_git_server {
         let (from, to) = refspec_to_from_to(refspec)?;
-        if is_default_branch_ref(to, declared_default_branch) {
+        {
             let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
             let tip_of_remote_branch = if let Some(oid) = existing_state.get(to) {
                 Sha1Hash::from_str(oid)
@@ -1400,8 +1559,18 @@ async fn get_merged_status_events(
             )
             .await?;
 
-            let merged_proposals_info =
+            let mut merged_proposals_info =
                 get_merged_proposals_info(git_repo, &ahead, &commit_events).await?;
+            merged_proposals_info.retain(|proposal_id, _| {
+                let explicit_target = pr_roots
+                    .iter()
+                    .find(|event| event.id == *proposal_id)
+                    .and_then(|event| tag_value(event, "b").ok());
+                explicit_target.map_or_else(
+                    || is_default_branch_ref(to, declared_default_branch),
+                    |branch| to == format!("refs/heads/{branch}"),
+                )
+            });
 
             for event in create_merge_events(
                 term,

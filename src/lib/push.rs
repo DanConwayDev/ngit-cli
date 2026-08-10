@@ -38,6 +38,12 @@ use crate::{
     },
 };
 
+#[derive(Clone, Debug, Default)]
+pub struct ProposalMetadata {
+    pub target_branch: Option<String>,
+    pub explicit_base: Option<Sha1Hash>,
+}
+
 // returns a HashMap of refs responded to and any related cancellation reasons
 pub fn push_to_remote(
     git_repo: &Repo,
@@ -430,6 +436,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     tip: &Sha1Hash,
     first_commit: &Sha1Hash,
     merge_base: Option<&Sha1Hash>,
+    proposal_metadata: &ProposalMetadata,
     user_ref: &UserRef,
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
@@ -504,6 +511,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         tip,
         first_commit,
         merge_base,
+        proposal_metadata,
         user_ref,
         root_proposal,
         title_description_overide,
@@ -599,6 +607,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
                 tip,
                 first_commit,
                 merge_base,
+                proposal_metadata,
                 user_ref,
                 root_proposal,
                 title_description_overide,
@@ -645,6 +654,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     tip: &Sha1Hash,
     first_commit: &Sha1Hash,
     merge_base: Option<&Sha1Hash>,
+    proposal_metadata: &ProposalMetadata,
     user_ref: &UserRef,
     root_proposal: Option<&Event>,
     title_description_overide: &Option<(String, String)>,
@@ -683,6 +693,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 tip,
                 first_commit,
                 merge_base,
+                proposal_metadata,
                 &[clone_url],
                 &[],
                 git_repo.get_path().ok(),

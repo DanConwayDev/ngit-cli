@@ -401,6 +401,7 @@ fn output_json(
                     "author": author,
                     "branch": branch,
                     "labels": proposal_labels,
+                    "target_branch": tag_value(proposal, "b").ok(),
                 })
             },
         )
@@ -491,6 +492,7 @@ fn show_proposal_details(
             "labels": proposal_labels,
             "comment_count": comment_count,
             "description": cover_letter.description,
+            "target_branch": tag_value(proposal, "b").ok(),
         });
         if let Some(cn) = cover_note_json {
             json_obj["cover_note"] = cn;
@@ -525,6 +527,9 @@ fn show_proposal_details(
         "Branch:   {}",
         cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
     );
+    if let Ok(target) = tag_value(proposal, "b") {
+        println!("Target:   {target}");
+    }
     if !proposal_labels.is_empty() {
         let labels_str = proposal_labels
             .iter()
