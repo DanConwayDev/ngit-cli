@@ -335,6 +335,8 @@ The initial stable error codes are:
 - `asset_not_found`;
 - `invalid_asset_author`;
 - `invalid_asset_metadata`;
+- `asset_platform_required`;
+- `ambiguous_file_platforms`;
 - `invalid_apk`;
 - `apk_platform_conflict`;
 - `asset_integrity_mismatch`;
@@ -666,7 +668,11 @@ accepts:
 - `--commit COMMIT` to override the Git revision represented by the release;
 - `--manifest PATH`;
 - repeatable `--asset PLATFORM=URL` for the simple case;
-- repeatable `--file PLATFORM=PATH` to upload a local file to Blossom;
+- `--file PATH` with repeatable `--platform PLATFORM` to upload one local file
+  to Blossom for one or more platforms;
+- repeatable `--file PLATFORM=PATH` as a compact multiple-file form; entries
+  with the exact same `PATH` are one asset whose platforms are merged, so that
+  file is snapshotted and uploaded only once;
 - repeatable `--asset-event ASSET` to reuse an existing asset;
 - `--platform-agnostic-asset URL` as an explicit no-platform shorthand;
 - repeatable `--platform-agnostic-file PATH` as the corresponding local-file

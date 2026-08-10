@@ -394,7 +394,7 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
     const ASSET_BYTES: &[u8] = b"local Blossom release archive\n";
 
     let (harness, publisher, published) = setup(0).await?;
-    create_application(&publisher).await?;
+    create_application_with_platforms(&publisher, &["linux-x86_64", "linux-aarch64"]).await?;
     fs::write(publisher.dir().join("ngit-release.zip"), ASSET_BYTES)
         .context("failed to write local release asset")?;
 
@@ -431,7 +431,11 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
             "--app",
             APP_ID,
             "--file",
-            "linux-x86_64=ngit-release.zip",
+            "ngit-release.zip",
+            "--platform",
+            "linux-x86_64",
+            "--platform",
+            "linux-aarch64",
             "--notes",
             "Uploaded through Blossom",
             "--json",
@@ -483,7 +487,7 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
     ensure!(asset.mime == "application/zip");
     ensure!(asset.sha256 == hash);
     ensure!(asset.size == Some(ASSET_BYTES.len() as u64));
-    ensure!(asset.platforms == ["linux-x86_64"]);
+    ensure!(asset.platforms == ["linux-aarch64", "linux-x86_64"]);
 
     let release = SoftwareRelease::parse(
         &single_event(
@@ -499,7 +503,7 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
     .map_err(|error| anyhow::anyhow!(error))?;
     ensure!(release.assets.len() == 1);
     ensure!(release.assets[0].event_id == asset.raw_event.id);
-    ensure!(release.platforms == ["linux-x86_64"]);
+    ensure!(release.platforms == ["linux-aarch64", "linux-x86_64"]);
     Ok(())
 }
 

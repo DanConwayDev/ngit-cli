@@ -542,9 +542,12 @@ pub struct ReleasePublishArgs {
     /// Add a URL-backed asset as PLATFORM=URL (repeatable)
     #[arg(long = "asset", value_name = "PLATFORM=URL")]
     pub assets: Vec<String>,
-    /// Upload a local asset to Blossom as PLATFORM=PATH (repeatable)
-    #[arg(long = "file", value_name = "PLATFORM=PATH")]
+    /// Upload PATH, or use PLATFORM=PATH shorthand (repeatable)
+    #[arg(long = "file", value_name = "[PLATFORM=]PATH")]
     pub files: Vec<String>,
+    /// Target platform for one bare --file PATH (repeatable)
+    #[arg(long = "platform", value_name = "PLATFORM")]
+    pub file_platforms: Vec<String>,
     /// Reuse an existing kind 3063 asset event (repeatable)
     #[arg(long = "asset-event", value_name = "ASSET")]
     pub asset_events: Vec<String>,

@@ -210,24 +210,12 @@ pub(super) async fn release_publish(
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
         prepared_assets.push(PreparedAsset::Ready(input));
     }
-    for value in &args.files {
-        let (platform, path) = value.split_once('=').ok_or_else(|| {
-            coded_error(
-                "invalid_file_argument",
-                format!("file {value:?} must use PLATFORM=PATH"),
-            )
-        })?;
-        if platform.trim().is_empty() || path.trim().is_empty() {
-            return Err(coded_error(
-                "invalid_file_argument",
-                format!("file {value:?} must contain a platform and path"),
-            ));
-        }
+    for (path, platforms) in grouped_file_arguments(&args.files, &args.file_platforms)? {
         let pending = prepare_file_asset(
             &mut context,
             NewFileAsset::simple(
-                Path::new(path),
-                vec![platform.to_owned()],
+                &path,
+                platforms,
                 &application_target,
                 &args.release_version,
                 false,
@@ -1619,6 +1607,77 @@ struct NewFileAsset {
     platform_agnostic: bool,
 }
 
+fn grouped_file_arguments(
+    values: &[String],
+    bare_platforms: &[String],
+) -> Result<Vec<(std::path::PathBuf, Vec<String>)>> {
+    let mut grouped: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
+    let mut bare_path = None;
+    for value in values {
+        let Some((platform, path)) = value.split_once('=') else {
+            if value.trim().is_empty() {
+                return Err(coded_error(
+                    "invalid_file_argument",
+                    "--file path must not be empty",
+                ));
+            }
+            if bare_path.replace(std::path::PathBuf::from(value)).is_some() {
+                return Err(coded_error(
+                    "ambiguous_file_platforms",
+                    "repeatable --platform can describe only one bare --file PATH; use PLATFORM=PATH or a release manifest for multiple files",
+                ));
+            }
+            continue;
+        };
+        if platform.trim().is_empty() || path.trim().is_empty() {
+            return Err(coded_error(
+                "invalid_file_argument",
+                format!("file {value:?} must contain a platform and path"),
+            ));
+        }
+
+        let path = std::path::PathBuf::from(path);
+        if let Some((_, platforms)) = grouped
+            .iter_mut()
+            .find(|(existing_path, _)| existing_path == &path)
+        {
+            if !platforms.iter().any(|existing| existing == platform) {
+                platforms.push(platform.to_owned());
+            }
+        } else {
+            grouped.push((path, vec![platform.to_owned()]));
+        }
+    }
+
+    if let Some(path) = bare_path {
+        if !grouped.is_empty() {
+            return Err(coded_error(
+                "ambiguous_file_platforms",
+                "do not mix a bare --file PATH with PLATFORM=PATH; use one form or a release manifest",
+            ));
+        }
+        let mut platforms = Vec::new();
+        for platform in bare_platforms {
+            if platform.trim().is_empty() {
+                return Err(coded_error(
+                    "invalid_file_argument",
+                    "--platform must not be empty",
+                ));
+            }
+            if !platforms.contains(platform) {
+                platforms.push(platform.clone());
+            }
+        }
+        grouped.push((path, platforms));
+    } else if !bare_platforms.is_empty() {
+        return Err(coded_error(
+            "ambiguous_file_platforms",
+            "--platform requires exactly one bare --file PATH",
+        ));
+    }
+    Ok(grouped)
+}
+
 impl NewFileAsset {
     fn simple(
         source_path: &Path,
@@ -1708,6 +1767,12 @@ async fn prepare_file_asset(
         &mut platforms,
         proposed.platform_agnostic,
     )?;
+    if platforms.is_empty() && apk_platform_inference.is_none() && !proposed.platform_agnostic {
+        return Err(coded_error(
+            "asset_platform_required",
+            "local file has no platform metadata; use repeatable --platform, PLATFORM=PATH, or --platform-agnostic-file",
+        ));
+    }
 
     let input = AssetInput {
         application: Some(AddressPointer {
@@ -2537,6 +2602,53 @@ mod tests {
             Some("application.apk"),
             Some(APK_MIME_TYPE),
         ));
+    }
+
+    #[test]
+    fn bare_file_accepts_repeatable_platforms() {
+        let grouped = grouped_file_arguments(
+            &values(&["dist/app"]),
+            &values(&["linux-x86_64", "linux-aarch64", "linux-x86_64"]),
+        )
+        .unwrap();
+        assert_eq!(
+            grouped,
+            vec![(
+                std::path::PathBuf::from("dist/app"),
+                values(&["linux-x86_64", "linux-aarch64"]),
+            )]
+        );
+    }
+
+    #[test]
+    fn repeated_shorthand_path_becomes_one_multiplatform_file() {
+        let grouped = grouped_file_arguments(
+            &values(&["linux-x86_64=dist/app", "linux-aarch64=dist/app"]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            grouped,
+            vec![(
+                std::path::PathBuf::from("dist/app"),
+                values(&["linux-x86_64", "linux-aarch64"]),
+            )]
+        );
+    }
+
+    #[test]
+    fn platforms_reject_ambiguous_file_forms() {
+        for (files, platforms) in [
+            (values(&["dist/a", "dist/b"]), values(&["linux-x86_64"])),
+            (
+                values(&["dist/a", "linux-aarch64=dist/b"]),
+                values(&["linux-x86_64"]),
+            ),
+            (values(&["linux-x86_64=dist/a"]), values(&["linux-aarch64"])),
+        ] {
+            let error = grouped_file_arguments(&files, &platforms).unwrap_err();
+            assert_eq!(error_code(&error), "ambiguous_file_platforms");
+        }
     }
 
     #[test]
