@@ -436,7 +436,40 @@ fn merged_repository_coordinates(
     coordinates
 }
 
-fn add_metadata_warnings(
+pub(super) fn application_input_from_repository(
+    context: &ReleaseContext,
+    identifier: &str,
+    platforms: Vec<String>,
+) -> Result<ApplicationInput> {
+    if context.repo_ref.name.is_empty() {
+        return Err(coded_error(
+            "metadata_confirmation_required",
+            "application name is required; create the application explicitly with release app init --name",
+        ));
+    }
+    let canonical_repository = context
+        .repo_ref
+        .to_nostr_git_url(&Some(&context.git_repo))
+        .to_string();
+    Ok(ApplicationInput {
+        identifier: identifier.to_owned(),
+        name: context.repo_ref.name.clone(),
+        description: context.repo_ref.description.clone(),
+        summary: None,
+        icon: None,
+        images: Vec::new(),
+        topics: dedup(context.repo_ref.hashtags.clone()),
+        website: context.repo_ref.web.first().cloned(),
+        repository: Some(canonical_repository),
+        repository_coordinates: context.ordered_repo_coordinates(),
+        platforms: dedup(platforms),
+        license: None,
+        extra_tags: Vec::new(),
+        created_at: None,
+    })
+}
+
+pub(super) fn add_metadata_warnings(
     context: &mut ReleaseContext,
     input: &ApplicationInput,
     strict: bool,

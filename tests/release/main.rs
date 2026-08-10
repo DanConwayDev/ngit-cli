@@ -11,8 +11,9 @@ use std::{fs, time::Duration};
 use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
 use ngit::software_release::{
-    AddressPointer, AssetInput, SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND,
-    SOFTWARE_RELEASE_KIND, SoftwareAsset, SoftwareRelease, asset_event_builder,
+    AddressPointer, ApplicationInput, AssetInput, SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND,
+    SOFTWARE_RELEASE_KIND, SoftwareAsset, SoftwareRelease, application_event_builder,
+    asset_event_builder,
 };
 use nostr_sdk::prelude::*;
 use serde_json::Value;
@@ -73,6 +74,146 @@ async fn application_create_links_the_repo_and_refuses_implicit_replacement() ->
     )
     .await?;
     ensure!(unchanged.id == application.id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_publish_bootstraps_the_application_asset_and_release() -> Result<()> {
+    const VERSION: &str = "0.1.0";
+    const ASSET_BYTES: &[u8] = b"zero-state release archive\n";
+
+    let (harness, publisher, published) = setup(0).await?;
+    let server = AssetHttpServer::spawn(vec![ServedAsset {
+        path: "/zero-state.tar.gz",
+        body: ASSET_BYTES,
+        content_type: "application/gzip",
+    }])
+    .await?;
+    let asset_argument = format!("linux-x86_64={}/zero-state.tar.gz", server.base_url());
+
+    let output = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            VERSION,
+            "--asset",
+            &asset_argument,
+            "--notes",
+            "First release from repository metadata",
+            "--json",
+        ],
+    )
+    .await?;
+    server.finish().await?;
+
+    ensure!(output["result"]["application_operation"] == "created");
+    ensure!(
+        output["result"]["publication"]["ordered_events"]
+            .as_array()
+            .context("publication events were not an array")?
+            .iter()
+            .map(|event| event["entity"].as_str())
+            .collect::<Vec<_>>()
+            == [Some("application"), Some("asset"), Some("release")]
+    );
+
+    let application = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_APPLICATION_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(&published.identifier),
+        "bootstrapped software application",
+    )
+    .await?;
+    ensure!(tag_values(&application, "f") == ["linux-x86_64"]);
+    let asset = SoftwareAsset::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+            "bootstrapped software asset",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let release = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(format!("{}@{VERSION}", published.identifier)),
+            "bootstrapped software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(asset.application.coordinate == release.application.coordinate);
+    ensure!(
+        release.application.coordinate
+            == Coordinate::new(
+                SOFTWARE_APPLICATION_KIND,
+                published.maintainer_keys.public_key(),
+            )
+            .identifier(published.identifier)
+    );
+    ensure!(release.assets[0].event_id == asset.raw_event.id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_publish_never_overwrites_an_unlinked_default_application() -> Result<()> {
+    let (harness, publisher, published) = setup(0).await?;
+    let application = application_event_builder(ApplicationInput {
+        identifier: published.identifier.clone(),
+        name: "Existing unlinked application".to_owned(),
+        platforms: vec!["linux-x86_64".to_owned()],
+        ..Default::default()
+    })?
+    .finalize(&published.maintainer_keys)?;
+    publish_to_default_relay(&harness, &application).await?;
+    wait_for_relay_event(&harness, application.id).await?;
+
+    let refused = run_json_expecting_failure(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            "0.1.0",
+            "--asset",
+            "linux-x86_64=https://example.invalid/should-not-download.tar.gz",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(refused["error"]["code"] == "application_not_linked");
+    let unchanged = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_APPLICATION_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(&published.identifier),
+        "unlinked software application",
+    )
+    .await?;
+    ensure!(unchanged.id == application.id);
+    ensure!(
+        harness
+            .relay("default")
+            .events(Filter::new().kind(SOFTWARE_ASSET_KIND))
+            .await?
+            .is_empty()
+    );
+    ensure!(
+        harness
+            .relay("default")
+            .events(Filter::new().kind(SOFTWARE_RELEASE_KIND))
+            .await?
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -139,6 +280,19 @@ assets:
     )
     .await?;
     ensure!(published_release["result"]["operation"] == "created");
+    let application = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_APPLICATION_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(APP_ID),
+        "existing software application",
+    )
+    .await?;
+    ensure!(
+        published_release["result"]["publication"]["ordered_events"][0]["event_id"]
+            == application.id.to_hex()
+    );
     server.finish().await?;
 
     let release = SoftwareRelease::parse(
@@ -319,6 +473,7 @@ async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
     .await?;
     ensure!(added["result"]["operation"] == "asset_added");
     ensure!(added["result"]["previous_event_id"] == initial.raw_event.id.to_hex());
+    ensure!(added["result"]["publication"]["ordered_events"][0]["entity"] == "application");
     server.finish().await?;
 
     let replacement = SoftwareRelease::parse(

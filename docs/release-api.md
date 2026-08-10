@@ -442,9 +442,12 @@ Mutation results add:
 ```json
 {
   "operation": "edited",
+  "application_operation": "unchanged",
+  "application": {},
   "previous_event_id": "...",
   "publication": {
     "ordered_events": [
+      { "entity": "application", "event_id": "..." },
       { "entity": "asset", "event_id": "..." },
       { "entity": "release", "event_id": "..." }
     ],
@@ -468,9 +471,11 @@ an incomplete batch. `ordered_events` is the exact send order, with the release
 last. On total failure the same object is returned in `error.details`,
 `possible_orphan_asset_ids` contains only assets newly signed by this command,
 and `recovery` tells the caller which reuse flag is safe after checking those
-exact event IDs. URLs and relay messages which may contain credentials are
-redacted in diagnostics; signed event URLs remain exact because changing them
-would change the event.
+exact event IDs. A newly created application remains valid if a later event in
+the batch fails; a retry discovers and resends that exact event rather than
+creating a replacement. URLs and relay messages which may contain credentials
+are redacted in diagnostics; signed event URLs remain exact because changing
+them would change the event.
 
 ## Application commands
 
@@ -654,11 +659,16 @@ This command creates a release and its new URL-backed asset events. It accepts:
 - `--strict-metadata`;
 - `--json`.
 
-If `--app` is omitted, the command uses the sole trusted linked application. It
-MUST fail on zero or multiple candidates rather than guessing. The application
-must exist and be linked before release publication. A future interactive flow
-may offer to create or link it, but the non-interactive API performs one
-explicit mutation at a time.
+If there is one trusted linked application, omitting `--app` selects it. When
+there are no trusted linked applications, the same command creates an
+application owned by the active maintainer, using `--app`, the manifest
+`application`, or the repository identifier as its identifier. Repository name,
+description, topics, website, canonical clone URL, repository coordinates, and
+the proposed release platforms seed its metadata. This zero-state path is the
+default way to publish the application, asset, and release events together.
+Multiple candidates remain an error. An exact existing but unlinked application
+is never overwritten or linked implicitly; the user must run `release app link
+APP --edit` first.
 
 Creation requires at least one valid asset. On edit, omitted notes, channel,
 release date, and asset inputs preserve their existing values. New asset inputs
@@ -668,14 +678,20 @@ event already present in the release is an error, not a silent no-op.
 
 Before publishing, ngit MUST:
 
-1. resolve the latest application and release state across the relay set;
+1. resolve the latest application and release state across the relay set, or
+   plan an initial application when neither exists;
 2. apply the create/edit guard;
 3. verify that the signer is both a current maintainer and application author;
 4. resolve and validate all existing and proposed assets;
 5. construct the canonical union of asset platforms for release `f` tags;
 6. show or emit the complete mutation plan;
-7. sign and publish new assets;
-8. sign and publish the release as the final commit point.
+7. sign the initial application when required, then new assets and the release;
+8. publish one ordered application, assets, release batch, with the release as
+   the final commit point.
+
+The exact current application event is sent first even when it already exists.
+This is a retry-safe duplicate and ensures a GRASP relay can validate every
+asset's application `a` tag before accepting the dependent events.
 
 Existing assets MUST be authored by the application author and satisfy the
 required NIP-82 asset shape. Their `i` and `version` values MAY differ from the
@@ -726,12 +742,14 @@ because an immutable event cannot be amended. In that form,
 does not add metadata to the event.
 
 The command first performs authority and release preflights, then downloads and
-hashes a URL asset. It publishes a new asset before publishing the replacement
-release. If release publication fails after the asset succeeds, the asset is an
-unreferenced but valid event; JSON and human output MUST report its ID and give
-safe recovery steps. The user must inspect the exact release and asset event
-IDs, then reuse a visible asset with `--event`; ngit must not suggest blindly
-repeating the URL command because that would sign a different immutable event.
+hashes a URL asset. It publishes one ordered application, assets, release batch,
+resending the exact current application and existing assets before the release
+replacement. If release publication fails after the new asset succeeds, the
+asset is an unreferenced but valid event; JSON and human output MUST report its
+ID and give safe recovery steps. The user must inspect the exact release and
+asset event IDs, then reuse a visible asset with `--event`; ngit must not suggest
+blindly repeating the URL command because that would sign a different immutable
+event.
 
 The command preserves release notes, channel, original release date, unknown
 tags, existing asset order, and existing asset IDs. It appends the new event ID
