@@ -50,6 +50,27 @@ notes which genuinely apply to every platform. A local APK has its Android
 platforms inferred from its native ABI directories, but still requires the
 Android metadata described below.
 
+## Publishing to the Zapstore catalog relay
+
+Release events normally go to the repository relays and the application
+author's NIP-65 write relays. Add `--zapstore-relay` to a release mutation to
+also target `wss://relay.zapstore.dev`:
+
+```sh
+ngit release publish "$VERSION" \
+  --file dist/my-app \
+  --platform linux-x86_64 \
+  --zapstore-relay \
+  --json
+```
+
+The flag adds the same publication target as
+`--relay wss://relay.zapstore.dev`, but it does not add Zapstore to general
+event or Blossom server-list discovery. It does not replace any existing
+publication target, select Zapstore's CDN, change the application's Blossom
+server list, or perform Zapstore whitelisting and certificate-linking setup.
+Relay acceptance is included in the normal human and JSON publication results.
+
 ## The release manifest
 
 A manifest is useful when filenames and metadata are stable across releases.

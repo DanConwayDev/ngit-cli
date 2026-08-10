@@ -34,9 +34,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::support::{
-    AssetReuseOption, CommandOutput, LoginMode, ReleaseContext, ReleaseError, WarningJson,
-    application_json, asset_json, coded_error, coded_error_with_details, load_applications,
-    load_assets, load_releases, release_json, resolve_application, resolve_release,
+    AssetReuseOption, CommandOutput, ReleaseContext, ReleaseError, WarningJson, application_json,
+    asset_json, coded_error, coded_error_with_details, load_applications, load_assets,
+    load_releases, release_json, resolve_application, resolve_release,
 };
 use crate::{
     cli::{
@@ -69,7 +69,7 @@ pub(super) async fn release_publish(
     signer: SignerParams<'_>,
 ) -> Result<CommandOutput> {
     let mut context =
-        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
+        ReleaseContext::load_for_write(&args.relays, args.zapstore_relay, signer).await?;
     let manifest = resolve_manifest(&context, args)?;
     let app_selector = args.app.as_deref().or_else(|| {
         manifest
@@ -530,7 +530,7 @@ pub(super) async fn asset_add(
     signer: SignerParams<'_>,
 ) -> Result<CommandOutput> {
     let mut context =
-        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
+        ReleaseContext::load_for_write(&args.relays, args.zapstore_relay, signer).await?;
     let applications = trusted_applications_for_write(&mut context).await?;
     let releases = load_releases(&mut context, &applications, true).await?;
     let release =

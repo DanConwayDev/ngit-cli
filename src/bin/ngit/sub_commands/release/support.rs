@@ -30,6 +30,8 @@ use serde_json::{Value, json};
 
 use crate::{cli::SignerParams, sub_commands::id_resolver::parse_event_id};
 
+pub(super) const ZAPSTORE_RELAY_URL: &str = "wss://relay.zapstore.dev";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LoginMode {
     Optional,
@@ -244,6 +246,7 @@ pub(super) struct ReleaseContext {
     pub user_ref: Option<UserRef>,
     pub explicit_relays: Vec<RelayUrl>,
     pub discovery_relays: Vec<RelayUrl>,
+    zapstore_relay: Option<RelayUrl>,
     pub offline: bool,
     pub warnings: Vec<WarningJson>,
 }
@@ -317,9 +320,23 @@ impl ReleaseContext {
             user_ref,
             explicit_relays,
             discovery_relays,
+            zapstore_relay: None,
             offline,
             warnings: Vec::new(),
         })
+    }
+
+    pub(super) async fn load_for_write(
+        explicit_relays: &[String],
+        zapstore_relay: bool,
+        auth: SignerParams<'_>,
+    ) -> Result<Self> {
+        let mut context = Self::load(false, explicit_relays, LoginMode::Required, auth).await?;
+        context.zapstore_relay = zapstore_relay
+            .then(|| RelayUrl::parse(ZAPSTORE_RELAY_URL))
+            .transpose()
+            .context("built-in Zapstore relay URL is invalid")?;
+        Ok(context)
     }
 
     pub(super) fn git_repo_path(&self) -> Result<&std::path::Path> {
@@ -506,6 +523,7 @@ impl ReleaseContext {
             .map_or_else(Vec::new, |user| user.relays.write());
         let mut repo = self.repo_ref.relays.clone();
         repo.extend(self.explicit_relays.iter().cloned());
+        add_zapstore_publication_relay(&mut repo, self.zapstore_relay.as_ref());
         dedup_relays(&mut repo);
         (user_write, repo)
     }
@@ -650,6 +668,12 @@ fn parse_relays(values: &[String]) -> Result<Vec<RelayUrl>> {
         .iter()
         .map(|value| RelayUrl::parse(value).with_context(|| format!("invalid relay URL {value:?}")))
         .collect()
+}
+
+fn add_zapstore_publication_relay(relays: &mut Vec<RelayUrl>, zapstore: Option<&RelayUrl>) {
+    if let Some(zapstore) = zapstore {
+        relays.push(zapstore.clone());
+    }
 }
 
 fn dedup_relays(relays: &mut Vec<RelayUrl>) {
@@ -1146,11 +1170,12 @@ fn event_id_bech32(event: &Event) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use nostr::prelude::EventId;
+    use nostr::prelude::{EventId, RelayUrl};
 
     use super::{
-        AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, optional_login,
-        publication_failure_message, publication_json, publication_recovery,
+        AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, ZAPSTORE_RELAY_URL,
+        add_zapstore_publication_relay, optional_login, publication_failure_message,
+        publication_json, publication_recovery,
     };
 
     #[test]
@@ -1162,6 +1187,20 @@ mod tests {
         let configured =
             optional_login::<()>(Err(anyhow::anyhow!("configured signer failed")), false).unwrap();
         assert!(configured.is_none());
+    }
+
+    #[test]
+    fn zapstore_relay_is_an_additive_publication_target() {
+        let existing = RelayUrl::parse("wss://repo.example").unwrap();
+        let zapstore = RelayUrl::parse(ZAPSTORE_RELAY_URL).unwrap();
+        let mut relays = vec![existing.clone()];
+
+        add_zapstore_publication_relay(&mut relays, Some(&zapstore));
+        assert_eq!(relays, [existing.clone(), zapstore]);
+
+        let mut relays = vec![existing.clone()];
+        add_zapstore_publication_relay(&mut relays, None);
+        assert_eq!(relays, [existing]);
     }
 
     #[test]

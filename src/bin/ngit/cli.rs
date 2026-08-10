@@ -579,6 +579,9 @@ pub struct ReleasePublishArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -733,6 +736,9 @@ pub struct ReleaseAppInitArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -749,6 +755,9 @@ pub struct ReleaseAppLinkArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -927,6 +936,9 @@ pub struct ReleaseAssetAddArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -1723,6 +1735,19 @@ mod tests {
             .as_slice(),
         ] {
             Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn zapstore_relay_is_available_to_release_mutations() {
+        for args in [
+            "ngit release app init --name ngit --zapstore-relay",
+            "ngit release app link ngit --edit --zapstore-relay",
+            "ngit release publish 1.8.0 --asset-event deadbeef --zapstore-relay",
+            "ngit release asset add ngit@1.8.0 --event deadbeef --edit --zapstore-relay",
+        ] {
+            Cli::try_parse_from(args.split_ascii_whitespace())
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
         }
     }

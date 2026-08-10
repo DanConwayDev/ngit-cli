@@ -58,7 +58,9 @@ alias.
 - Installing, updating, or executing release assets.
 - Dependency resolution, update-channel policy, or release signing beyond
   Nostr event signatures and asset hashes.
-- Acting as a global application catalogue or hard-coding Zapstore relays.
+- Acting as a global application catalogue or silently publishing to
+  Zapstore. The explicit `--zapstore-relay` shortcut is additive and never
+  changes Blossom storage.
 - Editing immutable kind `3063` asset events. Corrections require a new asset
   event and an explicit edit of the release which references it.
 - Silently adopting applications published by non-maintainers.
@@ -228,8 +230,11 @@ commands.
 
 Repository relays, the relevant authors' NIP-65 relays, ngit's configured
 defaults, explicit `--relay` values, and the local cache form the discovery
-set. There MUST NOT be a Zapstore-specific relay hidden in the implementation.
-Explicit relay options extend the discovery set unless the existing global
+set. `--zapstore-relay` explicitly adds `wss://relay.zapstore.dev` only to the
+publication targets and their strict preflight query. It MUST NOT add Zapstore
+to general discovery or Blossom kind-10063 server-list discovery. There MUST
+NOT be a Zapstore-specific relay hidden in default behavior. Explicit relay
+options extend the discovery set unless the existing global
 `--repo-relay-only` behavior narrows it.
 
 An online create or edit preflight MUST wait for end-of-stored-events from each
@@ -574,6 +579,7 @@ the current repository. It accepts:
 - `--edit`;
 - explicit `--clear-*` forms for optional fields;
 - `--strict-metadata`;
+- `--zapstore-relay` to additionally publish to the Zapstore catalog relay;
 - `--json`.
 
 Creation requires a name. Defaults MAY be inferred from repository metadata but
@@ -595,6 +601,9 @@ semantic application, and per-relay publication results.
 This command adds every current repository coordinate to an existing
 application. It is an application replacement, so `--edit` is required even
 though the verb is already explicit.
+
+`--zapstore-relay` additionally publishes the replacement to the Zapstore
+catalog relay without changing any existing publication target.
 
 The command MUST fail before signing when:
 
@@ -688,6 +697,8 @@ accepts:
   application platforms;
 - repeatable `--blossom-server URL` as an ordered server override for all local
   files in the operation;
+- `--zapstore-relay` to additionally publish the complete ordered batch to the
+  Zapstore catalog relay;
 - `--edit`;
 - `--strict-metadata`;
 - `--json`.
@@ -807,6 +818,9 @@ The new asset is supplied by exactly one of:
 - `--file PATH`, with the same metadata flags and optional repeatable
   `--blossom-server URL`; or
 - `--event ASSET`, for an existing immutable asset event.
+
+`--zapstore-relay` additionally publishes the application, asset, and release
+batch to the Zapstore catalog relay. It does not select Zapstore's Blossom CDN.
 
 Metadata flags other than `--platform-agnostic` are invalid with `--event`
 because an immutable event cannot be amended. In that form,
