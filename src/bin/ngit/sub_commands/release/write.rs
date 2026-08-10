@@ -390,6 +390,9 @@ pub(super) async fn release_publish(
             )
         })?
     };
+    let signed_application_id = (existing_application.is_none()
+        || !platform_policy.application_platforms_added.is_empty())
+    .then_some(application.raw_event.id);
     let mut new_asset_event_ids = Vec::new();
     for prepared in prepared_assets {
         let input = match prepared {
@@ -401,7 +404,7 @@ pub(super) async fn release_publish(
                 error,
                 &blossom,
                 "asset_signing",
-                Nip82Progress::assets(&new_asset_event_ids),
+                Nip82Progress::assets(signed_application_id.as_ref(), &new_asset_event_ids),
             )
         })?;
         new_asset_event_ids.push(asset.raw_event.id);
@@ -410,7 +413,7 @@ pub(super) async fn release_publish(
                 error,
                 &blossom,
                 "asset_validation",
-                Nip82Progress::assets(&new_asset_event_ids),
+                Nip82Progress::assets(signed_application_id.as_ref(), &new_asset_event_ids),
             )
         })?;
         assets.push(asset);
@@ -429,7 +432,7 @@ pub(super) async fn release_publish(
             error,
             &blossom,
             "state_recheck",
-            Nip82Progress::assets(&new_asset_event_ids),
+            Nip82Progress::assets(signed_application_id.as_ref(), &new_asset_event_ids),
         )
     })?;
     context.require_application_author(&application)?;
@@ -461,7 +464,7 @@ pub(super) async fn release_publish(
             error,
             &blossom,
             "release_signing",
-            Nip82Progress::assets(&new_asset_event_ids),
+            Nip82Progress::assets(signed_application_id.as_ref(), &new_asset_event_ids),
         )
     })?;
     let parsed_release = SoftwareRelease::parse(&release_event).map_err(|error| {
@@ -469,7 +472,7 @@ pub(super) async fn release_publish(
             error.into(),
             &blossom,
             "release_validation",
-            Nip82Progress::release(&new_asset_event_ids),
+            Nip82Progress::release(signed_application_id.as_ref(), &new_asset_event_ids),
         )
     })?;
 
@@ -489,7 +492,7 @@ pub(super) async fn release_publish(
                 error,
                 &blossom,
                 "relay_publication",
-                Nip82Progress::release(&new_asset_event_ids),
+                Nip82Progress::release(signed_application_id.as_ref(), &new_asset_event_ids),
             )
         })?;
     let authority = context.authority(&application);
@@ -675,6 +678,8 @@ pub(super) async fn asset_add(
             )
         })?
     };
+    let signed_application_id = (!platform_policy.application_platforms_added.is_empty())
+        .then_some(application.raw_event.id);
     let newly_published = prepared_asset.is_some();
     let asset = if let Some(prepared) = prepared_asset {
         let input = match prepared {
@@ -682,7 +687,12 @@ pub(super) async fn asset_add(
             PreparedAsset::File(pending) => pending.input,
         };
         sign_asset_input(input, &signer).await.map_err(|error| {
-            preserve_completed_blossom(error, &blossom, "asset_signing", Nip82Progress::none())
+            preserve_completed_blossom(
+                error,
+                &blossom,
+                "asset_signing",
+                Nip82Progress::application(signed_application_id.as_ref()),
+            )
         })?
     } else {
         reused_asset.context("asset add requires one URL or event source")?
@@ -705,7 +715,10 @@ pub(super) async fn asset_add(
             error,
             &blossom,
             "state_recheck",
-            Nip82Progress::assets(std::slice::from_ref(&added_id)),
+            Nip82Progress::assets(
+                signed_application_id.as_ref(),
+                std::slice::from_ref(&added_id),
+            ),
         )
     })?;
     context.require_application_author(&application)?;
@@ -727,7 +740,10 @@ pub(super) async fn asset_add(
             error,
             &blossom,
             "release_signing",
-            Nip82Progress::assets(std::slice::from_ref(&added_id)),
+            Nip82Progress::assets(
+                signed_application_id.as_ref(),
+                std::slice::from_ref(&added_id),
+            ),
         )
     })?;
     let parsed_release = SoftwareRelease::parse(&release_event).map_err(|error| {
@@ -735,7 +751,10 @@ pub(super) async fn asset_add(
             error.into(),
             &blossom,
             "release_validation",
-            Nip82Progress::release(std::slice::from_ref(&added_id)),
+            Nip82Progress::release(
+                signed_application_id.as_ref(),
+                std::slice::from_ref(&added_id),
+            ),
         )
     })?;
 
@@ -760,7 +779,10 @@ pub(super) async fn asset_add(
                 error,
                 &blossom,
                 "relay_publication",
-                Nip82Progress::release(std::slice::from_ref(&added_id)),
+                Nip82Progress::release(
+                    signed_application_id.as_ref(),
+                    std::slice::from_ref(&added_id),
+                ),
             )
         })?;
     let authority = context.authority(&application);
@@ -1903,30 +1925,44 @@ impl BlossomPublication {
 
 #[derive(Clone, Copy)]
 struct Nip82Progress<'a> {
+    signed_application_id: Option<&'a EventId>,
     signed_asset_ids: &'a [EventId],
     release_event_signed: bool,
     publication_complete: bool,
 }
 
-impl Nip82Progress<'_> {
+impl<'a> Nip82Progress<'a> {
     fn none() -> Self {
         Self {
+            signed_application_id: None,
             signed_asset_ids: &[],
             release_event_signed: false,
             publication_complete: false,
         }
     }
 
-    fn assets(signed_asset_ids: &[EventId]) -> Nip82Progress<'_> {
+    fn application(signed_application_id: Option<&'a EventId>) -> Self {
+        Self {
+            signed_application_id,
+            ..Self::none()
+        }
+    }
+
+    fn assets(signed_application_id: Option<&'a EventId>, signed_asset_ids: &'a [EventId]) -> Self {
         Nip82Progress {
+            signed_application_id,
             signed_asset_ids,
             release_event_signed: false,
             publication_complete: false,
         }
     }
 
-    fn release(signed_asset_ids: &[EventId]) -> Nip82Progress<'_> {
+    fn release(
+        signed_application_id: Option<&'a EventId>,
+        signed_asset_ids: &'a [EventId],
+    ) -> Self {
         Nip82Progress {
+            signed_application_id,
             signed_asset_ids,
             release_event_signed: true,
             publication_complete: false,
@@ -2128,8 +2164,11 @@ fn blossom_failure_message(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let signed_application_id = progress
+        .signed_application_id
+        .map_or_else(|| "none".to_owned(), EventId::to_hex);
     format!(
-        "{message}\nserver outcomes: {server_outcomes}\npossible orphan blobs: {possible_orphans}\nsigned asset IDs: {signed_asset_ids}\nrelease event signed: {}\npublication complete: {}\nrecovery: {recovery}",
+        "{message}\nserver outcomes: {server_outcomes}\npossible orphan blobs: {possible_orphans}\nsigned application ID: {signed_application_id}\nsigned asset IDs: {signed_asset_ids}\nrelease event signed: {}\npublication complete: {}\nrecovery: {recovery}",
         progress.release_event_signed, progress.publication_complete
     )
 }
@@ -2160,6 +2199,12 @@ fn preserve_completed_blossom(
     details.insert(
         "possible_orphan_blobs".to_owned(),
         json!(blossom.possible_orphan_blobs),
+    );
+    details.insert(
+        "signed_application_id".to_owned(),
+        progress
+            .signed_application_id
+            .map_or(Value::Null, |event_id| json!(event_id.to_hex())),
     );
     details.insert(
         "signed_asset_ids".to_owned(),
@@ -2515,6 +2560,7 @@ mod tests {
         let orphan_url = Url::parse(
             "https://blossom.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.zip",
         )?;
+        let signed_application = EventId::from_hex(&"22".repeat(32))?;
         let signed_asset = EventId::from_hex(&"11".repeat(32))?;
         let publication = BlossomPublication {
             json: json!({ "server_selection": {}, "uploads": [{}] }),
@@ -2539,17 +2585,25 @@ mod tests {
             ),
             &publication,
             "release_signing",
-            Nip82Progress::assets(std::slice::from_ref(&signed_asset)),
+            Nip82Progress::assets(
+                Some(&signed_application),
+                std::slice::from_ref(&signed_asset),
+            ),
         );
         let error = error
             .downcast::<ReleaseError>()
             .expect("coded release error");
 
         assert_eq!(error.code, "release_signing_failed");
+        assert_eq!(
+            error.details["signed_application_id"],
+            signed_application.to_hex()
+        );
         assert_eq!(error.details["signed_asset_ids"][0], signed_asset.to_hex());
         assert_eq!(error.details["release_event_signed"], false);
         assert_eq!(error.details["publication_complete"], false);
         assert!(error.message.contains(orphan_url.as_str()));
+        assert!(error.message.contains(&signed_application.to_hex()));
         assert!(error.message.contains(&signed_asset.to_hex()));
         assert!(
             error

@@ -1008,7 +1008,7 @@ when at least one relay acknowledges the complete ordered batch. Partial batch
 completion is present in JSON, but it is not expanded into per-event certainty:
 an event whose acknowledgement failed may still have reached the relay. If no
 complete relay is available, the operation fails and reports only the newly
-signed asset IDs which may now be orphaned.
+signed application ID and asset IDs which may now be orphaned.
 
 ## Discovery and validation
 
@@ -1077,8 +1077,9 @@ orphan deletion is attempted. If a later state check, signing operation, or
 relay publication fails, its existing error code and details are retained and
 enriched with the completed Blossom report and possible orphan blobs. Human
 errors include the ordered server outcomes, possible orphan locations, signed
-asset IDs, release-signature state, and recovery guidance. JSON represents the
-same downstream progress explicitly as `signed_asset_ids`,
+application ID, asset IDs, release-signature state, and recovery guidance. JSON
+represents the same downstream progress explicitly as
+`signed_application_id`, `signed_asset_ids`,
 `release_event_signed`, and `publication_complete`; it never infers that all
 release events were signed merely because one asset event was signed.
 
