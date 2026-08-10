@@ -14,7 +14,7 @@ use ngit::{
         SoftwareAsset, SoftwareRelease, asset_event_builder, release_event_builder,
     },
 };
-use nostr::prelude::{Event, Filter, Timestamp};
+use nostr::prelude::{Coordinate, Event, Filter, Timestamp};
 use serde_json::json;
 
 use super::support::{
@@ -264,6 +264,7 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
         }
         let proposed = NewUrlAsset {
             source: url.clone(),
+            application_coordinate: application.coordinate(),
             identifier: args
                 .asset_id
                 .clone()
@@ -684,6 +685,16 @@ fn validate_reused_asset(
             }),
         ));
     }
+    if asset.application.coordinate != application.coordinate() {
+        return Err(coded_error_with_details(
+            "invalid_asset_application",
+            "asset does not reference the selected application",
+            json!({
+                "asset_application": super::support::coordinate_key(&asset.application.coordinate),
+                "expected_application": super::support::coordinate_key(&application.coordinate()),
+            }),
+        ));
+    }
     if asset.platforms.is_empty() && !platform_agnostic_acknowledged {
         return Err(coded_error(
             "asset_platform_required",
@@ -759,6 +770,7 @@ fn reject_asset_against_prepared(prepared: &[AssetInput], proposed: &SoftwareAss
 #[derive(Clone, Debug)]
 struct NewUrlAsset {
     source: String,
+    application_coordinate: Coordinate,
     identifier: String,
     version: String,
     filename: Option<String>,
@@ -785,6 +797,7 @@ impl NewUrlAsset {
     ) -> Self {
         Self {
             source: source.to_owned(),
+            application_coordinate: application.coordinate(),
             identifier: application.identifier.clone(),
             version: release_version.to_owned(),
             filename: None,
@@ -810,6 +823,7 @@ impl NewUrlAsset {
     ) -> Self {
         Self {
             source: asset.source.clone(),
+            application_coordinate: application.coordinate(),
             identifier: asset
                 .identifier
                 .clone()
@@ -867,6 +881,10 @@ async fn prepare_url_asset(
             .push(WarningJson::new(code, warning.message.clone()));
     }
     let input = AssetInput {
+        application: Some(AddressPointer {
+            coordinate: proposed.application_coordinate,
+            relay_hint: context.repo_ref.relays.first().map(ToString::to_string),
+        }),
         identifier: proposed.identifier,
         version: proposed.version,
         url: Some(downloaded.source_url),

@@ -32,6 +32,7 @@ pub enum ValidationCode {
     InvalidCoordinate,
     InvalidRepositoryCoordinate,
     InvalidApplicationCoordinate,
+    AssetApplicationMismatch,
     ApplicationAuthorMismatch,
     IdentifierMismatch,
     ReleaseIdentifierMismatch,
@@ -259,6 +260,18 @@ impl SoftwareRelease {
                     ),
                 ));
             }
+            if asset.application.coordinate != self.application.coordinate {
+                issues.push(ValidationIssue::field(
+                    ValidationCode::AssetApplicationMismatch,
+                    "a",
+                    format!(
+                        "asset {} references application {}, expected {}",
+                        asset.raw_event.id,
+                        asset.application.coordinate,
+                        self.application.coordinate
+                    ),
+                ));
+            }
         }
 
         let derived = release_platforms(assets.iter());
@@ -279,6 +292,7 @@ impl SoftwareRelease {
 #[derive(Clone, Debug, Serialize)]
 pub struct SoftwareAsset {
     pub raw_event: Event,
+    pub application: AddressPointer,
     pub identifier: String,
     pub version: String,
     pub url: Option<String>,
@@ -312,6 +326,10 @@ impl SoftwareAsset {
 
         Ok(Self {
             raw_event: event.clone(),
+            application: address_pointers(event, "a")
+                .into_iter()
+                .next()
+                .expect("validated asset has an application coordinate"),
             identifier: required_value(event, "i"),
             version: required_value(event, "version"),
             url: optional_value(event, "url"),
@@ -428,6 +446,7 @@ pub fn validate_asset(event: &Event) -> Vec<ValidationIssue> {
     for field in ["i", "m", "x", "version"] {
         validate_single_tag(event, field, true, &mut issues);
     }
+    validate_addresses(event, "a", SOFTWARE_APPLICATION_KIND, true, &mut issues);
     for field in [
         "url",
         "filename",
@@ -490,6 +509,18 @@ pub fn validate_asset(event: &Event) -> Vec<ValidationIssue> {
                     format!("{field} must be an unsigned integer"),
                 ));
             }
+        }
+    }
+    if let Some(application) = first_coordinate(event, "a") {
+        if application.public_key != event.pubkey {
+            issues.push(ValidationIssue::field(
+                ValidationCode::ApplicationAuthorMismatch,
+                "a",
+                format!(
+                    "asset author {} does not own application {}",
+                    event.pubkey, application.public_key
+                ),
+            ));
         }
     }
     issues
@@ -684,6 +715,7 @@ pub fn release_event_builder(input: ReleaseInput) -> Result<EventBuilder, Valida
 
 #[derive(Clone, Debug, Default)]
 pub struct AssetInput {
+    pub application: Option<AddressPointer>,
     pub identifier: String,
     pub version: String,
     pub url: Option<String>,
@@ -708,6 +740,15 @@ pub struct AssetInput {
 
 pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, ValidationError> {
     let mut issues = Vec::new();
+    if let Some(application) = &input.application {
+        validate_input_address(application, SOFTWARE_APPLICATION_KIND, "a", &mut issues);
+    } else {
+        issues.push(ValidationIssue::field(
+            ValidationCode::MissingTag,
+            "a",
+            "asset requires an application coordinate",
+        ));
+    }
     validate_input_required("i", &input.identifier, &mut issues);
     validate_input_required("version", &input.version, &mut issues);
     validate_input_required("m", &input.mime, &mut issues);
@@ -770,12 +811,18 @@ pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, Validation
         });
     }
 
-    let mut tags = vec![
+    let mut tags = vec![address_tag(
+        "a",
+        input
+            .application
+            .expect("validated asset input has an application coordinate"),
+    )];
+    tags.extend([
         tag(["i", &input.identifier]),
         tag(["m", &input.mime]),
         tag(["x", &input.sha256.to_ascii_lowercase()]),
         tag(["version", &input.version]),
-    ];
+    ]);
     push_optional(&mut tags, "url", input.url);
     push_optional(&mut tags, "filename", input.filename);
     if let Some(size) = input.size {
@@ -1338,7 +1385,8 @@ fn is_release_tag(name: &str) -> bool {
 fn is_asset_tag(name: &str) -> bool {
     matches!(
         name,
-        "i" | "url"
+        "a" | "i"
+            | "url"
             | "filename"
             | "m"
             | "x"
@@ -1378,8 +1426,19 @@ mod tests {
         Keys::parse(OTHER_SECRET_KEY).unwrap()
     }
 
-    fn asset(keys: &Keys, identifier: &str, version: &str, platforms: &[&str]) -> SoftwareAsset {
+    fn asset(
+        keys: &Keys,
+        application_identifier: &str,
+        identifier: &str,
+        version: &str,
+        platforms: &[&str],
+    ) -> SoftwareAsset {
         let event = asset_event_builder(AssetInput {
+            application: Some(AddressPointer {
+                coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, keys.public_key())
+                    .identifier(application_identifier),
+                relay_hint: None,
+            }),
             identifier: identifier.to_string(),
             version: version.to_string(),
             mime: "application/gzip".to_string(),
@@ -1432,10 +1491,17 @@ mod tests {
     #[test]
     fn release_builder_uses_application_identity_and_asset_platform_union() {
         let keys = keys();
-        let linux = asset(&keys, "org.ngit.linux", "1.0.0+linux", &["linux-x86_64"]);
-        let universal = asset(&keys, "org.ngit.checksums", "2026-08-08", &[]);
+        let linux = asset(
+            &keys,
+            "ngit",
+            "org.ngit.linux",
+            "1.0.0+linux",
+            &["linux-x86_64"],
+        );
+        let universal = asset(&keys, "ngit", "org.ngit.checksums", "2026-08-08", &[]);
         let darwin = asset(
             &keys,
+            "ngit",
             "org.ngit.mac",
             "build-42",
             &["darwin-arm64", "linux-x86_64"],
@@ -1478,7 +1544,7 @@ mod tests {
     #[test]
     fn release_parser_rejects_cross_author_and_identity_mismatches() {
         let keys = keys();
-        let asset = asset(&keys, "asset-id", "asset-version", &[]);
+        let asset = asset(&keys, "ngit", "asset-id", "asset-version", &[]);
         let event = EventBuilder::new(SOFTWARE_RELEASE_KIND, "")
             .tags([
                 tag([
@@ -1521,6 +1587,50 @@ mod tests {
                 .filter(|issue| issue.code == ValidationCode::MissingAndroidMetadata)
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn assets_require_and_validate_their_application_coordinate() {
+        let missing = asset_event_builder(AssetInput {
+            identifier: "asset".to_string(),
+            version: "1".to_string(),
+            mime: "application/gzip".to_string(),
+            sha256: HASH_A.to_string(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(missing.issues.iter().any(|issue| {
+            issue.code == ValidationCode::MissingTag && issue.field.as_deref() == Some("a")
+        }));
+
+        let wrong_owner = asset_event_builder(AssetInput {
+            application: Some(AddressPointer {
+                coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, other_keys().public_key())
+                    .identifier("app"),
+                relay_hint: Some("wss://relay.example.com".to_string()),
+            }),
+            identifier: "asset".to_string(),
+            version: "1".to_string(),
+            mime: "application/gzip".to_string(),
+            sha256: HASH_A.to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+        .finalize(&keys())
+        .unwrap();
+        let error = SoftwareAsset::parse(&wrong_owner).unwrap_err();
+        assert!(
+            error
+                .issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::ApplicationAuthorMismatch)
+        );
+
+        let valid = asset(&keys(), "app", "asset", "1", &["linux-x86_64"]);
+        assert_eq!(
+            valid.application.coordinate,
+            Coordinate::new(SOFTWARE_APPLICATION_KIND, keys().public_key()).identifier("app")
         );
     }
 
@@ -1630,7 +1740,13 @@ mod tests {
     #[test]
     fn asset_identity_and_version_are_not_coupled_to_a_release() {
         let keys = keys();
-        let asset = asset(&keys, "com.example.android", "42", &["android-x86_64"]);
+        let asset = asset(
+            &keys,
+            "org.example.product",
+            "com.example.android",
+            "42",
+            &["android-x86_64"],
+        );
         let result = release_event_builder(ReleaseInput {
             application: AddressPointer {
                 coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, keys.public_key())
@@ -1651,8 +1767,8 @@ mod tests {
     #[test]
     fn resolved_asset_validation_reports_missing_wrong_author_and_platform_union() {
         let keys = keys();
-        let expected = asset(&keys, "asset", "1", &["linux-x86_64"]);
-        let unreferenced = asset(&other_keys(), "other", "2", &["darwin-arm64"]);
+        let expected = asset(&keys, "app", "asset", "1", &["linux-x86_64"]);
+        let unreferenced = asset(&other_keys(), "other-app", "other", "2", &["darwin-arm64"]);
         let release_event = release_event_builder(ReleaseInput {
             application: AddressPointer {
                 coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, keys.public_key())
@@ -1686,6 +1802,11 @@ mod tests {
             issues
                 .iter()
                 .any(|issue| issue.code == ValidationCode::InvalidAssetAuthor)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == ValidationCode::AssetApplicationMismatch)
         );
         assert!(
             issues

@@ -130,7 +130,9 @@ impl PublicationBatchResult {
         let ordered_events = events
             .iter()
             .map(|event| OrderedPublicationEvent {
-                entity: if event.kind == SOFTWARE_ASSET_KIND {
+                entity: if event.kind == SOFTWARE_APPLICATION_KIND {
+                    "application"
+                } else if event.kind == SOFTWARE_ASSET_KIND {
                     "asset"
                 } else if event.kind == SOFTWARE_RELEASE_KIND {
                     "release"
@@ -1050,6 +1052,7 @@ pub(super) fn asset_json(asset: &SoftwareAsset) -> Value {
         "event_id_bech32": event_id_bech32(&asset.raw_event),
         "author": asset.raw_event.pubkey.to_hex(),
         "author_npub": asset.raw_event.pubkey.to_bech32().ok(),
+        "application_coordinate": coordinate_key(&asset.application.coordinate),
         "identifier": asset.identifier,
         "version": asset.version,
         "url": asset.url,

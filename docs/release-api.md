@@ -103,8 +103,10 @@ Callers MUST NOT be able to provide contradictory values for those tags.
 
 ### Asset
 
-A software asset event has required `i`, `m`, `x`, and `version` tags for the
-asset identifier, MIME type, SHA-256 hash, and asset version. An asset's
+A software asset event has a required `a` tag identifying its kind `32267`
+application and required `i`, `m`, `x`, and `version` tags for the asset
+identifier, MIME type, SHA-256 hash, and asset version. The asset author MUST
+own the referenced application coordinate. An asset's
 identifier and version are independent of the application and release values.
 URL-backed assets also have a `url` tag. ngit SHOULD publish all metadata it can
 establish, including:

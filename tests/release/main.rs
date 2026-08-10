@@ -11,8 +11,8 @@ use std::{fs, time::Duration};
 use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
 use ngit::software_release::{
-    AssetInput, SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND,
-    SoftwareAsset, SoftwareRelease, asset_event_builder,
+    AddressPointer, AssetInput, SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND,
+    SOFTWARE_RELEASE_KIND, SoftwareAsset, SoftwareRelease, asset_event_builder,
 };
 use nostr_sdk::prelude::*;
 use serde_json::Value;
@@ -174,6 +174,8 @@ assets:
     let linux = asset_named(&assets, "ngit-1.2.3-linux-x86_64.tar.gz")?;
     let windows = asset_named(&assets, "ngit-1.2.3-windows-x86_64.zip")?;
 
+    ensure!(linux.application.coordinate == release.application.coordinate);
+    ensure!(windows.application.coordinate == release.application.coordinate);
     ensure!(linux.identifier == APP_ID);
     ensure!(linux.version == RELEASE_VERSION);
     ensure!(linux.mime == "application/gzip");
@@ -275,6 +277,7 @@ async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
     ensure!(initial_asset_events.len() == 1);
     let x86 =
         SoftwareAsset::parse(&initial_asset_events[0]).map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(x86.application.coordinate == initial.application.coordinate);
     ensure!(x86.url.as_deref() == Some(x86_url.as_str()));
     ensure!(x86.filename.as_deref() == Some("ngit-1.2.3-linux-x86_64.tar.gz"));
     ensure!(x86.mime == "application/gzip");
@@ -659,6 +662,14 @@ fn asset_event(
 ) -> Result<Event> {
     let sha256 = hash_pair.repeat(32);
     asset_event_builder(AssetInput {
+        application: Some(AddressPointer {
+            coordinate: Coordinate::new(
+                SOFTWARE_APPLICATION_KIND,
+                published.maintainer_keys.public_key(),
+            )
+            .identifier(APP_ID),
+            relay_hint: None,
+        }),
         identifier: APP_ID.to_string(),
         version: RELEASE_VERSION.to_string(),
         url: Some(format!("https://example.invalid/releases/{filename}")),
