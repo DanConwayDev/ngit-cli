@@ -473,12 +473,17 @@ async fn read_store_response(
             StatusCode::PAYMENT_REQUIRED => {
                 "paid Blossom uploads are not supported; choose a server which accepts this blob"
             }
+            status if status.is_server_error() => {
+                "the server failed while handling the request; blob storage is uncertain"
+            }
             _ => "the Blossom server rejected the request",
         };
-        return Err(BlobRequestError::definite(
-            anyhow!("Blossom {operation} returned HTTP {status}: {guidance}{body}"),
-            false,
-        ));
+        let error = anyhow!("Blossom {operation} returned HTTP {status}: {guidance}{body}");
+        return Err(if status.is_server_error() {
+            BlobRequestError::unknown(error, true)
+        } else {
+            BlobRequestError::definite(error, false)
+        });
     }
     let possible_orphan = status == StatusCode::CREATED;
     if response
@@ -1738,6 +1743,37 @@ mod tests {
             assert!(message.contains(body));
             completed_request(server).await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_errors_leave_storage_unknown_and_report_a_possible_orphan() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (server_url, server) = spawn_one_shot_server(move |_| TestResponse {
+            status: "500 Internal Server Error",
+            headers: Vec::new(),
+            body: "descriptor persistence failed".to_owned(),
+        })
+        .await?;
+        let server_url = Url::parse(&server_url)?;
+
+        let error = upload_snapshot_to_servers(
+            std::slice::from_ref(&server_url),
+            &snapshot,
+            &NgitSigner::Keys(Keys::generate()),
+        )
+        .await
+        .unwrap_err();
+        completed_request(server).await?;
+
+        assert_eq!(error.servers[0].status, BlossomServerStatus::Unknown);
+        assert_eq!(error.possible_orphan_blobs.len(), 1);
+        assert_eq!(error.possible_orphan_blobs[0].server, server_url);
+        assert_eq!(error.possible_orphan_blobs[0].sha256, snapshot.sha256);
+        assert!(error.possible_orphan_blobs[0].url.is_none());
+        assert!(error.message.contains("blob storage is uncertain"));
         Ok(())
     }
 

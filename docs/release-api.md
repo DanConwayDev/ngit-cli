@@ -1071,7 +1071,10 @@ the failed stage and server, the complete ordered server plan, and
 `release_events_signed: false` plus `release_events_published: false`.
 `possible_orphan_blobs` contains HTTP-201 locations created by this invocation
 and ambiguous requests whose storage result is unknown; it excludes HTTP-200
-blobs which were already present. Recovery explains that blob publication is
+blobs which were already present. HTTP 5xx responses are ambiguous because a
+server may fail after storing the bytes, so they use status `unknown` and add a
+hash-only possible orphan; 3xx/4xx responses remain definite rejections.
+Recovery explains that blob publication is
 content-addressed and may be retried after fixing the server set. No automatic
 orphan deletion is attempted. If a later state check, signing operation, or
 relay publication fails, its existing error code and details are retained and

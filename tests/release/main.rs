@@ -732,6 +732,7 @@ async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> 
     )
     .await?;
     let primary_root = primary.base_url_with_slash();
+    let mirror_root = mirror.base_url_with_slash();
     let primary_url = primary
         .blob_url()
         .context("primary descriptor URL missing")?
@@ -745,17 +746,20 @@ async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> 
     ensure!(details["release_events_signed"] == false);
     ensure!(details["release_events_published"] == false);
     ensure!(details["blossom"]["uploads"][0]["servers"][0]["status"] == "stored");
-    ensure!(details["blossom"]["uploads"][0]["servers"][1]["status"] == "failed");
-    ensure!(details["possible_orphan_blobs"].as_array().map(Vec::len) == Some(1));
+    ensure!(details["blossom"]["uploads"][0]["servers"][1]["status"] == "unknown");
+    ensure!(details["possible_orphan_blobs"].as_array().map(Vec::len) == Some(2));
     ensure!(details["possible_orphan_blobs"][0]["server"] == primary_root);
     ensure!(details["possible_orphan_blobs"][0]["sha256"] == hash);
     ensure!(details["possible_orphan_blobs"][0]["url"] == primary_url);
+    ensure!(details["possible_orphan_blobs"][1]["server"] == mirror_root);
+    ensure!(details["possible_orphan_blobs"][1]["sha256"] == hash);
+    ensure!(details["possible_orphan_blobs"][1]["url"].is_null());
     let message = failure["error"]["message"]
         .as_str()
         .context("Blossom failure message missing")?;
     ensure!(message.contains(&primary_url));
     ensure!(message.contains("stored"));
-    ensure!(message.contains("failed"));
+    ensure!(message.contains("unknown"));
     ensure!(message.contains("recovery:"));
 
     let release_events = harness
