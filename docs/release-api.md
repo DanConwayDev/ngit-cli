@@ -335,6 +335,8 @@ The initial stable error codes are:
 - `asset_not_found`;
 - `invalid_asset_author`;
 - `invalid_asset_metadata`;
+- `invalid_apk`;
+- `apk_platform_conflict`;
 - `asset_integrity_mismatch`;
 - `duplicate_asset`;
 - `release_platform_coverage_incomplete`;
@@ -760,6 +762,9 @@ per-server operation, status, and descriptor URL. Status is `stored` for HTTP
 earlier fail-fast error. Mirror URLs are operational results; only the primary
 URL is written to the kind `3063` event. A mutation without local files retains
 the same shape with a null server selection and an empty upload list.
+For APKs, each upload also contains `apk_platform_inference`, recording the
+derived platforms, whether native libraries were present, and any ABI names
+which ngit did not recognize.
 
 ## Asset commands
 
@@ -847,7 +852,6 @@ assets:
   - file: dist/ngit-{version}-android-arm64-v8a.apk
     filename: ngit-{version}-android-arm64-v8a.apk
     mime: application/vnd.android.package-archive
-    platforms: [android-arm64-v8a]
     android:
       version_code: 10203
       certificate_sha256:
@@ -877,12 +881,37 @@ value. Relative local paths are resolved from the repository root and uploaded
 through the same ordered Blossom workflow as `--file`. No shell, environment
 variable, command, arbitrary template, or glob expansion is performed.
 
+A local APK is the one exception to the general requirement for an explicit
+`platforms` list: ngit derives its Android platforms from the exact stable
+snapshot it hashes and uploads. This makes a manifest containing a local APK a
+single-command zero-state workflow: when no NIP-82 events exist, `release
+publish` creates the linked application, asset, and release and sends them in
+that order. APKs cannot be marked `platform_agnostic`.
+
+ngit requires one non-empty root `AndroidManifest.xml`. When the archive
+contains native libraries under `lib/<abi>/*.so`, the supported ABI directories
+become `android-<abi>` platforms; the standard Android ABI names use the NIP-82
+spellings. Explicit platforms are merged only when they agree with those native
+libraries. With no native libraries, ngit emits the four standard Android ABI
+platforms and permits additional explicitly supplied `android-*` platforms.
+Unknown but safely encoded ABI names are retained and reported with the
+`apk_unknown_abi` warning. A declared non-Android platform, a platform absent
+from an APK which has native libraries, a MIME conflict, or an invalid archive
+fails before upload.
+
+v1 deliberately does not parse the binary manifest or APK signing blocks.
+`android.version_code` and at least one
+`android.certificate_sha256` therefore remain explicit, validated manifest
+metadata; `android.min_allowed_version_code` remains optional. This keeps ABI
+inference small and auditable without pretending filename or archive layout can
+prove package identity.
+
 CLI values override top-level manifest values. For release commit selection,
 precedence is `--commit`, top-level manifest `commit`, the prior value on edit,
 then `HEAD` on create. Release-wide and per-asset commit values are independent:
 the former identifies the source state represented by the release, while the
 latter may identify the source of one particular artifact. Direct asset flags
-append to manifest assets; they do not replace them. Duplicate final URLs or
+append to manifest assets; they do not replace them. Duplicate final URLs,
 local paths, or resolved filenames are rejected. Unknown schema versions and
 unknown keys are errors so a typo cannot silently discard metadata.
 
@@ -892,12 +921,13 @@ Protocol-optional metadata remains optional on the wire, but ngit requires an
 explicit decision where omission commonly creates a poor release:
 
 - Each new asset requires at least one platform or an explicit
-  `platform_agnostic: true`/`--platform-agnostic` acknowledgement.
+  `platform_agnostic: true`/`--platform-agnostic` acknowledgement, except that
+  local APK platforms may be inferred from the archive snapshot.
 - A missing filename or MIME type is inferred from the final URL, response
   headers, and content sniffing. Ambiguous or generic results produce a warning.
-- Android APK assets require a version code and signing certificate SHA-256.
-  When ngit can inspect the APK, extracted values override untrusted HTTP
-  metadata and conflicting caller values are rejected.
+- Android APK assets require an explicit version code and signing certificate
+  SHA-256. Local APK platform tags are inferred from the stable archive
+  snapshot and merged with compatible declarations.
 - Applications SHOULD have a summary, icon, website, repository URL, license,
   and platform hints. Creation warns about omissions but does not require them.
 - Releases SHOULD have non-empty notes. ngit-created releases identify a source
@@ -949,8 +979,7 @@ additional, added, and resulting platform sets.
 
 Publication order is:
 
-1. application, if a separate explicit application operation creates or links
-   it;
+1. the newly created, explicitly updated, or exact current application event;
 2. immutable asset events;
 3. the addressable release event.
 
@@ -1178,9 +1207,8 @@ fail closed with an actionable error.
   Avoid presenting it as guaranteed current, and do not replace a user-chosen
   repository URL merely because inference found another mirror.
 - Publishing a release can reveal platforms absent from the application's `f`
-  tags. Warn about the stale application summary, but never replace the
-  application as a side effect of release publication; that needs its own
-  explicit `app init --edit` operation.
+  tags. Fail by default. Only `--add-application-platforms` authorizes an
+  additive application replacement; preserve all unrelated metadata and links.
 
 ### Release consistency
 
@@ -1275,12 +1303,18 @@ fail closed with an actionable error.
 - Updating application platforms must preserve links to other repositories and
   unknown future tags. Reconstructing only the fields ngit understands can
   silently sever another publisher's metadata.
-- APK architecture, package version, SDK levels, certificate hash, and version
-  code should be extracted from the same bytes being hashed. Caller values that
-  conflict are errors.
+- APK architecture inference must inspect the same immutable bytes being
+  hashed. v1 derives ABI platforms only; version code and certificate hashes
+  stay explicit until a small, independently audited parser can validate them.
 - APKs can be split, universal, signed by multiple certificates, unsigned, or
   use signing schemes the parser does not understand. Fail safely rather than
   choosing an arbitrary certificate.
+- A Java/Kotlin-only APK has no native ABI directories. Treat it as supporting
+  the four standard Android ABIs, merge only explicit `android-*` additions,
+  and never call it platform agnostic.
+- Native ABI directory names can be novel. Preserve safe names as
+  `android-<abi>` with a structured warning; reject hostile archive names and
+  bound ZIP entry traversal work.
 - Certificate hashes and Android integers need canonical encoding and overflow
   checks. Version code zero may be technically encodable but should be treated
   deliberately.

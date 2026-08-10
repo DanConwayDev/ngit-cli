@@ -1,5 +1,6 @@
 pub mod accept_maintainership;
 pub mod agent_guidance;
+pub mod apk;
 pub mod blossom;
 pub mod cli_interactor;
 pub mod client;

@@ -6,7 +6,11 @@
 //! bounded in-process HTTP server so they exercise the real downloader while
 //! remaining hermetic.
 
-use std::{fs, time::Duration};
+use std::{
+    fs,
+    io::{Cursor, Write},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
@@ -23,6 +27,7 @@ use tokio::{
     net::TcpListener,
     task::JoinHandle,
 };
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 const APP_ID: &str = "ngit-release-test";
 const RELEASE_VERSION: &str = "1.2.3";
@@ -500,22 +505,24 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
 
 #[tokio::test]
 async fn local_apk_manifest_upload_preserves_android_metadata() -> Result<()> {
-    const APK_BYTES: &[u8] = b"manifest Android package fixture\n";
     const CERTIFICATE_SHA256: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     let (harness, publisher, published) = setup(0).await?;
-    create_application(&publisher).await?;
+    let apk_bytes = android_apk(&[
+        ("AndroidManifest.xml", b"binary manifest fixture"),
+        ("lib/arm64-v8a/libngit.so", b"native fixture"),
+    ])?;
     let dist = publisher.dir().join("dist");
     fs::create_dir_all(&dist).context("failed to create release artifact directory")?;
-    fs::write(dist.join("ngit-1.2.3.apk"), APK_BYTES)
+    fs::write(dist.join("ngit-1.2.3.apk"), &apk_bytes)
         .context("failed to write local Android release asset")?;
 
-    let hash = sha256_hex(APK_BYTES);
+    let hash = sha256_hex(&apk_bytes);
     let blossom = BlossomHttpServer::descriptor(
         "201 Created",
         &hash,
-        APK_BYTES.len() as u64,
+        apk_bytes.len() as u64,
         "application/vnd.android.package-archive",
     )
     .await?;
@@ -529,7 +536,6 @@ assets:
   - file: dist/ngit-{{version}}.apk
     filename: ngit-{{version}}-android-arm64-v8a.apk
     mime: application/vnd.android.package-archive
-    platforms: [android-arm64-v8a]
     android:
       version_code: 10203
       min_allowed_version_code: 10100
@@ -560,9 +566,34 @@ assets:
     let request = blossom.finish().await?;
 
     ensure!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
-    ensure!(request.body == APK_BYTES);
+    ensure!(request.body == apk_bytes);
+    ensure!(output["result"]["application_operation"] == "created");
+    ensure!(
+        output["result"]["publication"]["ordered_events"]
+            .as_array()
+            .context("publication events were not an array")?
+            .iter()
+            .map(|event| event["entity"].as_str())
+            .collect::<Vec<_>>()
+            == [Some("application"), Some("asset"), Some("release")]
+    );
     ensure!(output["result"]["blossom"]["server_selection"]["source"] == "explicit");
     ensure!(output["result"]["blossom"]["uploads"][0]["sha256"] == hash);
+    ensure!(
+        output["result"]["blossom"]["uploads"][0]["apk_platform_inference"]["derived_platforms"][0]
+            == "android-arm64-v8a"
+    );
+
+    let application = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_APPLICATION_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(APP_ID),
+        "manifest-bootstrapped Android software application",
+    )
+    .await?;
+    ensure!(tag_values(&application, "f") == ["android-arm64-v8a"]);
 
     let asset = SoftwareAsset::parse(
         &single_event(
@@ -579,7 +610,7 @@ assets:
     ensure!(asset.filename.as_deref() == Some("ngit-1.2.3-android-arm64-v8a.apk"));
     ensure!(asset.mime == "application/vnd.android.package-archive");
     ensure!(asset.sha256 == hash);
-    ensure!(asset.size == Some(APK_BYTES.len() as u64));
+    ensure!(asset.size == Some(apk_bytes.len() as u64));
     ensure!(asset.platforms == ["android-arm64-v8a"]);
     ensure!(asset.version_code == Some(10203));
     ensure!(asset.min_allowed_version_code == Some(10100));
@@ -599,6 +630,66 @@ assets:
     .map_err(|error| anyhow::anyhow!(error))?;
     ensure!(release.assets[0].event_id == asset.raw_event.id);
     ensure!(release.platforms == ["android-arm64-v8a"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_apk_rejects_platforms_absent_from_native_libraries() -> Result<()> {
+    const CERTIFICATE_SHA256: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let (harness, publisher, published) = setup(0).await?;
+    let apk_bytes = android_apk(&[
+        ("AndroidManifest.xml", b"binary manifest fixture"),
+        ("lib/arm64-v8a/libngit.so", b"native fixture"),
+    ])?;
+    fs::write(publisher.dir().join("ngit.apk"), apk_bytes)
+        .context("failed to write local Android release asset")?;
+    fs::write(
+        publisher.dir().join("release.yaml"),
+        format!(
+            r#"schema: 1
+application: {APP_ID}
+assets:
+  - file: ngit.apk
+    platforms: [android-x86_64]
+    android:
+      version_code: 10203
+      certificate_sha256: [{CERTIFICATE_SHA256}]
+"#,
+        ),
+    )
+    .context("failed to write release manifest")?;
+
+    let failure = run_json_expecting_failure(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--manifest",
+            "release.yaml",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(failure["error"]["code"] == "apk_platform_conflict");
+    ensure!(failure["error"]["details"]["derived_platforms"][0] == "android-arm64-v8a");
+    ensure!(failure["error"]["details"]["conflicting_platforms"][0] == "android-x86_64");
+
+    let events = harness
+        .relay("default")
+        .events(Filter::new().author(published.maintainer_keys.public_key()))
+        .await?;
+    ensure!(
+        events.iter().all(|event| ![
+            SOFTWARE_APPLICATION_KIND,
+            SOFTWARE_ASSET_KIND,
+            SOFTWARE_RELEASE_KIND,
+        ]
+        .contains(&event.kind)),
+        "APK preflight failure published NIP-82 events"
+    );
     Ok(())
 }
 
@@ -1673,6 +1764,16 @@ fn asset_named<'a>(assets: &'a [SoftwareAsset], filename: &str) -> Result<&'a So
 
 fn sha256_hex(bytes: &[u8]) -> String {
     sha256::Hash::hash(bytes).to_string()
+}
+
+fn android_apk(entries: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in entries {
+        writer.start_file(*name, options)?;
+        writer.write_all(bytes)?;
+    }
+    Ok(writer.finish()?.into_inner())
 }
 
 struct CapturedBlossomRequest {

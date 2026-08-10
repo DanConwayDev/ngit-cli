@@ -78,7 +78,7 @@ pub struct FileSnapshot {
 }
 
 impl FileSnapshot {
-    fn reopen(&self) -> Result<File> {
+    pub(crate) fn reopen(&self) -> Result<File> {
         self.file
             .reopen()
             .context("failed to reopen the stable asset snapshot")

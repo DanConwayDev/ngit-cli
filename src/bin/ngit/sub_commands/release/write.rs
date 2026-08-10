@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use ngit::{
+    apk::{APK_MIME_TYPE, ApkPlatformInference, inspect_apk_platforms},
     blossom::{
         BlossomServerList, BlossomServerOperation, BlossomServerOutcome, BlossomServerStatus,
         FileSnapshot, LocalFileRequest, MultiServerUpload, MultiServerUploadError,
@@ -229,6 +230,7 @@ pub(super) async fn release_publish(
                 vec![platform.to_owned()],
                 &application_target,
                 &args.release_version,
+                false,
             ),
         )
         .await?;
@@ -238,7 +240,13 @@ pub(super) async fn release_publish(
     for path in &args.platform_agnostic_files {
         let pending = prepare_file_asset(
             &mut context,
-            NewFileAsset::simple(path, Vec::new(), &application_target, &args.release_version),
+            NewFileAsset::simple(
+                path,
+                Vec::new(),
+                &application_target,
+                &args.release_version,
+                true,
+            ),
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &pending.input)?;
@@ -546,9 +554,18 @@ pub(super) async fn asset_add(
     let application_target = ApplicationTarget::from(&application);
 
     let mut assets = require_all_assets(&mut context, &release).await?;
+    let local_apk_candidate = args.file.as_ref().is_some_and(|path| {
+        path.to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with(".apk")
+    }) || args
+        .mime
+        .as_deref()
+        .is_some_and(|mime| mime.eq_ignore_ascii_case(APK_MIME_TYPE));
     if (args.url.is_some() || args.file.is_some())
         && args.platforms.is_empty()
         && !args.platform_agnostic
+        && !local_apk_candidate
     {
         return Err(coded_error(
             "asset_platform_required",
@@ -566,6 +583,7 @@ pub(super) async fn asset_add(
             NewFileAsset {
                 source_path: path.clone(),
                 metadata: asset_add_metadata(args, String::new(), &application, &release),
+                platform_agnostic: args.platform_agnostic,
             },
         )
         .await?;
@@ -1579,6 +1597,7 @@ fn asset_add_metadata(
 struct NewFileAsset {
     source_path: std::path::PathBuf,
     metadata: NewUrlAsset,
+    platform_agnostic: bool,
 }
 
 impl NewFileAsset {
@@ -1587,10 +1606,12 @@ impl NewFileAsset {
         platforms: Vec<String>,
         application: &ApplicationTarget,
         release_version: &str,
+        platform_agnostic: bool,
     ) -> Self {
         Self {
             source_path: source_path.to_path_buf(),
             metadata: NewUrlAsset::simple("", platforms, application, release_version),
+            platform_agnostic,
         }
     }
 
@@ -1602,6 +1623,7 @@ impl NewFileAsset {
     ) -> Self {
         Self {
             source_path: source_path.to_path_buf(),
+            platform_agnostic: asset.platform_agnostic,
             metadata: NewUrlAsset::from_manifest(
                 asset,
                 String::new(),
@@ -1617,6 +1639,7 @@ struct PendingFileAsset {
     source_path: String,
     input: AssetInput,
     snapshot: FileSnapshot,
+    apk_platform_inference: Option<Box<ApkPlatformInference>>,
 }
 
 #[derive(Debug)]
@@ -1658,6 +1681,15 @@ async fn prepare_file_asset(
     })?;
     append_download_warnings(context, &snapshot.warnings)?;
 
+    let mut platforms = proposed.metadata.platforms;
+    let apk_platform_inference = infer_apk_platforms(
+        context,
+        &snapshot,
+        &proposed.source_path,
+        &mut platforms,
+        proposed.platform_agnostic,
+    )?;
+
     let input = AssetInput {
         application: Some(AddressPointer {
             coordinate: proposed.metadata.application_coordinate,
@@ -1670,7 +1702,7 @@ async fn prepare_file_asset(
         mime: snapshot.mime_type.clone(),
         sha256: snapshot.sha256.clone(),
         size: Some(snapshot.size),
-        platforms: proposed.metadata.platforms,
+        platforms,
         min_platform_version: proposed.metadata.min_platform_version,
         target_platform_version: proposed.metadata.target_platform_version,
         supported_nips: proposed.metadata.supported_nips,
@@ -1689,7 +1721,100 @@ async fn prepare_file_asset(
         source_path: proposed.source_path.display().to_string(),
         input,
         snapshot,
+        apk_platform_inference: apk_platform_inference.map(Box::new),
     })
+}
+
+fn infer_apk_platforms(
+    context: &mut ReleaseContext,
+    snapshot: &FileSnapshot,
+    source_path: &Path,
+    platforms: &mut Vec<String>,
+    platform_agnostic: bool,
+) -> Result<Option<ApkPlatformInference>> {
+    let source_is_apk = source_path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .ends_with(".apk");
+    let filename_is_apk = snapshot.filename.to_ascii_lowercase().ends_with(".apk");
+    let mime_is_apk = snapshot.mime_type.eq_ignore_ascii_case(APK_MIME_TYPE);
+    if !source_is_apk && !filename_is_apk && !mime_is_apk {
+        return Ok(None);
+    }
+    if !mime_is_apk {
+        return Err(coded_error_with_details(
+            "apk_platform_conflict",
+            "the local asset looks like an APK but its resolved MIME type is not the Android package MIME type",
+            json!({
+                "source": source_path.display().to_string(),
+                "filename": snapshot.filename,
+                "resolved_mime": snapshot.mime_type,
+                "expected_mime": APK_MIME_TYPE,
+            }),
+        ));
+    }
+    if platform_agnostic {
+        return Err(coded_error(
+            "apk_platform_conflict",
+            "Android APK assets cannot be platform agnostic",
+        ));
+    }
+
+    let inference = inspect_apk_platforms(snapshot).map_err(|error| {
+        coded_error_with_details(
+            "invalid_apk",
+            format!(
+                "cannot infer Android platforms from {}: {error:#}",
+                snapshot.filename
+            ),
+            json!({
+                "source": source_path.display().to_string(),
+                "filename": snapshot.filename,
+            }),
+        )
+    })?;
+    let derived = inference
+        .derived_platforms
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let conflicting = platforms
+        .iter()
+        .filter(|platform| {
+            if inference.native_libraries_present {
+                !derived.contains(platform.as_str())
+            } else {
+                !platform.starts_with("android-")
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !conflicting.is_empty() {
+        return Err(coded_error_with_details(
+            "apk_platform_conflict",
+            "declared platforms contradict the platforms supported by the APK",
+            json!({
+                "declared_platforms": platforms,
+                "derived_platforms": inference.derived_platforms,
+                "conflicting_platforms": conflicting,
+                "native_libraries_present": inference.native_libraries_present,
+            }),
+        ));
+    }
+
+    platforms.extend(inference.derived_platforms.iter().cloned());
+    platforms.sort();
+    platforms.dedup();
+    if !inference.unknown_abis.is_empty() {
+        context.warnings.push(WarningJson::new(
+            "apk_unknown_abi",
+            format!(
+                "the APK contains unrecognized native ABI directories: {}",
+                inference.unknown_abis.join(", ")
+            ),
+        ));
+    }
+    Ok(Some(inference))
 }
 
 async fn resolve_blossom_server_selection(
@@ -1890,6 +2015,7 @@ fn blossom_upload_json(pending: &PendingFileAsset, upload: &MultiServerUpload) -
         "sha256": pending.snapshot.sha256,
         "size": pending.snapshot.size.to_string(),
         "mime": pending.snapshot.mime_type,
+        "apk_platform_inference": pending.apk_platform_inference,
         "primary_url": upload.primary.url,
         "servers": upload.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
     })
@@ -1902,6 +2028,7 @@ fn failed_blossom_upload_json(pending: &PendingFileAsset, error: &MultiServerUpl
         "sha256": pending.snapshot.sha256,
         "size": pending.snapshot.size.to_string(),
         "mime": pending.snapshot.mime_type,
+        "apk_platform_inference": pending.apk_platform_inference,
         "primary_url": error.servers.first().and_then(|outcome| outcome.descriptor.as_ref()).map(|descriptor| descriptor.url.as_str()),
         "servers": error.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
     })
@@ -2289,6 +2416,7 @@ fn is_metadata_warning(code: &str) -> bool {
             | "invalid_mime_hint"
             | "mime_conflict"
             | "generic_mime"
+            | "apk_unknown_abi"
     )
 }
 

@@ -15,6 +15,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Url;
 use serde::Deserialize;
 
+use crate::apk::APK_MIME_TYPE;
+
 /// Project-relative location used when no explicit manifest path is supplied.
 pub const DEFAULT_RELEASE_MANIFEST_PATH: &str = ".ngit/release.yaml";
 
@@ -340,19 +342,34 @@ impl ReleaseManifestAsset {
         normalize_string_list("platforms", &mut self.platforms)?;
         normalize_string_list("supported_nips", &mut self.supported_nips)?;
 
+        let apk = self
+            .mime
+            .as_deref()
+            .is_some_and(|mime| mime.eq_ignore_ascii_case(APK_MIME_TYPE))
+            || self
+                .file
+                .as_deref()
+                .is_some_and(|file| file.to_ascii_lowercase().ends_with(".apk"))
+            || self
+                .filename
+                .as_deref()
+                .is_some_and(|filename| filename.to_ascii_lowercase().ends_with(".apk"));
+        let local_apk = apk && self.file.is_some();
+
         if self.platform_agnostic && !self.platforms.is_empty() {
             bail!("platforms and platform_agnostic: true are mutually exclusive");
         }
-        if !self.platform_agnostic && self.platforms.is_empty() {
+        if self.platform_agnostic && apk {
+            bail!("Android APK assets cannot be platform agnostic");
+        }
+        if !self.platform_agnostic && self.platforms.is_empty() && !local_apk {
             bail!("provide at least one platform or set platform_agnostic: true");
         }
 
         if let Some(android) = &mut self.android {
             android.validate_and_normalize()?;
         }
-        if self.mime.as_deref().is_some_and(|mime| {
-            mime.eq_ignore_ascii_case("application/vnd.android.package-archive")
-        }) {
+        if apk {
             let android = self
                 .android
                 .as_ref()
@@ -736,12 +753,12 @@ assets:
             r#"
 schema: 1
 assets:
-  - file: dist/{version}/ngit.apk
-    filename: one.apk
-    platforms: [android-arm64-v8a]
-  - file: dist/1/ngit.apk
-    filename: two.apk
-    platforms: [android-arm64-v8a]
+  - file: dist/{version}/ngit.zip
+    filename: one.zip
+    platforms: [linux-x86_64]
+  - file: dist/1/ngit.zip
+    filename: two.zip
+    platforms: [linux-x86_64]
 "#,
         )
         .unwrap();
@@ -866,6 +883,45 @@ assets:
         )
         .unwrap_err();
         assert!(format!("{invalid_hash:#}").contains("64 hexadecimal"));
+    }
+
+    #[test]
+    fn local_apks_may_leave_platforms_for_snapshot_inference() {
+        let manifest = parse_release_manifest(
+            r#"
+schema: 1
+assets:
+  - file: dist/app.apk
+    android:
+      version_code: 1
+      certificate_sha256:
+        - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#,
+        )
+        .unwrap();
+        assert!(manifest.assets[0].platforms.is_empty());
+
+        let error = parse_release_manifest(
+            r#"
+schema: 1
+assets:
+  - file: dist/app.apk
+    platform_agnostic: true
+    android:
+      version_code: 1
+      certificate_sha256:
+        - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("cannot be platform agnostic"));
+    }
+
+    #[test]
+    fn local_apks_still_require_explicit_android_identity_metadata() {
+        let error =
+            parse_release_manifest("schema: 1\nassets:\n  - file: dist/app.apk\n").unwrap_err();
+        assert!(format!("{error:#}").contains("android metadata block"));
     }
 
     #[test]
