@@ -190,22 +190,25 @@ ngit pr checkout <ID|nevent>
 ### Merge (maintainer)
 
 ```bash
-ngit merge <ID|nevent>                    # merge PR into default branch; does not push
+ngit merge <ID|nevent>                    # merge into the PR's declared target; does not push
 ngit pr checkout <ID|nevent>
 ngit merge                                # infers PR from checked-out pr/ branch
 ngit merge --exclude-description <ID|nevent>
-git push origin main                      # publishes the merge event
+git push origin <target-branch>           # publishes the merge and applied status
 ```
 
-`ngit merge` creates a no-ff merge commit on the default branch with the
-standard `Merge #<8-hex>: <PR title>` message. If conflicts occur, resolve them
-and run `git commit`; ngit has already prepared the commit message.
+`ngit merge` creates a no-ff merge commit on the PR's indexed `b` target, or on
+the repository default when the PR has no explicit target, with the standard
+`Merge #<8-hex>: <PR title>` message. It resolves an explicit target against
+the latest Nostr repository state, so a stale local tracking ref cannot route
+the merge onto old history. If conflicts occur, resolve them and run
+`git commit`; ngit has already prepared the commit message.
 
 Before adding maintainer fixes or merging, inspect PR-only merge commits with
-`git log --merges --oneline origin/<default>..HEAD`. If it shows a prior
+`git log --merges --oneline origin/<target>..HEAD`. If it shows a prior
 `Merge #...`, stop: `ngit merge` would create nested merge history. Unless that
 history is intentional, rebase or cherry-pick the PR commits onto the current
-default branch before updating the PR.
+target branch before updating the PR.
 
 ### Lifecycle
 

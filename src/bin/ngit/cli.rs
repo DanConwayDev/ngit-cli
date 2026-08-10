@@ -241,10 +241,10 @@ pub enum Commands {
         long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`"
     )]
     Pr(PrSubCommandArgs),
-    /// merge a PR into the default branch as a no-ff merge commit (does not
-    /// push)
+    /// merge a PR into its declared target, or the default branch, as a no-ff
+    /// merge commit (does not push)
     #[command(
-        long_about = "merge a PR into the default branch as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
+        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
     )]
     Merge(MergeSubCommandArgs),
     /// work with issues

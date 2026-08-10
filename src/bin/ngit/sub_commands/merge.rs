@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use ngit::{
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
-        get_proposals_and_revisions_from_cache,
+        get_proposals_and_revisions_from_cache, get_state_from_cache,
     },
     fetch::ensure_commit_local,
     git_events::{
@@ -12,7 +12,7 @@ use ngit::{
         process_subject, tag_value,
     },
     login::{get_curent_user, user::extract_user_metadata},
-    proposal_base::resolve_target_branch_tip,
+    proposal_base::resolve_target_branch_tip_with_known_tip,
     utils::get_open_or_draft_proposals,
 };
 use nostr::prelude::{EventId, PublicKey, RelayUrl, ToBech32, nip19::Nip19Event};
@@ -169,7 +169,47 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
     };
 
     if explicit_target.is_some() {
-        let target_tip = resolve_target_branch_tip(&git_repo, &target_branch, None, false)?;
+        // Unlike a default-branch merge, a maintainer may never have checked
+        // out this release or maintenance branch. Its remote-tracking ref can
+        // therefore be stale even though the online event refresh above has
+        // learned the latest authoritative repository state. Include that
+        // state tip when selecting the merge target and fetch its object by
+        // OID without mutating any tracking refs.
+        let state = get_state_from_cache(Some(git_repo_path), &repo_ref)
+            .await
+            .context("failed to read the latest repository state for the PR target")?;
+        let target_ref = format!("refs/heads/{target_branch}");
+        let state_target = state.state.get(&target_ref).with_context(|| {
+            format!(
+                "target branch '{target_branch}' is absent from the latest repository state; it may have been deleted"
+            )
+        })?;
+        let state_target_tip = str_to_sha1(state_target)
+            .with_context(|| format!("repository state has an invalid tip for '{target_ref}'"))?;
+        if !git_repo.does_commit_exist(state_target)? {
+            if offline {
+                bail!(
+                    "target branch '{target_branch}' tip {state_target} is not available locally; rerun without --offline"
+                );
+            }
+            ensure_commit_local(
+                state_target,
+                &git_repo,
+                &repo_ref,
+                &[],
+                &console::Term::stderr(),
+            )
+            .with_context(|| {
+                format!("failed to fetch target branch '{target_branch}' tip {state_target}")
+            })?;
+        }
+        let target_tip = resolve_target_branch_tip_with_known_tip(
+            &git_repo,
+            &target_branch,
+            None,
+            false,
+            Some(state_target_tip),
+        )?;
         git_repo.create_branch_at_commit(&target_branch, &target_tip.to_string())?;
     } else if !git_repo
         .get_local_branch_names()

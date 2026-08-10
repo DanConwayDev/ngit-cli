@@ -81,7 +81,20 @@ fn resolve_event_id_or_prefix(reference: &str, events: &[Event]) -> Result<Optio
 }
 
 pub fn visible_branch_tip(git_repo: &Repo, branch: &str) -> Result<Option<Sha1Hash>> {
-    let tips = git_repo.get_branch_tips(branch)?;
+    visible_branch_tip_with_known_tip(git_repo, branch, None)
+}
+
+fn visible_branch_tip_with_known_tip(
+    git_repo: &Repo,
+    branch: &str,
+    known_tip: Option<Sha1Hash>,
+) -> Result<Option<Sha1Hash>> {
+    let mut tips = git_repo.get_branch_tips(branch)?;
+    if let Some(known_tip) = known_tip {
+        if !tips.contains(&known_tip) {
+            tips.push(known_tip);
+        }
+    }
     if tips.is_empty() {
         return Ok(None);
     }
@@ -94,7 +107,7 @@ pub fn visible_branch_tip(git_repo: &Repo, branch: &str) -> Result<Option<Sha1Ha
     match most_advanced {
         Some(tip) => Ok(Some(*tip)),
         None => {
-            bail!("branch '{branch}' has divergent local or remote tips; specify a commit instead")
+            bail!("branch '{branch}' has divergent visible tips; reconcile them before continuing")
         }
     }
 }
@@ -110,12 +123,32 @@ pub fn resolve_target_branch_tip(
     declared_default: Option<&str>,
     reject_default: bool,
 ) -> Result<Sha1Hash> {
+    resolve_target_branch_tip_with_known_tip(
+        git_repo,
+        branch,
+        declared_default,
+        reject_default,
+        None,
+    )
+}
+
+/// Validate a proposal target and resolve it together with an authoritative
+/// tip learned outside the local Git refs, such as the latest Nostr repository
+/// state.
+pub fn resolve_target_branch_tip_with_known_tip(
+    git_repo: &Repo,
+    branch: &str,
+    declared_default: Option<&str>,
+    reject_default: bool,
+    known_tip: Option<Sha1Hash>,
+) -> Result<Sha1Hash> {
     if branch.is_empty() || !git2::Reference::is_valid_name(&format!("refs/heads/{branch}")) {
         bail!("invalid target branch name '{branch}'");
     }
-    let tip = visible_branch_tip(git_repo, branch)?.with_context(|| {
-        format!("target branch '{branch}' does not exist locally or on a remote")
-    })?;
+    let tip =
+        visible_branch_tip_with_known_tip(git_repo, branch, known_tip)?.with_context(|| {
+            format!("target branch '{branch}' does not exist locally or on a remote")
+        })?;
     if reject_default
         && git_repo
             .get_default_branch_name(declared_default)?
@@ -593,6 +626,29 @@ mod tests {
 
         assert_eq!(
             resolve_target_branch_tip(&git_repo, "release/2.x", None, true)?,
+            oid_to_sha1(&advanced)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn target_resolution_includes_an_advanced_repository_state_tip() -> Result<()> {
+        let fixture = GitTestRepo::default();
+        let advanced = fixture.populate()?;
+        let stale = fixture.git_repo.find_commit(advanced)?.parent_id(0)?;
+        fixture
+            .git_repo
+            .branch("release/2.x", &fixture.git_repo.find_commit(stale)?, false)?;
+        let git_repo = Repo::from_path(&fixture.dir)?;
+
+        assert_eq!(
+            resolve_target_branch_tip_with_known_tip(
+                &git_repo,
+                "release/2.x",
+                None,
+                true,
+                Some(oid_to_sha1(&advanced)),
+            )?,
             oid_to_sha1(&advanced)
         );
         Ok(())

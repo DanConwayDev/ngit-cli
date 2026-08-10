@@ -174,6 +174,29 @@ async fn send_and_git_push_target_a_non_default_branch() -> Result<()> {
             .iter()
             .any(|event| event_root_e_tag(event) == Some(targeted.id))
     );
+
+    let release_before_second_merge = maintainer.rev_parse("release/2.x").await?;
+    ngit_ok(&maintainer, &["pr", "checkout", &pushed_target.id.to_hex()]).await?;
+    ngit_ok(&maintainer, &["merge", "--exclude-description"]).await?;
+    assert_eq!(
+        maintainer.rev_parse("release/2.x^1").await?,
+        release_before_second_merge
+    );
+    assert_eq!(
+        maintainer.rev_parse("release/2.x^2").await?,
+        pushed_update_tip
+    );
+    assert_eq!(maintainer.rev_parse("main").await?, main_before_merge);
+    maintainer.nostr_push(["upstream", "release/2.x"]).await?;
+    let applied = harness
+        .grasp("repo")
+        .events(Filter::new().kind(Kind::GitStatusApplied))
+        .await?;
+    assert!(
+        applied
+            .iter()
+            .any(|event| event_root_e_tag(event) == Some(pushed_target.id))
+    );
     Ok(())
 }
 
@@ -248,6 +271,162 @@ async fn send_uses_advanced_remote_target_when_local_target_is_stale() -> Result
         tag_value(&proposal, "merge-base").as_deref(),
         Some(advanced_target.as_str())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn merge_uses_advanced_state_target_when_tracking_ref_is_stale() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("pr-stale-merge-target-test".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    publisher
+        .git_ok(["checkout", "-b", "release/2.x"], "create target branch")
+        .await?;
+    commit_file(&publisher, "release-one.md", "one\n", "release one").await?;
+    publisher
+        .nostr_push(["-u", "origin", "release/2.x"])
+        .await?;
+
+    let maintainer = harness
+        .clone_published_repo(&published, CloneLogin::AsMaintainer)
+        .await?;
+    let stale_target = maintainer.rev_parse("origin/release/2.x").await?;
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "stale merge target contributor".into(),
+            },
+        )
+        .await?;
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/release-fix", "origin/release/2.x"],
+            "create targeted PR",
+        )
+        .await?;
+    commit_file(&contributor, "fix.md", "fix\n", "release fix").await?;
+    let proposal_tip = contributor.rev_parse("HEAD").await?;
+    contributor
+        .nostr_push([
+            "-u",
+            "origin",
+            "pr/release-fix",
+            "-o",
+            "target-branch=release/2.x",
+        ])
+        .await?;
+    let proposal = find_pr(&harness, "release-fix").await?;
+
+    commit_file(&publisher, "release-two.md", "two\n", "release two").await?;
+    publisher.nostr_push(["origin", "release/2.x"]).await?;
+    let advanced_target = publisher.rev_parse("release/2.x").await?;
+    assert_ne!(advanced_target, stale_target);
+    assert_eq!(
+        maintainer.rev_parse("origin/release/2.x").await?,
+        stale_target,
+        "the regression requires a stale remote-tracking ref"
+    );
+
+    ngit_ok(
+        &maintainer,
+        &["merge", &proposal.id.to_hex(), "--exclude-description"],
+    )
+    .await?;
+
+    assert_eq!(
+        maintainer.rev_parse("release/2.x^1").await?,
+        advanced_target
+    );
+    assert_eq!(maintainer.rev_parse("release/2.x^2").await?, proposal_tip);
+    assert_eq!(
+        maintainer.rev_parse("origin/release/2.x").await?,
+        stale_target,
+        "ngit merge should fetch the target object without mutating tracking refs"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn merge_rejects_a_target_deleted_from_repository_state() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("pr-deleted-merge-target-test".into()),
+            ..Default::default()
+        })
+        .await?;
+
+    publisher
+        .git_ok(["checkout", "-b", "release/2.x"], "create target branch")
+        .await?;
+    commit_file(&publisher, "release.md", "release\n", "release target").await?;
+    publisher
+        .nostr_push(["-u", "origin", "release/2.x"])
+        .await?;
+
+    let maintainer = harness
+        .clone_published_repo(&published, CloneLogin::AsMaintainer)
+        .await?;
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "deleted merge target contributor".into(),
+            },
+        )
+        .await?;
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/release-fix", "origin/release/2.x"],
+            "create targeted PR",
+        )
+        .await?;
+    commit_file(&contributor, "fix.md", "fix\n", "release fix").await?;
+    contributor
+        .nostr_push([
+            "-u",
+            "origin",
+            "pr/release-fix",
+            "-o",
+            "target-branch=release/2.x",
+        ])
+        .await?;
+    let proposal = find_pr(&harness, "release-fix").await?;
+
+    publisher.nostr_push(["origin", ":release/2.x"]).await?;
+    let main_before_merge = maintainer.rev_parse("main").await?;
+    ngit_fails(
+        &maintainer,
+        &["merge", &proposal.id.to_hex(), "--exclude-description"],
+    )
+    .await?;
+
+    assert_eq!(maintainer.rev_parse("main").await?, main_before_merge);
+    let local_target = maintainer
+        .git(["rev-parse", "--verify", "refs/heads/release/2.x"])
+        .output()
+        .await?;
+    assert!(!local_target.status.success());
     Ok(())
 }
 
