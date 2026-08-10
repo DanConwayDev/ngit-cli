@@ -544,6 +544,27 @@ pub struct ApplicationInput {
     pub created_at: Option<Timestamp>,
 }
 
+impl From<&SoftwareApplication> for ApplicationInput {
+    fn from(application: &SoftwareApplication) -> Self {
+        Self {
+            identifier: application.identifier.clone(),
+            name: application.name.clone(),
+            description: application.description.clone(),
+            summary: application.summary.clone(),
+            icon: application.icon.clone(),
+            images: application.images.clone(),
+            topics: application.topics.clone(),
+            website: application.website.clone(),
+            repository: application.repository.clone(),
+            repository_coordinates: application.repository_coordinates.clone(),
+            platforms: application.platforms.clone(),
+            license: application.license.clone(),
+            extra_tags: application.extra_tags.clone(),
+            created_at: None,
+        }
+    }
+}
+
 pub fn application_event_builder(input: ApplicationInput) -> Result<EventBuilder, ValidationError> {
     let mut issues = Vec::new();
     validate_input_required("d", &input.identifier, &mut issues);
@@ -1486,6 +1507,24 @@ mod tests {
         assert_eq!(parsed.repository_coordinates.len(), 1);
         assert_eq!(parsed.extra_tags, vec![foreign]);
         assert_eq!(values(&event, "name").collect::<Vec<_>>(), vec!["ngit"]);
+
+        let preserved = ApplicationInput::from(&parsed);
+        assert_eq!(preserved.identifier, parsed.identifier);
+        assert_eq!(preserved.name, parsed.name);
+        assert_eq!(preserved.description, parsed.description);
+        assert_eq!(preserved.summary, parsed.summary);
+        assert_eq!(preserved.icon, parsed.icon);
+        assert_eq!(preserved.images, parsed.images);
+        assert_eq!(preserved.topics, parsed.topics);
+        assert_eq!(preserved.website, parsed.website);
+        assert_eq!(preserved.repository, parsed.repository);
+        assert_eq!(
+            preserved.repository_coordinates,
+            parsed.repository_coordinates
+        );
+        assert_eq!(preserved.platforms, parsed.platforms);
+        assert_eq!(preserved.license, parsed.license);
+        assert_eq!(preserved.extra_tags, parsed.extra_tags);
     }
 
     #[test]

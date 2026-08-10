@@ -665,7 +665,7 @@ async fn adding_an_existing_asset_preserves_release_assets_and_order() -> Result
     )?;
     publish_to_default_relay(&harness, &second).await?;
     wait_for_relay_event(&harness, second.id).await?;
-    let added = run_json(
+    let refused = run_json_expecting_failure(
         &publisher,
         &[
             "release",
@@ -679,7 +679,28 @@ async fn adding_an_existing_asset_preserves_release_assets_and_order() -> Result
         ],
     )
     .await?;
+    ensure!(refused["error"]["code"] == "application_platform_update_required");
+    let added = run_json(
+        &publisher,
+        &[
+            "release",
+            "asset",
+            "add",
+            RELEASE_IDENTIFIER,
+            "--event",
+            &second.id.to_hex(),
+            "--add-application-platforms",
+            "--edit",
+            "--json",
+        ],
+    )
+    .await?;
     ensure!(added["result"]["operation"] == "asset_added");
+    ensure!(added["result"]["application_operation"] == "edited");
+    ensure!(
+        added["result"]["platform_policy"]["application_platforms_added"]
+            == serde_json::json!(["linux-aarch64"])
+    );
 
     let replacement = single_event(
         &harness,
@@ -693,6 +714,16 @@ async fn adding_an_existing_asset_preserves_release_assets_and_order() -> Result
     ensure!(replacement.id != initial.id);
     ensure!(tag_values(&replacement, "e") == vec![first.id.to_hex(), second.id.to_hex()]);
     ensure!(tag_values(&replacement, "f") == vec!["linux-aarch64", "linux-x86_64"]);
+    let updated_application = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_APPLICATION_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(APP_ID),
+        "platform-updated software application",
+    )
+    .await?;
+    ensure!(tag_values(&updated_application, "f") == vec!["linux-aarch64", "linux-x86_64"]);
     Ok(())
 }
 
@@ -757,6 +788,76 @@ async fn co_maintainer_cannot_publish_for_an_application_owned_by_another_mainta
     Ok(())
 }
 
+#[tokio::test]
+async fn non_main_platform_subsets_require_explicit_compatibility_acknowledgement() -> Result<()> {
+    let (harness, publisher, published) = setup(0).await?;
+    create_application_with_platforms(&publisher, &["linux-x86_64", "windows-x86_64"]).await?;
+    let asset = asset_event(&published, "ngit-linux-x86_64.tar.gz", "33", "linux-x86_64")?;
+    publish_to_default_relay(&harness, &asset).await?;
+    wait_for_relay_event(&harness, asset.id).await?;
+
+    let main_refused = run_json_expecting_failure(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--asset-event",
+            &asset.id.to_hex(),
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(main_refused["error"]["code"] == "release_platform_coverage_incomplete");
+
+    let beta_refused = run_json_expecting_failure(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--channel",
+            "beta",
+            "--asset-event",
+            &asset.id.to_hex(),
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(beta_refused["error"]["code"] == "partial_platform_confirmation_required");
+
+    let published_release = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--channel",
+            "beta",
+            "--asset-event",
+            &asset.id.to_hex(),
+            "--allow-partial-platforms",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(published_release["result"]["platform_policy"]["partial_release"] == true);
+    ensure!(
+        published_release["warnings"]
+            .as_array()
+            .context("release warnings were not an array")?
+            .iter()
+            .any(|warning| warning["code"] == "partial_platform_release")
+    );
+    Ok(())
+}
+
 async fn setup(additional_maintainer_count: usize) -> Result<(Harness, Repo, PublishedRepo)> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
@@ -779,32 +880,34 @@ async fn setup(additional_maintainer_count: usize) -> Result<(Harness, Repo, Pub
 }
 
 async fn create_application(repo: &Repo) -> Result<()> {
-    let created = run_json(
-        repo,
-        &[
-            "release",
-            "app",
-            "init",
-            "--id",
-            APP_ID,
-            "--name",
-            "ngit release test",
-            "--description",
-            "Exercises the NIP-82 release API",
-            "--summary",
-            "release fixture",
-            "--website",
-            "https://example.invalid/ngit-release-test",
-            "--icon",
-            "https://example.invalid/ngit-release-test.png",
-            "--license",
-            "MIT",
-            "--platform",
-            "linux-x86_64",
-            "--json",
-        ],
-    )
-    .await?;
+    create_application_with_platforms(repo, &["linux-x86_64"]).await
+}
+
+async fn create_application_with_platforms(repo: &Repo, platforms: &[&str]) -> Result<()> {
+    let mut args = vec![
+        "release",
+        "app",
+        "init",
+        "--id",
+        APP_ID,
+        "--name",
+        "ngit release test",
+        "--description",
+        "Exercises the NIP-82 release API",
+        "--summary",
+        "release fixture",
+        "--website",
+        "https://example.invalid/ngit-release-test",
+        "--icon",
+        "https://example.invalid/ngit-release-test.png",
+        "--license",
+        "MIT",
+    ];
+    for platform in platforms {
+        args.extend(["--platform", *platform]);
+    }
+    args.push("--json");
+    let created = run_json(repo, &args).await?;
     ensure!(created["result"]["operation"] == "created");
     Ok(())
 }

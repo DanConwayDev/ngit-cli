@@ -547,6 +547,12 @@ pub struct ReleasePublishArgs {
     /// Acknowledge reused asset events which have no platform tags
     #[arg(long)]
     pub accept_platform_agnostic_assets: bool,
+    /// Add release-only platforms to the replaceable application event
+    #[arg(long)]
+    pub add_application_platforms: bool,
+    /// Permit a non-main release to omit application platforms
+    #[arg(long)]
+    pub allow_partial_platforms: bool,
     /// Explicitly replace an existing release; never creates a missing release
     #[arg(long)]
     pub edit: bool,
@@ -868,6 +874,12 @@ pub struct ReleaseAssetAddArgs {
     /// Original web source when it differs from the asset URL
     #[arg(long, value_name = "URL", conflicts_with = "event")]
     pub original_url: Option<String>,
+    /// Add release-only platforms to the replaceable application event
+    #[arg(long)]
+    pub add_application_platforms: bool,
+    /// Permit a non-main release to omit application platforms
+    #[arg(long)]
+    pub allow_partial_platforms: bool,
     /// Confirm replacement of the existing release event
     #[arg(long, required = true)]
     pub edit: bool,

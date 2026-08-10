@@ -22,6 +22,7 @@ use ngit::{
 use nostr::prelude::{
     Coordinate, Event, Filter, FromBech32, PublicKey, Timestamp, nip19::Nip19Coordinate,
 };
+use serde::Serialize;
 use serde_json::json;
 
 use super::support::{
@@ -168,6 +169,19 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
             "release notes are empty; provide --notes, --notes-file, or manifest notes",
         ));
     }
+    let release_platforms = proposed_platforms(&assets, &prepared_assets, &reused_assets);
+    let application_platforms = existing_application.as_ref().map_or_else(
+        || release_platforms.clone(),
+        |application| application.platforms.clone(),
+    );
+    let platform_policy = enforce_platform_policy(
+        &mut context.warnings,
+        &application_platforms,
+        &release_platforms,
+        &channel,
+        args.allow_partial_platforms,
+        args.add_application_platforms,
+    )?;
     ensure_release_state_unchanged(
         &mut context,
         &application_target,
@@ -177,8 +191,8 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     )
     .await?;
     if existing_application.is_none() {
-        let platforms = proposed_platforms(&assets, &prepared_assets, &reused_assets);
-        let input = bootstrap_application_input(&context, &application_target, platforms)?;
+        let input =
+            bootstrap_application_input(&context, &application_target, release_platforms.clone())?;
         super::write_app::add_metadata_warnings(&mut context, &input, args.strict_metadata)?;
     }
     enforce_metadata_policy(&context, args.strict_metadata)?;
@@ -190,11 +204,19 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
         .context("nostr signer was not initialized")?
         .clone();
     let application = if let Some(application) = existing_application.as_ref() {
-        application.clone()
+        if platform_policy.application_platforms_added.is_empty() {
+            application.clone()
+        } else {
+            sign_application_platform_update(
+                application,
+                &platform_policy.resulting_application_platforms,
+                &signer,
+            )
+            .await?
+        }
     } else {
-        let platforms = proposed_platforms(&assets, &prepared_assets, &reused_assets);
         sign_bootstrap_application(
-            bootstrap_application_input(&context, &application_target, platforms)?,
+            bootstrap_application_input(&context, &application_target, release_platforms.clone())?,
             &application_target,
             &signer,
         )
@@ -258,10 +280,19 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     } else {
         "created"
     };
+    let application_operation = if existing_application.is_none() {
+        "created"
+    } else if platform_policy.application_platforms_added.is_empty() {
+        "unchanged"
+    } else {
+        "edited"
+    };
     let result = json!({
         "operation": operation,
-        "application_operation": if existing_application.is_some() { "unchanged" } else { "created" },
+        "application_operation": application_operation,
+        "previous_application_event_id": existing_application.as_ref().map(|application| application.raw_event.id.to_hex()),
         "application": application_json(&context, &application),
+        "platform_policy": platform_policy,
         "release": release_json(&parsed_release, &assets),
         "assets": assets.iter().map(asset_json).collect::<Vec<_>>(),
         "previous_event_id": existing.as_ref().map(|release| release.raw_event.id.to_hex()),
@@ -296,16 +327,11 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
         .context("release application was not resolved")?
         .clone();
     context.require_application_author(&application)?;
+    let existing_application = application.clone();
     let application_target = ApplicationTarget::from(&application);
 
     let mut assets = require_all_assets(&mut context, &release).await?;
-    let signer = context
-        .signer
-        .as_ref()
-        .context("nostr signer was not initialized")?
-        .clone();
-
-    let (asset, newly_published) = if let Some(url) = &args.url {
+    let (prepared_asset, reused_asset) = if let Some(url) = &args.url {
         if args.platforms.is_empty() && !args.platform_agnostic {
             return Err(coded_error(
                 "asset_platform_required",
@@ -339,49 +365,80 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
         };
         let input = prepare_url_asset(&mut context, proposed).await?;
         reject_duplicate_prepared_asset(&assets, &[], &input)?;
-        ensure_release_state_unchanged(
-            &mut context,
-            &application_target,
-            Some(&application),
-            &release.version,
-            Some(&release),
-        )
-        .await?;
-        enforce_metadata_policy(&context, args.strict_metadata)?;
-        context.emit_human_warnings_before_signing(args.json);
-        (sign_asset_input(input, &signer).await?, true)
+        (Some(input), None)
     } else {
         let selector = args.event.as_deref().context("--event is required")?;
         let asset = load_asset_event(&mut context, selector, true).await?;
         validate_reused_asset(&application_target, &asset, args.platform_agnostic)?;
-        (asset, false)
+        reject_duplicate_asset(&assets, &asset)?;
+        (None, Some(asset))
+    };
+    let release_platforms = assets
+        .iter()
+        .flat_map(|asset| asset.platforms.iter())
+        .chain(
+            prepared_asset
+                .iter()
+                .flat_map(|asset| asset.platforms.iter()),
+        )
+        .chain(reused_asset.iter().flat_map(|asset| asset.platforms.iter()))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let platform_policy = enforce_platform_policy(
+        &mut context.warnings,
+        &application.platforms,
+        &release_platforms,
+        &release.channel,
+        args.allow_partial_platforms,
+        args.add_application_platforms,
+    )?;
+    ensure_release_state_unchanged(
+        &mut context,
+        &application_target,
+        Some(&application),
+        &release.version,
+        Some(&release),
+    )
+    .await?;
+    enforce_metadata_policy(&context, args.strict_metadata)?;
+    context.emit_human_warnings_before_signing(args.json);
+
+    let signer = context
+        .signer
+        .as_ref()
+        .context("nostr signer was not initialized")?
+        .clone();
+    let application = if platform_policy.application_platforms_added.is_empty() {
+        application
+    } else {
+        sign_application_platform_update(
+            &application,
+            &platform_policy.resulting_application_platforms,
+            &signer,
+        )
+        .await?
+    };
+    let newly_published = prepared_asset.is_some();
+    let asset = if let Some(input) = prepared_asset {
+        sign_asset_input(input, &signer).await?
+    } else {
+        reused_asset.context("asset add requires one URL or event source")?
     };
     reject_duplicate_asset(&assets, &asset)?;
-    if !newly_published {
-        ensure_release_state_unchanged(
-            &mut context,
-            &application_target,
-            Some(&application),
-            &release.version,
-            Some(&release),
-        )
-        .await?;
-        enforce_metadata_policy(&context, args.strict_metadata)?;
-        context.emit_human_warnings_before_signing(args.json);
-    }
     let added_id = asset.raw_event.id;
     assets.push(asset);
 
-    if newly_published {
-        ensure_release_state_unchanged(
-            &mut context,
-            &application_target,
-            Some(&application),
-            &release.version,
-            Some(&release),
-        )
-        .await?;
-    }
+    ensure_release_state_unchanged(
+        &mut context,
+        &application_target,
+        Some(&existing_application),
+        &release.version,
+        Some(&release),
+    )
+    .await?;
+    context.require_application_author(&application)?;
     let release_event = build_release_event(
         &context,
         &application,
@@ -415,6 +472,10 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
     let authority = context.authority(&application);
     let result = json!({
         "operation": "asset_added",
+        "application_operation": if platform_policy.application_platforms_added.is_empty() { "unchanged" } else { "edited" },
+        "previous_application_event_id": existing_application.raw_event.id.to_hex(),
+        "application": application_json(&context, &application),
+        "platform_policy": platform_policy,
         "release": release_json(&parsed_release, &assets),
         "asset": assets.last().map(asset_json),
         "previous_event_id": release.raw_event.id.to_hex(),
@@ -482,6 +543,107 @@ fn proposed_platforms(
         .collect()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct PlatformPolicy {
+    channel: String,
+    application_platforms: Vec<String>,
+    release_platforms: Vec<String>,
+    missing_from_release: Vec<String>,
+    additional_to_application: Vec<String>,
+    application_platforms_added: Vec<String>,
+    resulting_application_platforms: Vec<String>,
+    partial_release: bool,
+}
+
+fn enforce_platform_policy(
+    warnings: &mut Vec<WarningJson>,
+    application_platforms: &[String],
+    release_platforms: &[String],
+    channel: &str,
+    allow_partial_platforms: bool,
+    add_application_platforms: bool,
+) -> Result<PlatformPolicy> {
+    let application = application_platforms
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let release = release_platforms.iter().cloned().collect::<BTreeSet<_>>();
+    let missing_from_release = application
+        .difference(&release)
+        .cloned()
+        .collect::<Vec<_>>();
+    let additional_to_application = release
+        .difference(&application)
+        .cloned()
+        .collect::<Vec<_>>();
+    let main_channel = channel == "main";
+
+    if main_channel && !missing_from_release.is_empty() {
+        return Err(coded_error_with_details(
+            "release_platform_coverage_incomplete",
+            "a main release must include every application platform",
+            json!({
+                "application_platforms": application,
+                "release_platforms": release,
+                "missing_from_release": missing_from_release,
+            }),
+        ));
+    }
+    if !main_channel && !missing_from_release.is_empty() && !allow_partial_platforms {
+        return Err(coded_error_with_details(
+            "partial_platform_confirmation_required",
+            "this non-main release omits application platforms; pass --allow-partial-platforms after checking client compatibility",
+            json!({
+                "channel": channel,
+                "application_platforms": application,
+                "release_platforms": release,
+                "missing_from_release": missing_from_release,
+            }),
+        ));
+    }
+    if main_channel && !additional_to_application.is_empty() && !add_application_platforms {
+        return Err(coded_error_with_details(
+            "application_platform_update_required",
+            "this main release introduces platforms absent from the application; pass --add-application-platforms to update it first",
+            json!({
+                "application_platforms": application,
+                "release_platforms": release,
+                "additional_to_application": additional_to_application,
+            }),
+        ));
+    }
+    if !main_channel && !missing_from_release.is_empty() {
+        warnings.push(
+            WarningJson::new(
+                "partial_platform_release",
+                "the release omits application platforms; current Zapstore clients may select it without considering channel or platform",
+            )
+            .with_details(json!({
+                "channel": channel,
+                "missing_from_release": &missing_from_release,
+            })),
+        );
+    }
+
+    let application_platforms_added = if add_application_platforms {
+        additional_to_application.clone()
+    } else {
+        Vec::new()
+    };
+    let mut resulting_application_platforms = application.clone();
+    resulting_application_platforms.extend(application_platforms_added.iter().cloned());
+    Ok(PlatformPolicy {
+        channel: channel.to_owned(),
+        application_platforms: application.into_iter().collect(),
+        release_platforms: release.into_iter().collect(),
+        partial_release: !missing_from_release.is_empty(),
+        missing_from_release,
+        additional_to_application,
+        application_platforms_added,
+        resulting_application_platforms: resulting_application_platforms.into_iter().collect(),
+    })
+}
+
 fn bootstrap_application_input(
     context: &ReleaseContext,
     target: &ApplicationTarget,
@@ -520,6 +682,43 @@ async fn sign_bootstrap_application(
                 "expected_application": super::support::coordinate_key(&target.coordinate()),
                 "signed_application": super::support::coordinate_key(&application.coordinate()),
             }),
+        ));
+    }
+    Ok(application)
+}
+
+async fn sign_application_platform_update(
+    existing: &SoftwareApplication,
+    platforms: &[String],
+    signer: &std::sync::Arc<ngit::NgitSigner>,
+) -> Result<SoftwareApplication> {
+    let mut input = ApplicationInput::from(existing);
+    input.platforms = platforms.to_vec();
+    let builder = application_event_builder(input).map_err(|error| {
+        coded_error_with_details(
+            "invalid_application_metadata",
+            error.to_string(),
+            json!({ "validation": error.issues }),
+        )
+    })?;
+    let unsigned = finalize_ordered_unsigned(
+        builder,
+        existing.raw_event.pubkey,
+        Some(&existing.raw_event),
+    )
+    .context("failed to order software application platform replacement")?;
+    let event = sign_draft_event(
+        unsigned,
+        signer,
+        "add software application platforms for release".to_owned(),
+    )
+    .await?;
+    let application = SoftwareApplication::parse(&event)
+        .context("signed software application platform replacement failed validation")?;
+    if application.coordinate() != existing.coordinate() {
+        return Err(coded_error(
+            "application_author_mismatch",
+            "signer returned a platform replacement for a different application",
         ));
     }
     Ok(application)
@@ -1245,7 +1444,18 @@ fn redacted_url(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_metadata_warning;
+    use super::{enforce_platform_policy, is_metadata_warning};
+
+    fn values(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn error_code(error: &anyhow::Error) -> &'static str {
+        error
+            .downcast_ref::<super::super::support::ReleaseError>()
+            .expect("platform policy returned an uncoded error")
+            .code
+    }
 
     #[test]
     fn strict_metadata_ignores_transport_and_relay_warnings() {
@@ -1254,5 +1464,59 @@ mod tests {
         assert!(!is_metadata_warning("redirected"));
         assert!(!is_metadata_warning("non_public_host"));
         assert!(!is_metadata_warning("relay_discovery_incomplete"));
+    }
+
+    #[test]
+    fn main_releases_must_cover_the_application_platforms() {
+        let mut warnings = Vec::new();
+        let error = enforce_platform_policy(
+            &mut warnings,
+            &values(&["linux-x86_64", "windows-x86_64"]),
+            &values(&["linux-x86_64"]),
+            "main",
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error_code(&error), "release_platform_coverage_incomplete");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn main_release_extras_require_the_additive_application_edit() {
+        let mut warnings = Vec::new();
+        let application = values(&["linux-x86_64"]);
+        let release = values(&["linux-aarch64", "linux-x86_64"]);
+        let error =
+            enforce_platform_policy(&mut warnings, &application, &release, "main", false, false)
+                .unwrap_err();
+        assert_eq!(error_code(&error), "application_platform_update_required");
+
+        let policy =
+            enforce_platform_policy(&mut warnings, &application, &release, "main", false, true)
+                .unwrap();
+        assert_eq!(
+            policy.application_platforms_added,
+            values(&["linux-aarch64"])
+        );
+        assert_eq!(policy.resulting_application_platforms, release);
+    }
+
+    #[test]
+    fn non_main_subsets_are_allowed_only_with_an_explicit_warning() {
+        let application = values(&["linux-x86_64", "windows-x86_64"]);
+        let release = values(&["linux-x86_64"]);
+        let mut warnings = Vec::new();
+        let error =
+            enforce_platform_policy(&mut warnings, &application, &release, "beta", false, false)
+                .unwrap_err();
+        assert_eq!(error_code(&error), "partial_platform_confirmation_required");
+
+        let policy =
+            enforce_platform_policy(&mut warnings, &application, &release, "beta", true, false)
+                .unwrap();
+        assert!(policy.partial_release);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "partial_platform_release");
     }
 }

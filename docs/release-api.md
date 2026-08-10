@@ -331,6 +331,9 @@ The initial stable error codes are:
 - `invalid_asset_metadata`;
 - `asset_integrity_mismatch`;
 - `duplicate_asset`;
+- `release_platform_coverage_incomplete`;
+- `partial_platform_confirmation_required`;
+- `application_platform_update_required`;
 - `ambiguous_selector`;
 - `metadata_confirmation_required`;
 - `relay_preflight_incomplete`;
@@ -655,6 +658,10 @@ This command creates a release and its new URL-backed asset events. It accepts:
 - `--platform-agnostic-asset URL` as an explicit no-platform shorthand;
 - `--accept-platform-agnostic-assets` to acknowledge reused asset events which
   have no `f` tags;
+- `--add-application-platforms` to add release-only platforms to the
+  replaceable application before publication;
+- `--allow-partial-platforms` to acknowledge a non-main release which omits
+  application platforms;
 - `--edit`;
 - `--strict-metadata`;
 - `--json`.
@@ -740,6 +747,11 @@ Metadata flags other than `--platform-agnostic` are invalid with `--event`
 because an immutable event cannot be amended. In that form,
 `--platform-agnostic` only acknowledges an existing event with no `f` tags; it
 does not add metadata to the event.
+
+`--add-application-platforms` and `--allow-partial-platforms` apply the same
+platform policy as `release publish`. The former is the complete authorization
+for an additive application replacement; `--edit` continues to authorize only
+the release replacement.
 
 The command first performs authority and release preflights, then downloads and
 hashes a URL asset. It publishes one ordered application, assets, release batch,
@@ -834,6 +846,35 @@ deduplicates exact values and SHOULD suggest the identifiers in NIP-82 Appendix
 A, while still allowing custom values because ngit does not own the platform
 taxonomy. The human preflight SHOULD flag suspicious spelling or case without
 silently rewriting it.
+
+### Application and release platform relationship
+
+Application `f` tags are ngit's current-channel interoperability baseline, not
+an assertion that every future channel must forever ship every platform.
+Publication follows these rules:
+
+- A `main` release MUST contain an asset for every application platform.
+  `--allow-partial-platforms` cannot weaken this invariant because current
+  Zapstore clients may choose the newest release without channel or platform
+  filtering.
+- A `main` release containing an additional platform fails by default. Passing
+  `--add-application-platforms` additively replaces the application, preserving
+  every other typed field, repository link, and unknown tag, and publishes that
+  replacement before the assets and release.
+- A non-main release may introduce an experimental platform without changing
+  the application. Passing `--add-application-platforms` explicitly promotes
+  those additional platforms into the application baseline.
+- A non-main release may omit application platforms only with
+  `--allow-partial-platforms`. JSON sets `partial_release: true` and emits a
+  `partial_platform_release` warning about current client compatibility.
+- A platform-agnostic asset contributes no platform and never satisfies an
+  application platform requirement.
+
+There is intentionally no generic `--force`: platform coverage and application
+replacement are separate decisions with separate flags. Mutation JSON includes
+`application_operation`, `previous_application_event_id`, and a
+`platform_policy` object containing the application, release, missing,
+additional, added, and resulting platform sets.
 
 ## Event construction and replacement ordering
 
@@ -1122,6 +1163,17 @@ fail closed with an actionable error.
   folded automatically.
 - Release `f` is derived from assets. A platform-agnostic asset contributes no
   tag and must not erase platforms contributed by other assets.
+- Current Zapstore release and asset lookups do not consistently include
+  channel and platform filters. A partial beta/nightly release can therefore be
+  selected as if it were the main release; keep the explicit acknowledgement
+  until those clients are known to be channel-aware.
+- An additive application platform replacement can be accepted while a later
+  asset or release is rejected. Retry from observed relay state and resend the
+  accepted application event; never sign a second replacement merely to make
+  the batch look atomic.
+- Updating application platforms must preserve links to other repositories and
+  unknown future tags. Reconstructing only the fields ngit understands can
+  silently sever another publisher's metadata.
 - APK architecture, package version, SDK levels, certificate hash, and version
   code should be extracted from the same bytes being hashed. Caller values that
   conflict are errors.
