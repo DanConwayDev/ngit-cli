@@ -694,6 +694,54 @@ assets:
 }
 
 #[tokio::test]
+async fn url_apks_cannot_claim_to_be_platform_agnostic() -> Result<()> {
+    const APK_BYTES: &[u8] = b"remote APK fixture";
+
+    let (harness, publisher, published) = setup(0).await?;
+    let server = AssetHttpServer::spawn(vec![ServedAsset {
+        path: "/application.apk",
+        body: APK_BYTES,
+        content_type: "application/vnd.android.package-archive",
+    }])
+    .await?;
+    let url = format!("{}/application.apk", server.base_url());
+    let failure = run_json_expecting_failure(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--platform-agnostic-asset",
+            &url,
+            "--notes",
+            "This remote APK has no inspectable platform metadata",
+            "--json",
+        ],
+    )
+    .await?;
+    server.finish().await?;
+
+    ensure!(failure["error"]["code"] == "apk_platform_conflict");
+    let events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kinds([
+                    SOFTWARE_APPLICATION_KIND,
+                    SOFTWARE_ASSET_KIND,
+                    SOFTWARE_RELEASE_KIND,
+                ])
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(
+        events.is_empty(),
+        "remote APK platform failure published NIP-82 events"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> Result<()> {
     const ASSET_BYTES: &[u8] = b"orphaned Blossom release archive\n";
 

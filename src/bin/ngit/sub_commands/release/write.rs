@@ -557,14 +557,11 @@ pub(super) async fn asset_add(
     let application_target = ApplicationTarget::from(&application);
 
     let mut assets = require_all_assets(&mut context, &release).await?;
-    let local_apk_candidate = args.file.as_ref().is_some_and(|path| {
-        path.to_string_lossy()
-            .to_ascii_lowercase()
-            .ends_with(".apk")
-    }) || args
-        .mime
-        .as_deref()
-        .is_some_and(|mime| mime.eq_ignore_ascii_case(APK_MIME_TYPE));
+    let local_apk_candidate = can_infer_local_apk_platforms(
+        args.file.as_deref(),
+        args.filename.as_deref(),
+        args.mime.as_deref(),
+    );
     if (args.url.is_some() || args.file.is_some())
         && args.platforms.is_empty()
         && !args.platform_agnostic
@@ -1754,11 +1751,8 @@ fn infer_apk_platforms(
     platforms: &mut Vec<String>,
     platform_agnostic: bool,
 ) -> Result<Option<ApkPlatformInference>> {
-    let source_is_apk = source_path
-        .to_string_lossy()
-        .to_ascii_lowercase()
-        .ends_with(".apk");
-    let filename_is_apk = snapshot.filename.to_ascii_lowercase().ends_with(".apk");
+    let source_is_apk = looks_like_apk_filename(&source_path.to_string_lossy());
+    let filename_is_apk = looks_like_apk_filename(&snapshot.filename);
     let mime_is_apk = snapshot.mime_type.eq_ignore_ascii_case(APK_MIME_TYPE);
     if !source_is_apk && !filename_is_apk && !mime_is_apk {
         return Ok(None);
@@ -1837,6 +1831,22 @@ fn infer_apk_platforms(
         ));
     }
     Ok(Some(inference))
+}
+
+fn can_infer_local_apk_platforms(
+    file: Option<&Path>,
+    filename: Option<&str>,
+    mime: Option<&str>,
+) -> bool {
+    file.is_some_and(|path| {
+        looks_like_apk_filename(&path.to_string_lossy())
+            || filename.is_some_and(looks_like_apk_filename)
+            || mime.is_some_and(|mime| mime.eq_ignore_ascii_case(APK_MIME_TYPE))
+    })
+}
+
+fn looks_like_apk_filename(value: &str) -> bool {
+    value.to_ascii_lowercase().ends_with(".apk")
 }
 
 async fn resolve_blossom_server_selection(
@@ -2299,6 +2309,16 @@ fn append_download_warnings(
 }
 
 fn validate_asset_input(input: &AssetInput) -> Result<()> {
+    if input.mime.eq_ignore_ascii_case(APK_MIME_TYPE) && input.platforms.is_empty() {
+        return Err(coded_error_with_details(
+            "apk_platform_conflict",
+            "Android APK assets require platform metadata; only local APKs can infer it",
+            json!({
+                "mime": input.mime,
+                "platforms": input.platforms,
+            }),
+        ));
+    }
     asset_event_builder(input.clone()).map_err(|error| {
         coded_error_with_details(
             "invalid_asset_metadata",
@@ -2498,6 +2518,25 @@ mod tests {
         assert!(!is_metadata_warning("redirected"));
         assert!(!is_metadata_warning("non_public_host"));
         assert!(!is_metadata_warning("relay_discovery_incomplete"));
+    }
+
+    #[test]
+    fn only_local_apks_are_candidates_for_platform_inference() {
+        assert!(can_infer_local_apk_platforms(
+            Some(Path::new("artifact.bin")),
+            Some("application.apk"),
+            None,
+        ));
+        assert!(can_infer_local_apk_platforms(
+            Some(Path::new("artifact.bin")),
+            None,
+            Some(APK_MIME_TYPE),
+        ));
+        assert!(!can_infer_local_apk_platforms(
+            None,
+            Some("application.apk"),
+            Some(APK_MIME_TYPE),
+        ));
     }
 
     #[test]
