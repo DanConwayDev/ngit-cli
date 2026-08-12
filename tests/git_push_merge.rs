@@ -1297,7 +1297,7 @@ async fn apply_as_commits_with_patch_kind_proposal_publishes_status_event() -> R
 
 /// Commit-message issue references should auto-resolve the issue when the
 /// commit reaches the default branch, preserving the original wording in the
-/// status content and tagging both source + merge commits as `r` tags.
+/// status content and tagging both source + merge commit provenance.
 #[tokio::test]
 async fn merge_commit_with_implements_keyword_resolves_issue() -> Result<()> {
     let harness = build_harness().await?;
@@ -1380,6 +1380,20 @@ async fn merge_commit_with_implements_keyword_resolves_issue() -> Result<()> {
     assert!(
         has_r_tag(&event, &merge_commit),
         "issue resolution status should carry an `r` tag for merge commit {merge_commit}",
+    );
+    assert_eq!(
+        tag_first_value(&event, "c"),
+        Some(source_commit.as_str()),
+        "issue resolution status should identify the commit that triggered it",
+    );
+    assert_eq!(
+        tag_first_value(&event, "merge-commit"),
+        Some(merge_commit.as_str()),
+        "issue resolution status should identify the merge commit separately",
+    );
+    assert!(
+        tag_first_value(&event, "q").is_none(),
+        "a direct git branch merge should not invent proposal context",
     );
     assert!(
         event.content.contains(&commit_subject),
@@ -1492,6 +1506,21 @@ async fn merge_commit_can_publish_pr_and_issue_status_events_together() -> Resul
         tag_first_value(&issue_status, "alt"),
         Some("issue resolved from commit message"),
         "issue status event should keep canonical alt text",
+    );
+    assert_eq!(
+        tag_first_value(&issue_status, "c"),
+        Some(amended_merge_oid.as_str()),
+        "the merge commit containing the keyword should be the triggering commit",
+    );
+    assert!(
+        tag_first_value(&issue_status, "merge-commit").is_none(),
+        "a triggering merge commit should not be duplicated as separate merge context",
+    );
+    let proposal_id = proposal.root_event_id.to_hex();
+    assert_eq!(
+        tag_first_value(&issue_status, "q"),
+        Some(proposal_id.as_str()),
+        "the issue resolution should quote the PR that introduced it",
     );
 
     Ok(())
