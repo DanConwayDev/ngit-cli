@@ -260,15 +260,17 @@ impl SoftwareRelease {
                     ),
                 ));
             }
-            if asset.application.coordinate != self.application.coordinate {
+            if let Some(application) = asset
+                .application
+                .as_ref()
+                .filter(|application| application.coordinate != self.application.coordinate)
+            {
                 issues.push(ValidationIssue::field(
                     ValidationCode::AssetApplicationMismatch,
                     "a",
                     format!(
                         "asset {} references application {}, expected {}",
-                        asset.raw_event.id,
-                        asset.application.coordinate,
-                        self.application.coordinate
+                        asset.raw_event.id, application.coordinate, self.application.coordinate
                     ),
                 ));
             }
@@ -292,7 +294,7 @@ impl SoftwareRelease {
 #[derive(Clone, Debug, Serialize)]
 pub struct SoftwareAsset {
     pub raw_event: Event,
-    pub application: AddressPointer,
+    pub application: Option<AddressPointer>,
     pub identifier: String,
     pub version: String,
     pub url: Option<String>,
@@ -326,10 +328,7 @@ impl SoftwareAsset {
 
         Ok(Self {
             raw_event: event.clone(),
-            application: address_pointers(event, "a")
-                .into_iter()
-                .next()
-                .expect("validated asset has an application coordinate"),
+            application: address_pointers(event, "a").into_iter().next(),
             identifier: required_value(event, "i"),
             version: required_value(event, "version"),
             url: optional_value(event, "url"),
@@ -446,7 +445,7 @@ pub fn validate_asset(event: &Event) -> Vec<ValidationIssue> {
     for field in ["i", "m", "x", "version"] {
         validate_single_tag(event, field, true, &mut issues);
     }
-    validate_addresses(event, "a", SOFTWARE_APPLICATION_KIND, true, &mut issues);
+    validate_optional_address(event, "a", SOFTWARE_APPLICATION_KIND, &mut issues);
     for field in [
         "url",
         "filename",
@@ -767,7 +766,7 @@ pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, Validation
         issues.push(ValidationIssue::field(
             ValidationCode::MissingTag,
             "a",
-            "asset requires an application coordinate",
+            "new assets require an application coordinate",
         ));
     }
     validate_input_required("i", &input.identifier, &mut issues);
@@ -832,12 +831,10 @@ pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, Validation
         });
     }
 
-    let mut tags = vec![address_tag(
-        "a",
-        input
-            .application
-            .expect("validated asset input has an application coordinate"),
-    )];
+    let mut tags = input
+        .application
+        .map(|application| vec![address_tag("a", application)])
+        .unwrap_or_default();
     tags.extend([
         tag(["i", &input.identifier]),
         tag(["m", &input.mime]),
@@ -1010,6 +1007,22 @@ fn validate_addresses(
             )),
         }
         validate_relay_hint(tag.as_slice().get(2).map(String::as_str), name, issues);
+    }
+}
+
+fn validate_optional_address(
+    event: &Event,
+    name: &'static str,
+    kind: Kind,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    validate_addresses(event, name, kind, false, issues);
+    if event.tags.iter().filter(|tag| tag.kind() == name).count() > 1 {
+        issues.push(ValidationIssue::field(
+            ValidationCode::DuplicateTag,
+            name,
+            format!("{name} must occur at most once"),
+        ));
     }
 }
 
@@ -1630,7 +1643,18 @@ mod tests {
     }
 
     #[test]
-    fn assets_require_and_validate_their_application_coordinate() {
+    fn assets_accept_legacy_omission_and_validate_present_application_coordinates() {
+        let legacy = EventBuilder::new(SOFTWARE_ASSET_KIND, "")
+            .tags(vec![
+                tag(["i", "asset"]),
+                tag(["version", "1"]),
+                tag(["m", "application/gzip"]),
+                tag(["x", HASH_A]),
+            ])
+            .finalize(&keys())
+            .unwrap();
+        assert!(SoftwareAsset::parse(&legacy).unwrap().application.is_none());
+
         let missing = asset_event_builder(AssetInput {
             identifier: "asset".to_string(),
             version: "1".to_string(),
@@ -1668,7 +1692,7 @@ mod tests {
 
         let valid = asset(&keys(), "app", "asset", "1", &["linux-x86_64"]);
         assert_eq!(
-            valid.application.coordinate,
+            valid.application.unwrap().coordinate,
             Coordinate::new(SOFTWARE_APPLICATION_KIND, keys().public_key()).identifier("app")
         );
     }

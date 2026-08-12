@@ -103,11 +103,13 @@ Callers MUST NOT be able to provide contradictory values for those tags.
 
 ### Asset
 
-A software asset event has a required `a` tag identifying its kind `32267`
-application and required `i`, `m`, `x`, and `version` tags for the asset
-identifier, MIME type, SHA-256 hash, and asset version. The asset author MUST
-own the referenced application coordinate. An asset's
-identifier and version are independent of the application and release values.
+A software asset event has optional application provenance through an `a` tag
+identifying its kind `32267` application, plus required `i`, `m`, `x`, and
+`version` tags for the asset identifier, MIME type, SHA-256 hash, and asset
+version. When present, the asset author MUST own the referenced application
+coordinate. Legacy assets without the pointer remain valid, while ngit-created
+assets always include it. An asset's identifier and version are independent of
+the application and release values.
 URL-backed assets also have a `url` tag. ngit SHOULD publish all metadata it can
 establish, including:
 
@@ -409,6 +411,7 @@ An asset object has this shape:
   "event_id_bech32": "nevent1...",
   "author": "<author>",
   "author_npub": "npub1...",
+  "application_coordinate": "32267:<author>:ngit",
   "identifier": "org.ngit.cli",
   "version": "1.8.0+linux.1",
   "url": "https://cdn.example.org/ngit.tar.gz",
@@ -697,11 +700,13 @@ Before publishing, ngit MUST:
    the final commit point.
 
 The exact current application event is sent first even when it already exists.
-This is a retry-safe duplicate and ensures a GRASP relay can validate every
-asset's application `a` tag before accepting the dependent events.
+This is a retry-safe duplicate and ensures a GRASP relay can validate each
+new ngit asset's application `a` tag before accepting the dependent events.
 
 Existing assets MUST be authored by the application author and satisfy the
-required NIP-82 asset shape. Their `i` and `version` values MAY differ from the
+required NIP-82 asset shape. When an asset has an application `a` tag, it MUST
+match the selected application; absence remains valid for compatibility with
+older publishers. Their `i` and `version` values MAY differ from the
 application and release values and MUST be displayed without normalization. An
 explicit asset event is never trusted only because its caller supplied the ID.
 For newly created assets, ngit defaults those fields to the application
@@ -1102,6 +1107,9 @@ fail closed with an actionable error.
   and release identifiers and versions. Do not reject a package such as
   `com.example.android` from a release for a cross-platform `com.example.app`,
   and do not rewrite either value for display.
+- An asset's application `a` pointer is optional for compatibility. When it is
+  present, validate its kind, author, and exact coordinate against the release;
+  do not infer a missing pointer while reading an immutable legacy event.
 - Custom channel names, empty channels, control characters, and case variants
   need validation. Do not silently map `Main` to `main`.
 - Notes can be empty, extremely large, non-UTF-8 on disk, or contain terminal

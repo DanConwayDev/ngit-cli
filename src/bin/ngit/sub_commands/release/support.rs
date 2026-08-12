@@ -1052,7 +1052,8 @@ pub(super) fn asset_json(asset: &SoftwareAsset) -> Value {
         "event_id_bech32": event_id_bech32(&asset.raw_event),
         "author": asset.raw_event.pubkey.to_hex(),
         "author_npub": asset.raw_event.pubkey.to_bech32().ok(),
-        "application_coordinate": coordinate_key(&asset.application.coordinate),
+        "application_coordinate": asset.application.as_ref()
+            .map(|application| coordinate_key(&application.coordinate)),
         "identifier": asset.identifier,
         "version": asset.version,
         "url": asset.url,

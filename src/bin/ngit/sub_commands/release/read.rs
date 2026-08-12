@@ -508,6 +508,7 @@ fn unresolved_asset_json(event_id: EventId, event: Option<&Event>) -> Value {
         ),
         "author": author,
         "author_npub": author_npub,
+        "application_coordinate": null,
         "identifier": null,
         "version": null,
         "url": null,

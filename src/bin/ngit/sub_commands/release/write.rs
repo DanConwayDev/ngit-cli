@@ -1077,13 +1077,18 @@ fn validate_reused_asset(
             }),
         ));
     }
-    if asset.application.coordinate != application.coordinate() {
+    let expected_application = application.coordinate();
+    if let Some(asset_application) = asset
+        .application
+        .as_ref()
+        .filter(|pointer| pointer.coordinate != expected_application)
+    {
         return Err(coded_error_with_details(
             "invalid_asset_application",
             "asset does not reference the selected application",
             json!({
-                "asset_application": super::support::coordinate_key(&asset.application.coordinate),
-                "expected_application": super::support::coordinate_key(&application.coordinate()),
+                "asset_application": super::support::coordinate_key(&asset_application.coordinate),
+                "expected_application": super::support::coordinate_key(&expected_application),
             }),
         ));
     }

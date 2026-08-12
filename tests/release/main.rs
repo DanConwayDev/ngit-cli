@@ -151,7 +151,12 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
         .await?,
     )
     .map_err(|error| anyhow::anyhow!(error))?;
-    ensure!(asset.application.coordinate == release.application.coordinate);
+    ensure!(
+        asset
+            .application
+            .as_ref()
+            .is_some_and(|application| application.coordinate == release.application.coordinate)
+    );
     ensure!(
         release.application.coordinate
             == Coordinate::new(
@@ -328,8 +333,20 @@ assets:
     let linux = asset_named(&assets, "ngit-1.2.3-linux-x86_64.tar.gz")?;
     let windows = asset_named(&assets, "ngit-1.2.3-windows-x86_64.zip")?;
 
-    ensure!(linux.application.coordinate == release.application.coordinate);
-    ensure!(windows.application.coordinate == release.application.coordinate);
+    ensure!(
+        linux
+            .application
+            .as_ref()
+            .map(|pointer| &pointer.coordinate)
+            == Some(&release.application.coordinate)
+    );
+    ensure!(
+        windows
+            .application
+            .as_ref()
+            .map(|pointer| &pointer.coordinate)
+            == Some(&release.application.coordinate)
+    );
     ensure!(linux.identifier == APP_ID);
     ensure!(linux.version == RELEASE_VERSION);
     ensure!(linux.mime == "application/gzip");
@@ -431,7 +448,10 @@ async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
     ensure!(initial_asset_events.len() == 1);
     let x86 =
         SoftwareAsset::parse(&initial_asset_events[0]).map_err(|error| anyhow::anyhow!(error))?;
-    ensure!(x86.application.coordinate == initial.application.coordinate);
+    ensure!(
+        x86.application.as_ref().map(|pointer| &pointer.coordinate)
+            == Some(&initial.application.coordinate)
+    );
     ensure!(x86.url.as_deref() == Some(x86_url.as_str()));
     ensure!(x86.filename.as_deref() == Some("ngit-1.2.3-linux-x86_64.tar.gz"));
     ensure!(x86.mime == "application/gzip");
