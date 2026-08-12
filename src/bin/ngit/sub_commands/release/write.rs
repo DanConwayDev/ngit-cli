@@ -75,6 +75,7 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
     let existing =
         load_exact_release(&mut context, &application_target, &args.release_version).await?;
     enforce_edit_guard(existing.as_ref(), args.edit, "release", &identifier)?;
+    let commit = release_commit(&context, args, manifest.as_ref(), existing.as_ref())?;
 
     let mut assets = if let Some(release) = &existing {
         require_all_assets(&mut context, release).await?
@@ -255,6 +256,7 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
         &args.release_version,
         channel,
         notes,
+        commit,
         &assets,
         existing.as_ref(),
         released_at,
@@ -445,6 +447,7 @@ pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<C
         &release.version,
         release.channel.clone(),
         release.notes.clone(),
+        release.commit.clone(),
         &assets,
         Some(&release),
         release.raw_event.created_at,
@@ -1335,6 +1338,7 @@ async fn build_release_event(
     version: &str,
     channel: String,
     notes: String,
+    commit: Option<String>,
     assets: &[SoftwareAsset],
     existing: Option<&SoftwareRelease>,
     released_at: Timestamp,
@@ -1372,6 +1376,7 @@ async fn build_release_event(
         channel,
         notes,
         assets: asset_pointers,
+        commit,
         extra_tags: existing.map_or_else(Vec::new, |release| release.extra_tags.clone()),
         released_at,
     })
@@ -1403,6 +1408,36 @@ async fn build_release_event(
     } else {
         sign_event(builder, signer, "software release".to_owned()).await
     }
+}
+
+fn release_commit(
+    context: &ReleaseContext,
+    args: &ReleasePublishArgs,
+    manifest: Option<&ResolvedReleaseManifest>,
+    existing: Option<&SoftwareRelease>,
+) -> Result<Option<String>> {
+    let requested = args
+        .commit
+        .as_deref()
+        .or_else(|| manifest.and_then(|manifest| manifest.commit.as_deref()));
+    if let Some(revision) = requested {
+        return resolve_git_commit(context, revision).map(Some);
+    }
+    if let Some(existing) = existing {
+        return Ok(existing.commit.clone());
+    }
+    resolve_git_commit(context, "HEAD").map(Some)
+}
+
+fn resolve_git_commit(context: &ReleaseContext, revision: &str) -> Result<String> {
+    context
+        .git_repo
+        .git_repo
+        .revparse_single(revision)
+        .with_context(|| format!("failed to resolve release commit {revision:?}"))?
+        .peel_to_commit()
+        .with_context(|| format!("release commit {revision:?} does not identify a Git commit"))
+        .map(|commit| commit.id().to_string())
 }
 
 fn enforce_metadata_policy(context: &ReleaseContext, strict: bool) -> Result<()> {

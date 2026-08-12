@@ -1038,6 +1038,7 @@ pub(super) fn release_json(release: &SoftwareRelease, assets: &[SoftwareAsset]) 
         "channel": release.channel,
         "released_at": release.raw_event.created_at.as_secs(),
         "notes": release.notes,
+        "commit": release.commit,
         "asset_ids": release.assets.iter().map(|asset| asset.event_id.to_hex()).collect::<Vec<_>>(),
         "published_platforms": release.platforms,
         "derived_platforms": release_platforms(assets.iter()),

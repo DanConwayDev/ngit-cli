@@ -26,6 +26,7 @@ pub struct ReleaseManifest {
     pub application: Option<String>,
     pub channel: Option<String>,
     pub notes: Option<String>,
+    pub commit: Option<String>,
     pub assets: Vec<ReleaseManifestAsset>,
 }
 
@@ -77,6 +78,7 @@ pub struct ResolvedReleaseManifest {
     pub application: Option<String>,
     pub channel: Option<String>,
     pub notes: Option<String>,
+    pub commit: Option<String>,
     pub assets: Vec<ResolvedReleaseManifestAsset>,
 }
 
@@ -236,6 +238,7 @@ impl ReleaseManifest {
             application: self.application.clone(),
             channel: self.channel.clone(),
             notes: self.notes.clone(),
+            commit: self.commit.clone(),
             assets,
         })
     }
@@ -249,6 +252,7 @@ impl ReleaseManifest {
         }
         validate_optional_clean_value("application", self.application.as_deref())?;
         validate_optional_clean_value("channel", self.channel.as_deref())?;
+        validate_optional_clean_value("commit", self.commit.as_deref())?;
         if self
             .notes
             .as_ref()
@@ -509,6 +513,7 @@ schema: 1
 application: ngit
 channel: main
 notes: Release notes
+commit: main
 assets:
   - source: https://downloads.example.com/ngit/{version}/ngit-{tag}.tar.gz
     identifier: dev.ngit.cli
@@ -533,6 +538,7 @@ assets:
     #[test]
     fn parses_normalizes_and_resolves_complete_manifest() {
         let manifest = parse_release_manifest(COMPLETE_MANIFEST).unwrap();
+        assert_eq!(manifest.commit.as_deref(), Some("main"));
         assert_eq!(manifest.assets[0].platforms, ["linux-x86_64"]);
         assert_eq!(manifest.assets[0].supported_nips, ["34", "65"]);
         assert_eq!(
@@ -545,6 +551,7 @@ assets:
         );
 
         let resolved = manifest.resolve("2.7.0/rc 1", Some("v2.7.0-rc.1")).unwrap();
+        assert_eq!(resolved.commit.as_deref(), Some("main"));
         let asset = &resolved.assets[0];
         assert_eq!(
             asset.source,

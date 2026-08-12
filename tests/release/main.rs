@@ -11,9 +11,9 @@ use std::{fs, time::Duration};
 use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
 use ngit::software_release::{
-    AddressPointer, ApplicationInput, AssetInput, SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND,
-    SOFTWARE_RELEASE_KIND, SoftwareAsset, SoftwareRelease, application_event_builder,
-    asset_event_builder,
+    AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
+    SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND, SoftwareAsset,
+    SoftwareRelease, application_event_builder, asset_event_builder, release_event_builder,
 };
 use nostr_sdk::prelude::*;
 use serde_json::Value;
@@ -166,6 +166,9 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
             .identifier(published.identifier)
     );
     ensure!(release.assets[0].event_id == asset.raw_event.id);
+    let expected_head = head_commit(&publisher)?;
+    ensure!(release.commit.as_deref() == Some(expected_head.as_str()));
+    ensure!(output["result"]["release"]["commit"] == expected_head);
     Ok(())
 }
 
@@ -513,6 +516,7 @@ async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
     ensure!(replacement.channel == initial.channel);
     ensure!(replacement.notes == initial.notes);
     ensure!(replacement.application == initial.application);
+    ensure!(replacement.commit == initial.commit);
     ensure!(replacement.platforms == ["linux-aarch64", "linux-x86_64"]);
 
     let asset_events = harness
@@ -640,6 +644,98 @@ async fn release_publish_reuses_an_asset_event_and_is_readable() -> Result<()> {
     ensure!(unchanged_release.id == initial_release.id);
 
     assert_read_apis(&publisher, &asset).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_edit_preserves_legacy_commit_omission_and_allows_an_override() -> Result<()> {
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+
+    let asset = asset_event(&published, "legacy.tar.gz", "66", "linux-x86_64")?;
+    publish_to_default_relay(&harness, &asset).await?;
+    wait_for_relay_event(&harness, asset.id).await?;
+    let legacy_release = release_event_builder(ReleaseInput {
+        application: AddressPointer {
+            coordinate: Coordinate::new(
+                SOFTWARE_APPLICATION_KIND,
+                published.maintainer_keys.public_key(),
+            )
+            .identifier(APP_ID),
+            relay_hint: None,
+        },
+        version: RELEASE_VERSION.to_string(),
+        channel: "main".to_string(),
+        notes: "Legacy release".to_string(),
+        assets: vec![ReleaseAssetInput::from_asset(
+            &SoftwareAsset::parse(&asset)?,
+            None,
+        )],
+        commit: None,
+        extra_tags: Vec::new(),
+        released_at: Timestamp::now(),
+    })?
+    .finalize(&published.maintainer_keys)?;
+    publish_to_default_relay(&harness, &legacy_release).await?;
+    wait_for_relay_event(&harness, legacy_release.id).await?;
+
+    let preserved = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--edit",
+            "--notes",
+            "Edited legacy release",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(preserved["result"]["release"]["commit"].is_null());
+    let preserved_event = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_RELEASE_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(RELEASE_IDENTIFIER),
+        "legacy release replacement",
+    )
+    .await?;
+    ensure!(SoftwareRelease::parse(&preserved_event)?.commit.is_none());
+
+    let expected_head = head_commit(&publisher)?;
+    let overridden = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--edit",
+            "--commit",
+            "main",
+            "--json",
+        ],
+    )
+    .await?;
+    ensure!(overridden["result"]["release"]["commit"] == expected_head);
+    let overridden_event = single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_RELEASE_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(RELEASE_IDENTIFIER),
+        "release replacement with commit override",
+    )
+    .await?;
+    ensure!(
+        SoftwareRelease::parse(&overridden_event)?.commit.as_deref()
+            == Some(expected_head.as_str())
+    );
     Ok(())
 }
 
@@ -897,6 +993,14 @@ async fn setup(additional_maintainer_count: usize) -> Result<(Harness, Repo, Pub
         })
         .await?;
     Ok((harness, publisher, published))
+}
+
+fn head_commit(repo: &Repo) -> Result<String> {
+    Ok(git2::Repository::open(repo.dir())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string())
 }
 
 async fn create_application(repo: &Repo) -> Result<()> {

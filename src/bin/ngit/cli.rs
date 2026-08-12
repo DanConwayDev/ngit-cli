@@ -532,6 +532,9 @@ pub struct ReleasePublishArgs {
     /// Git tag used for {tag} manifest expansion
     #[arg(long, value_name = "TAG")]
     pub tag: Option<String>,
+    /// Git commit represented by this release (defaults to HEAD when creating)
+    #[arg(long, value_name = "COMMIT")]
+    pub commit: Option<String>,
     /// Release manifest; creation also discovers .ngit/release.yaml
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
@@ -1669,6 +1672,8 @@ mod tests {
                 "1.8.0",
                 "--asset-event",
                 "deadbeef",
+                "--commit",
+                "HEAD~1",
                 "--json",
             ]
             .as_slice(),
@@ -1852,6 +1857,7 @@ mod tests {
         assert!(args.channel.is_none());
         assert!(args.notes.is_none());
         assert!(args.released_at.is_none());
+        assert!(args.commit.is_none());
     }
 
     #[test]

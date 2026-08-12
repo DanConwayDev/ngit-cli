@@ -95,6 +95,8 @@ A software release event has:
 - a `d` tag equal to `<application-id>@<version>`;
 - one `e` tag for each referenced kind `3063` asset event;
 - `f` tags equal to the deduplicated union of the referenced assets' `f` tags;
+- an optional `commit` tag containing the full Git commit ID represented by the
+  release;
 - release notes in event content;
 - `created_at` set to the release date when the release is first published.
 
@@ -395,6 +397,7 @@ A release object has this shape:
   "channel": "main",
   "released_at": 1786147200,
   "notes": "...",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
   "asset_ids": ["..."],
   "published_platforms": ["linux-x86_64"],
   "derived_platforms": ["linux-x86_64"],
@@ -655,6 +658,7 @@ This command creates a release and its new URL-backed asset events. It accepts:
 - `--notes TEXT` or `--notes-file PATH`;
 - `--released-at UNIX_SECONDS` (default now for creation);
 - `--tag TAG` when `{tag}` manifest expansion differs from VERSION;
+- `--commit COMMIT` to override the Git revision represented by the release;
 - `--manifest PATH`;
 - repeatable `--asset PLATFORM=URL` for the simple case;
 - repeatable `--asset-event ASSET` to reuse an existing asset;
@@ -680,11 +684,16 @@ Multiple candidates remain an error. An exact existing but unlinked application
 is never overwritten or linked implicitly; the user must run `release app link
 APP --edit` first.
 
-Creation requires at least one valid asset. On edit, omitted notes, channel,
-release date, and asset inputs preserve their existing values. New asset inputs
-append; they do not replace or remove the existing `e` tags. Asset removal and
-same-filename replacement require a future explicit operation. An exact asset
-event already present in the release is an error, not a silent no-op.
+Creation requires at least one valid asset. A new release defaults its source
+commit to the repository's current `HEAD`. `--commit` and top-level manifest
+`commit` values may be any revision that resolves to a commit in the local
+repository; ngit peels the revision and writes its full commit ID. On edit,
+omitted notes, channel, release date, commit, and asset inputs preserve their
+existing values. This includes preserving the absence of `commit` on a legacy
+release. New asset inputs append; they do not replace or remove the existing
+`e` tags. Asset removal and same-filename replacement require a future explicit
+operation. An exact asset event already present in the release is an error, not
+a silent no-op.
 
 Before publishing, ngit MUST:
 
@@ -692,7 +701,7 @@ Before publishing, ngit MUST:
    plan an initial application when neither exists;
 2. apply the create/edit guard;
 3. verify that the signer is both a current maintainer and application author;
-4. resolve and validate all existing and proposed assets;
+4. resolve the selected Git commit and all existing and proposed assets;
 5. construct the canonical union of asset platforms for release `f` tags;
 6. show or emit the complete mutation plan;
 7. sign the initial application when required, then new assets and the release;
@@ -786,6 +795,7 @@ direct assets are provided.
 schema: 1
 application: ngit
 channel: main
+commit: main
 assets:
   - source: https://downloads.example.org/ngit/{version}/ngit-linux-x86_64.tar.gz
     platforms:
@@ -799,8 +809,8 @@ assets:
     platform_agnostic: true
 ```
 
-Supported top-level fields are `schema`, `application`, `channel`, `notes`, and
-`assets`. An asset supports:
+Supported top-level fields are `schema`, `application`, `channel`, `notes`,
+release-wide `commit`, and `assets`. An asset supports:
 
 - `source` URL;
 - `identifier` and `version`, defaulting to the application identifier and
@@ -819,10 +829,14 @@ is the exact VERSION argument. `{tag}` is the exact resolved Git tag and MUST be
 provided explicitly when it differs from VERSION. No shell, environment
 variable, command, arbitrary template, or glob expansion is performed.
 
-CLI values override top-level manifest values. Direct asset flags append to
-manifest assets; they do not replace them. Duplicate final URLs or duplicate
-resolved filenames are rejected. Unknown schema versions and unknown keys are
-errors so a typo cannot silently discard metadata.
+CLI values override top-level manifest values. For release commit selection,
+precedence is `--commit`, top-level manifest `commit`, the prior value on edit,
+then `HEAD` on create. Release-wide and per-asset commit values are independent:
+the former identifies the source state represented by the release, while the
+latter may identify the source of one particular artifact. Direct asset flags
+append to manifest assets; they do not replace them. Duplicate final URLs or
+duplicate resolved filenames are rejected. Unknown schema versions and unknown
+keys are errors so a typo cannot silently discard metadata.
 
 ## Metadata policy
 
@@ -838,7 +852,9 @@ explicit decision where omission commonly creates a poor release:
   metadata and conflicting caller values are rejected.
 - Applications SHOULD have a summary, icon, website, repository URL, license,
   and platform hints. Creation warns about omissions but does not require them.
-- Releases SHOULD have non-empty notes and SHOULD identify a source commit.
+- Releases SHOULD have non-empty notes. ngit-created releases identify a source
+  commit by default; legacy edits preserve an omitted tag unless explicitly
+  overridden.
 - `--strict-metadata` promotes all metadata warnings to validation errors.
 
 This policy makes users acknowledge absent platform metadata without inventing
@@ -1206,6 +1222,12 @@ fail closed with an actionable error.
   the resolved URL before publication.
 - VERSION and Git tag can differ. `{tag}` must fail if no exact tag was supplied
   or resolved unambiguously.
+- A release commit input can be a branch, tag, abbreviated ID, or revision
+  expression. Resolve it locally, require it to peel to a commit, and serialize
+  the full ID so consumers never inherit the publisher's revision ambiguity.
+- An edit with no commit input must preserve the existing `commit` tag exactly,
+  including preserving absence for a legacy release. An asset-add replacement
+  must do the same.
 - CLI-over-manifest precedence must be field-specific and documented. Repeated
   assets append; scalar overrides must not duplicate singleton tags.
 - Relative manifest paths are resolved from the repository root, not the

@@ -425,12 +425,19 @@ async fn view_release(
         "unresolved_asset_ids": unresolved_asset_ids,
     });
     let mut human = format!(
-        "{} {} ({})\nreleased: {}\nauthor: {}\nplatforms: {}\n\n{}",
+        "{} {} ({})\nreleased: {}\nauthor: {}",
         release.application_identifier,
         release.version,
         release.channel,
         release.raw_event.created_at.as_secs(),
-        short_pubkey(release.raw_event.pubkey),
+        short_pubkey(release.raw_event.pubkey)
+    );
+    if let Some(commit) = &release.commit {
+        let _ = write!(human, "\ncommit: {commit}");
+    }
+    let _ = write!(
+        human,
+        "\nplatforms: {}\n\n{}",
         release.platforms.join(", "),
         release.notes
     );

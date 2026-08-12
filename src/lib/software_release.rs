@@ -189,6 +189,7 @@ pub struct SoftwareRelease {
     pub notes: String,
     pub assets: Vec<AssetPointer>,
     pub platforms: Vec<String>,
+    pub commit: Option<String>,
     pub extra_tags: Vec<Tag>,
 }
 
@@ -215,6 +216,7 @@ impl SoftwareRelease {
             notes: event.content.clone(),
             assets: asset_pointers(event),
             platforms: unique_values(event, "f"),
+            commit: optional_value(event, "commit"),
             extra_tags: extra_tags(event, is_release_tag),
         })
     }
@@ -392,6 +394,7 @@ pub fn validate_release(event: &Event) -> Vec<ValidationIssue> {
     validate_addresses(event, "a", SOFTWARE_APPLICATION_KIND, true, &mut issues);
     validate_event_ids(event, "e", true, &mut issues);
     validate_repeated_tag(event, "f", false, &mut issues);
+    validate_single_tag(event, "commit", false, &mut issues);
     validate_duplicate_values(event, "e", &mut issues);
     validate_duplicate_values(event, "f", &mut issues);
 
@@ -647,6 +650,7 @@ pub struct ReleaseInput {
     pub channel: String,
     pub notes: String,
     pub assets: Vec<ReleaseAssetInput>,
+    pub commit: Option<String>,
     pub extra_tags: Vec<Tag>,
     pub released_at: Timestamp,
 }
@@ -662,6 +666,7 @@ pub fn release_event_builder(input: ReleaseInput) -> Result<EventBuilder, Valida
     validate_input_required("i", &input.application.coordinate.identifier, &mut issues);
     validate_input_required("version", &input.version, &mut issues);
     validate_input_required("c", &input.channel, &mut issues);
+    validate_optional_nonempty("commit", input.commit.as_deref(), &mut issues);
     if input.assets.is_empty() {
         issues.push(ValidationIssue::field(
             ValidationCode::MissingTag,
@@ -721,6 +726,7 @@ pub fn release_event_builder(input: ReleaseInput) -> Result<EventBuilder, Valida
             .flat_map(|asset| asset.platforms.iter().cloned()),
     );
     push_repeated(&mut tags, "f", platforms);
+    push_optional(&mut tags, "commit", input.commit);
     tags.extend(
         input
             .extra_tags
@@ -1413,7 +1419,10 @@ fn is_application_tag(name: &str) -> bool {
 }
 
 fn is_release_tag(name: &str) -> bool {
-    matches!(name, "a" | "i" | "version" | "d" | "c" | "e" | "f")
+    matches!(
+        name,
+        "a" | "i" | "version" | "d" | "c" | "e" | "f" | "commit"
+    )
 }
 
 fn is_asset_tag(name: &str) -> bool {
@@ -1571,6 +1580,7 @@ mod tests {
                 .into_iter()
                 .map(|asset| ReleaseAssetInput::from_asset(asset, None))
                 .collect(),
+            commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
             extra_tags: Vec::new(),
             released_at: Timestamp::from(1_700_000_000),
         })
@@ -1582,6 +1592,10 @@ mod tests {
         assert_eq!(release.application_identifier, "ngit");
         assert_eq!(release.identifier, "ngit@v1.0.0");
         assert_eq!(release.assets.len(), 3);
+        assert_eq!(
+            release.commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
         assert_eq!(
             release.platforms,
             vec!["darwin-arm64".to_string(), "linux-x86_64".to_string()]
@@ -1820,6 +1834,7 @@ mod tests {
             channel: "beta".to_string(),
             notes: String::new(),
             assets: vec![ReleaseAssetInput::from_asset(&asset, None)],
+            commit: None,
             extra_tags: Vec::new(),
             released_at: Timestamp::from(1_700_000_000),
         });
@@ -1842,6 +1857,7 @@ mod tests {
             channel: "main".to_string(),
             notes: String::new(),
             assets: vec![ReleaseAssetInput::from_asset(&expected, None)],
+            commit: None,
             extra_tags: Vec::new(),
             released_at: Timestamp::from(1_700_000_000),
         })
