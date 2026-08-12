@@ -1644,6 +1644,15 @@ async fn get_issue_resolution_status_events(
 
     let signer_pubkey = signer.get_public_key().await?;
     let empty_pr_roots: Vec<Event> = vec![];
+    let proposal_events = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![
+            nostr::prelude::Filter::default().kind(nostr::prelude::Kind::GitPatch),
+            nostr::prelude::Filter::default().kind(KIND_PULL_REQUEST),
+            nostr::prelude::Filter::default().kind(KIND_PULL_REQUEST_UPDATE),
+        ],
+    )
+    .await?;
     let mut events = vec![];
     let mut queued_issue_ids: HashSet<EventId> = HashSet::new();
 
@@ -1668,6 +1677,8 @@ async fn get_issue_resolution_status_events(
 
         let (ahead, _) =
             git_repo.get_commits_ahead_behind(&tip_of_remote_branch, &tip_of_pushed_branch)?;
+        let merged_proposals_info =
+            get_merged_proposals_info(git_repo, &ahead, &proposal_events).await?;
 
         // Track all merge commits introduced by this push so each referenced
         // source commit can be attributed to the merge commit that actually
@@ -1744,6 +1755,16 @@ async fn get_issue_resolution_status_events(
                         commit_hash,
                     )
                     .filter(|merge| *merge != commit_hash);
+                    let related_event = if let Some(event_id) = find_issue_resolution_proposal_id(
+                        git_repo,
+                        &merged_proposals_info,
+                        commit_hash,
+                        merge_commit,
+                    ) {
+                        get_event_from_cache_by_id(git_repo, &event_id).await.ok()
+                    } else {
+                        None
+                    };
                     let status_event = create_issue_resolution_status_event(
                         signer,
                         repo_ref,
@@ -1751,6 +1772,7 @@ async fn get_issue_resolution_status_events(
                         &mention,
                         commit_hash,
                         merge_commit,
+                        related_event.as_ref(),
                     )
                     .await?;
 
@@ -1808,6 +1830,7 @@ async fn create_issue_resolution_status_event(
     mention: &IssueResolutionMention,
     source_commit: Sha1Hash,
     merge_commit: Option<Sha1Hash>,
+    related_event: Option<&Event>,
 ) -> Result<Event> {
     let mut public_keys = repo_ref
         .maintainers
@@ -1818,6 +1841,24 @@ async fn create_issue_resolution_status_event(
 
     let alt_tag = Tag::parse(["alt", "issue resolved from commit message"])?;
     let r_tag = Tag::parse(["r", &repo_ref.root_commit])?;
+    let source_commit_tag = Tag::parse(vec!["c".to_string(), source_commit.to_string()])?;
+    let merge_commit_tag = merge_commit
+        .map(|commit| Tag::parse(vec!["merge-commit".to_string(), commit.to_string()]))
+        .transpose()?;
+    let related_event_tag = related_event
+        .map(|event| {
+            Tag::parse(vec![
+                "q".to_string(),
+                event.id.to_hex(),
+                repo_ref
+                    .relays
+                    .first()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                event.pubkey.to_hex(),
+            ])
+        })
+        .transpose()?;
     let mut commit_refs = vec![Tag::from(Nip34Tag::Reference(source_commit))];
     if let Some(merge_commit) = merge_commit {
         commit_refs.push(Tag::from(Nip34Tag::Reference(merge_commit)));
@@ -1837,6 +1878,10 @@ async fn create_issue_resolution_status_event(
                         public_key: None,
                     }),
                 ],
+                [Some(source_commit_tag), merge_commit_tag, related_event_tag]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
                 public_keys.iter().map(|pk| Tag::public_key(*pk)).collect(),
                 repo_ref
                     .coordinates()
@@ -2060,6 +2105,59 @@ fn find_issue_merge_commit_for_source_commit(
 /// (`proposal_id`, `revision_id`)
 type MergedProposalsInfo =
     HashMap<EventId, (Option<EventId>, HashMap<Sha1Hash, MergedPRCommitType>)>;
+
+/// Find the single proposal that introduced an issue-resolving commit.
+///
+/// A no-ff merge is matched by its merge commit. For a fast-forwarded
+/// proposal, prefer an exact commit match and otherwise use the nearest
+/// proposal commit descended from the source commit. Ambiguous matches omit
+/// the optional proposal context rather than attaching the wrong event.
+fn find_issue_resolution_proposal_id(
+    git_repo: &Repo,
+    merged_proposals_info: &MergedProposalsInfo,
+    source_commit: Sha1Hash,
+    merge_commit: Option<Sha1Hash>,
+) -> Option<EventId> {
+    let context_commit = merge_commit.unwrap_or(source_commit);
+    let exact = merged_proposals_info
+        .iter()
+        .filter(|(_, (_, commits))| commits.contains_key(&context_commit))
+        .map(|(proposal_id, _)| *proposal_id)
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return exact.first().copied();
+    }
+    if !exact.is_empty() || merge_commit.is_some() {
+        return None;
+    }
+
+    let source_oid = sha1_to_oid(&source_commit).ok()?;
+    let mut candidates = merged_proposals_info
+        .iter()
+        .filter_map(|(proposal_id, (_, commits))| {
+            let distance = commits
+                .keys()
+                .filter_map(|commit| {
+                    let commit_oid = sha1_to_oid(commit).ok()?;
+                    let (ahead, behind) = git_repo
+                        .git_repo
+                        .graph_ahead_behind(commit_oid, source_oid)
+                        .ok()?;
+                    (behind == 0).then_some(ahead)
+                })
+                .min()?;
+            Some((*proposal_id, distance))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, distance)| *distance);
+
+    let (proposal_id, distance) = candidates.first().copied()?;
+    if candidates.get(1).is_some_and(|(_, next)| *next == distance) {
+        None
+    } else {
+        Some(proposal_id)
+    }
+}
 
 async fn get_merged_proposals_info(
     git_repo: &Repo,
