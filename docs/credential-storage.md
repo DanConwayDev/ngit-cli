@@ -93,7 +93,9 @@ The `nostr.secret-storage` git config item — overridden by the
 `ngit account login --secret-storage <value>` — selects the policy:
 
 - `auto` (default): OS credential store, falling back to the file store.
-- `file`: ngit's file store only, never the OS store.
+- `file`: write to ngit's file store, never the OS store. If different data
+  already exists under the same higher-priority OS entry, login fails with a
+  removal command instead of writing a credential that could never be used.
 - `git-config`: plaintext in git config, as ngit stored secrets previously.
 
 When a secret cannot be stored under `auto` or `file`, login fails with

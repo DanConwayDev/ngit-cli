@@ -442,6 +442,17 @@ fn parse_bunker_signer(
 }
 
 fn store_value(name: &str, value: &str, policy: SecretStorage) -> Result<(String, Backend)> {
+    if policy == SecretStorage::File && !os_store_disabled() {
+        match os_store::get_value(name) {
+            Ok(existing) => ensure_unshadowed_file_value(name, value, Some(&existing))?,
+            Err(OsError::NoEntry | OsError::Store(_)) => {}
+            Err(OsError::Corrupt) => {
+                bail!(
+                    "OS credential '{name}' contains invalid data and would shadow the new file-store entry; remove it before using --secret-storage file"
+                );
+            }
+        }
+    }
     let os_error = if policy == SecretStorage::File || os_store_disabled() {
         None
     } else {
@@ -475,6 +486,15 @@ fn store_value(name: &str, value: &str, policy: SecretStorage) -> Result<(String
         bail!("file-store read-back verification failed");
     }
     Ok((name.to_string(), Backend::File))
+}
+
+fn ensure_unshadowed_file_value(name: &str, value: &str, existing: Option<&str>) -> Result<()> {
+    if existing.is_some_and(|existing| existing != value) {
+        bail!(
+            "OS credential '{name}' contains different data and would shadow the new file-store entry; remove it with `ngit account forget-keys {name}` before using --secret-storage file"
+        );
+    }
+    Ok(())
 }
 
 fn retrieve_value(name: &str) -> std::result::Result<String, LookupError> {
@@ -1142,5 +1162,12 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn file_values_cannot_be_hidden_by_different_os_data() {
+        assert!(ensure_unshadowed_file_value("signer:npub", "new", None).is_ok());
+        assert!(ensure_unshadowed_file_value("signer:npub", "same", Some("same")).is_ok());
+        assert!(ensure_unshadowed_file_value("signer:npub", "new", Some("old")).is_err());
     }
 }
