@@ -244,7 +244,14 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
 }
 
 fn read_nsec_file(path: &Path) -> Result<String> {
-    let file = fs::File::open(path).context("failed to open nsec file")?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).context("failed to open nsec file")?;
     let meta = file
         .metadata()
         .context("failed to inspect open nsec file")?;
@@ -797,7 +804,7 @@ mod tests {
     use clap::Parser;
     use tempfile::tempdir;
 
-    use super::{Cli, extract_signer_cli_arguments};
+    use super::{Cli, extract_signer_cli_arguments, read_nsec_file};
 
     fn key_file(path: &Path, value: &[u8]) {
         fs::write(path, value).unwrap();
@@ -901,6 +908,33 @@ mod tests {
         assert!(
             matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nsec_file_rejects_fifo_without_waiting_for_a_writer() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt, sync::mpsc, thread, time::Duration};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("key-pipe");
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a valid, NUL-terminated path and the mode is a
+        // conventional user-only permission mask.
+        let status = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(
+            status,
+            0,
+            "failed to create FIFO: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || sender.send(read_nsec_file(&path)).unwrap());
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("opening a FIFO blocked instead of rejecting it");
+        handle.join().unwrap();
+        assert!(result.is_err());
     }
 
     #[test]

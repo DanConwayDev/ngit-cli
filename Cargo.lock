@@ -1786,6 +1786,7 @@ dependencies = [
  "git2",
  "indicatif",
  "keyring",
+ "libc",
  "mailparse",
  "mockall",
  "nostr",
