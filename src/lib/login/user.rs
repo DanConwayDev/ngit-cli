@@ -9,7 +9,7 @@ use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
 use crate::{
-    client::{Connect, get_event_from_global_cache, is_verbose, sign_event},
+    client::{Connect, FetchReport, get_event_from_global_cache, is_verbose, sign_event},
     git_events::KIND_USER_GRASP_LIST,
 };
 
@@ -103,11 +103,9 @@ pub async fn get_user_details(
                 let (reports, progress_reporter) = client
                     .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
                     .await?;
-                if !reports.iter().any(|r| r.is_err()) {
-                    progress_reporter.clear()?;
-                    if is_verbose() {
-                        term.clear_last_lines(1)?;
-                    }
+                finish_profile_fetch(&reports, progress_reporter)?;
+                if is_verbose() && !reports.iter().any(|report| report.is_err()) {
+                    term.clear_last_lines(1)?;
                 }
                 return get_user_ref_from_cache(git_repo_path, public_key).await;
             }
@@ -129,11 +127,11 @@ pub async fn get_user_details(
             if is_verbose() {
                 term.write_line("searching for profile...")?;
             }
-            let (_, progress_reporter) = client
+            let (reports, progress_reporter) = client
                 .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
                 .await?;
+            finish_profile_fetch(&reports, progress_reporter)?;
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
-                progress_reporter.clear()?;
                 Ok(user_ref)
             } else {
                 Ok(empty)
@@ -142,6 +140,24 @@ pub async fn get_user_details(
             Ok(empty)
         }
     }
+}
+
+/// Complete a profile fetch before its caller prints ordinary status text.
+/// Successful relay details are transient; errors remain visible and receive
+/// a separating newline so subsequent output cannot share the final bar line.
+fn finish_profile_fetch(
+    reports: &[Result<FetchReport>],
+    progress_reporter: indicatif::MultiProgress,
+) -> Result<()> {
+    let had_errors = reports.iter().any(Result::is_err);
+    if !had_errors {
+        progress_reporter.clear()?;
+    }
+    drop(progress_reporter);
+    if had_errors {
+        console::Term::stderr().write_line("")?;
+    }
+    Ok(())
 }
 
 pub async fn get_user_ref_from_cache(
@@ -288,5 +304,88 @@ pub fn extract_user_grasp_list(
         } else {
             Timestamp::from(0)
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
+
+    use super::finish_profile_fetch;
+    use crate::client::FetchReport;
+
+    #[derive(Debug)]
+    struct ClearTrackingTerm {
+        clears: Arc<AtomicUsize>,
+    }
+
+    impl TermLike for ClearTrackingTerm {
+        fn width(&self) -> u16 {
+            80
+        }
+
+        fn move_cursor_up(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, _s: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_str(&self, _s: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clear_line(&self) -> io::Result<()> {
+            self.clears.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn flush(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn successful_profile_fetch_clears_progress_without_a_profile() {
+        let clears = Arc::new(AtomicUsize::new(0));
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
+            ClearTrackingTerm {
+                clears: clears.clone(),
+            },
+        )));
+        let bar = progress.add(
+            ProgressBar::new(1)
+                .with_style(ProgressStyle::with_template("{msg}").expect("valid style")),
+        );
+        bar.finish_with_message("no new events");
+
+        finish_profile_fetch(&[Ok(FetchReport::default())], progress)
+            .expect("successful progress cleanup");
+
+        assert!(
+            clears.load(Ordering::Relaxed) > 0,
+            "a successful fetch must clear transient relay details even when no profile was found"
+        );
     }
 }
