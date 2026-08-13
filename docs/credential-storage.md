@@ -11,7 +11,9 @@ via the [`keyring`] crate, under keyring **service `nostr`**. When no OS
 credential store is available, the secret goes to ngit's **file store**
 instead: a JSON file at `<ngit-data-dir>/credentials.json` (on Linux
 `~/.local/share/ngit/credentials.json`) restricted to the current user
-(0700 directory, 0600 file on unix).
+(0700 directory, 0600 file on unix). Updates write and flush a complete
+replacement beside the file before atomically replacing it on Unix and
+Windows, so interruption cannot leave a partially written credential file.
 
 The file store is plaintext by design. The threat this feature counters is
 *incidental* disclosure of git config — which coding agents and other tools

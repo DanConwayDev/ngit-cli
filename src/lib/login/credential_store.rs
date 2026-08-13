@@ -823,6 +823,7 @@ mod file_store {
 
     use anyhow::{Context, Result};
     use nostr::prelude::Keys;
+    use tempfile::NamedTempFile;
 
     pub fn path() -> Result<PathBuf> {
         // Compiled out of release builds so an environment variable can never
@@ -901,34 +902,37 @@ mod file_store {
     }
 
     fn write(path: &Path, values: &BTreeMap<String, String>) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let mut builder = fs::DirBuilder::new();
-                builder.recursive(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::DirBuilderExt;
-                    builder.mode(0o700);
-                }
-                builder
-                    .create(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
             }
+            builder
+                .create(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let data = serde_json::to_vec_pretty(values).context("failed to serialize file store")?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        let mut temp = NamedTempFile::new_in(parent).with_context(|| {
+            format!("failed to create a temporary file in {}", parent.display())
+        })?;
+        temp.write_all(&data)
+            .and_then(|()| temp.as_file().sync_all())
+            .with_context(|| format!("failed to write a replacement for {}", path.display()))?;
+        temp.persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // 0600 applies on creation only; a pre-existing file keeps its
-            // mode (the tempfile-backed test override relies on this).
-            options.mode(0o600);
-        }
-        options
-            .open(path)
-            .and_then(|mut file| file.write_all(&data))
-            .with_context(|| format!("failed to write {}", path.display()))
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("failed to sync {}", parent.display()))?;
+        Ok(())
     }
 }
 
@@ -1026,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_bunker_record_is_atomic_and_drops_pairing_secret() -> Result<()> {
+    fn typed_bunker_record_is_bundled_and_drops_pairing_secret() -> Result<()> {
         let user = Keys::generate();
         let remote_signer = Keys::generate();
         let client = Keys::generate();
@@ -1059,6 +1063,31 @@ mod tests {
         assert!(
             parse_bunker_signer(&name, &user_npub, &serde_json::to_string(&mismatched)?).is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn file_store_atomically_replaces_the_complete_document() -> Result<()> {
+        use std::{collections::BTreeMap, io::Read};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("credentials.json");
+        let first = Keys::generate().public_key().to_bech32()?;
+        let second = Keys::generate().public_key().to_bech32()?;
+        file_store::set_value_at(&path, "alias:first", &first)?;
+        let mut previous_document = std::fs::File::open(&path)?;
+
+        file_store::set_value_at(&path, "alias:second", &second)?;
+
+        let mut previous_data = String::new();
+        previous_document.read_to_string(&mut previous_data)?;
+        let previous: BTreeMap<String, String> = serde_json::from_str(&previous_data)?;
+        assert_eq!(previous.get("nostr/alias:first"), Some(&first));
+        assert!(!previous.contains_key("nostr/alias:second"));
+
+        let current: BTreeMap<String, String> = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(current.get("nostr/alias:first"), Some(&first));
+        assert_eq!(current.get("nostr/alias:second"), Some(&second));
         Ok(())
     }
 
