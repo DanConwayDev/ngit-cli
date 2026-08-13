@@ -10,6 +10,7 @@ use ngit::{
 use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
+    cli::SignerParams,
     client::{
         Client, Connect, fetching_with_report, get_events_from_local_cache,
         get_repo_ref_from_cache, save_event_in_local_cache,
@@ -36,6 +37,7 @@ async fn publish_set_cover_note_event(
     body: &str,
     offline: bool,
     target_kind: &str, // "issue" or "PR" — used in error messages
+    auth: SignerParams<'_>,
 ) -> Result<()> {
     let body = body.trim();
     if body.is_empty() {
@@ -63,8 +65,14 @@ async fn publish_set_cover_note_event(
     let event_id = target.id;
 
     // Login — we need the signer and user pubkey.
-    let (signer, user_ref, _) =
-        login::login_or_signup(&Some(&git_repo), &None, &None, Some(&client), true).await?;
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        auth.info,
+        auth.password,
+        Some(&client),
+        true,
+    )
+    .await?;
 
     let user_pubkey = signer.get_public_key().await?;
 
@@ -199,10 +207,20 @@ async fn publish_set_cover_note_event(
     Ok(())
 }
 
-pub async fn launch_issue_set_cover_note(id: &str, body: &str, offline: bool) -> Result<()> {
-    publish_set_cover_note_event(id, body, offline, "issue").await
+pub async fn launch_issue_set_cover_note(
+    id: &str,
+    body: &str,
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    publish_set_cover_note_event(id, body, offline, "issue", auth).await
 }
 
-pub async fn launch_pr_set_cover_note(id: &str, body: &str, offline: bool) -> Result<()> {
-    publish_set_cover_note_event(id, body, offline, "PR").await
+pub async fn launch_pr_set_cover_note(
+    id: &str,
+    body: &str,
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    publish_set_cover_note_event(id, body, offline, "PR", auth).await
 }

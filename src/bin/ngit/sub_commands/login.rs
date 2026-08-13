@@ -8,7 +8,7 @@ use ngit::{
 };
 
 use crate::{
-    cli::{Cli, extract_signer_cli_arguments},
+    cli::SignerParams,
     client::{Client, Connect},
     git::Repo,
     login::fresh::{fresh_login_or_signup, login_with_bunker_url},
@@ -38,7 +38,7 @@ pub struct SubCommandArgs {
     secret_storage: Option<String>,
 }
 
-pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
     if let Some(value) = &command_args.secret_storage {
         let policy = credential_store::parse_policy(value).with_context(|| {
             format!("invalid --secret-storage value '{value}'; expected auto, file or git-config")
@@ -47,9 +47,8 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
     }
     // Early validation: check if we have required parameters in non-interactive
     // mode
-    let signer_info = extract_signer_cli_arguments(args)?;
     if Interactor::is_non_interactive()
-        && signer_info.is_none()
+        && signer.info.is_none()
         && command_args.bunker_url.is_none()
     {
         use ngit::cli_interactor::cli_error;
@@ -94,7 +93,7 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
             fresh_login_or_signup(
                 &git_repo.as_ref(),
                 client.as_ref(),
-                signer_info,
+                signer.info.clone(),
                 log_in_locally_only || command_args.local,
                 &command_args.signer_relays,
             )

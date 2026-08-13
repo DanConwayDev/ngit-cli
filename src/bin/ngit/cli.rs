@@ -1,9 +1,21 @@
-use anyhow::{Result, bail};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use console::style;
 use ngit::login::SignerInfo;
 
 use crate::sub_commands;
+
+#[derive(Clone, Copy)]
+pub struct SignerParams<'a> {
+    pub info: &'a Option<SignerInfo>,
+    pub password: &'a Option<String>,
+}
 
 #[derive(Parser)]
 #[command(
@@ -23,8 +35,11 @@ pub struct Cli {
     #[arg(long, global = true, hide = true)]
     pub bunker_app_key: Option<String>,
     /// nsec or hex private key
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, conflicts_with = "nsec_file")]
     pub nsec: Option<String>,
+    /// read an nsec or hex private key from a path resolving to a regular file
+    #[arg(long, global = true, value_name = "PATH", conflicts_with = "nsec")]
+    pub nsec_file: Option<PathBuf>,
     /// password to decrypt nsec
     #[arg(short, long, global = true, hide = true)]
     pub password: Option<String>,
@@ -198,9 +213,16 @@ implementation details used for efficiency.
 }
 
 pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
-    if let Some(nsec) = &args.nsec {
+    let nsec = if let Some(nsec) = &args.nsec {
+        Some(nsec.clone())
+    } else if let Some(path) = &args.nsec_file {
+        Some(read_nsec_file(path)?)
+    } else {
+        None
+    };
+    if let Some(nsec) = nsec {
         Ok(Some(SignerInfo::Nsec {
-            nsec: nsec.clone(),
+            nsec,
             password: None,
             npub: None,
         }))
@@ -219,6 +241,43 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
     } else {
         Ok(None)
     }
+}
+
+fn read_nsec_file(path: &Path) -> Result<String> {
+    let file = fs::File::open(path).context("failed to open nsec file")?;
+    let meta = file
+        .metadata()
+        .context("failed to inspect open nsec file")?;
+    if !meta.is_file() {
+        bail!("nsec file path must resolve to a regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !matches!(meta.permissions().mode() & 0o777, 0o400 | 0o600) {
+            bail!("nsec file permissions must be 0400 or 0600");
+        }
+    }
+    if !(1..=4096).contains(&meta.len()) {
+        bail!("nsec file must contain 1 to 4096 bytes");
+    }
+    let capacity = usize::try_from(meta.len()).context("nsec file size does not fit memory")?;
+    let mut raw = Vec::with_capacity(capacity);
+    file.take(4097)
+        .read_to_end(&mut raw)
+        .context("failed to read nsec file")?;
+    if raw.len() > 4096 {
+        bail!("nsec file must contain 1 to 4096 bytes");
+    }
+    let value = std::str::from_utf8(&raw).context("nsec file must be UTF-8")?;
+    let value = value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value);
+    if value.is_empty() || value.contains(['\r', '\n']) {
+        bail!("nsec file must contain exactly one non-empty line");
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Subcommand)]
@@ -733,9 +792,116 @@ pub enum RepoCommands {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use std::{fs, path::Path};
 
-    use super::Cli;
+    use clap::Parser;
+    use tempfile::tempdir;
+
+    use super::{Cli, extract_signer_cli_arguments};
+
+    fn key_file(path: &Path, value: &[u8]) {
+        fs::write(path, value).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    #[test]
+    fn nsec_file_parser_conflict_and_valid_line() {
+        assert!(Cli::try_parse_from(["ngit", "--nsec", "x", "--nsec-file", "key"]).is_err());
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("key");
+        key_file(&path, b"fixture\n");
+        let cli = Cli::try_parse_from(["ngit", "--nsec-file", path.to_str().unwrap()]).unwrap();
+        assert!(
+            matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
+        );
+    }
+
+    #[test]
+    fn nsec_file_is_global_for_signing_commands() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("key");
+        key_file(&path, b"fixture");
+        let path = path.to_string_lossy().into_owned();
+
+        for args in [
+            vec![
+                "ngit",
+                "issue",
+                "comment",
+                "deadbeef",
+                "--body",
+                "body",
+                "--nsec-file",
+                &path,
+            ],
+            vec!["ngit", "--nsec-file", &path, "pr", "close", "deadbeef"],
+            vec!["ngit", "sync", "--nsec-file", &path],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(
+                matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
+            );
+        }
+    }
+
+    #[test]
+    fn nsec_file_rejects_bad_content_without_echo() {
+        let dir = tempdir().unwrap();
+        for (name, value) in [
+            ("empty", b"".as_slice()),
+            ("multi", b"never-echo\nline\n"),
+            ("large", vec![b'x'; 4097].leak()),
+        ] {
+            let path = dir.path().join(name);
+            key_file(&path, value);
+            let cli = Cli::try_parse_from(["ngit", "--nsec-file", path.to_str().unwrap()]).unwrap();
+            let error = match extract_signer_cli_arguments(&cli) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("bad nsec file accepted"),
+            };
+            assert!(!error.contains("never-echo"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nsec_file_accepts_symlink_and_validates_its_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        key_file(&target, b"fixture");
+        let link = dir.path().join("link");
+        symlink(&target, &link).unwrap();
+
+        let cli = Cli::try_parse_from(["ngit", "--nsec-file", link.to_str().unwrap()]).unwrap();
+        assert!(
+            matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
+        );
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(extract_signer_cli_arguments(&cli).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nsec_file_accepts_read_only_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("key");
+        key_file(&path, b"fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let cli = Cli::try_parse_from(["ngit", "--nsec-file", path.to_str().unwrap()]).unwrap();
+        assert!(
+            matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
+        );
+    }
 
     #[test]
     fn repo_arg_is_accepted_at_every_command_position() {

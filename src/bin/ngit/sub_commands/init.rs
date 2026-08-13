@@ -40,7 +40,7 @@ use nostr::prelude::{
 };
 
 use crate::{
-    cli::{Cli, extract_signer_cli_arguments},
+    cli::{Cli, SignerParams},
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
@@ -1609,7 +1609,7 @@ async fn publish_and_finalize(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
     // Phase 1: Local-only setup
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -1619,8 +1619,8 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
     let (signer, user_ref, _) = login::login_or_signup(
         &Some(&git_repo),
-        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
-        &cli_args.password,
+        signer.info,
+        signer.password,
         Some(&client),
         false,
     )

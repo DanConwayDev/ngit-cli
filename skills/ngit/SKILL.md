@@ -265,6 +265,7 @@ ngit account logout                           # removes login config, but preser
 ngit account logout --forget                  # logout and delete the stored secret
 ngit account forget-keys <entry>              # delete a preserved credential-store entry
 ngit --nsec <nsec> <command>                  # inline for CI, no login needed
+ngit --nsec-file /private/key <command>       # one-shot CI/agent key, omitted from argv
 ```
 
 By default, login/create use the OS credential store and fall back to ngit's user-only file store. Git config contains the credential entry name rather than the secret. Select `auto`, `file`, or `git-config` with `--secret-storage`, `NGIT_SECRET_STORAGE`, or `nostr.secret-storage`; plaintext git-config storage must be requested explicitly. Existing plaintext values remain supported.
@@ -286,6 +287,7 @@ ngit sync --ref-name main        # sync specific ref
 | `--repo <TARGET>`     | Select remote, naddr, or nostr URL     |
 | `--repo-relay-only`   | Publish only to repository relays      |
 | `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
+| `--nsec-file <PATH>`  | Read a one-shot key from a private file|
 | `-f`, `--force`       | Bypass safety guards                   |
 | `-v`, `--verbose`     | Verbose output                         |
 

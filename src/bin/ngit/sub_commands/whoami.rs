@@ -10,7 +10,6 @@ use nostr::prelude::ToBech32;
 use serde::Serialize;
 
 use crate::{
-    cli::{Cli, extract_signer_cli_arguments},
     client::{Client, Connect},
     git::Repo,
 };
@@ -49,7 +48,7 @@ struct WhoamiJson {
     active: Option<UserJson>,
 }
 
-pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(command_args: &SubCommandArgs) -> Result<()> {
     let git_repo = Repo::discover()
         .context("failed to find a git repository")
         .ok();
@@ -62,12 +61,9 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
         )))
     };
 
-    let signer_info = extract_signer_cli_arguments(args).unwrap_or(None);
-
     // Try to load login from each config level (silent, no prompts)
     let local = load_user_for_scope(
         git_repo.as_ref(),
-        signer_info.as_ref(),
         client.as_ref(),
         SignerInfoSource::GitLocal,
     )
@@ -75,7 +71,6 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
 
     let global = load_user_for_scope(
         git_repo.as_ref(),
-        signer_info.as_ref(),
         client.as_ref(),
         SignerInfoSource::GitGlobal,
     )
@@ -83,7 +78,6 @@ pub async fn launch(args: &Cli, command_args: &SubCommandArgs) -> Result<()> {
 
     let system = load_user_for_scope(
         git_repo.as_ref(),
-        signer_info.as_ref(),
         client.as_ref(),
         SignerInfoSource::GitSystem,
     )
@@ -171,26 +165,18 @@ fn print_user_human(u: &(String, String, Option<String>)) {
 /// via that scope or if the scope requires a password prompt (ncryptsec).
 async fn load_user_for_scope(
     git_repo: Option<&Repo>,
-    signer_info: Option<&ngit::login::SignerInfo>,
     client: Option<&Client>,
     source: SignerInfoSource,
 ) -> Option<(String, String, Option<String>)> {
     // First verify signer info exists for this scope without building a full
     // signer — avoids triggering password prompts for ncryptsec.
-    if get_signer_info(
-        &git_repo,
-        &signer_info.cloned(),
-        &None,
-        &Some(source.clone()),
-    )
-    .is_err()
-    {
+    if get_signer_info(&git_repo, &None, &None, &Some(source.clone())).is_err() {
         return None;
     }
 
     let result = load_existing_login(
         &git_repo,
-        &signer_info.cloned(),
+        &None,
         &None,
         &Some(source),
         client,

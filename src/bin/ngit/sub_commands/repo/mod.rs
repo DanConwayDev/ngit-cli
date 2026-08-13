@@ -17,7 +17,7 @@ use nostr::prelude::{FromBech32, PublicKey, ToBech32, nip19::Nip19Coordinate};
 use serde::Serialize;
 
 use crate::{
-    cli::{Cli, RepoCommands, extract_signer_cli_arguments},
+    cli::{Cli, RepoCommands, SignerParams},
     client::{Client, Connect},
     git::{Repo, RepoActions},
     repo_ref::{get_nostr_remote_for_resolved_coordinate, try_resolve_repo_coordinate},
@@ -29,13 +29,14 @@ pub async fn launch(
     repo_command: Option<&RepoCommands>,
     offline: bool,
     json: bool,
+    signer: SignerParams<'_>,
 ) -> Result<()> {
     match repo_command {
         Some(RepoCommands::Init(args) | RepoCommands::Edit(args)) => {
-            init::launch(cli_args, args).await
+            init::launch(cli_args, args, signer).await
         }
-        Some(RepoCommands::Accept(args)) => accept::launch(cli_args, args).await,
-        None => show_info(cli_args, offline, json).await,
+        Some(RepoCommands::Accept(args)) => accept::launch(args, signer).await,
+        None => show_info(offline, json, signer).await,
     }
 }
 
@@ -115,25 +116,28 @@ fn maintainer_json_fields(repo_ref: &RepoRef) -> MaintainerJsonFields {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines)]
-async fn show_info(cli_args: &Cli, offline: bool, json: bool) -> Result<()> {
+async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     // Attempt a silent login — don't prompt if not logged in.
-    let my_pubkey: Option<PublicKey> = load_existing_login(
+    let login = load_existing_login(
         &Some(&git_repo),
-        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
-        &cli_args.password,
+        signer.info,
+        signer.password,
         &None,
         Some(&client),
         true,  // silent
         false, // don't prompt for password
         false, // don't fetch profile updates
     )
-    .await
-    .ok()
-    .map(|(_, user_ref, _)| user_ref.public_key);
+    .await;
+    let my_pubkey: Option<PublicKey> = match login {
+        Ok((_, user_ref, _)) => Some(user_ref.public_key),
+        Err(error) if signer.info.is_some() => return Err(error),
+        Err(_) => None,
+    };
 
     let Some(resolved_repo) = try_resolve_repo_coordinate(&git_repo).await? else {
         if json {

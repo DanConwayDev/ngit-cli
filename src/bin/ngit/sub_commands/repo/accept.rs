@@ -14,7 +14,7 @@ use ngit::{
 use nostr::prelude::{RelayUrl, ToBech32, nip19::Nip19Coordinate};
 
 use crate::{
-    cli::{Cli, extract_signer_cli_arguments},
+    cli::SignerParams,
     client::{Client, Connect},
     git::{Repo, RepoActions},
     login,
@@ -29,15 +29,15 @@ pub struct SubCommandArgs {
     grasp_server: Vec<String>,
 }
 
-pub async fn launch(cli_args: &Cli, args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     let (signer, user_ref, _) = login::login_or_signup(
         &Some(&git_repo),
-        &extract_signer_cli_arguments(cli_args).unwrap_or(None),
-        &cli_args.password,
+        signer.info,
+        signer.password,
         Some(&client),
         false,
     )
