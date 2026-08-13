@@ -15,6 +15,16 @@ jobs:
       - run: nix develop --command cargo fmt --all -- --check
       - run: nix develop --command cargo test
 
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --all-targets --all-features
+      - run: cargo test --lib --all-features login::credential_store::tests
+      - run: cargo test --bin ngit --all-features cli::tests
+
   container:
     runs-on: ubuntu-latest
     timeout-minutes: 30
