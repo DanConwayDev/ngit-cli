@@ -7,7 +7,7 @@ use crate::{
     cli::Cli,
     client::{Client, Connect},
     git::Repo,
-    login::fresh::signup_non_interactive,
+    login::fresh::{configured_signer_scope_message, signup_non_interactive},
 };
 
 #[derive(Parser)]
@@ -25,7 +25,7 @@ pub struct SubCommandArgs {
     #[arg(long)]
     pub offline: bool,
 
-    /// Save credentials only to local git config
+    /// Use the new account only in this local Git repository
     #[arg(long)]
     pub local: bool,
 
@@ -60,7 +60,7 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let publish = !args.offline;
 
-    let (_signer, public_key, _signer_info, keys) = signup_non_interactive(
+    let (_signer, public_key, signer_info, keys) = signup_non_interactive(
         args.name.clone(),
         client.as_ref(),
         args.local,
@@ -83,11 +83,10 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
         println!("✓ Published metadata to relays");
     }
 
-    if args.local {
-        println!("✓ Saved credentials to local git config only");
-    } else {
-        println!("✓ Saved credentials to global git config");
-    }
+    println!(
+        "✓ {}",
+        configured_signer_scope_message(!args.local, &signer_info)
+    );
 
     // Disconnect client if it was created
     if let Some(client) = client {

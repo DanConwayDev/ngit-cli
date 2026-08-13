@@ -93,7 +93,7 @@ pub async fn load_existing_login(
     Ok((signer, user_ref, source))
 }
 
-fn selected_alias(
+pub fn selected_alias(
     git_repo: &Option<&Repo>,
     requested_signer_info: &Option<SignerInfo>,
     source: &SignerInfoSource,

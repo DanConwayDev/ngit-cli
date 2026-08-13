@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
     login::{
-        self, SignerInfo, SignerInfoSource,
-        existing::{get_signer_info, load_existing_login},
+        self, SignerInfo,
+        existing::{get_signer_info, load_existing_login, selected_alias},
         fresh::generate_qr,
+        logged_in_message,
     },
 };
 use nostr::prelude::ToBech32;
@@ -32,15 +33,8 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
     )
     .await
     .map_err(login::require_account)?;
-    let logged_in_msg = format!(
-        "logged in {}as {}",
-        if source == SignerInfoSource::GitLocal {
-            "to local git repository "
-        } else {
-            ""
-        },
-        user_ref.metadata.name
-    );
+    let alias = selected_alias(&git_repo.as_ref(), signer.info, &source)?;
+    let logged_in_msg = logged_in_message(&user_ref.metadata.name, &source, alias.as_deref());
     match signer_info {
         SignerInfo::Bunker {
             bunker_uri: _,

@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use ngit::{
     git::{get_git_config_item, remove_git_config_item},
-    login::{SignerInfoSource, credential_store, existing::load_existing_login},
+    login::{
+        SignerInfoSource, credential_store,
+        existing::{load_existing_login, selected_alias},
+        logged_out_message, login_identity,
+    },
 };
 use nostr::prelude::ToBech32;
 
@@ -60,6 +64,10 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
             .as_ref()
             .ok()
             .and_then(|(_, user_ref, _)| user_ref.public_key.to_bech32().ok());
+        let alias = loaded
+            .as_ref()
+            .ok()
+            .and_then(|(_, _, source)| selected_alias(&git_repo, &None, source).ok().flatten());
         let pointers = credential_store::config_pointers(&scope, npub.as_deref());
         if forget {
             forget_pointers(&pointers)?;
@@ -70,11 +78,11 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
                     println!(
                         "failed to log out {}as {}",
                         if source == SignerInfoSource::GitLocal {
-                            "from local git repository "
+                            "of this local repository "
                         } else {
-                            ""
+                            "globally "
                         },
-                        user_ref.metadata.name
+                        login_identity(&user_ref.metadata.name, alias.as_deref())
                     );
                 }
                 eprintln!("{error:?}");
@@ -92,13 +100,8 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
         }
         if let Ok((_, user_ref, _)) = loaded {
             println!(
-                "logged out {}as {}",
-                if source == SignerInfoSource::GitLocal {
-                    "from local git repository "
-                } else {
-                    ""
-                },
-                user_ref.metadata.name
+                "{}",
+                logged_out_message(&user_ref.metadata.name, &source, alias.as_deref())
             );
         }
         hint_retained_secrets(forget, &pointers);
@@ -137,8 +140,13 @@ fn hint_retained_secrets(forget: bool, pointers: &[String]) {
         return;
     }
     for pointer in pointers {
+        let subject = if pointer.starts_with("signer:") {
+            "the remote signer connection"
+        } else {
+            "the account secret"
+        };
         eprintln!(
-            "the account secret remains in the credential store; remove it with: ngit account forget-keys {pointer}"
+            "{subject} remains in the credential store; remove it with: ngit account forget-keys {pointer}"
         );
     }
 }

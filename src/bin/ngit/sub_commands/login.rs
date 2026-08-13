@@ -6,7 +6,8 @@ use ngit::{
     git::{get_git_config_item, remove_git_config_item},
     login::{
         SignerInfo, SignerInfoSource, credential_store,
-        existing::{get_signer_info, load_existing_login},
+        existing::{get_signer_info, load_existing_login, selected_alias},
+        logged_in_message,
     },
 };
 use nostr::prelude::{FromBech32, Keys, NostrConnectUri, PublicKey, ToBech32};
@@ -345,17 +346,14 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
             }
 
             // Interactive mode: prompt user for what to do
+            let alias = selected_alias(&git_repo, &None, &source)?;
             match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)
-                    .with_prompt(format!(
-                        "logged in {}as {}",
-                        if source == SignerInfoSource::GitLocal {
-                            "to local git repository "
-                        } else {
-                            ""
-                        },
-                        user_ref.metadata.name
+                    .with_prompt(logged_in_message(
+                        &user_ref.metadata.name,
+                        &source,
+                        alias.as_deref(),
                     ))
                     .with_choices(if source == SignerInfoSource::GitGlobal {
                         vec![
@@ -365,7 +363,10 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                         ]
                     } else {
                         vec![
-                            format!("logout as \"{}\"", user_ref.metadata.name),
+                            alias.as_ref().map_or_else(
+                                || format!("logout as \"{}\"", user_ref.metadata.name),
+                                |alias| format!("logout as signer alias '{alias}'"),
+                            ),
                             "remain logged in".to_string(),
                         ]
                     }),
@@ -399,7 +400,7 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                             );
                             match Interactor::default().choice(
                                 PromptChoiceParms::default().with_default(0)
-                                .with_prompt("failed to remove login details from global git config")
+                                .with_prompt("failed to remove the signer configuration from global Git config")
                                 .with_choices(
                                     vec![
                                         "continue with global login to reveal what git config items to manually set".to_string(),

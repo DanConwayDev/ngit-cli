@@ -19,7 +19,7 @@ use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
 use super::{
-    SignerInfo, SignerInfoSource,
+    SignerInfo, SignerInfoSource, credential_store,
     existing::load_existing_login,
     key_encryption::decrypt_key,
     print_logged_in_as,
@@ -107,6 +107,7 @@ pub async fn fresh_login_or_signup(
     if let Some(alias) = alias {
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
+    let mut saved_source = git_config_source(!save_local);
     if let SignerInfo::Selection { selector } = &signer_info {
         // account login resolves selections before calling this function, but
         // library callers may still supply one. Persist the separately
@@ -117,11 +118,14 @@ pub async fn fresh_login_or_signup(
             save_signer_selection(git_repo, selector, &npub, !save_local)?;
         }
     } else {
-        save_to_git_config(git_repo, &signer_info, !save_local).await?;
-        if let Some(alias) = alias {
-            save_signer_alias(git_repo, alias, &npub, !save_local)?;
-        } else if let Some(selector) = selected_by {
-            save_signer_selection(git_repo, selector, &npub, !save_local)?;
+        saved_source = save_to_git_config(git_repo, &signer_info, !save_local).await?;
+        if saved_source != SignerInfoSource::CommandLineArguments {
+            let saved_globally = saved_source == SignerInfoSource::GitGlobal;
+            if let Some(alias) = alias {
+                save_signer_alias(git_repo, alias, &npub, saved_globally)?;
+            } else if let Some(selector) = selected_by {
+                save_signer_selection(git_repo, selector, &npub, saved_globally)?;
+            }
         }
     }
     let user_ref = get_user_details(
@@ -136,11 +140,6 @@ pub async fn fresh_login_or_signup(
         false,
     )
     .await?;
-    let saved_source = if save_local {
-        SignerInfoSource::GitLocal
-    } else {
-        SignerInfoSource::GitGlobal
-    };
     print_logged_in_as(&user_ref, client.is_none(), &saved_source, alias)?;
     Ok((signer, user_ref, saved_source))
 }
@@ -148,7 +147,7 @@ pub async fn fresh_login_or_signup(
 /// Non-interactive login using a `bunker://` URL provided directly.
 ///
 /// Parses the URL, generates a fresh app key, connects to the remote signer,
-/// and saves the resulting credentials to git config.
+/// stores the resulting connection and configures the selected login scope.
 pub async fn login_with_bunker_url(
     git_repo: &Option<&Repo>,
     #[cfg(test)] client: Option<&MockConnect>,
@@ -182,9 +181,16 @@ pub async fn login_with_bunker_url(
     if let Some(alias) = alias {
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
-    save_to_git_config(git_repo, &signer_info, !save_local).await?;
-    if let Some(alias) = alias {
-        save_signer_alias(git_repo, alias, &npub, !save_local)?;
+    let source = save_to_git_config(git_repo, &signer_info, !save_local).await?;
+    if source != SignerInfoSource::CommandLineArguments {
+        if let Some(alias) = alias {
+            save_signer_alias(
+                git_repo,
+                alias,
+                &npub,
+                source == SignerInfoSource::GitGlobal,
+            )?;
+        }
     }
 
     let user_ref = get_user_details(
@@ -200,11 +206,6 @@ pub async fn login_with_bunker_url(
     )
     .await?;
 
-    let source = if save_local {
-        SignerInfoSource::GitLocal
-    } else {
-        SignerInfoSource::GitGlobal
-    };
     print_logged_in_as(&user_ref, client.is_none(), &source, alias)?;
     Ok((signer, user_ref, source))
 }
@@ -819,7 +820,7 @@ async fn save_to_git_config(
     git_repo: &Option<&Repo>,
     signer_info: &SignerInfo,
     global: bool,
-) -> Result<()> {
+) -> Result<SignerInfoSource> {
     let signer_info = protect_secrets(git_repo, signer_info)?;
     let signer_info = &signer_info;
     let global = if std::env::var("NGITTEST").is_ok() {
@@ -828,7 +829,7 @@ async fn save_to_git_config(
         global
     };
     let err_msg = format!(
-        "failed to save login details to {} git config",
+        "failed to configure the signer in {} Git config",
         if global { "global" } else { "local" }
     );
     if let Err(error) =
@@ -844,7 +845,7 @@ async fn save_to_git_config(
             if crate::cli_interactor::Interactor::is_non_interactive() {
                 use crate::cli_interactor::cli_error;
                 return Err(cli_error(
-                    "failed to create account",
+                    "failed to configure the signer",
                     &[("cause", "global git config is read-only")],
                     &[
                         "ngit account create --local --nsec <your-nsec>",
@@ -906,7 +907,7 @@ async fn save_to_git_config(
                         .await
                         {
                             if user_ref.public_key == get_pubkey_from_signer_info(signer_info)? {
-                                return Ok(());
+                                return Ok(SignerInfoSource::GitGlobal);
                             } else {
                                 eprintln!(
                                     "global git config hasn't been updated with different npub"
@@ -919,38 +920,58 @@ async fn save_to_git_config(
                         }
                     }
                     1 => {
-                        if let Err(error) =
-                            silently_save_to_git_config(git_repo, signer_info, false).context(
-                                format!(
-                                    "failed to save login details to {} git config",
-                                    if global { "global" } else { "local" }
-                                ),
-                            )
-                        {
-                            eprintln!("Error: {error:?}");
-                            eprintln!("login details were not saved");
-                        } else {
-                            eprintln!(
-                                "saved login details to local git config. you are only logged in to this local repository."
-                            );
-                        }
-                        return Ok(());
+                        silently_save_to_git_config(git_repo, signer_info, false)
+                            .context("failed to configure the signer in local Git config")?;
+                        return Ok(SignerInfoSource::GitLocal);
                     }
-                    _ => return Ok(()),
+                    _ => return Ok(SignerInfoSource::CommandLineArguments),
                 }
             }
         }
         Err(error)
     } else {
-        eprintln!(
-            "{}",
-            if global {
-                "saved login details to global git config"
-            } else {
-                "saved login details to local git config. you are only logged in to this local repository."
-            }
-        );
-        Ok(())
+        Ok(git_config_source(global))
+    }
+}
+
+fn git_config_source(global: bool) -> SignerInfoSource {
+    if global && std::env::var("NGITTEST").is_err() {
+        SignerInfoSource::GitGlobal
+    } else {
+        SignerInfoSource::GitLocal
+    }
+}
+
+pub fn configured_signer_scope_message(global: bool, signer_info: &SignerInfo) -> String {
+    let scope = if global {
+        "global Git config"
+    } else {
+        "this repository's local Git config"
+    };
+    match signer_info {
+        SignerInfo::Selection { selector } if selector.starts_with("npub1") => {
+            format!("{scope} now selects signer {selector}")
+        }
+        SignerInfo::Selection { selector } => {
+            format!("{scope} now selects signer alias '{selector}'")
+        }
+        SignerInfo::Nsec { nsec, .. } if credential_store::parse_pointer(nsec).is_some() => {
+            format!("{scope} now points to the stored account secret")
+        }
+        SignerInfo::Nsec { nsec, .. } if nsec.starts_with("ncryptsec1") => {
+            format!("{scope} now contains the encrypted account secret")
+        }
+        SignerInfo::Bunker { bunker_app_key, .. }
+            if credential_store::parse_pointer(bunker_app_key).is_some() =>
+        {
+            format!("{scope} now points to the stored remote signer connection")
+        }
+        SignerInfo::Nsec { .. } => {
+            format!("{scope} now contains the account secret in plaintext")
+        }
+        SignerInfo::Bunker { .. } => {
+            format!("{scope} now contains the remote signer connection in plaintext")
+        }
     }
 }
 
@@ -971,10 +992,11 @@ pub fn save_signer_alias(
         .to_bech32()?;
     let policy = credential_store::policy(git_repo);
     let credential_backed = policy != SecretStorage::GitConfig;
-    if credential_backed {
-        credential_store::store_alias(&alias, &npub, policy)
-            .context("failed to save signer alias in the credential store")?;
-    }
+    let alias_backend = credential_backed
+        .then(|| credential_store::store_alias(&alias, &npub, policy))
+        .transpose()
+        .context("failed to save signer alias in the credential store")?
+        .map(|(_, backend)| backend);
 
     let global = global && std::env::var("NGITTEST").is_err();
     let scope = if global {
@@ -996,11 +1018,26 @@ pub fn save_signer_alias(
         remove_git_config_item(scope, "nostr.bunker-uri")?;
         remove_git_config_item(scope, "nostr.bunker-app-key")?;
     }
-    eprintln!(
-        "saved signer alias '{alias}' to {} git config",
-        if global { "global" } else { "local" }
-    );
+    if let Some(backend) = alias_backend {
+        print_alias_storage(&alias, backend);
+    }
     Ok(())
+}
+
+fn print_alias_storage(alias: &str, backend: credential_store::Backend) {
+    match backend {
+        credential_store::Backend::Os => eprintln!(
+            "signer alias '{alias}' is stored in the OS credential store under service '{}'",
+            credential_store::SERVICE
+        ),
+        credential_store::Backend::File => {
+            let path = credential_store::file_store_path().map_or_else(
+                |_| "ngit's file store".to_string(),
+                |path| path.display().to_string(),
+            );
+            eprintln!("signer alias '{alias}' is stored in {path}");
+        }
+    }
 }
 
 fn save_signer_selection(
@@ -1077,7 +1114,8 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
     let policy = credential_store::policy(git_repo);
     if policy == SecretStorage::GitConfig {
         eprintln!(
-            "saving the secret to git config in plaintext (secret-storage policy: git-config)"
+            "{} will be stored in Git config in plaintext (secret-storage policy: git-config)",
+            signer_storage_subject(signer_info)
         );
         return Ok(signer_info.clone());
     }
@@ -1136,9 +1174,10 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
     };
     match stored {
         Ok((protected, pointer, backend)) => {
+            let subject = signer_storage_subject(signer_info);
             match backend {
                 Backend::Os => eprintln!(
-                    "stored the account secret in the OS credential store as entry '{pointer}' under service '{}'",
+                    "{subject} is stored in the OS credential store as entry '{pointer}' under service '{}'",
                     credential_store::SERVICE
                 ),
                 Backend::File => {
@@ -1147,11 +1186,9 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
                         |path| path.display().to_string(),
                     );
                     if policy == SecretStorage::File {
-                        eprintln!("stored the account secret in {path}");
+                        eprintln!("{subject} is stored in {path}");
                     } else {
-                        eprintln!(
-                            "OS credential store unavailable; stored the account secret in {path}"
-                        );
+                        eprintln!("OS credential store unavailable; {subject} is stored in {path}");
                     }
                 }
             }
@@ -1169,6 +1206,14 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
                 "failed to store the account secret in a credential store; re-run with `--secret-storage git-config` to save it as plaintext in git config instead",
             ))
         }
+    }
+}
+
+fn signer_storage_subject(signer_info: &SignerInfo) -> &'static str {
+    match signer_info {
+        SignerInfo::Nsec { .. } => "the account secret",
+        SignerInfo::Bunker { .. } => "the remote signer connection",
+        SignerInfo::Selection { .. } => "the signer selection",
     }
 }
 
@@ -1245,7 +1290,8 @@ fn silently_save_to_git_config(
 /// # Arguments
 /// * `name` - Display name for the new account
 /// * `client` - Optional client for publishing metadata to relays
-/// * `save_local` - If true, save credentials to local git config only
+/// * `save_local` - If true, configure this local repository instead of the
+///   global Git-config scope
 /// * `publish` - If true, publish metadata and relay list to relays
 ///
 /// # Returns
@@ -1271,7 +1317,7 @@ pub async fn signup_non_interactive(
         verify_npub: false,
     };
 
-    // Save to git config
+    // Store the secret and configure the selected Git-config scope.
     let git_repo = Repo::discover().ok();
     let config_signer_info = protect_secrets(&git_repo.as_ref(), &signer_info)?;
     if let Err(error) =
@@ -1315,8 +1361,8 @@ pub async fn signup_non_interactive(
 
             let cmd_refs: Vec<&str> = cmds.iter().map(String::as_str).collect();
             return Err(cli_error(
-                "global git config is read-only. login to local repo or save git config manually",
-                &[("--local", "login scoped to this repositoriy")],
+                "global Git config is read-only; configure the account locally or update Git config manually",
+                &[("--local", "use the account only in this repository")],
                 &cmd_refs,
             ));
         }
@@ -1476,6 +1522,62 @@ fn print_lines_with_headings(lines: Vec<&str>, printer: &mut Printer) {
             printer.println_with_custom_formatting(heading_style.apply_to(&s).to_string(), s);
         } else {
             printer.println(line.to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod status_message_tests {
+    use nostr::prelude::{Keys, ToBech32};
+
+    use super::configured_signer_scope_message;
+    use crate::login::SignerInfo;
+
+    #[test]
+    fn configured_scope_status_distinguishes_selection_and_storage() {
+        let pointer = Keys::generate().public_key().to_bech32().unwrap();
+        for (global, signer_info, expected) in [
+            (
+                false,
+                SignerInfo::Selection {
+                    selector: "dcagent".to_string(),
+                },
+                "this repository's local Git config now selects signer alias 'dcagent'",
+            ),
+            (
+                true,
+                SignerInfo::Nsec {
+                    nsec: pointer.clone(),
+                    password: None,
+                    npub: None,
+                    verify_npub: false,
+                },
+                "global Git config now points to the stored account secret",
+            ),
+            (
+                false,
+                SignerInfo::Nsec {
+                    nsec: "nsec1plaintext".to_string(),
+                    password: None,
+                    npub: None,
+                    verify_npub: false,
+                },
+                "this repository's local Git config now contains the account secret in plaintext",
+            ),
+            (
+                false,
+                SignerInfo::Bunker {
+                    bunker_uri: "bunker://example".to_string(),
+                    bunker_app_key: pointer,
+                    npub: None,
+                },
+                "this repository's local Git config now points to the stored remote signer connection",
+            ),
+        ] {
+            assert_eq!(
+                configured_signer_scope_message(global, &signer_info),
+                expected
+            );
         }
     }
 }

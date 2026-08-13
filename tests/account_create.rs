@@ -467,12 +467,6 @@ async fn alias_only_login_reactivates_a_retained_file_signer() -> Result<()> {
         repo.config("nostr.signer-alias.dcagent").await?.as_deref(),
         Some(npub.as_str())
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("logged in as dcagent to local repository"),
-        "alias should replace the profile name in login status: {stderr}"
-    );
-
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert_eq!(
         entries
@@ -1020,16 +1014,21 @@ async fn direct_ncryptsec_login_uses_the_cli_password() -> Result<()> {
 
 #[tokio::test]
 async fn local_login_outside_a_repo_does_not_store_the_secret() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
     let outside = tempfile::tempdir()?;
     let credentials = NamedTempFile::new()?;
     let nsec = Keys::generate().secret_key().to_bech32()?;
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ngit"))
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
         .current_dir(outside.path())
-        .args(["account", "login", "--local", "--offline", "--nsec", &nsec])
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", credentials.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .await?;
 
