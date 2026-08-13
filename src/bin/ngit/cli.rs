@@ -1,4 +1,8 @@
-use std::{fs, io::Read, path::PathBuf};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -27,7 +31,7 @@ pub struct Cli {
     /// nsec or hex private key
     #[arg(short, long, global = true, conflicts_with = "nsec_file")]
     pub nsec: Option<String>,
-    /// read an nsec or hex private key from a mode-0600 regular file
+    /// read an nsec or hex private key from a path resolving to a regular file
     #[arg(long, global = true, value_name = "PATH", conflicts_with = "nsec")]
     pub nsec_file: Option<PathBuf>,
     /// password to decrypt nsec
@@ -233,29 +237,26 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
     }
 }
 
-fn read_nsec_file(path: &PathBuf) -> Result<String> {
-    let path_meta = fs::symlink_metadata(path).context("failed to inspect nsec file")?;
-    if path_meta.file_type().is_symlink() || !path_meta.is_file() {
-        bail!("nsec file must be a regular non-symlink file");
-    }
+fn read_nsec_file(path: &Path) -> Result<String> {
     let file = fs::File::open(path).context("failed to open nsec file")?;
     let meta = file
         .metadata()
         .context("failed to inspect open nsec file")?;
+    if !meta.is_file() {
+        bail!("nsec file path must resolve to a regular file");
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if (path_meta.dev(), path_meta.ino()) != (meta.dev(), meta.ino()) {
-            bail!("nsec file changed while opening");
-        }
-        if meta.permissions().mode() & 0o777 != 0o600 {
-            bail!("nsec file permissions must be 0600");
+        use std::os::unix::fs::PermissionsExt;
+        if !matches!(meta.permissions().mode() & 0o777, 0o400 | 0o600) {
+            bail!("nsec file permissions must be 0400 or 0600");
         }
     }
     if !(1..=4096).contains(&meta.len()) {
         bail!("nsec file must contain 1 to 4096 bytes");
     }
-    let mut raw = Vec::with_capacity(meta.len() as usize);
+    let capacity = usize::try_from(meta.len()).context("nsec file size does not fit memory")?;
+    let mut raw = Vec::with_capacity(capacity);
     file.take(4097)
         .read_to_end(&mut raw)
         .context("failed to read nsec file")?;
@@ -834,20 +835,38 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn nsec_file_rejects_symlink_and_unsafe_mode() {
+    fn nsec_file_accepts_symlink_and_validates_its_target() {
         use std::os::unix::fs::{PermissionsExt, symlink};
+
         let dir = tempdir().unwrap();
         let target = dir.path().join("target");
         key_file(&target, b"fixture");
         let link = dir.path().join("link");
         symlink(&target, &link).unwrap();
-        for path in [&link, &target] {
-            if path == &target {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o640)).unwrap();
-            }
-            let cli = Cli::try_parse_from(["ngit", "--nsec-file", path.to_str().unwrap()]).unwrap();
-            assert!(extract_signer_cli_arguments(&cli).is_err());
-        }
+
+        let cli = Cli::try_parse_from(["ngit", "--nsec-file", link.to_str().unwrap()]).unwrap();
+        assert!(
+            matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
+        );
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(extract_signer_cli_arguments(&cli).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nsec_file_accepts_read_only_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("key");
+        key_file(&path, b"fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let cli = Cli::try_parse_from(["ngit", "--nsec-file", path.to_str().unwrap()]).unwrap();
+        assert!(
+            matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
+        );
     }
 
     #[test]
