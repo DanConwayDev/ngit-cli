@@ -93,4 +93,11 @@ To move an existing plaintext login into a credential store, log in again
 with `ngit account login`. Interactive commands print a once-per-run hint
 to that effect while a plaintext secret is in use.
 
+## One-shot non-interactive use
+
+`--nsec-file PATH` reads one nsec or hex key for the current command without
+placing it in argv or git config. It requires a regular, non-symlink file with
+one non-empty line, at most 4096 bytes and, on unix, mode 0600. It conflicts
+with `--nsec`. Prefer `ngit account login` for reusable identities.
+
 [`keyring`]: https://crates.io/crates/keyring
