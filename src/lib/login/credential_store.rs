@@ -216,9 +216,11 @@ pub fn normalize_alias(alias: &str) -> Result<String> {
         || !alias
             .as_bytes()
             .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
+            .is_some_and(u8::is_ascii_alphabetic)
     {
-        bail!("signer alias must be 1 to 64 letters, numbers, or hyphens");
+        bail!(
+            "signer alias must start with a letter and contain at most 64 letters, numbers, or hyphens"
+        );
     }
     Ok(alias.to_ascii_lowercase())
 }
@@ -981,7 +983,14 @@ mod tests {
     fn alias_names_are_portable_and_namespaced() -> Result<()> {
         assert_eq!(normalize_alias("Fred-2")?, "fred-2");
         assert_eq!(alias_entry_name("Fred-2")?, "alias:fred-2");
-        for invalid in ["", "-fred", "fred_jones", "fred.jones", "fred jones"] {
+        for invalid in [
+            "",
+            "-fred",
+            "2fred",
+            "fred_jones",
+            "fred.jones",
+            "fred jones",
+        ] {
             assert!(
                 normalize_alias(invalid).is_err(),
                 "accepted invalid alias {invalid:?}"

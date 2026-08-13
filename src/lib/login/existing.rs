@@ -103,21 +103,47 @@ pub fn get_signer_info(
                         result = Some(res);
                         break;
                     }
-                    Err(error)
-                        if error
-                            .downcast_ref::<credential_store::LookupError>()
-                            .is_some() =>
-                    {
-                        return Err(error);
+                    Err(error) => {
+                        let explicit_cli_selection = source
+                            == SignerInfoSource::CommandLineArguments
+                            && matches!(signer_info, Some(SignerInfo::Selection { .. }));
+                        let configured_selection = match source {
+                            SignerInfoSource::GitLocal => git_repo.is_some_and(|repo| {
+                                get_git_config_item(&Some(repo), "nostr.signer")
+                                    .is_ok_and(|value| value.is_some())
+                            }),
+                            SignerInfoSource::GitGlobal => {
+                                get_git_config_item(&None, "nostr.signer")
+                                    .is_ok_and(|value| value.is_some())
+                            }
+                            SignerInfoSource::GitSystem => {
+                                get_git_config_item_system("nostr.signer")
+                                    .is_ok_and(|value| value.is_some())
+                            }
+                            SignerInfoSource::CommandLineArguments => false,
+                        };
+                        if explicit_cli_selection
+                            || configured_selection
+                            || error
+                                .downcast_ref::<credential_store::LookupError>()
+                                .is_some()
+                        {
+                            return Err(error);
+                        }
                     }
-                    Err(_) => {}
                 }
             }
             result.ok_or(SignerInfoNotFound)?
         }
         Some(SignerInfoSource::CommandLineArguments) => {
             if let Some(signer_info) = signer_info {
-                (signer_info.clone(), SignerInfoSource::CommandLineArguments)
+                let signer_info = match signer_info {
+                    SignerInfo::Selection { selector } => {
+                        resolve_selected_signer(git_repo, selector, password)?
+                    }
+                    signer_info => signer_info.clone(),
+                };
+                (signer_info, SignerInfoSource::CommandLineArguments)
             } else {
                 bail!("failed to get signer from cli signer arguments because none were specified")
             }
@@ -125,7 +151,14 @@ pub fn get_signer_info(
         Some(SignerInfoSource::GitLocal) => {
             let git_repo =
                 git_repo.context("failed to get local git config as no git_repo supplied")?;
-            if let Ok(nsec) = get_git_config_item(&Some(git_repo), "nostr.nsec")
+            if let Some(selector) = get_git_config_item(&Some(git_repo), "nostr.signer")
+                .context("failed get local git config")?
+            {
+                (
+                    resolve_selected_signer(&Some(git_repo), &selector, password)?,
+                    SignerInfoSource::GitLocal,
+                )
+            } else if let Ok(nsec) = get_git_config_item(&Some(git_repo), "nostr.nsec")
                 .context("failed get local git config")?
                 .context("git local config item nostr.nsec doesn't exist")
             {
@@ -136,6 +169,7 @@ pub fn get_signer_info(
                         password: password.clone(),
                         npub: get_git_config_item(&Some(git_repo), "nostr.npub")
                             .context("failed get local git config")?,
+                        verify_npub: false,
                     },
                     SignerInfoSource::GitLocal,
                 )
@@ -155,7 +189,14 @@ pub fn get_signer_info(
             }
         }
         Some(SignerInfoSource::GitGlobal) => {
-            if let Some(nsec) = get_git_config_item(&None, "nostr.nsec")
+            if let Some(selector) = get_git_config_item(&None, "nostr.signer")
+                .context("failed to get global git config")?
+            {
+                (
+                    resolve_selected_signer(git_repo, &selector, password)?,
+                    SignerInfoSource::GitGlobal,
+                )
+            } else if let Some(nsec) = get_git_config_item(&None, "nostr.nsec")
                 .context("failed to get global git config")?
             {
                 let nsec = resolve_config_secret(&None, &nsec, true, true)?;
@@ -165,6 +206,7 @@ pub fn get_signer_info(
                         password: password.clone(),
                         npub: get_git_config_item(&None, "nostr.npub")
                             .context("failed to get global git config")?,
+                        verify_npub: false,
                     },
                     SignerInfoSource::GitGlobal,
                 )
@@ -183,7 +225,14 @@ pub fn get_signer_info(
             }
         }
         Some(SignerInfoSource::GitSystem) => {
-            if let Some(nsec) = get_git_config_item_system("nostr.nsec")
+            if let Some(selector) = get_git_config_item_system("nostr.signer")
+                .context("failed to get system git config")?
+            {
+                (
+                    resolve_selected_signer(git_repo, &selector, password)?,
+                    SignerInfoSource::GitSystem,
+                )
+            } else if let Some(nsec) = get_git_config_item_system("nostr.nsec")
                 .context("failed to get system git config")?
             {
                 let nsec = resolve_config_secret(&None, &nsec, true, false)?;
@@ -193,6 +242,7 @@ pub fn get_signer_info(
                         password: password.clone(),
                         npub: get_git_config_item_system("nostr.npub")
                             .context("failed to get system git config")?,
+                        verify_npub: false,
                     },
                     SignerInfoSource::GitSystem,
                 )
@@ -211,6 +261,217 @@ pub fn get_signer_info(
             }
         }
     })
+}
+
+#[derive(Clone, Copy)]
+enum ConfigScope {
+    Local,
+    Global,
+    System,
+}
+
+impl ConfigScope {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Global => "global",
+            Self::System => "system",
+        }
+    }
+}
+
+fn selection_scopes(git_repo: &Option<&Repo>) -> Vec<ConfigScope> {
+    let mut scopes = Vec::with_capacity(3);
+    if git_repo.is_some() {
+        scopes.push(ConfigScope::Local);
+    }
+    if std::env::var("NGITTEST").is_err() {
+        scopes.extend([ConfigScope::Global, ConfigScope::System]);
+    }
+    scopes
+}
+
+fn config_value(git_repo: &Option<&Repo>, scope: ConfigScope, key: &str) -> Result<Option<String>> {
+    match scope {
+        ConfigScope::Local => {
+            let repo = git_repo.context("cannot read local git config without a repository")?;
+            get_git_config_item(&Some(repo), key).context("failed to read local git config")
+        }
+        ConfigScope::Global => {
+            get_git_config_item(&None, key).context("failed to read global git config")
+        }
+        ConfigScope::System => {
+            get_git_config_item_system(key).context("failed to read system git config")
+        }
+    }
+}
+
+fn resolve_scope_secret(
+    git_repo: &Option<&Repo>,
+    scope: ConfigScope,
+    value: &str,
+    is_nsec: bool,
+) -> Result<String> {
+    resolve_config_secret(
+        if matches!(scope, ConfigScope::Local) {
+            git_repo
+        } else {
+            &None
+        },
+        value,
+        is_nsec,
+        !matches!(scope, ConfigScope::System),
+    )
+}
+
+fn resolve_selected_signer(
+    git_repo: &Option<&Repo>,
+    selector: &str,
+    password: &Option<String>,
+) -> Result<SignerInfo> {
+    let expected_npub = resolve_selector_npub(git_repo, selector)?;
+    let mut store_error = None;
+
+    match credential_store::retrieve(&expected_npub) {
+        Ok(keys) => {
+            return Ok(SignerInfo::Nsec {
+                nsec: keys.secret_key().to_bech32()?,
+                password: password.clone(),
+                npub: Some(expected_npub),
+                verify_npub: true,
+            });
+        }
+        Err(error) => match &error {
+            credential_store::LookupError::Missing(_) => {}
+            credential_store::LookupError::Unavailable(_) => {
+                store_error = Some(anyhow::Error::new(error));
+            }
+            credential_store::LookupError::Invalid(_) => {
+                return Err(anyhow::Error::new(error));
+            }
+        },
+    }
+
+    // Every nsec source is considered before any bunker source. A matching
+    // but unusable nsec profile fails instead of silently switching methods.
+    for scope in selection_scopes(git_repo) {
+        let Some(nsec) = matching_nsec_config(git_repo, scope, &expected_npub)? else {
+            continue;
+        };
+        return Ok(SignerInfo::Nsec {
+            nsec: resolve_scope_secret(git_repo, scope, &nsec, true)?,
+            password: password.clone(),
+            npub: Some(expected_npub),
+            verify_npub: true,
+        });
+    }
+
+    if let Some(error) = store_error.take() {
+        return Err(error.context(format!(
+            "failed to resolve nsec for selected signer {expected_npub}"
+        )));
+    }
+
+    match credential_store::retrieve_bunker_signer(&expected_npub) {
+        Ok(record) => {
+            return Ok(SignerInfo::Bunker {
+                bunker_uri: record.bunker_uri,
+                bunker_app_key: record.client_nsec,
+                npub: Some(expected_npub),
+            });
+        }
+        Err(error) => match &error {
+            credential_store::LookupError::Missing(_) => {}
+            credential_store::LookupError::Unavailable(_) => {
+                store_error = Some(anyhow::Error::new(error));
+            }
+            credential_store::LookupError::Invalid(_) => {
+                return Err(anyhow::Error::new(error));
+            }
+        },
+    }
+
+    if let Some(error) = store_error.take() {
+        return Err(error.context(format!(
+            "failed to resolve bunker record for selected signer {expected_npub}"
+        )));
+    }
+
+    // Legacy flat bunker fields remain readable, but a profile is only a
+    // candidate when all of its fields come from the same scope.
+    for scope in selection_scopes(git_repo) {
+        if config_value(git_repo, scope, "nostr.npub")?.as_deref() != Some(&expected_npub) {
+            continue;
+        }
+        let Some(bunker_uri) = config_value(git_repo, scope, "nostr.bunker-uri")? else {
+            continue;
+        };
+        let app_key =
+            config_value(git_repo, scope, "nostr.bunker-app-key")?.with_context(|| {
+                format!(
+                    "{} git config has a matching bunker URI but no bunker app key",
+                    scope.label()
+                )
+            })?;
+        return Ok(SignerInfo::Bunker {
+            bunker_uri,
+            bunker_app_key: resolve_scope_secret(git_repo, scope, &app_key, false)?,
+            npub: Some(expected_npub),
+        });
+    }
+
+    bail!("selected signer {expected_npub} is not available in the credential store or git config")
+}
+
+fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<String> {
+    if selector.starts_with("npub1") {
+        return PublicKey::parse(selector)
+            .context("--signer contains an invalid npub")?
+            .to_bech32()
+            .map_err(Into::into);
+    }
+    let alias = credential_store::normalize_alias(selector)?;
+    let key = format!("nostr.signer-alias.{alias}");
+    for scope in selection_scopes(git_repo) {
+        if let Some(npub) = config_value(git_repo, scope, &key)? {
+            return PublicKey::parse(&npub)
+                .with_context(|| {
+                    format!(
+                        "{} git config maps alias '{alias}' to an invalid npub",
+                        scope.label()
+                    )
+                })?
+                .to_bech32()
+                .map_err(Into::into);
+        }
+    }
+    credential_store::retrieve_alias(&alias).map_err(|error| match error {
+        credential_store::LookupError::Missing(_) => anyhow::anyhow!(
+            "signer alias '{alias}' is not defined in git config or the credential store"
+        ),
+        error => anyhow::Error::new(error),
+    })
+}
+
+fn matching_nsec_config(
+    git_repo: &Option<&Repo>,
+    scope: ConfigScope,
+    expected_npub: &str,
+) -> Result<Option<String>> {
+    let Some(nsec) = config_value(git_repo, scope, "nostr.nsec")? else {
+        return Ok(None);
+    };
+    if config_value(git_repo, scope, "nostr.npub")?.as_deref() == Some(expected_npub)
+        || credential_store::parse_pointer(&nsec) == Some(expected_npub)
+    {
+        return Ok(Some(nsec));
+    }
+    if let Ok(keys) = nostr::prelude::Keys::parse(&nsec) {
+        if keys.public_key().to_bech32().as_deref() == Ok(expected_npub) {
+            return Ok(Some(nsec));
+        }
+    }
+    Ok(None)
 }
 
 fn resolve_config_secret(
@@ -271,7 +532,8 @@ async fn get_signer(
         SignerInfo::Nsec {
             nsec,
             password,
-            npub: _,
+            npub,
+            verify_npub,
         } => {
             let keys = if nsec.contains("ncryptsec") {
                 // TODO get user details from npub
@@ -296,6 +558,15 @@ async fn get_signer(
                 nostr::prelude::Keys::from_str(nsec).context("invalid nsec parameter")?
             };
             let public_key = keys.public_key();
+            if *verify_npub {
+                let expected = npub
+                    .as_deref()
+                    .context("selected nsec has no expected npub")?;
+                let expected = PublicKey::parse(expected).context("invalid configured npub")?;
+                if public_key != expected {
+                    bail!("selected nsec belongs to a different npub");
+                }
+            }
             Ok((Arc::new(crate::NgitSigner::Keys(keys)), public_key))
         }
         SignerInfo::Bunker {
@@ -311,6 +582,10 @@ async fn get_signer(
                 None,
             )?;
             if let Some(public_key) = npub.clone().and_then(|npub| PublicKey::parse(&npub).ok()) {
+                // This key was learned during initial pairing and persisted
+                // with the connection. Seed NostrConnect's cache so normal
+                // commands do not prompt for a redundant identity request.
+                // NgitSigner validates every real signed response instead.
                 s.non_secure_set_user_public_key(public_key)?;
                 let signer = Arc::new(crate::NgitSigner::Connect(Arc::new(s)));
                 Ok((signer, public_key))
@@ -323,5 +598,115 @@ async fn get_signer(
                 Ok((signer, public_key))
             }
         }
+        SignerInfo::Selection { .. } => {
+            bail!("internal error: unresolved signer selection reached signer construction")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::prelude::{Keys, ToBech32};
+
+    use super::*;
+    use crate::git::{Repo, RepoActions, test_helpers::GitTestRepo};
+
+    #[test]
+    fn local_alias_resolves_matching_nsec() -> Result<()> {
+        let fixture = GitTestRepo::new("main")?;
+        let repo = Repo::from_path(&fixture.dir)?;
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32()?;
+        repo.save_git_config_item("nostr.signer-alias.fred", &npub, false)?;
+        repo.save_git_config_item("nostr.npub", &npub, false)?;
+        repo.save_git_config_item("nostr.nsec", &keys.secret_key().to_bech32()?, false)?;
+
+        let selection = SignerInfo::Selection {
+            selector: "fred".to_string(),
+        };
+        let (info, source) = get_signer_info(
+            &Some(&repo),
+            &Some(selection),
+            &None,
+            &Some(SignerInfoSource::CommandLineArguments),
+        )?;
+        assert_eq!(source, SignerInfoSource::CommandLineArguments);
+        assert!(matches!(
+            info,
+            SignerInfo::Nsec { npub: Some(selected), .. } if selected == npub
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn alias_mapping_does_not_accept_a_different_nsec() -> Result<()> {
+        let fixture = GitTestRepo::new("main")?;
+        let repo = Repo::from_path(&fixture.dir)?;
+        let expected = Keys::generate().public_key().to_bech32()?;
+        let other = Keys::generate();
+        repo.save_git_config_item("nostr.signer-alias.fred", &expected, false)?;
+        repo.save_git_config_item("nostr.npub", &other.public_key().to_bech32()?, false)?;
+        repo.save_git_config_item("nostr.nsec", &other.secret_key().to_bech32()?, false)?;
+
+        let error = resolve_selected_signer(&Some(&repo), "fred", &None).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("not available") || message.contains("credential store"),
+            "unexpected error: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_selected_alias_fails_closed() -> Result<()> {
+        let fixture = GitTestRepo::new("main")?;
+        let repo = Repo::from_path(&fixture.dir)?;
+        repo.save_git_config_item("nostr.signer", "not/a/portable-alias", false)?;
+        repo.save_git_config_item(
+            "nostr.nsec",
+            &Keys::generate().secret_key().to_bech32()?,
+            false,
+        )?;
+
+        let error = get_signer_info(&Some(&repo), &None, &None, &None).unwrap_err();
+        assert!(format!("{error:#}").contains("signer alias"));
+        Ok(())
+    }
+
+    #[test]
+    fn nsec_precedes_bunker_for_same_selected_npub() -> Result<()> {
+        let fixture = GitTestRepo::new("main")?;
+        let repo = Repo::from_path(&fixture.dir)?;
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32()?;
+        repo.save_git_config_item("nostr.npub", &npub, false)?;
+        repo.save_git_config_item("nostr.nsec", &keys.secret_key().to_bech32()?, false)?;
+        repo.save_git_config_item(
+            "nostr.bunker-uri",
+            &format!("bunker://{}", Keys::generate().public_key()),
+            false,
+        )?;
+        repo.save_git_config_item(
+            "nostr.bunker-app-key",
+            &Keys::generate().secret_key().to_bech32()?,
+            false,
+        )?;
+
+        let info = resolve_selected_signer(&Some(&repo), &npub, &None)?;
+        assert!(matches!(info, SignerInfo::Nsec { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_nsec_npub_is_verified_on_construction() -> Result<()> {
+        let info = SignerInfo::Nsec {
+            nsec: Keys::generate().secret_key().to_bech32()?,
+            password: None,
+            npub: Some(Keys::generate().public_key().to_bech32()?),
+            verify_npub: true,
+        };
+        let error = get_signer(&info, false).await.unwrap_err();
+        assert!(error.to_string().contains("different npub"));
+        Ok(())
     }
 }

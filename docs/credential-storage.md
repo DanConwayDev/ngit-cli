@@ -19,11 +19,13 @@ read routinely — not filesystem compromise by a targeted attacker. A secret
 in an ngit-specific path is far less likely to be casually read and
 republished than one sitting in `~/.gitconfig`.
 
-Entries are named by the npub of the stored key itself, so every login for
+Local-key entries are named by the npub of the stored key itself, so every login for
 the same account shares one entry and the name remains derivable after
-logout. Bunker (NIP-46) logins store the app key under the app key's own
-npub. Entries written by pre-release versions as `<npub>/<8-char-suffix>`
-are still read.
+logout. Bunker (NIP-46) logins use `signer:<user-npub>` and contain one typed,
+versioned record with the expected user npub, sanitized bunker URI, and bunker
+client/app nsec. The one-time `secret=` pairing parameter is removed before
+the record is saved. Entries written by pre-release versions as
+`<npub>/<8-char-suffix>` are still read.
 
 Git config remains the index, because platform keyrings cannot be
 enumerated:
@@ -32,6 +34,36 @@ enumerated:
 | ---------------------- | ------------------------------------------------------------ |
 | `nostr.nsec`           | credential entry name, plaintext `nsec1…`, or `ncryptsec1…`  |
 | `nostr.bunker-app-key` | credential entry name or plaintext key                       |
+
+## Selecting signers
+
+`--signer <npub|alias>` selects an existing signer for one command without
+changing the configured profile. An alias maps to an npub in either place:
+
+- credential store: `alias:fred` contains `npub1…`
+- git config: `nostr.signer-alias.fred = npub1…`
+
+Git-config aliases are resolved local, global, then system, followed by the
+credential store. `nostr.signer = fred` (or an npub) makes a signer the default
+for that Git-config scope. `ngit account login --alias fred` writes the mapping
+to the selected Git-config scope and, unless `git-config` secret storage was
+selected, the credential store as well.
+
+After resolving an alias to its npub, ngit checks all nsec sources before any
+bunker source: raw npub-named credential, matching local/global/system nsec,
+typed `signer:<npub>` bunker record, then matching legacy local/global/system
+bunker fields. Bunker fields are never assembled across scopes. The chosen
+deriving its public key. A bunker's user public key is obtained once during
+the initial NIP-46 pairing and persisted with its connection details. Later
+commands seed that stored key into the connection instead of making a new
+identity request or signing a verification-only event. Every real event
+returned by the bunker must still match the requested public key and event ID
+and carry a valid signature. Missing, malformed, or mismatched explicit
+selections fail instead of falling back to a different identity.
+
+When `--signer` is omitted, existing flat local/global/system login selection
+continues to work. A configured `nostr.signer` opts that scope into the new
+selection model.
 
 ## Choosing where secrets live
 
@@ -67,10 +99,10 @@ account/user field) of an entry under keyring service `nostr`. The npub is
 derived from the stored secret itself and must be verified against the
 retrieved key on read.
 
-The service is `nostr`, not `ngit`, because nothing about an entry is
-ngit-specific: it is named by the npub of the key it holds, and pairs with
-`nostr.*` git config keys. Any nostr application can read and write these
-entries.
+The service is `nostr`, not `ngit`, because these entries pair with `nostr.*`
+git config keys and are useful to other nostr applications. Namespaces keep
+record types distinct: bare `npub1…` for an identity nsec, `signer:npub1…` for
+a typed bunker record, and `alias:<name>` for an alias mapping.
 
 The entry's secret is written as an **`nsec1…` bech32 string**, so the
 platform's own credential UI can display it and a user can recover the key

@@ -229,6 +229,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
                     nsec: keys.secret_key().to_bech32()?,
                     password: None,
                     npub,
+                    verify_npub: false,
                 }
             } else {
                 show_prompt_success("nsec", &shorten_string(&input));
@@ -236,6 +237,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
                     nsec: input,
                     password: Some(password),
                     npub,
+                    verify_npub: false,
                 }
             };
             (keys, signer_info)
@@ -246,6 +248,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
                 nsec,
                 password: None,
                 npub: Some(keys.public_key().to_bech32()?),
+                verify_npub: false,
             };
             (keys, signer_info)
         } else {
@@ -822,6 +825,7 @@ async fn save_to_git_config(
                 nsec,
                 password: _,
                 npub: _,
+                ..
             } => {
                 eprintln!("consider manually setting git config nostr.nsec to: {nsec}");
             }
@@ -829,10 +833,14 @@ async fn save_to_git_config(
                 bunker_uri,
                 bunker_app_key,
                 npub: _,
+                ..
             } => {
                 eprintln!("consider manually setting git config as follows:");
                 eprintln!("nostr.bunker-uri: {bunker_uri}");
                 eprintln!("nostr.bunker-app-key: {bunker_app_key}");
+            }
+            SignerInfo::Selection { selector } => {
+                eprintln!("consider manually setting git config nostr.signer to: {selector}");
             }
         }
         if global {
@@ -911,18 +919,63 @@ async fn save_to_git_config(
     }
 }
 
+/// Persist an alias in both the selected git-config scope and, when enabled,
+/// the credential store. Git config remains a portable account selector for
+/// repository directories mounted into environments with a different store.
+pub fn save_signer_alias(
+    git_repo: &Option<&Repo>,
+    alias: &str,
+    npub: &str,
+    global: bool,
+) -> Result<()> {
+    use crate::login::credential_store::{self, SecretStorage};
+
+    let alias = credential_store::normalize_alias(alias)?;
+    let npub = PublicKey::parse(npub)
+        .context("cannot save signer alias for an invalid npub")?
+        .to_bech32()?;
+    let policy = credential_store::policy(git_repo);
+    if policy != SecretStorage::GitConfig {
+        credential_store::store_alias(&alias, &npub, policy)
+            .context("failed to save signer alias in the credential store")?;
+    }
+
+    let global = global && std::env::var("NGITTEST").is_err();
+    let scope = if global {
+        &None
+    } else if git_repo.is_some() {
+        git_repo
+    } else {
+        bail!("cannot save a local signer alias without a git repository");
+    };
+    save_git_config_item(scope, &format!("nostr.signer-alias.{alias}"), &npub)?;
+    save_git_config_item(scope, "nostr.signer", &alias)?;
+    save_git_config_item(scope, "nostr.npub", &npub)?;
+    eprintln!(
+        "saved signer alias '{alias}' to {} git config",
+        if global { "global" } else { "local" }
+    );
+    Ok(())
+}
+
 fn get_pubkey_from_signer_info(signer_info: &SignerInfo) -> Result<PublicKey> {
     let npub = match signer_info {
         SignerInfo::Bunker {
             bunker_uri: _,
             bunker_app_key: _,
             npub,
+            ..
         } => npub,
         SignerInfo::Nsec {
             nsec: _,
             password: _,
             npub,
+            ..
         } => npub,
+        SignerInfo::Selection { selector } => {
+            return PublicKey::parse(selector)
+                .context("format of npub string in signer selection is invalid");
+        }
     };
     if let Some(npub) = npub {
         PublicKey::parse(npub).context("format of npub string in signer_info is invalid")
@@ -945,6 +998,7 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
     }
     if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if credential_store::parse_pointer(nsec).is_some())
         || matches!(signer_info, SignerInfo::Bunker { bunker_app_key, .. } if credential_store::parse_pointer(bunker_app_key).is_some())
+        || matches!(signer_info, SignerInfo::Selection { .. })
     {
         return Ok(signer_info.clone());
     }
@@ -960,6 +1014,7 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
             nsec,
             password,
             npub: _,
+            ..
         } => {
             let Ok(keys) = nostr::prelude::Keys::parse(nsec) else {
                 return Ok(signer_info.clone());
@@ -974,6 +1029,7 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
                                 .to_bech32()
                                 .expect("public keys always encode as npub"),
                         ),
+                        verify_npub: false,
                     },
                     pointer,
                     backend,
@@ -984,22 +1040,27 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
             bunker_uri,
             bunker_app_key,
             npub,
+            ..
         } => {
             let Ok(keys) = nostr::prelude::Keys::parse(bunker_app_key) else {
                 return Ok(signer_info.clone());
             };
-            credential_store::store(&keys, policy).map(|(pointer, backend)| {
-                (
-                    SignerInfo::Bunker {
-                        bunker_uri: bunker_uri.clone(),
-                        bunker_app_key: pointer.clone(),
-                        npub: npub.clone(),
-                    },
-                    pointer,
-                    backend,
-                )
-            })
+            let npub = npub
+                .as_deref()
+                .context("cannot store bunker signer without its user npub")?;
+            credential_store::store_bunker_signer(npub, bunker_uri, &keys, policy).map(
+                |(pointer, backend)| {
+                    (
+                        SignerInfo::Selection {
+                            selector: npub.to_string(),
+                        },
+                        pointer,
+                        backend,
+                    )
+                },
+            )
         }
+        SignerInfo::Selection { .. } => unreachable!("selection returned before secret storage"),
     };
     match stored {
         Ok((protected, pointer, backend)) => {
@@ -1051,6 +1112,7 @@ fn silently_save_to_git_config(
             git_repo.remove_git_config_item("nostr.nsec", false)?;
             git_repo.remove_git_config_item("nostr.bunker-uri", false)?;
             git_repo.remove_git_config_item("nostr.bunker-app-key", false)?;
+            git_repo.remove_git_config_item("nostr.signer", false)?;
         }
     }
 
@@ -1068,21 +1130,32 @@ fn silently_save_to_git_config(
             nsec,
             password: _,
             npub,
+            ..
         } => {
-            npub_to_save = npub;
+            npub_to_save = npub.as_deref();
             save_git_config_item(git_repo, "nostr.nsec", nsec)?;
             remove_git_config_item(git_repo, "nostr.bunker-uri")?;
             remove_git_config_item(git_repo, "nostr.bunker-app-key")?;
+            remove_git_config_item(git_repo, "nostr.signer")?;
         }
         SignerInfo::Bunker {
             bunker_uri,
             bunker_app_key,
             npub,
+            ..
         } => {
-            npub_to_save = npub;
+            npub_to_save = npub.as_deref();
             save_git_config_item(git_repo, "nostr.bunker-uri", bunker_uri)?;
             save_git_config_item(git_repo, "nostr.bunker-app-key", bunker_app_key)?;
             remove_git_config_item(git_repo, "nostr.nsec")?;
+            remove_git_config_item(git_repo, "nostr.signer")?;
+        }
+        SignerInfo::Selection { selector } => {
+            npub_to_save = Some(selector.as_str());
+            save_git_config_item(git_repo, "nostr.signer", selector)?;
+            remove_git_config_item(git_repo, "nostr.nsec")?;
+            remove_git_config_item(git_repo, "nostr.bunker-uri")?;
+            remove_git_config_item(git_repo, "nostr.bunker-app-key")?;
         }
     }
     if let Some(npub) = npub_to_save {
@@ -1121,6 +1194,7 @@ pub async fn signup_non_interactive(
         nsec,
         password: None,
         npub: Some(public_key.to_bech32()?),
+        verify_npub: false,
     };
 
     // Save to git config
@@ -1148,6 +1222,7 @@ pub async fn signup_non_interactive(
                     bunker_uri,
                     bunker_app_key,
                     npub,
+                    ..
                 } => {
                     let mut v = vec![
                         format!("git config --global nostr.bunker-uri {bunker_uri}"),
@@ -1157,6 +1232,9 @@ pub async fn signup_non_interactive(
                         v.push(format!("git config --global nostr.npub {npub}"));
                     }
                     v
+                }
+                SignerInfo::Selection { selector } => {
+                    vec![format!("git config --global nostr.signer {selector}")]
                 }
             };
             cmds.push("ngit account create --local --name <your-name>".to_string());

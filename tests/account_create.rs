@@ -317,6 +317,79 @@ async fn logout_forget_removes_entry() -> Result<()> {
 }
 
 #[tokio::test]
+async fn login_alias_selects_stored_nsec_without_rewriting_profile() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--alias",
+            "fred",
+            "--nsec",
+            &nsec,
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "aliased login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(repo.config("nostr.signer").await?.as_deref(), Some("fred"));
+    assert_eq!(
+        repo.config("nostr.signer-alias.fred").await?.as_deref(),
+        Some(npub.as_str())
+    );
+    assert_eq!(
+        repo.config("nostr.npub").await?.as_deref(),
+        Some(npub.as_str())
+    );
+
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert_eq!(
+        entries
+            .get(format!("{SERVICE}/alias:fred"))
+            .and_then(Value::as_str),
+        Some(npub.as_str())
+    );
+    assert!(entries.get(format!("{SERVICE}/{npub}")).is_some());
+
+    let unset = repo
+        .git(["config", "--local", "--unset", "nostr.signer"])
+        .output()
+        .await?;
+    assert!(unset.status.success());
+    let output = repo
+        .ngit(["--signer", "fred", "account", "export-keys"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "alias selection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(repo.config("nostr.signer").await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn plaintext_is_read_without_migration_and_dangling_pointer_has_login_guidance() -> Result<()>
 {
     let harness = Harness::builder(

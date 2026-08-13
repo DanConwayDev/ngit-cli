@@ -43,6 +43,7 @@ pub async fn login_or_signup(
     .await;
     match res {
         Ok(login) => Ok(login),
+        Err(error) if matches!(signer_info, Some(SignerInfo::Selection { .. })) => Err(error),
         Err(error) if Interactor::is_non_interactive() => Err(require_account(error)),
         Err(error) if error.downcast_ref::<SignerInfoNotFound>().is_some() => {
             fresh_login_or_signup(git_repo, client, None, false, &[]).await
@@ -87,21 +88,27 @@ pub fn require_account(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignerInfo {
     Nsec {
         nsec: String,
         password: Option<String>,
         npub: Option<String>,
+        /// Compare the derived public key with `npub`. Explicit selection
+        /// requires this; legacy profiles retain their existing behavior.
+        verify_npub: bool,
     },
     Bunker {
         bunker_uri: String,
         bunker_app_key: String,
         npub: Option<String>,
     },
+    /// Select a previously stored/configured signer by npub or alias. This is
+    /// resolved before a signer is constructed and never reaches signing code.
+    Selection { selector: String },
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SignerInfoSource {
     GitLocal,
     GitGlobal,

@@ -1,8 +1,8 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use nostr::prelude::{
-    Event, EventBuilder, Keys, PublicKey,
+    Event, EventBuilder, EventId, Keys, PublicKey,
     event::{AsyncSignEvent, FinalizeUnsignedEvent, SignEvent, UnsignedEvent},
     key::AsyncGetPublicKey,
 };
@@ -47,8 +47,31 @@ impl AsyncSignEvent for SharedConnect {
         &self,
         unsigned: UnsignedEvent,
     ) -> Pin<Box<dyn Future<Output = Result<Event, Self::Error>> + Send + '_>> {
-        self.0.sign_event_async(unsigned)
+        Box::pin(async move {
+            let expected_public_key = unsigned.pubkey;
+            let expected_event_id = unsigned.compute_id();
+            let event = self.0.sign_event_async(unsigned).await?;
+            validate_remote_signed_event(expected_public_key, expected_event_id, event)
+                .map_err(|error| NostrConnectError::other(std::io::Error::other(error.to_string())))
+        })
     }
+}
+
+fn validate_remote_signed_event(
+    expected_public_key: PublicKey,
+    expected_event_id: EventId,
+    event: Event,
+) -> Result<Event> {
+    if event.pubkey != expected_public_key {
+        bail!("remote signer signed with a different npub than requested");
+    }
+    if event.id != expected_event_id {
+        bail!("remote signer signed a different event than requested");
+    }
+    event
+        .verify()
+        .context("remote signer returned an invalid event signature")?;
+    Ok(event)
 }
 
 impl NgitSigner {
@@ -62,7 +85,12 @@ impl NgitSigner {
     pub async fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event> {
         match self {
             Self::Keys(k) => k.sign_event(unsigned).map_err(|e| anyhow!(e)),
-            Self::Connect(c) => c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e)),
+            Self::Connect(c) => {
+                let expected_public_key = unsigned.pubkey;
+                let expected_event_id = unsigned.compute_id();
+                let event = c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e))?;
+                validate_remote_signed_event(expected_public_key, expected_event_id, event)
+            }
         }
     }
 
@@ -124,5 +152,74 @@ pub async fn fetch_public_key_from_signer(signer: &Arc<NgitSigner>) -> Result<Pu
             .get_public_key()
             .await
             .map_err(|e| anyhow!("failed to get public key from local keys: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::prelude::{EventBuilder, FinalizeUnsignedEvent, Kind, SignEvent};
+
+    use super::*;
+
+    fn unsigned_event(keys: &Keys, content: &str) -> UnsignedEvent {
+        EventBuilder::new(Kind::TextNote, content).finalize_unsigned(keys.public_key())
+    }
+
+    #[test]
+    fn accepts_the_requested_event_with_a_valid_signature() {
+        let keys = Keys::generate();
+        let unsigned = unsigned_event(&keys, "requested");
+        let event = keys
+            .sign_event(unsigned.clone())
+            .expect("test key should sign");
+
+        assert!(
+            validate_remote_signed_event(unsigned.pubkey, unsigned.compute_id(), event).is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_an_event_signed_by_a_different_npub() {
+        let requested_keys = Keys::generate();
+        let returned_keys = Keys::generate();
+        let unsigned = unsigned_event(&requested_keys, "requested");
+        let returned = returned_keys
+            .sign_event(unsigned_event(&returned_keys, "requested"))
+            .expect("test key should sign");
+
+        let error = validate_remote_signed_event(unsigned.pubkey, unsigned.compute_id(), returned)
+            .expect_err("a different signer must be rejected");
+        assert!(error.to_string().contains("different npub"));
+    }
+
+    #[test]
+    fn rejects_a_different_event_from_the_requested_signer() {
+        let keys = Keys::generate();
+        let unsigned = unsigned_event(&keys, "requested");
+        let returned = keys
+            .sign_event(unsigned_event(&keys, "different"))
+            .expect("test key should sign");
+
+        let error = validate_remote_signed_event(unsigned.pubkey, unsigned.compute_id(), returned)
+            .expect_err("different event contents must be rejected");
+        assert!(error.to_string().contains("different event"));
+    }
+
+    #[test]
+    fn rejects_an_invalid_signature_for_the_requested_event() {
+        let keys = Keys::generate();
+        let other_keys = Keys::generate();
+        let unsigned = unsigned_event(&keys, "requested");
+        let mut returned = keys
+            .sign_event(unsigned.clone())
+            .expect("test key should sign");
+        returned.sig = other_keys
+            .sign_event(unsigned_event(&other_keys, "requested"))
+            .expect("other test key should sign")
+            .sig;
+
+        let error = validate_remote_signed_event(unsigned.pubkey, unsigned.compute_id(), returned)
+            .expect_err("an invalid signature must be rejected");
+        assert!(error.to_string().contains("invalid event signature"));
     }
 }

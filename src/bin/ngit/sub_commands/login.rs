@@ -6,12 +6,13 @@ use ngit::{
     git::{get_git_config_item, remove_git_config_item},
     login::{SignerInfoSource, credential_store, existing::load_existing_login},
 };
+use nostr::prelude::ToBech32;
 
 use crate::{
     cli::SignerParams,
     client::{Client, Connect},
     git::Repo,
-    login::fresh::{fresh_login_or_signup, login_with_bunker_url},
+    login::fresh::{fresh_login_or_signup, login_with_bunker_url, save_signer_alias},
 };
 
 #[derive(clap::Args)]
@@ -36,9 +37,18 @@ pub struct SubCommandArgs {
     /// back to ngit's file store), file, or git-config (plaintext)
     #[arg(long, value_name = "auto|file|git-config")]
     secret_storage: Option<String>,
+
+    /// save a reusable name for the account being logged in
+    #[arg(long, value_name = "ALIAS")]
+    alias: Option<String>,
 }
 
 pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
+    if matches!(signer.info, Some(ngit::login::SignerInfo::Selection { .. })) {
+        anyhow::bail!(
+            "--signer selects an account for one command and cannot be used with account login"
+        );
+    }
     if let Some(value) = &command_args.secret_storage {
         let policy = credential_store::parse_policy(value).with_context(|| {
             format!("invalid --secret-storage value '{value}'; expected auto, file or git-config")
@@ -80,7 +90,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
 
     let (logged_out, log_in_locally_only) = logout(git_repo.as_ref(), command_args.local).await?;
     if logged_out || log_in_locally_only {
-        if let Some(bunker_url) = &command_args.bunker_url {
+        let (_, user_ref, source) = if let Some(bunker_url) = &command_args.bunker_url {
             login_with_bunker_url(
                 &git_repo.as_ref(),
                 client.as_ref(),
@@ -88,7 +98,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
                 log_in_locally_only || command_args.local,
                 &command_args.signer_relays,
             )
-            .await?;
+            .await?
         } else {
             fresh_login_or_signup(
                 &git_repo.as_ref(),
@@ -97,7 +107,15 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
                 log_in_locally_only || command_args.local,
                 &command_args.signer_relays,
             )
-            .await?;
+            .await?
+        };
+        if let Some(alias) = &command_args.alias {
+            save_signer_alias(
+                &git_repo.as_ref(),
+                alias,
+                &user_ref.public_key.to_bech32()?,
+                source == SignerInfoSource::GitGlobal,
+            )?;
         }
     }
 
@@ -139,6 +157,7 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                     "nostr.npub",
                     "nostr.bunker-uri",
                     "nostr.bunker-app-key",
+                    "nostr.signer",
                 ] {
                     if let Err(_error) = remove_git_config_item(
                         if source == SignerInfoSource::GitLocal {
@@ -198,6 +217,7 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                         "nostr.npub",
                         "nostr.bunker-uri",
                         "nostr.bunker-app-key",
+                        "nostr.signer",
                     ] {
                         if let Err(error) = remove_git_config_item(
                             if source == SignerInfoSource::GitLocal {
@@ -250,6 +270,7 @@ pub fn get_global_login_config_items_set() -> Vec<&'static str> {
         "nostr.npub",
         "nostr.bunker-uri",
         "nostr.bunker-app-key",
+        "nostr.signer",
     ]
     .iter()
     .copied()

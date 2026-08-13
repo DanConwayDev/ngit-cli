@@ -22,11 +22,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     logout(git_repo.as_ref(), args.forget).await
 }
 
-const LOGIN_CONFIG_ITEMS: [&str; 4] = [
+const LOGIN_CONFIG_ITEMS: [&str; 5] = [
     "nostr.nsec",
     "nostr.npub",
     "nostr.bunker-uri",
     "nostr.bunker-app-key",
+    "nostr.signer",
 ];
 
 async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
@@ -109,9 +110,14 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
     } else {
         vec![git_repo, None]
     } {
-        let has_login = ["nostr.nsec", "nostr.bunker-uri", "nostr.bunker-app-key"]
-            .iter()
-            .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()));
+        let has_login = [
+            "nostr.nsec",
+            "nostr.bunker-uri",
+            "nostr.bunker-app-key",
+            "nostr.signer",
+        ]
+        .iter()
+        .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()));
         if has_login {
             let pointers = credential_store::config_pointers(&scope);
             if forget {

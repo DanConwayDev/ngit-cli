@@ -11,18 +11,19 @@ use ngit::{
 };
 use nostr::prelude::ToBech32;
 
-use crate::git::Repo;
+use crate::{cli::SignerParams, git::Repo};
 
-pub async fn launch() -> Result<()> {
+pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
     let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = { git_repo_result.ok() };
 
     let (signer_info, source) =
-        get_signer_info(&git_repo.as_ref(), &None, &None, &None).map_err(login::require_account)?;
+        get_signer_info(&git_repo.as_ref(), signer.info, signer.password, &None)
+            .map_err(login::require_account)?;
     let (_, user_ref, source) = load_existing_login(
         &git_repo.as_ref(),
-        &None,
-        &None,
+        &Some(signer_info.clone()),
+        signer.password,
         &Some(source),
         None,
         true,
@@ -55,6 +56,7 @@ pub async fn launch() -> Result<()> {
             nsec,
             password: _,
             npub,
+            ..
         } => {
             match Interactor::default().choice(
                 PromptChoiceParms::default()
@@ -104,6 +106,9 @@ pub async fn launch() -> Result<()> {
                 }
                 _ => Ok(()),
             }
+        }
+        SignerInfo::Selection { .. } => {
+            anyhow::bail!("internal error: unresolved signer selection during key export")
         }
     }
 }
