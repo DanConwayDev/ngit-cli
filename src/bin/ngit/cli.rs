@@ -11,6 +11,12 @@ use ngit::login::SignerInfo;
 
 use crate::sub_commands;
 
+#[derive(Clone, Copy)]
+pub struct SignerParams<'a> {
+    pub info: &'a Option<SignerInfo>,
+    pub password: &'a Option<String>,
+}
+
 #[derive(Parser)]
 #[command(
     author,
@@ -812,6 +818,34 @@ mod tests {
         assert!(
             matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
         );
+    }
+
+    #[test]
+    fn nsec_file_is_global_for_signing_commands() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("key");
+        key_file(&path, b"fixture");
+        let path = path.to_string_lossy().into_owned();
+
+        for args in [
+            vec![
+                "ngit",
+                "issue",
+                "comment",
+                "deadbeef",
+                "--body",
+                "body",
+                "--nsec-file",
+                &path,
+            ],
+            vec!["ngit", "--nsec-file", &path, "pr", "close", "deadbeef"],
+            vec!["ngit", "sync", "--nsec-file", &path],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(
+                matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
+            );
+        }
     }
 
     #[test]

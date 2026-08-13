@@ -17,6 +17,7 @@ use nostr::prelude::{
 };
 
 use crate::{
+    cli::SignerParams,
     client::{
         Client, Connect, fetching_with_report, get_events_from_local_cache,
         get_repo_ref_from_cache, warn_if_invited_as_maintainer,
@@ -29,7 +30,7 @@ use crate::{
 };
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
+pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -44,8 +45,14 @@ pub async fn launch(id: &str, squash: bool, offline: bool) -> Result<()> {
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     // Login to verify maintainer status
-    let (signer, user_ref, _) =
-        login::login_or_signup(&Some(&git_repo), &None, &None, Some(&client), true).await?;
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        auth.info,
+        auth.password,
+        Some(&client),
+        true,
+    )
+    .await?;
 
     let user_pubkey = signer.get_public_key().await?;
 

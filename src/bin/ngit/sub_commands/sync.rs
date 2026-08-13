@@ -27,8 +27,11 @@ use ngit::{
 };
 use nostr::prelude::RelayUrl;
 
-use crate::state_transaction::{
-    LiveOps, ServerForcePolicy, ServerPushOutcome, StateTransaction, StateTransactionFailure,
+use crate::{
+    cli::SignerParams,
+    state_transaction::{
+        LiveOps, ServerForcePolicy, ServerPushOutcome, StateTransaction, StateTransactionFailure,
+    },
 };
 
 #[derive(Debug, Default, clap::Args)]
@@ -46,10 +49,10 @@ pub struct SubCommandArgs {
     trust_server: bool,
 }
 
-pub async fn launch(args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    sync_with_client(args, &git_repo, &mut client, false).await
+    sync_with_client(args, &git_repo, &mut client, false, signer).await
 }
 
 /// Run `ngit sync` against an already-discovered repository and an
@@ -65,6 +68,7 @@ pub(crate) async fn sync_with_client(
     git_repo: &Repo,
     client: &mut Client,
     client_has_signer: bool,
+    auth: SignerParams<'_>,
 ) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
 
@@ -116,8 +120,8 @@ pub(crate) async fn sync_with_client(
     let force_login = if args.force {
         let (signer, user_ref, _) = load_existing_login(
             &Some(git_repo),
-            &None,
-            &None,
+            auth.info,
+            auth.password,
             &None,
             Some(&*client),
             false,
@@ -214,8 +218,8 @@ pub(crate) async fn sync_with_client(
         if !refs_to_trust.is_empty() {
             match load_existing_login(
                 &Some(git_repo),
-                &None,
-                &None,
+                auth.info,
+                auth.password,
                 &None,
                 Some(&*client),
                 false,
@@ -230,6 +234,7 @@ pub(crate) async fn sync_with_client(
                     trust_login = Some((signer, user_ref));
                     refs_to_adopt = refs_to_trust;
                 }
+                Err(error) if auth.info.is_some() => return Err(error),
                 Err(_) => {
                     term.write_line(
                         "cannot update nostr state: not logged in — run 'ngit account login' or 'ngit account create' first",
@@ -397,10 +402,10 @@ pub(crate) async fn sync_with_client(
             .iter()
             .any(|relay_url| !relays_already_holding.contains(relay_url))
     {
-        if let Ok((signer, _, _)) = load_existing_login(
+        match load_existing_login(
             &Some(git_repo),
-            &None,
-            &None,
+            auth.info,
+            auth.password,
             &None,
             Some(&*client),
             true,  // silent
@@ -409,7 +414,9 @@ pub(crate) async fn sync_with_client(
         )
         .await
         {
-            client.set_signer(signer).await;
+            Ok((signer, _, _)) => client.set_signer(signer).await,
+            Err(error) if auth.info.is_some() => return Err(error),
+            Err(_) => {}
         }
     }
 

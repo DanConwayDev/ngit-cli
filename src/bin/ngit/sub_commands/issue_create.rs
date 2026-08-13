@@ -6,6 +6,7 @@ use ngit::{
 use nostr::prelude::{EventBuilder, Kind, Tag, ToBech32, nip01::Nip01Tag, nip19::Nip19Event};
 
 use crate::{
+    cli::SignerParams,
     client::{
         Client, Connect, fetching_with_report, get_repo_ref_from_cache,
         warn_if_invited_as_maintainer,
@@ -19,6 +20,7 @@ pub async fn launch(
     title: Option<String>,
     body: Option<String>,
     labels: Vec<String>,
+    signer: SignerParams<'_>,
 ) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -41,8 +43,14 @@ pub async fn launch(
     let body = body.unwrap_or_default();
 
     // Login
-    let (signer, user_ref, _) =
-        login::login_or_signup(&Some(&git_repo), &None, &None, Some(&client), true).await?;
+    let (event_signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        signer.info,
+        signer.password,
+        Some(&client),
+        true,
+    )
+    .await?;
 
     // Build NIP-34 GitIssue event (kind 1621)
     // Tags:
@@ -83,7 +91,7 @@ pub async fn launch(
 
     let issue_event = sign_event(
         EventBuilder::new(Kind::GitIssue, body).tags(tags),
-        &signer,
+        &event_signer,
         "create issue".to_string(),
     )
     .await?;
@@ -91,7 +99,7 @@ pub async fn launch(
     let event_id = issue_event.id;
 
     let mut client = client;
-    client.set_signer(signer).await;
+    client.set_signer(event_signer).await;
 
     send_events(
         &client,

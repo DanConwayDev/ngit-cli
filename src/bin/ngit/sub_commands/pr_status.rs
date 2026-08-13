@@ -13,6 +13,7 @@ use nostr::prelude::{
 };
 
 use crate::{
+    cli::SignerParams,
     client::{
         Client, Connect, fetching_with_report, get_events_from_local_cache, get_repo_ref_from_cache,
     },
@@ -29,6 +30,7 @@ async fn launch_status(
     new_kind: Kind,
     action: &str,
     reason: Option<&str>,
+    auth: SignerParams<'_>,
 ) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -50,8 +52,14 @@ async fn launch_status(
     let event_id = proposal.id;
 
     // Login to get signer and user pubkey
-    let (signer, user_ref, _) =
-        login::login_or_signup(&Some(&git_repo), &None, &None, Some(&client), true).await?;
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        auth.info,
+        auth.password,
+        Some(&client),
+        true,
+    )
+    .await?;
 
     let user_pubkey = signer.get_public_key().await?;
 
@@ -207,25 +215,54 @@ async fn launch_status(
     Ok(())
 }
 
-pub async fn launch_close(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusClosed, "closed", reason).await
+pub async fn launch_close(
+    id: &str,
+    offline: bool,
+    reason: Option<&str>,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusClosed, "closed", reason, auth).await
 }
 
-pub async fn launch_reopen(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "reopened", reason).await
+pub async fn launch_reopen(
+    id: &str,
+    offline: bool,
+    reason: Option<&str>,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusOpen, "reopened", reason, auth).await
 }
 
-pub async fn launch_ready(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
-    launch_status(id, offline, Kind::GitStatusOpen, "marked as ready", reason).await
+pub async fn launch_ready(
+    id: &str,
+    offline: bool,
+    reason: Option<&str>,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    launch_status(
+        id,
+        offline,
+        Kind::GitStatusOpen,
+        "marked as ready",
+        reason,
+        auth,
+    )
+    .await
 }
 
-pub async fn launch_draft(id: &str, offline: bool, reason: Option<&str>) -> Result<()> {
+pub async fn launch_draft(
+    id: &str,
+    offline: bool,
+    reason: Option<&str>,
+    auth: SignerParams<'_>,
+) -> Result<()> {
     launch_status(
         id,
         offline,
         Kind::GitStatusDraft,
         "converted to draft",
         reason,
+        auth,
     )
     .await
 }

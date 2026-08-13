@@ -10,6 +10,7 @@ use ngit::{
 use nostr::prelude::{EventBuilder, EventId, Kind, PublicKey, Tag};
 
 use crate::{
+    cli::SignerParams,
     client::{
         Client, Connect, fetching_with_report, get_repo_ref_from_cache,
         warn_if_invited_as_maintainer,
@@ -36,6 +37,7 @@ struct CommentArgs<'a> {
     entity_name: &'a str,
     client: Client,
     repo_ref: ngit::repo_ref::RepoRef,
+    signer: SignerParams<'a>,
 }
 
 /// Build and publish a NIP-22 kind-1111 comment on any event.
@@ -59,6 +61,7 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
         entity_name,
         client,
         repo_ref,
+        signer,
     } = args;
 
     // Resolve parent: either the specified reply-to comment or the root itself
@@ -89,8 +92,14 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
     };
 
     // Login
-    let (signer, user_ref, _) =
-        login::login_or_signup(&Some(git_repo), &None, &None, Some(&client), true).await?;
+    let (event_signer, user_ref, _) = login::login_or_signup(
+        &Some(git_repo),
+        signer.info,
+        signer.password,
+        Some(&client),
+        true,
+    )
+    .await?;
 
     let relay_hint = repo_ref
         .relays
@@ -138,13 +147,13 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
 
     let comment_event = sign_event(
         EventBuilder::new(KIND_COMMENT, body).tags(comment_tags),
-        &signer,
+        &event_signer,
         format!("comment on {entity_name}"),
     )
     .await?;
 
     let mut client = client;
-    client.set_signer(signer).await;
+    client.set_signer(event_signer).await;
 
     send_events(
         &client,
@@ -169,6 +178,7 @@ pub async fn launch_pr_comment(
     body: &str,
     reply_to: Option<&str>,
     offline: bool,
+    signer: SignerParams<'_>,
 ) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -202,6 +212,7 @@ pub async fn launch_pr_comment(
         entity_name: "PR",
         client,
         repo_ref,
+        signer,
     })
     .await
 }
@@ -211,6 +222,7 @@ pub async fn launch_issue_comment(
     body: &str,
     reply_to: Option<&str>,
     offline: bool,
+    signer: SignerParams<'_>,
 ) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -242,6 +254,7 @@ pub async fn launch_issue_comment(
         entity_name: "issue",
         client,
         repo_ref,
+        signer,
     })
     .await
 }

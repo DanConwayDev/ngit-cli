@@ -6,6 +6,7 @@ use ngit::{
 use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
+    cli::SignerParams,
     client::{
         Client, Connect, fetching_with_report, get_events_from_local_cache,
         get_repo_ref_from_cache, save_event_in_local_cache, warn_if_invited_as_maintainer,
@@ -26,6 +27,7 @@ async fn publish_label_event(
     labels: &[String],
     offline: bool,
     target_kind: &str, // "issue" or "PR" — used in error messages
+    auth: SignerParams<'_>,
 ) -> Result<()> {
     if labels.is_empty() {
         bail!("at least one --label value is required");
@@ -53,8 +55,14 @@ async fn publish_label_event(
     let event_id = target.id;
 
     // Login — we need the signer and user pubkey.
-    let (signer, user_ref, _) =
-        login::login_or_signup(&Some(&git_repo), &None, &None, Some(&client), true).await?;
+    let (signer, user_ref, _) = login::login_or_signup(
+        &Some(&git_repo),
+        auth.info,
+        auth.password,
+        Some(&client),
+        true,
+    )
+    .await?;
 
     let user_pubkey = signer.get_public_key().await?;
 
@@ -168,10 +176,20 @@ async fn publish_label_event(
     Ok(())
 }
 
-pub async fn launch_issue_label(id: &str, labels: &[String], offline: bool) -> Result<()> {
-    publish_label_event(id, labels, offline, "issue").await
+pub async fn launch_issue_label(
+    id: &str,
+    labels: &[String],
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    publish_label_event(id, labels, offline, "issue", auth).await
 }
 
-pub async fn launch_pr_label(id: &str, labels: &[String], offline: bool) -> Result<()> {
-    publish_label_event(id, labels, offline, "PR").await
+pub async fn launch_pr_label(
+    id: &str,
+    labels: &[String],
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    publish_label_event(id, labels, offline, "PR", auth).await
 }

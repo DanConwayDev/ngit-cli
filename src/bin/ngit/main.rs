@@ -5,7 +5,10 @@
 use std::ffi::OsStr;
 
 use clap::Parser;
-use cli::{AccountCommands, Cli, Commands, IssueCommands, PrCommands, customise_template};
+use cli::{
+    AccountCommands, Cli, Commands, IssueCommands, PrCommands, SignerParams, customise_template,
+    extract_signer_cli_arguments,
+};
 
 mod cli;
 use ngit::{
@@ -80,16 +83,31 @@ async fn main() {
         print_skill_notice_if_available().await;
     }
 
+    // Resolve an explicitly supplied signer once, before dispatch. This makes
+    // invalid signer files fail closed instead of allowing an individual
+    // command to fall back to a configured account.
+    let signer_info = match extract_signer_cli_arguments(&cli) {
+        Ok(signer_info) => signer_info,
+        Err(err) => {
+            eprintln!("Error: {err:?}");
+            std::process::exit(1);
+        }
+    };
+    let signer_params = SignerParams {
+        info: &signer_info,
+        password: &cli.password,
+    };
+
     let result = if let Some(command) = &cli.command {
         match command {
             Commands::Account(args) => match &args.account_command {
                 AccountCommands::Login(sub_args) => {
-                    sub_commands::login::launch(&cli, sub_args).await
+                    sub_commands::login::launch(sub_args, signer_params).await
                 }
                 AccountCommands::Connect(sub_args) => {
                     // `connect` is an alias for `login -i`: always interactive
                     std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
-                    sub_commands::login::launch(&cli, sub_args).await
+                    sub_commands::login::launch(sub_args, signer_params).await
                 }
                 AccountCommands::Logout(sub_args) => sub_commands::logout::launch(sub_args).await,
                 AccountCommands::ExportKeys => sub_commands::export_keys::launch().await,
@@ -99,21 +117,22 @@ async fn main() {
                 AccountCommands::Create(sub_args) => {
                     sub_commands::create::launch(&cli, sub_args).await
                 }
-                AccountCommands::Whoami(sub_args) => {
-                    sub_commands::whoami::launch(&cli, sub_args).await
-                }
+                AccountCommands::Whoami(sub_args) => sub_commands::whoami::launch(sub_args).await,
             },
-            Commands::Init(args) => sub_commands::init::launch(&cli, args).await,
+            Commands::Init(args) => sub_commands::init::launch(&cli, args, signer_params).await,
             Commands::Repo(args) => {
                 sub_commands::repo::launch(
                     &cli,
                     args.repo_command.as_ref(),
                     args.offline,
                     args.json,
+                    signer_params,
                 )
                 .await
             }
-            Commands::Send(args) => sub_commands::send::launch(&cli, args, false).await,
+            Commands::Send(args) => {
+                sub_commands::send::launch(&cli, args, false, signer_params).await
+            }
             Commands::Pr(args) => match &args.pr_command {
                 PrCommands::List {
                     status,
@@ -157,28 +176,60 @@ async fn main() {
                     offline,
                 } => sub_commands::apply::launch(id, *stdout, *offline).await,
                 PrCommands::Send(sub_args) => {
-                    sub_commands::send::launch(&cli, sub_args, false).await
+                    sub_commands::send::launch(&cli, sub_args, false, signer_params).await
                 }
                 PrCommands::Close {
                     id,
                     reason,
                     offline,
-                } => sub_commands::pr_status::launch_close(id, *offline, reason.as_deref()).await,
+                } => {
+                    sub_commands::pr_status::launch_close(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::Reopen {
                     id,
                     reason,
                     offline,
-                } => sub_commands::pr_status::launch_reopen(id, *offline, reason.as_deref()).await,
+                } => {
+                    sub_commands::pr_status::launch_reopen(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::Ready {
                     id,
                     reason,
                     offline,
-                } => sub_commands::pr_status::launch_ready(id, *offline, reason.as_deref()).await,
+                } => {
+                    sub_commands::pr_status::launch_ready(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::Draft {
                     id,
                     reason,
                     offline,
-                } => sub_commands::pr_status::launch_draft(id, *offline, reason.as_deref()).await,
+                } => {
+                    sub_commands::pr_status::launch_draft(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::Comment {
                     id,
                     body,
@@ -190,6 +241,7 @@ async fn main() {
                         body,
                         reply_to.as_deref(),
                         *offline,
+                        signer_params,
                     )
                     .await
                 }
@@ -197,19 +249,35 @@ async fn main() {
                     id,
                     squash,
                     offline,
-                } => sub_commands::pr_merge::launch(id, *squash, *offline).await,
+                } => sub_commands::pr_merge::launch(id, *squash, *offline, signer_params).await,
                 PrCommands::Label {
                     id,
                     labels,
                     offline,
-                } => sub_commands::label::launch_pr_label(id, labels, *offline).await,
+                } => {
+                    sub_commands::label::launch_pr_label(id, labels, *offline, signer_params).await
+                }
                 PrCommands::SetSubject {
                     id,
                     subject,
                     offline,
-                } => sub_commands::set_subject::launch_pr_set_subject(id, subject, *offline).await,
+                } => {
+                    sub_commands::set_subject::launch_pr_set_subject(
+                        id,
+                        subject,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::SetCoverNote { id, body, offline } => {
-                    sub_commands::set_cover_note::launch_pr_set_cover_note(id, body, *offline).await
+                    sub_commands::set_cover_note::launch_pr_set_cover_note(
+                        id,
+                        body,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
                 }
             },
             Commands::Issue(args) => match &args.issue_command {
@@ -256,6 +324,7 @@ async fn main() {
                         subject.clone(),
                         body.clone(),
                         labels.clone(),
+                        signer_params,
                     )
                     .await
                 }
@@ -264,22 +333,39 @@ async fn main() {
                     reason,
                     offline,
                 } => {
-                    sub_commands::issue_status::launch_close(id, *offline, reason.as_deref()).await
+                    sub_commands::issue_status::launch_close(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
                 }
                 IssueCommands::Resolved {
                     id,
                     reason,
                     offline,
                 } => {
-                    sub_commands::issue_status::launch_resolved(id, *offline, reason.as_deref())
-                        .await
+                    sub_commands::issue_status::launch_resolved(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
                 }
                 IssueCommands::Reopen {
                     id,
                     reason,
                     offline,
                 } => {
-                    sub_commands::issue_status::launch_reopen(id, *offline, reason.as_deref()).await
+                    sub_commands::issue_status::launch_reopen(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
                 }
                 IssueCommands::Comment {
                     id,
@@ -292,6 +378,7 @@ async fn main() {
                         body,
                         reply_to.as_deref(),
                         *offline,
+                        signer_params,
                     )
                     .await
                 }
@@ -299,20 +386,34 @@ async fn main() {
                     id,
                     labels,
                     offline,
-                } => sub_commands::label::launch_issue_label(id, labels, *offline).await,
+                } => {
+                    sub_commands::label::launch_issue_label(id, labels, *offline, signer_params)
+                        .await
+                }
                 IssueCommands::SetSubject {
                     id,
                     subject,
                     offline,
                 } => {
-                    sub_commands::set_subject::launch_issue_set_subject(id, subject, *offline).await
+                    sub_commands::set_subject::launch_issue_set_subject(
+                        id,
+                        subject,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
                 }
                 IssueCommands::SetCoverNote { id, body, offline } => {
-                    sub_commands::set_cover_note::launch_issue_set_cover_note(id, body, *offline)
-                        .await
+                    sub_commands::set_cover_note::launch_issue_set_cover_note(
+                        id,
+                        body,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
                 }
             },
-            Commands::Sync(args) => sub_commands::sync::launch(args).await,
+            Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,
             Commands::Skill(args) => {
                 sub_commands::skill::launch(&args.skill_command, cli.force).await
             }
