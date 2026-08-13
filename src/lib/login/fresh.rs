@@ -46,8 +46,10 @@ pub async fn fresh_login_or_signup(
     signer_info: Option<SignerInfo>,
     save_local: bool,
     signer_relays: &[String],
+    alias: Option<&str>,
+    selected_by: Option<&str>,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
-    let (signer, public_key, signer_info, source) = loop {
+    let (signer, public_key, signer_info, _) = loop {
         if let Some(signer_info) = signer_info {
             let (signer, user_ref, source) = load_existing_login(
                 git_repo,
@@ -101,7 +103,27 @@ pub async fn fresh_login_or_signup(
             }
         }
     };
-    save_to_git_config(git_repo, &signer_info, !save_local).await?;
+    let npub = public_key.to_bech32()?;
+    if let Some(alias) = alias {
+        crate::login::credential_store::ensure_alias_available(alias, &npub)?;
+    }
+    if let SignerInfo::Selection { selector } = &signer_info {
+        // account login resolves selections before calling this function, but
+        // library callers may still supply one. Persist the separately
+        // resolved npub so an alias can never be copied into `nostr.npub`.
+        if let Some(alias) = alias {
+            save_signer_alias(git_repo, alias, &npub, !save_local)?;
+        } else {
+            save_signer_selection(git_repo, selector, &npub, !save_local)?;
+        }
+    } else {
+        save_to_git_config(git_repo, &signer_info, !save_local).await?;
+        if let Some(alias) = alias {
+            save_signer_alias(git_repo, alias, &npub, !save_local)?;
+        } else if let Some(selector) = selected_by {
+            save_signer_selection(git_repo, selector, &npub, !save_local)?;
+        }
+    }
     let user_ref = get_user_details(
         &public_key,
         client,
@@ -114,8 +136,13 @@ pub async fn fresh_login_or_signup(
         false,
     )
     .await?;
-    print_logged_in_as(&user_ref, client.is_none(), &source)?;
-    Ok((signer, user_ref, source))
+    let saved_source = if save_local {
+        SignerInfoSource::GitLocal
+    } else {
+        SignerInfoSource::GitGlobal
+    };
+    print_logged_in_as(&user_ref, client.is_none(), &saved_source, alias)?;
+    Ok((signer, user_ref, saved_source))
 }
 
 /// Non-interactive login using a `bunker://` URL provided directly.
@@ -129,6 +156,7 @@ pub async fn login_with_bunker_url(
     bunker_url: &str,
     save_local: bool,
     signer_relays: &[String],
+    alias: Option<&str>,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let url = NostrConnectUri::parse(bunker_url)
         .context("invalid bunker:// URL - must be a valid bunker:// URI")?;
@@ -150,7 +178,14 @@ pub async fn login_with_bunker_url(
         npub: Some(user_public_key.to_bech32()?),
     };
 
+    let npub = user_public_key.to_bech32()?;
+    if let Some(alias) = alias {
+        crate::login::credential_store::ensure_alias_available(alias, &npub)?;
+    }
     save_to_git_config(git_repo, &signer_info, !save_local).await?;
+    if let Some(alias) = alias {
+        save_signer_alias(git_repo, alias, &npub, !save_local)?;
+    }
 
     let user_ref = get_user_details(
         &user_public_key,
@@ -170,7 +205,7 @@ pub async fn login_with_bunker_url(
     } else {
         SignerInfoSource::GitGlobal
     };
-    print_logged_in_as(&user_ref, client.is_none(), &source)?;
+    print_logged_in_as(&user_ref, client.is_none(), &source, alias)?;
     Ok((signer, user_ref, source))
 }
 
@@ -935,7 +970,8 @@ pub fn save_signer_alias(
         .context("cannot save signer alias for an invalid npub")?
         .to_bech32()?;
     let policy = credential_store::policy(git_repo);
-    if policy != SecretStorage::GitConfig {
+    let credential_backed = policy != SecretStorage::GitConfig;
+    if credential_backed {
         credential_store::store_alias(&alias, &npub, policy)
             .context("failed to save signer alias in the credential store")?;
     }
@@ -951,10 +987,46 @@ pub fn save_signer_alias(
     save_git_config_item(scope, &format!("nostr.signer-alias.{alias}"), &npub)?;
     save_git_config_item(scope, "nostr.signer", &alias)?;
     save_git_config_item(scope, "nostr.npub", &npub)?;
+    if credential_backed {
+        // The alias is now the complete selector for credential-store-backed
+        // signers. Keeping a redundant credential pointer here obscures that
+        // model and makes mounted repositories appear to carry login material
+        // that is actually held by the machine's credential store.
+        remove_git_config_item(scope, "nostr.nsec")?;
+        remove_git_config_item(scope, "nostr.bunker-uri")?;
+        remove_git_config_item(scope, "nostr.bunker-app-key")?;
+    }
     eprintln!(
         "saved signer alias '{alias}' to {} git config",
         if global { "global" } else { "local" }
     );
+    Ok(())
+}
+
+fn save_signer_selection(
+    git_repo: &Option<&Repo>,
+    selector: &str,
+    npub: &str,
+    global: bool,
+) -> Result<()> {
+    use crate::login::credential_store::{self, SecretStorage};
+
+    let credential_backed = credential_store::policy(git_repo) != SecretStorage::GitConfig;
+    let global = global && std::env::var("NGITTEST").is_err();
+    let scope = if global {
+        &None
+    } else if git_repo.is_some() {
+        git_repo
+    } else {
+        bail!("cannot save a local signer selection without a git repository");
+    };
+    save_git_config_item(scope, "nostr.signer", selector)?;
+    save_git_config_item(scope, "nostr.npub", npub)?;
+    if credential_backed {
+        remove_git_config_item(scope, "nostr.nsec")?;
+        remove_git_config_item(scope, "nostr.bunker-uri")?;
+        remove_git_config_item(scope, "nostr.bunker-app-key")?;
+    }
     Ok(())
 }
 
@@ -1151,11 +1223,13 @@ fn silently_save_to_git_config(
             remove_git_config_item(git_repo, "nostr.signer")?;
         }
         SignerInfo::Selection { selector } => {
-            npub_to_save = Some(selector.as_str());
-            save_git_config_item(git_repo, "nostr.signer", selector)?;
-            remove_git_config_item(git_repo, "nostr.nsec")?;
-            remove_git_config_item(git_repo, "nostr.bunker-uri")?;
-            remove_git_config_item(git_repo, "nostr.bunker-app-key")?;
+            // Selection persistence needs both the selector and its resolved
+            // npub, so normal callers must use `save_signer_selection`.
+            // Failing here protects future callers from writing an alias into
+            // `nostr.npub` as though it were a public key.
+            bail!(
+                "internal error: unresolved signer selection '{selector}' reached direct Git-config persistence"
+            );
         }
     }
     if let Some(npub) = npub_to_save {
@@ -1403,5 +1477,37 @@ fn print_lines_with_headings(lines: Vec<&str>, printer: &mut Printer) {
         } else {
             printer.println(line.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_persistence_tests {
+    use super::silently_save_to_git_config;
+    use crate::{
+        git::{Repo, RepoActions, test_helpers::GitTestRepo},
+        login::SignerInfo,
+    };
+
+    #[test]
+    fn direct_selection_persistence_rejects_an_unresolved_alias() -> anyhow::Result<()> {
+        let fixture = GitTestRepo::new("main")?;
+        let repo = Repo::from_path(&fixture.dir)?;
+        let selection = SignerInfo::Selection {
+            selector: "dcagent".to_string(),
+        };
+
+        let error = silently_save_to_git_config(&Some(&repo), &selection, false)
+            .expect_err("an unresolved alias must not be written as an npub");
+
+        assert!(error.to_string().contains("unresolved signer selection"));
+        assert!(
+            repo.get_git_config_item("nostr.signer", Some(false))?
+                .is_none()
+        );
+        assert!(
+            repo.get_git_config_item("nostr.npub", Some(false))?
+                .is_none()
+        );
+        Ok(())
     }
 }

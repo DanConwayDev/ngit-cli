@@ -884,6 +884,32 @@ mod tests {
     }
 
     #[test]
+    fn bunker_login_url_conflicts_with_other_signer_sources() {
+        for conflicting in [
+            ["--nsec", "key"],
+            ["--nsec-file", "key"],
+            ["--signer", "fred"],
+            ["--bunker-uri", "bunker://example"],
+            ["--bunker-app-key", "key"],
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "ngit",
+                    "account",
+                    "login",
+                    "--bunker-url",
+                    "bunker://example",
+                    conflicting[0],
+                    conflicting[1],
+                ])
+                .is_err(),
+                "--bunker-url accepted conflicting source {}",
+                conflicting[0]
+            );
+        }
+    }
+
+    #[test]
     fn nsec_file_is_global_for_signing_commands() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("key");

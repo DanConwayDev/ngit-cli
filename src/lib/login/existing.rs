@@ -33,6 +33,23 @@ impl std::fmt::Display for SignerInfoNotFound {
 
 impl std::error::Error for SignerInfoNotFound {}
 
+#[derive(Debug)]
+pub struct SignerAliasNotFound {
+    alias: String,
+}
+
+impl std::fmt::Display for SignerAliasNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "signer alias '{}' is not defined in the OS credential store, credentials.json, or git config",
+            self.alias
+        )
+    }
+}
+
+impl std::error::Error for SignerAliasNotFound {}
+
 /// load signer from git config and UserProfile from cache or relays
 ///
 /// # Parameters
@@ -51,6 +68,7 @@ pub async fn load_existing_login(
     prompt_for_password: bool,
     fetch_profile_updates: bool,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
+    let requested_signer_info = signer_info;
     let (signer_info, source) = get_signer_info(git_repo, signer_info, password, source)?;
 
     let (signer, public_key) = get_signer(&signer_info, prompt_for_password).await?;
@@ -69,9 +87,30 @@ pub async fn load_existing_login(
     .await?;
 
     if !silent {
-        print_logged_in_as(&user_ref, client.is_none(), &source)?;
+        let alias = selected_alias(git_repo, requested_signer_info, &source)?;
+        print_logged_in_as(&user_ref, client.is_none(), &source, alias.as_deref())?;
     }
     Ok((signer, user_ref, source))
+}
+
+fn selected_alias(
+    git_repo: &Option<&Repo>,
+    requested_signer_info: &Option<SignerInfo>,
+    source: &SignerInfoSource,
+) -> Result<Option<String>> {
+    let selector = match source {
+        SignerInfoSource::CommandLineArguments => match requested_signer_info {
+            Some(SignerInfo::Selection { selector }) => Some(selector.clone()),
+            _ => None,
+        },
+        SignerInfoSource::GitLocal => {
+            let repo = git_repo.context("cannot read local signer alias without a repository")?;
+            get_git_config_item(&Some(repo), "nostr.signer")?
+        }
+        SignerInfoSource::GitGlobal => get_git_config_item(&None, "nostr.signer")?,
+        SignerInfoSource::GitSystem => get_git_config_item_system("nostr.signer")?,
+    };
+    Ok(selector.filter(|selector| !selector.starts_with("npub1")))
 }
 
 /// priority order: cli arguments, local git config, global git config, system
@@ -332,7 +371,27 @@ fn resolve_selected_signer(
     let expected_npub = resolve_selector_npub(git_repo, selector)?;
     let mut store_error = None;
 
-    match credential_store::retrieve(&expected_npub) {
+    match credential_store::retrieve_from(&expected_npub, credential_store::Backend::Os) {
+        Ok(keys) => {
+            return Ok(SignerInfo::Nsec {
+                nsec: keys.secret_key().to_bech32()?,
+                password: password.clone(),
+                npub: Some(expected_npub),
+                verify_npub: true,
+            });
+        }
+        Err(error) => match &error {
+            credential_store::LookupError::Missing(_) => {}
+            credential_store::LookupError::Unavailable(_) => {
+                store_error = Some(anyhow::Error::new(error));
+            }
+            credential_store::LookupError::Invalid(_) => {
+                return Err(anyhow::Error::new(error));
+            }
+        },
+    }
+
+    match credential_store::retrieve_from(&expected_npub, credential_store::Backend::File) {
         Ok(keys) => {
             return Ok(SignerInfo::Nsec {
                 nsec: keys.secret_key().to_bech32()?,
@@ -366,13 +425,10 @@ fn resolve_selected_signer(
         });
     }
 
-    if let Some(error) = store_error.take() {
-        return Err(error.context(format!(
-            "failed to resolve nsec for selected signer {expected_npub}"
-        )));
-    }
-
-    match credential_store::retrieve_bunker_signer(&expected_npub) {
+    match credential_store::retrieve_bunker_signer_from(
+        &expected_npub,
+        credential_store::Backend::Os,
+    ) {
         Ok(record) => {
             return Ok(SignerInfo::Bunker {
                 bunker_uri: record.bunker_uri,
@@ -391,10 +447,26 @@ fn resolve_selected_signer(
         },
     }
 
-    if let Some(error) = store_error.take() {
-        return Err(error.context(format!(
-            "failed to resolve bunker record for selected signer {expected_npub}"
-        )));
+    match credential_store::retrieve_bunker_signer_from(
+        &expected_npub,
+        credential_store::Backend::File,
+    ) {
+        Ok(record) => {
+            return Ok(SignerInfo::Bunker {
+                bunker_uri: record.bunker_uri,
+                bunker_app_key: record.client_nsec,
+                npub: Some(expected_npub),
+            });
+        }
+        Err(error) => match &error {
+            credential_store::LookupError::Missing(_) => {}
+            credential_store::LookupError::Unavailable(_) => {
+                store_error = Some(anyhow::Error::new(error));
+            }
+            credential_store::LookupError::Invalid(_) => {
+                return Err(anyhow::Error::new(error));
+            }
+        },
     }
 
     // Legacy flat bunker fields remain readable, but a profile is only a
@@ -420,7 +492,15 @@ fn resolve_selected_signer(
         });
     }
 
-    bail!("selected signer {expected_npub} is not available in the credential store or git config")
+    if let Some(error) = store_error.take() {
+        return Err(error.context(format!(
+            "failed to resolve bunker record for selected signer {expected_npub}"
+        )));
+    }
+
+    bail!(
+        "selected signer {expected_npub} is not available in the OS credential store, credentials.json, or git config"
+    )
 }
 
 fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<String> {
@@ -432,6 +512,27 @@ fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<Str
     }
     let alias = credential_store::normalize_alias(selector)?;
     let key = format!("nostr.signer-alias.{alias}");
+    let mut store_error = None;
+    match credential_store::retrieve_alias_from(&alias, credential_store::Backend::Os) {
+        Ok(npub) => return Ok(npub),
+        Err(credential_store::LookupError::Missing(_)) => {}
+        Err(credential_store::LookupError::Unavailable(error)) => {
+            store_error = Some(error);
+        }
+        Err(error @ credential_store::LookupError::Invalid(_)) => {
+            return Err(anyhow::Error::new(error));
+        }
+    }
+    match credential_store::retrieve_alias_from(&alias, credential_store::Backend::File) {
+        Ok(npub) => return Ok(npub),
+        Err(credential_store::LookupError::Missing(_)) => {}
+        Err(credential_store::LookupError::Unavailable(error)) => {
+            store_error = Some(error);
+        }
+        Err(error @ credential_store::LookupError::Invalid(_)) => {
+            return Err(anyhow::Error::new(error));
+        }
+    }
     for scope in selection_scopes(git_repo) {
         if let Some(npub) = config_value(git_repo, scope, &key)? {
             return PublicKey::parse(&npub)
@@ -445,12 +546,14 @@ fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<Str
                 .map_err(Into::into);
         }
     }
-    credential_store::retrieve_alias(&alias).map_err(|error| match error {
-        credential_store::LookupError::Missing(_) => anyhow::anyhow!(
-            "signer alias '{alias}' is not defined in git config or the credential store"
-        ),
-        error => anyhow::Error::new(error),
-    })
+    store_error.map_or_else(
+        || Err(anyhow::Error::new(SignerAliasNotFound { alias })),
+        |error| {
+            Err(anyhow::Error::new(
+                credential_store::LookupError::Unavailable(error),
+            ))
+        },
+    )
 }
 
 fn matching_nsec_config(

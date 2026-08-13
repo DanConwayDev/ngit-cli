@@ -46,7 +46,7 @@ pub async fn login_or_signup(
         Err(error) if matches!(signer_info, Some(SignerInfo::Selection { .. })) => Err(error),
         Err(error) if Interactor::is_non_interactive() => Err(require_account(error)),
         Err(error) if error.downcast_ref::<SignerInfoNotFound>().is_some() => {
-            fresh_login_or_signup(git_repo, client, None, false, &[]).await
+            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
         }
         Err(error)
             if matches!(
@@ -55,7 +55,7 @@ pub async fn login_or_signup(
             ) =>
         {
             eprintln!("{error}; please log in again");
-            fresh_login_or_signup(git_repo, client, None, false, &[]).await
+            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
         }
         Err(error) => Err(error),
     }
@@ -120,6 +120,7 @@ fn print_logged_in_as(
     user_ref: &UserRef,
     offline_mode: bool,
     source: &SignerInfoSource,
+    alias: Option<&str>,
 ) -> Result<()> {
     if is_verbose() {
         if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
@@ -134,7 +135,7 @@ fn print_logged_in_as(
     }
     eprintln!(
         "logged in as {}{}",
-        user_ref.metadata.name,
+        login_display_name(&user_ref.metadata.name, alias),
         match source {
             SignerInfoSource::CommandLineArguments => " via cli arguments",
             SignerInfoSource::GitLocal => " to local repository",
@@ -143,6 +144,10 @@ fn print_logged_in_as(
         }
     );
     Ok(())
+}
+
+fn login_display_name(profile_name: &str, alias: Option<&str>) -> String {
+    alias.unwrap_or(profile_name).to_string()
 }
 
 // None: in the edge case where the user is logged in via cli arguments rather
@@ -166,4 +171,15 @@ pub fn get_curent_user(git_repo: &Repo) -> Result<Option<PublicKey>> {
             None
         },
     )
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::login_display_name;
+
+    #[test]
+    fn selected_alias_replaces_profile_name() {
+        assert_eq!(login_display_name("Dan Conway", Some("dcagent")), "dcagent");
+        assert_eq!(login_display_name("Dan Conway", None), "Dan Conway");
+    }
 }

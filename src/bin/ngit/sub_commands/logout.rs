@@ -3,6 +3,7 @@ use ngit::{
     git::{get_git_config_item, remove_git_config_item},
     login::{SignerInfoSource, credential_store, existing::load_existing_login},
 };
+use nostr::prelude::ToBech32;
 
 use crate::{
     git::Repo,
@@ -36,36 +37,36 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
     } else {
         vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]
     } {
-        if let Ok((_, user_ref, source)) = load_existing_login(
+        let scope = if source == SignerInfoSource::GitLocal {
+            git_repo
+        } else {
+            None
+        };
+        if !has_login_config(scope) {
+            continue;
+        }
+        let loaded = load_existing_login(
             &git_repo,
             &None,
             &None,
-            &Some(source),
+            &Some(source.clone()),
             None,
             true,
             false,
             false,
         )
-        .await
-        {
-            let scope = if source == SignerInfoSource::GitLocal {
-                git_repo
-            } else {
-                None
-            };
-            let pointers = credential_store::config_pointers(&scope);
-            if forget {
-                forget_pointers(&pointers)?;
-            }
-            for item in LOGIN_CONFIG_ITEMS {
-                if let Err(error) = remove_git_config_item(
-                    if source == SignerInfoSource::GitLocal {
-                        &git_repo
-                    } else {
-                        &None
-                    },
-                    item,
-                ) {
+        .await;
+        let npub = loaded
+            .as_ref()
+            .ok()
+            .and_then(|(_, user_ref, _)| user_ref.public_key.to_bech32().ok());
+        let pointers = credential_store::config_pointers(&scope, npub.as_deref());
+        if forget {
+            forget_pointers(&pointers)?;
+        }
+        for item in LOGIN_CONFIG_ITEMS {
+            if let Err(error) = remove_git_config_item(&scope, item) {
+                if let Ok((_, user_ref, _)) = &loaded {
                     println!(
                         "failed to log out {}as {}",
                         if source == SignerInfoSource::GitLocal {
@@ -75,19 +76,21 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
                         },
                         user_ref.metadata.name
                     );
-                    eprintln!("{error:?}");
-                    eprintln!(
-                        "consider manually removing {} git config items: {}",
-                        if source == SignerInfoSource::GitGlobal {
-                            "global"
-                        } else {
-                            "local"
-                        },
-                        format_items_as_list(&get_global_login_config_items_set())
-                    );
-                    return Ok(());
                 }
+                eprintln!("{error:?}");
+                eprintln!(
+                    "consider manually removing {} git config items: {}",
+                    if source == SignerInfoSource::GitGlobal {
+                        "global"
+                    } else {
+                        "local"
+                    },
+                    format_items_as_list(&get_global_login_config_items_set())
+                );
+                return Ok(());
             }
+        }
+        if let Ok((_, user_ref, _)) = loaded {
             println!(
                 "logged out {}as {}",
                 if source == SignerInfoSource::GitLocal {
@@ -97,40 +100,22 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
                 },
                 user_ref.metadata.name
             );
-            hint_retained_secrets(forget, &pointers);
-            return Ok(());
         }
-    }
-    // A dangling pointer cannot be loaded as a signer, but logout must still
-    // clear it so the user can recover with a fresh login.
-    // NGITTEST limits the sweep to local config, mirroring the login flow, so
-    // tests never touch the developer's real global git config.
-    for scope in if std::env::var("NGITTEST").is_ok() {
-        vec![git_repo]
-    } else {
-        vec![git_repo, None]
-    } {
-        let has_login = [
-            "nostr.nsec",
-            "nostr.bunker-uri",
-            "nostr.bunker-app-key",
-            "nostr.signer",
-        ]
-        .iter()
-        .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()));
-        if has_login {
-            let pointers = credential_store::config_pointers(&scope);
-            if forget {
-                forget_pointers(&pointers)?;
-            }
-            for item in LOGIN_CONFIG_ITEMS {
-                remove_git_config_item(&scope, item)?;
-            }
-            hint_retained_secrets(forget, &pointers);
-            return Ok(());
-        }
+        hint_retained_secrets(forget, &pointers);
+        return Ok(());
     }
     Ok(())
+}
+
+fn has_login_config(scope: Option<&Repo>) -> bool {
+    [
+        "nostr.nsec",
+        "nostr.bunker-uri",
+        "nostr.bunker-app-key",
+        "nostr.signer",
+    ]
+    .iter()
+    .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()))
 }
 
 fn forget_pointers(pointers: &[String]) -> Result<()> {

@@ -38,21 +38,40 @@ enumerated:
 ## Selecting signers
 
 `--signer <npub|alias>` selects an existing signer for one command without
-changing the configured profile. An alias maps to an npub in either place:
+changing the configured profile. An alias maps to an npub in any of these
+places:
 
-- credential store: `alias:fred` contains `npub1…`
+- OS credential store: `alias:fred` contains `npub1…`
+- `credentials.json`: `nostr/alias:fred` contains `npub1…`
 - git config: `nostr.signer-alias.fred = npub1…`
 
-Git-config aliases are resolved local, global, then system, followed by the
-credential store. `nostr.signer = fred` (or an npub) makes a signer the default
-for that Git-config scope. `ngit account login --alias fred` writes the mapping
-to the selected Git-config scope and, unless `git-config` secret storage was
-selected, the credential store as well.
+Aliases are resolved from the OS credential store first, then
+`credentials.json`, then local, global, and system Git config. The JSON store
+is the direct fallback for systems where the OS credential store is
+unavailable. `nostr.signer = fred` (or an
+npub) makes a signer the default for that Git-config scope. `ngit account login
+--alias fred` writes the mapping to the selected Git-config scope and, unless
+`git-config` secret storage was selected, the selected credential backend as
+well. After logout retains a stored signer, `ngit account login --local --alias
+fred` reactivates it without requiring the nsec or bunker URL again.
+
+For a credential-store-backed selection, the selected Git-config scope contains
+`nostr.signer` and `nostr.npub`, plus `nostr.signer-alias.<alias>` when an alias
+is used; it does not keep a redundant `nostr.nsec` or bunker pointer. With
+`secret-storage = git-config`, the nsec or bunker fields remain in that scope
+because they are the signer material rather than credential-store pointers.
+
+An alias stored in the OS credential store or `credentials.json` is
+machine-wide and cannot be reassigned to another npub by logging in again;
+choose a new alias or explicitly remove `alias:<name>` first. Git-config-only
+aliases can differ between repositories when `secret-storage = git-config`,
+provided no higher-priority credential-store alias uses the name, and follow
+local, global, then system scope precedence.
 
 After resolving an alias to its npub, ngit checks all nsec sources before any
-bunker source: raw npub-named credential, matching local/global/system nsec,
-typed `signer:<npub>` bunker record, then matching legacy local/global/system
-bunker fields. Bunker fields are never assembled across scopes. The chosen
+bunker source. Within each type the order is OS credential store,
+`credentials.json`, then matching local/global/system Git config. Bunker
+fields are never assembled across scopes. The chosen nsec is checked by
 deriving its public key. A bunker's user public key is obtained once during
 the initial NIP-46 pairing and persisted with its connection details. Later
 commands seed that stored key into the connection instead of making a new
