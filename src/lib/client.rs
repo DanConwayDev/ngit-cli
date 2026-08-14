@@ -627,32 +627,25 @@ impl Connect for Client {
         let success_count = Arc::new(AtomicU64::new(0));
         let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
 
-        let mut processed_relays = HashSet::new();
+        let mut processed_relay_scopes = HashSet::new();
 
         let mut relay_reports: Vec<Result<FetchReport>> = vec![];
 
         loop {
-            let relays = request
+            let relay_requests = request
                 .repo_relays
                 .union(&request.user_relays_for_profiles)
                 .chain(request.announcement_indexer_relays.iter())
                 .filter(|&r| !r.as_str().contains("nostr.mutinywallet.com"))
-                .cloned()
-                .collect::<HashSet<RelayUrl>>()
-                .difference(&processed_relays)
-                .cloned()
-                .collect::<HashSet<RelayUrl>>();
-            if relays.is_empty() {
+                .filter_map(|relay| {
+                    let scoped = request.scoped_to_relay(relay);
+                    let key = (relay.clone(), scoped.scope);
+                    (!processed_relay_scopes.contains(&key)).then_some(scoped)
+                })
+                .collect::<Vec<_>>();
+            if relay_requests.is_empty() {
                 break;
             }
-            let profile_relays_only = request
-                .user_relays_for_profiles
-                .difference(&request.repo_relays)
-                .collect::<HashSet<&RelayUrl>>();
-            let announcement_relays_only = request
-                .announcement_indexer_relays
-                .difference(&request.repo_relays)
-                .collect::<HashSet<&RelayUrl>>();
             for relay in &request.repo_relays {
                 self.client
                     .add_relay(relay.as_str())
@@ -662,51 +655,19 @@ impl Connect for Client {
 
             let success_count_for_loop = success_count.clone();
             let current_timeout_for_loop = current_timeout.clone();
-            let total_relays = relays.len() as u64;
-
-            let futures: Vec<_> = relays
+            let total_relays = relay_requests.len() as u64;
+            let processed_this_round = relay_requests
                 .iter()
-                .map(|r| {
-                    if profile_relays_only.contains(r) {
-                        FetchRequest {
-                            selected_relay: Some(r.to_owned()),
-                            repo_coordinates_without_relays: vec![],
-                            announcement_only: false,
-                            proposals: HashSet::new(),
-                            missing_contributor_profiles: request
-                                .missing_contributor_profiles
-                                .union(
-                                    &request
-                                        .profiles_to_fetch_from_user_relays
-                                        .clone()
-                                        .into_keys()
-                                        .collect(),
-                                )
-                                .copied()
-                                .collect(),
-                            ..request.clone()
-                        }
-                    } else if announcement_relays_only.contains(r) {
-                        FetchRequest {
-                            selected_relay: Some(r.to_owned()),
-                            announcement_only: true,
-                            state: None,
-                            proposals: HashSet::new(),
-                            issue_ids: HashSet::new(),
-                            non_proposal_event_ids: HashSet::new(),
-                            contributors: HashSet::new(),
-                            missing_contributor_profiles: HashSet::new(),
-                            profiles_to_fetch_from_user_relays: HashMap::new(),
-                            user_relays_for_profiles: HashSet::new(),
-                            ..request.clone()
-                        }
-                    } else {
-                        FetchRequest {
-                            selected_relay: Some(r.to_owned()),
-                            ..request.clone()
-                        }
-                    }
+                .filter_map(|request| {
+                    request
+                        .selected_relay
+                        .clone()
+                        .map(|relay| (relay, request.scope))
                 })
+                .collect::<Vec<_>>();
+
+            let futures: Vec<_> = relay_requests
+                .into_iter()
                 .map(|request| {
                     let success_count_clone = success_count_for_loop.clone();
                     let current_timeout_clone = current_timeout_for_loop.clone();
@@ -861,7 +822,7 @@ impl Connect for Client {
             {
                 relay_reports.push(report);
             }
-            processed_relays.extend(relays.clone());
+            processed_relay_scopes.extend(processed_this_round);
 
             if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
                 if let Ok(repo_ref) =
@@ -946,16 +907,23 @@ impl Connect for Client {
         let dim = Style::new().color256(247);
 
         loop {
-            let mut filters = if request.announcement_only {
-                get_announcement_only_fetch_filters(&fresh_coordinates)
-            } else {
-                get_fetch_filters(
+            let mut filters = match request.scope {
+                RelayFetchScope::Repository => get_fetch_filters(
                     &fresh_coordinates,
                     &fresh_proposal_roots,
                     &fresh_issue_roots,
                     &fresh_non_proposal_event_ids,
                     &fresh_profiles,
-                )
+                ),
+                RelayFetchScope::Auxiliary {
+                    announcements,
+                    profiles,
+                } => get_auxiliary_fetch_filters(
+                    &fresh_coordinates,
+                    &fresh_profiles,
+                    announcements,
+                    profiles,
+                ),
             };
             if version_check::is_version_check_relay(&relay_url)
                 && !VERSION_CHECK_STATE_REQUESTED.swap(true, Ordering::AcqRel)
@@ -1035,15 +1003,22 @@ impl Connect for Client {
             )
             .await?;
 
-            if request.announcement_only {
-                if fresh_coordinates.is_empty() {
-                    break;
+            let exhausted = match request.scope {
+                RelayFetchScope::Repository => {
+                    fresh_coordinates.is_empty()
+                        && fresh_proposal_roots.is_empty()
+                        && fresh_issue_roots.is_empty()
+                        && fresh_profiles.is_empty()
                 }
-            } else if fresh_coordinates.is_empty()
-                && fresh_proposal_roots.is_empty()
-                && fresh_issue_roots.is_empty()
-                && fresh_profiles.is_empty()
-            {
+                RelayFetchScope::Auxiliary {
+                    announcements,
+                    profiles,
+                } => {
+                    (!announcements || fresh_coordinates.is_empty())
+                        && (!profiles || fresh_profiles.is_empty())
+                }
+            };
+            if exhausted {
                 break;
             }
         }
@@ -2124,10 +2099,11 @@ async fn create_relays_request(
         existing_events
     };
 
-    let relays = {
-        // Only use fallback relays for bootstrapping (no repo context).
-        // When we have a repo coordinate, rely on repo relays and coordinate
-        // hint relays instead of always merging in the default set.
+    let repo_relays = {
+        // With repository context, only relays from a cached announcement are
+        // authoritative for state and collaboration events. Without
+        // repository context these carry the fallback profile-bootstrap
+        // relays; no repository filters exist in that mode.
         let mut relays = if selected_maintainer_coordinate.is_none() {
             fallback_relays.clone()
         } else {
@@ -2138,26 +2114,31 @@ async fn create_relays_request(
                 relays.insert(r);
             }
         }
-        for c in repo_coordinates {
-            for r in &c.relays {
-                relays.insert(r.clone());
-            }
-        }
-        // Fall back to fallback relays when the coordinate had no relay hints
-        // and nothing is cached yet (e.g. fresh clone with a bare npub URL).
-        if relays.is_empty() {
-            relays = fallback_relays;
-        }
         relays
     };
 
-    let announcement_indexer_relays = if repo_coordinates_without_relays.is_empty() {
-        HashSet::new()
-    } else {
-        announcement_indexer_relays
+    let announcement_indexer_relays = {
+        if repo_coordinates_without_relays.is_empty() {
+            HashSet::new()
+        } else {
+            // URL/naddr relay hints locate announcements; they do not become
+            // authorities for repository events until an announcement lists
+            // them. A bare coordinate additionally uses fallback relays for
+            // announcement bootstrap only.
+            let coordinate_hint_relays = repo_coordinates
+                .iter()
+                .flat_map(|coordinate| coordinate.relays.iter().cloned())
+                .collect::<HashSet<_>>();
+            let mut relays = announcement_indexer_relays;
+            relays.extend(coordinate_hint_relays.iter().cloned());
+            if repo_relays.is_empty() && coordinate_hint_relays.is_empty() {
+                relays.extend(fallback_relays);
+            }
+            relays
+        }
     };
 
-    let relay_column_width = relays
+    let relay_column_width = repo_relays
         .union(&user_relays_for_profiles)
         .chain(announcement_indexer_relays.iter())
         .reduce(|a, r| {
@@ -2175,9 +2156,9 @@ async fn create_relays_request(
 
     Ok(FetchRequest {
         selected_relay: None,
-        repo_relays: relays,
+        repo_relays,
         announcement_indexer_relays,
-        announcement_only: false,
+        scope: RelayFetchScope::Repository,
         relay_column_width,
         repo_coordinates_without_relays: if let Some(repo_ref) = &repo_ref {
             repo_ref.coordinates_with_timestamps()
@@ -2687,6 +2668,22 @@ fn get_announcement_only_fetch_filters(
     }
 }
 
+fn get_auxiliary_fetch_filters(
+    repo_coordinates: &HashSet<Nip19Coordinate>,
+    required_profiles: &HashSet<PublicKey>,
+    announcements: bool,
+    profiles: bool,
+) -> Vec<nostr::prelude::Filter> {
+    let mut filters = Vec::new();
+    if announcements {
+        filters.extend(get_announcement_only_fetch_filters(repo_coordinates));
+    }
+    if profiles && !required_profiles.is_empty() {
+        filters.push(get_filter_contributor_profiles(required_profiles.clone()));
+    }
+    filters
+}
+
 pub fn get_filter_repo_ann_events(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     maintainers_only: bool,
@@ -2894,12 +2891,23 @@ impl Display for FetchReport {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+enum RelayFetchScope {
+    /// Fetch repository announcements, state and collaboration events, plus
+    /// any user data needed to render their authors.
+    #[default]
+    Repository,
+    /// Fetch only the non-collaboration data explicitly assigned to this
+    /// relay. A relay can be both an announcement indexer and a user relay.
+    Auxiliary { announcements: bool, profiles: bool },
+}
+
 #[derive(Default, Clone)]
 pub struct FetchRequest {
     repo_relays: HashSet<RelayUrl>,
     announcement_indexer_relays: HashSet<RelayUrl>,
     selected_relay: Option<RelayUrl>,
-    announcement_only: bool,
+    scope: RelayFetchScope,
     relay_column_width: usize,
     repo_coordinates_without_relays: Vec<(Nip19Coordinate, Option<Timestamp>)>,
     state: Option<(Timestamp, EventId)>,
@@ -2914,6 +2922,54 @@ pub struct FetchRequest {
     existing_events: HashSet<EventId>,
     profiles_to_fetch_from_user_relays: HashMap<PublicKey, (Timestamp, Timestamp, Timestamp)>,
     user_relays_for_profiles: HashSet<RelayUrl>,
+}
+
+impl FetchRequest {
+    /// Restrict a request to the data this relay is authoritative for.
+    ///
+    /// Repository relays receive the complete request. Other relays may be
+    /// queried for maintainer announcements or user profile data, but never
+    /// receive repository state, issue, proposal, comment, label, cover-note
+    /// or deletion filters.
+    fn scoped_to_relay(&self, relay: &RelayUrl) -> Self {
+        let mut scoped = self.clone();
+        scoped.selected_relay = Some(relay.clone());
+        if self.repo_relays.contains(relay) {
+            scoped.scope = RelayFetchScope::Repository;
+            return scoped;
+        }
+
+        let announcements = self.announcement_indexer_relays.contains(relay);
+        let profiles = self.user_relays_for_profiles.contains(relay);
+        scoped.scope = RelayFetchScope::Auxiliary {
+            announcements,
+            profiles,
+        };
+        if !announcements {
+            scoped.repo_coordinates_without_relays.clear();
+        }
+        scoped.state = None;
+        scoped.proposals.clear();
+        scoped.issue_ids.clear();
+        scoped.non_proposal_event_ids.clear();
+        if profiles {
+            scoped.missing_contributor_profiles = self
+                .missing_contributor_profiles
+                .union(
+                    &self
+                        .profiles_to_fetch_from_user_relays
+                        .clone()
+                        .into_keys()
+                        .collect(),
+                )
+                .copied()
+                .collect();
+        } else {
+            scoped.missing_contributor_profiles.clear();
+            scoped.profiles_to_fetch_from_user_relays.clear();
+        }
+        scoped
+    }
 }
 
 pub async fn fetching_with_report(
@@ -3653,6 +3709,47 @@ mod tests {
     #[test]
     fn announcement_only_filters_are_empty_without_coordinates() {
         assert!(get_announcement_only_fetch_filters(&HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn auxiliary_filters_include_only_announcements_and_user_data() {
+        let maintainer =
+            PublicKey::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let profile =
+            PublicKey::from_hex("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let coordinates = HashSet::from_iter([Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: maintainer,
+                identifier: "repo".to_string(),
+            },
+            relays: vec![],
+        }]);
+
+        let filters =
+            get_auxiliary_fetch_filters(&coordinates, &HashSet::from_iter([profile]), true, true);
+
+        assert_eq!(filters.len(), 2);
+        assert_eq!(
+            filters[0].kinds,
+            Some(std::collections::BTreeSet::from_iter([
+                Kind::GitRepoAnnouncement,
+            ]))
+        );
+        assert_eq!(
+            filters[1].kinds,
+            Some(std::collections::BTreeSet::from_iter([
+                Kind::Metadata,
+                Kind::RelayList,
+                KIND_USER_GRASP_LIST,
+            ]))
+        );
+        assert_eq!(
+            filters[1].authors,
+            Some(std::collections::BTreeSet::from_iter([profile]))
+        );
     }
 
     #[tokio::test]
