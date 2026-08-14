@@ -14,8 +14,8 @@ Standard git commands work directly with these URLs — `git-remote-nostr` resol
 ## Publishing a repo
 
 ```bash
-ngit init --name "My Project" --description "What it does" -d # uses user's preferred grasp server or falls back to defaults
-ngit repo edit --description "New description"                   # update metadata
+ngit init --name "My Project" --description "What it does" -d --json # uses user's preferred grasp server or falls back to defaults
+ngit repo edit --description "New description" --json               # update metadata
 ngit repo --json --offline                                       # view repo info (check nostr_url field)
 ```
 

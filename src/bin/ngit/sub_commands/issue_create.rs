@@ -124,6 +124,18 @@ pub async fn launch(
         event_id.to_bech32()?
     };
 
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": "created",
+            "entity": "issue",
+            "id": event_bech32,
+            "subject": title,
+            "labels": labels,
+            "url": format!("https://gitworkshop.dev/{event_bech32}"),
+        }));
+    }
+
     println!("issue created: {event_id}");
     let dim = console::Style::new().color256(247);
     println!(

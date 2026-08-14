@@ -14,6 +14,31 @@ use nostr::prelude::ToBech32;
 
 use crate::{cli::SignerParams, git::Repo};
 
+fn set_json_output(signer_info: SignerInfo) -> Result<()> {
+    match signer_info {
+        SignerInfo::Bunker { .. } => {
+            anyhow::bail!("keys are stored in a remote signer and cannot be exported")
+        }
+        SignerInfo::Nsec { nsec, npub, .. } => {
+            let npub = if let Some(npub) = npub {
+                npub
+            } else {
+                nostr::prelude::Keys::from_str(&nsec)?
+                    .public_key()
+                    .to_bech32()?
+            };
+            crate::output::set_value(serde_json::json!({
+                "npub": npub,
+                "nsec": nsec,
+            }));
+            Ok(())
+        }
+        SignerInfo::Selection { .. } => {
+            anyhow::bail!("internal error: unresolved signer selection during key export")
+        }
+    }
+}
+
 pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
     let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = { git_repo_result.ok() };
@@ -35,6 +60,9 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
     .await
     .map_err(login::require_account)?;
     let logged_in_msg = logged_in_message(&user_ref.metadata.name, &source, alias.as_deref());
+    if crate::output::is_json() {
+        return set_json_output(signer_info);
+    }
     match signer_info {
         SignerInfo::Bunker {
             bunker_uri: _,

@@ -5,8 +5,8 @@ Part of the ngit skill. Read this when syncing refs, choosing flags, or tuning g
 ## Sync
 
 ```bash
-ngit sync                        # sync all refs from nostr state to git servers
-ngit sync --ref-name main        # sync specific ref
+ngit sync --json                 # sync all refs from nostr state to git servers
+ngit sync --ref-name main --json # sync specific ref
 ```
 
 ## Key flags

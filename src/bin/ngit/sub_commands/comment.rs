@@ -40,6 +40,24 @@ struct CommentArgs<'a> {
     signer: SignerParams<'a>,
 }
 
+fn set_comment_json(
+    comment_id: EventId,
+    root_id: EventId,
+    reply_to: Option<EventId>,
+    entity_name: &str,
+    repo_ref: &ngit::repo_ref::RepoRef,
+) {
+    let relay = repo_ref.relays.first();
+    crate::output::set_value(serde_json::json!({
+        "status": "ok",
+        "action": "commented",
+        "entity": entity_name.to_lowercase(),
+        "id": crate::output::event_id_to_nevent(comment_id, relay),
+        "root": crate::output::event_id_to_nevent(root_id, relay),
+        "reply_to": reply_to.map(|id| crate::output::event_id_to_nevent(id, relay)),
+    }));
+}
+
 /// Build and publish a NIP-22 kind-1111 comment on any event.
 ///
 /// NIP-22 threading tags (<https://nips.nostr.com/22>):
@@ -49,6 +67,7 @@ struct CommentArgs<'a> {
 ///   - lowercase `e` — parent event id + relay hint + parent pubkey
 ///   - lowercase `k` — parent event kind
 ///   - lowercase `p` — parent event author pubkey
+#[allow(clippy::too_many_lines)]
 async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
     let CommentArgs {
         root_event_id,
@@ -151,6 +170,7 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
         format!("comment on {entity_name}"),
     )
     .await?;
+    let comment_event_id = comment_event.id;
 
     let mut client = client;
     client.set_signer(event_signer).await;
@@ -165,6 +185,16 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
         false,
     )
     .await?;
+
+    if crate::output::is_json() {
+        set_comment_json(
+            comment_event_id,
+            root_event_id,
+            reply_to,
+            entity_name,
+            &repo_ref,
+        );
+    }
 
     println!(
         "comment posted on {entity_name} {}",

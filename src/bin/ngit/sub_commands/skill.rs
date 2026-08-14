@@ -22,7 +22,7 @@ struct Output {
     reminders_enabled: bool,
 }
 
-pub async fn launch(command: &SkillCommands, force: bool) -> Result<()> {
+pub async fn launch(command: &SkillCommands, force: bool, json: bool) -> Result<()> {
     if let SkillCommands::OptOut(args) = command {
         return opt_out(args);
     }
@@ -30,14 +30,14 @@ pub async fn launch(command: &SkillCommands, force: bool) -> Result<()> {
     let context = resolve_context()?;
     match command {
         SkillCommands::Install | SkillCommands::Upgrade => reconcile(&context, force).await,
-        SkillCommands::Status { json } => {
+        SkillCommands::Status => {
             let output = Output {
                 guidance: agent_guidance::status(&context.root)?,
                 is_maintainer: resolve_maintainer(&context).await,
                 reminders_enabled: agent_guidance::reminders_enabled(&context.repo)?,
             };
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
+            if json {
+                crate::output::set(output)?;
             } else {
                 print_status(&output);
             }

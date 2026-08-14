@@ -19,6 +19,8 @@ use ngit::{
 };
 
 mod git_remote_helper;
+#[macro_use]
+mod output;
 mod push_bookkeeping;
 mod state_transaction;
 mod sub_commands;
@@ -52,6 +54,7 @@ async fn main() {
     }
 
     let cli = Cli::parse();
+    output::set_json_mode(cli.json);
 
     // Non-interactive by default; set NGIT_INTERACTIVE_MODE only when -i is
     // specified
@@ -74,7 +77,12 @@ async fn main() {
     }
 
     if cli.customize {
-        print!("{}", customise_template());
+        if cli.json {
+            output::set_value(serde_json::json!({ "configuration": customise_template() }));
+            output::finish_success();
+        } else {
+            print!("{}", customise_template());
+        }
         std::process::exit(0); // Exit the program
     }
 
@@ -89,6 +97,9 @@ async fn main() {
     let signer_info = match extract_signer_cli_arguments(&cli) {
         Ok(signer_info) => signer_info,
         Err(err) => {
+            if cli.json {
+                output::finish_error(&err);
+            }
             eprintln!("Error: {err:?}");
             std::process::exit(1);
         }
@@ -119,7 +130,9 @@ async fn main() {
                 AccountCommands::Create(sub_args) => {
                     sub_commands::create::launch(&cli, sub_args).await
                 }
-                AccountCommands::Whoami(sub_args) => sub_commands::whoami::launch(sub_args).await,
+                AccountCommands::Whoami(sub_args) => {
+                    sub_commands::whoami::launch(sub_args, cli.json).await
+                }
             },
             Commands::Init(args) => sub_commands::init::launch(&cli, args, signer_params).await,
             Commands::Repo(args) => {
@@ -127,7 +140,7 @@ async fn main() {
                     &cli,
                     args.repo_command.as_ref(),
                     args.offline,
-                    args.json,
+                    cli.json,
                     signer_params,
                 )
                 .await
@@ -139,14 +152,13 @@ async fn main() {
                 PrCommands::List {
                     status,
                     labels,
-                    json,
                     id,
                     offline,
                 } => {
                     sub_commands::list::launch(
                         status.clone(),
                         labels.clone(),
-                        *json,
+                        cli.json,
                         false,
                         id.clone(),
                         *offline,
@@ -155,14 +167,13 @@ async fn main() {
                 }
                 PrCommands::View {
                     id,
-                    json,
                     comments,
                     offline,
                 } => {
                     sub_commands::list::launch(
                         "open,draft,closed,applied".to_string(),
                         vec![],
-                        *json,
+                        cli.json,
                         *comments,
                         Some(id.clone()),
                         *offline,
@@ -286,7 +297,6 @@ async fn main() {
                 IssueCommands::List {
                     status,
                     labels,
-                    json,
                     comments,
                     id,
                     offline,
@@ -294,7 +304,7 @@ async fn main() {
                     sub_commands::issue_list::launch(
                         status.clone(),
                         labels.clone(),
-                        *json,
+                        cli.json,
                         *comments,
                         id.clone(),
                         *offline,
@@ -303,14 +313,13 @@ async fn main() {
                 }
                 IssueCommands::View {
                     id,
-                    json,
                     comments,
                     offline,
                 } => {
                     sub_commands::issue_list::launch(
                         "open,draft,closed,applied".to_string(),
                         vec![],
-                        *json,
+                        cli.json,
                         *comments,
                         Some(id.clone()),
                         *offline,
@@ -417,7 +426,7 @@ async fn main() {
             },
             Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,
             Commands::Skill(args) => {
-                sub_commands::skill::launch(&args.skill_command, cli.force).await
+                sub_commands::skill::launch(&args.skill_command, cli.force, cli.json).await
             }
             Commands::Merge(args) => {
                 sub_commands::merge::launch(
@@ -435,12 +444,18 @@ async fn main() {
     };
 
     if let Err(err) = result {
+        if cli.json {
+            output::finish_error(&err);
+        }
         if err.downcast_ref::<CliError>().is_some() {
             // Already printed styled output to stderr
             std::process::exit(1);
         }
         eprintln!("Error: {err:?}");
         std::process::exit(1);
+    }
+    if cli.json {
+        output::finish_success();
     }
 }
 

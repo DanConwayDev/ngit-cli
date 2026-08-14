@@ -154,7 +154,11 @@ pub async fn launch(
         get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 
     if issues.is_empty() {
-        println!("no issues found");
+        if json {
+            crate::output::set(Vec::<serde_json::Value>::new())?;
+        } else {
+            println!("no issues found");
+        }
         return Ok(());
     }
 
@@ -227,7 +231,11 @@ pub async fn launch(
         .collect();
 
     if filtered.is_empty() {
-        println!("no issues found matching the given filters");
+        if json {
+            crate::output::set(Vec::<serde_json::Value>::new())?;
+        } else {
+            println!("no issues found matching the given filters");
+        }
         return Ok(());
     }
 
@@ -393,7 +401,7 @@ fn show_issue_details(
                 .collect();
             json_obj["comments"] = serde_json::Value::Array(comments_json);
         }
-        println!("{}", serde_json::to_string_pretty(&json_obj)?);
+        crate::output::set_value(json_obj);
         return Ok(());
     }
 
@@ -549,6 +557,5 @@ fn output_json(issues: &[IssueRow<'_>], relay_hint: Option<&RelayUrl>) -> Result
             },
         )
         .collect();
-    println!("{}", serde_json::to_string_pretty(&json_output)?);
-    Ok(())
+    crate::output::set(json_output)
 }

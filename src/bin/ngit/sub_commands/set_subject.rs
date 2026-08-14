@@ -93,6 +93,15 @@ async fn publish_set_subject_event(
     let (_, existing_subject) = get_labels_and_subject(&target, &repo_ref, &existing_label_events);
 
     if existing_subject.as_deref() == Some(subject) {
+        if crate::output::is_json() {
+            crate::output::set_value(serde_json::json!({
+                "status": "ok",
+                "action": "unchanged",
+                "entity": target_kind.to_lowercase(),
+                "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+                "subject": subject,
+            }));
+        }
         println!(
             "{target_kind} {} already has subject: {}",
             &event_id.to_hex()[..8],
@@ -148,6 +157,7 @@ async fn publish_set_subject_event(
         format!("set {target_kind} subject"),
     )
     .await?;
+    let subject_event_id = subject_event.id;
 
     // Save to local cache immediately so subsequent reads reflect the new subject.
     save_event_in_local_cache(git_repo_path, &subject_event).await?;
@@ -184,6 +194,20 @@ async fn publish_set_subject_event(
 
     if let Some(acceptance) = &maintainer_acceptance {
         finalize_maintainership_acceptance(&git_repo, acceptance).await?;
+    }
+
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": "subject-set",
+            "entity": target_kind.to_lowercase(),
+            "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+            "event": crate::output::event_id_to_nevent(
+                subject_event_id,
+                repo_ref.relays.first(),
+            ),
+            "subject": subject,
+        }));
     }
 
     println!(

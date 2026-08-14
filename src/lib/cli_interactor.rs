@@ -456,7 +456,7 @@ where
                     }
                     Err(err) => {
                         // Inform the user about the validation error
-                        println!("Error: {err}");
+                        eprintln!("Error: {err}");
                     }
                 }
             }

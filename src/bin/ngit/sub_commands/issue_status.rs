@@ -98,6 +98,15 @@ async fn launch_status(
             Kind::GitStatusApplied => "resolved",
             _ => "unknown",
         };
+        if crate::output::is_json() {
+            crate::output::set_value(serde_json::json!({
+                "status": "ok",
+                "action": "unchanged",
+                "entity": "issue",
+                "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+                "issue_status": status_str,
+            }));
+        }
         println!("issue is already {status_str}");
         return Ok(());
     }
@@ -164,6 +173,7 @@ async fn launch_status(
         format!("issue {action}"),
     )
     .await?;
+    let status_event_id = status_event.id;
 
     let mut client = client;
     client.set_signer(signer).await;
@@ -197,6 +207,19 @@ async fn launch_status(
 
     if let Some(acceptance) = &maintainer_acceptance {
         finalize_maintainership_acceptance(&git_repo, acceptance).await?;
+    }
+
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": action,
+            "entity": "issue",
+            "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+            "event": crate::output::event_id_to_nevent(
+                status_event_id,
+                repo_ref.relays.first(),
+            ),
+        }));
     }
 
     println!("issue {} {action}", &event_id.to_hex()[..8]);

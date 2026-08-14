@@ -5,7 +5,7 @@ pub fn decrypt_key(encrypted_key: &str, password: &str) -> Result<nostr::prelude
     let encrypted_key = nostr::nips::nip49::EncryptedSecretKey::from_bech32(encrypted_key)?;
     // to request that log_n gets exposed
     if encrypted_key.log_n() > 14 {
-        println!("this may take a few seconds...");
+        eprintln!("this may take a few seconds...");
     }
     Ok(nostr::prelude::Keys::new(encrypted_key.decrypt(password)?))
 }
@@ -38,7 +38,7 @@ mod tests {
             // we have enough of entropy - no need to spend CPU time adding much more
             1
         } else {
-            println!("this may take a few seconds...");
+            eprintln!("this may take a few seconds...");
             // default (scrypt::Params::RECOMMENDED_LOG_N) is 17 but 30s is too long to wait
             15
         };

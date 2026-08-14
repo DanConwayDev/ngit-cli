@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use console::Term;
 use git2::Oid;
 use ngit::{
     client::{
@@ -1121,7 +1120,7 @@ pub(crate) fn fetch_missing_refs(
                 oids,
                 url,
                 nostr_url_decoded,
-                &Term::stdout(),
+                &crate::output::term(),
                 is_grasp_server_clone_url(url),
             );
         } else {

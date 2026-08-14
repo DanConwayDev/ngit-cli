@@ -82,6 +82,7 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
             display_name,
             "--relay",
             &relay_url,
+            "--json",
         ])
         .output()
         .await
@@ -94,6 +95,13 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    let json: Value = serde_json::from_slice(&output.stdout)
+        .context("account create stdout is not valid JSON")?;
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["entity"], "account");
+    assert_eq!(json["name"], display_name);
+    assert_eq!(json["scope"], "local");
+    assert_eq!(json["published"], true);
 
     // --- assertion 2: credentials saved to local git config ---------------
 
@@ -111,6 +119,11 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
         npub,
         keys.public_key().to_bech32()?,
         "stored npub does not match nsec"
+    );
+    assert_eq!(json["npub"], npub);
+    assert!(
+        json.get("nsec").is_none(),
+        "account create output must not expose the secret key"
     );
 
     // --- assertion 3: kind 0 metadata reached the specified relay ----------

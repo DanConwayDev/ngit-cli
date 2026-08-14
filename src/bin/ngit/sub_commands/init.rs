@@ -1398,9 +1398,13 @@ async fn publish_and_finalize(
             // listing. It is a transaction candidate: pushed to the
             // repo's git servers, fanned out to the relays and cached
             // only after acceptance (see publish_origin_state).
-            if let Ok(mut origin_state) =
-                list_from_remote(&Term::stdout(), git_repo, url, &nostr_url_decoded, false)
-            {
+            if let Ok(mut origin_state) = list_from_remote(
+                &crate::output::term(),
+                git_repo,
+                url,
+                &nostr_url_decoded,
+                false,
+            ) {
                 origin_state.retain(|key, _| {
                     key.starts_with("refs/heads/")
                         || key.starts_with("refs/tags/")
@@ -1556,6 +1560,15 @@ async fn publish_and_finalize(
     let gitworkshop_url = nostr_url_decoded
         .to_string()
         .replace("nostr://", "https://gitworkshop.dev/");
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": if is_co_maintainer_first_acceptance { "accepted" } else { "published" },
+            "entity": "repository",
+            "nostr_url": nostr_url,
+            "url": gitworkshop_url,
+        }));
+    }
     if is_co_maintainer_first_acceptance {
         println!("co-maintainership accepted.");
         println!("your announcement was published to nostr. you can now push updates.");

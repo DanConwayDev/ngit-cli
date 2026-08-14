@@ -126,6 +126,15 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
         .await?;
     }
 
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": "accepted",
+            "entity": "repository",
+            "name": repo_name,
+            "coordinate": repo_coordinate.to_bech32()?,
+        }));
+    }
     print_completion_message(&git_repo, repo_coordinate);
 
     Ok(())

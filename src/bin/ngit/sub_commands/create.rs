@@ -60,7 +60,7 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let publish = !args.offline;
 
-    let (_signer, public_key, signer_info, keys) = signup_non_interactive(
+    let (_signer, public_key, signer_info, _keys) = signup_non_interactive(
         args.name.clone(),
         client.as_ref(),
         args.local,
@@ -70,23 +70,33 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
     .await
     .context("failed to create account")?;
 
-    // Display the generated nsec prominently
-    println!("\n✓ Account created successfully!");
-    println!("\nDisplay name: {}", args.name);
-    println!("Public key (npub): {}", public_key.to_bech32()?);
-    println!("\n⚠️  IMPORTANT: Save your secret key (nsec) securely!");
-    println!("nsec: {}", keys.secret_key().to_bech32()?);
-    println!("\nYou will need this key to log in from other devices.");
-    println!("Run 'ngit account export-keys' to see this again.\n");
+    let npub = public_key.to_bech32()?;
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": "created",
+            "entity": "account",
+            "name": args.name,
+            "npub": npub,
+            "scope": if args.local { "local" } else { "global" },
+            "published": publish,
+        }));
+    } else {
+        println!("\n✓ Account created successfully!");
+        println!("\nDisplay name: {}", args.name);
+        println!("Public key (npub): {npub}");
+        println!("\nYour secret key (nsec) has been stored securely.");
+        println!("Run 'ngit account export-keys' to view it.\n");
 
-    if publish {
-        println!("✓ Published metadata to relays");
+        if publish {
+            println!("✓ Published metadata to relays");
+        }
+
+        println!(
+            "✓ {}",
+            configured_signer_scope_message(!args.local, &signer_info)
+        );
     }
-
-    println!(
-        "✓ {}",
-        configured_signer_scope_message(!args.local, &signer_info)
-    );
 
     // Disconnect client if it was created
     if let Some(client) = client {

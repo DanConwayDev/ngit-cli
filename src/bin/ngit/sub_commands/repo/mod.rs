@@ -141,29 +141,26 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
 
     let Some(resolved_repo) = try_resolve_repo_coordinate(&git_repo).await? else {
         if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&RepoInfoJson {
-                    is_nostr_repo: false,
-                    name: None,
-                    identifier: None,
-                    description: None,
-                    nostr_url: None,
-                    coordinate: None,
-                    web: None,
-                    upstream: None,
-                    maintainers: None,
-                    selected_maintainer: None,
-                    confirmed_maintainers: None,
-                    invited_maintainers: None,
-                    lead_maintainer: None,
-                    maintainer_edges: None,
-                    grasp_servers: None,
-                    git_servers: None,
-                    relays: None,
-                    hashtags: None,
-                })?
-            );
+            crate::output::set(RepoInfoJson {
+                is_nostr_repo: false,
+                name: None,
+                identifier: None,
+                description: None,
+                nostr_url: None,
+                coordinate: None,
+                web: None,
+                upstream: None,
+                maintainers: None,
+                selected_maintainer: None,
+                confirmed_maintainers: None,
+                invited_maintainers: None,
+                lead_maintainer: None,
+                maintainer_edges: None,
+                grasp_servers: None,
+                git_servers: None,
+                relays: None,
+                hashtags: None,
+            })?;
         } else {
             println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
             println!();
@@ -190,34 +187,31 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
         if json {
             // Coordinate found but no announcement yet — still a nostr repo
             let nostr_url = selected_remote.map(|remote| remote.decoded_url.original_string);
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&RepoInfoJson {
-                    is_nostr_repo: true,
-                    name: None,
-                    identifier: Some(repo_coordinate.identifier.clone()),
-                    description: None,
-                    nostr_url,
-                    coordinate: repo_coordinate.to_bech32().ok(),
-                    web: None,
-                    upstream: None,
-                    maintainers: None,
-                    selected_maintainer: Some(
-                        repo_coordinate
-                            .public_key
-                            .to_bech32()
-                            .unwrap_or_else(|_| repo_coordinate.public_key.to_hex()),
-                    ),
-                    confirmed_maintainers: None,
-                    invited_maintainers: None,
-                    lead_maintainer: None,
-                    maintainer_edges: None,
-                    grasp_servers: None,
-                    git_servers: None,
-                    relays: None,
-                    hashtags: None,
-                })?
-            );
+            crate::output::set(RepoInfoJson {
+                is_nostr_repo: true,
+                name: None,
+                identifier: Some(repo_coordinate.identifier.clone()),
+                description: None,
+                nostr_url,
+                coordinate: repo_coordinate.to_bech32().ok(),
+                web: None,
+                upstream: None,
+                maintainers: None,
+                selected_maintainer: Some(
+                    repo_coordinate
+                        .public_key
+                        .to_bech32()
+                        .unwrap_or_else(|_| repo_coordinate.public_key.to_hex()),
+                ),
+                confirmed_maintainers: None,
+                invited_maintainers: None,
+                lead_maintainer: None,
+                maintainer_edges: None,
+                grasp_servers: None,
+                git_servers: None,
+                relays: None,
+                hashtags: None,
+            })?;
         } else {
             println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
             println!();
@@ -357,8 +351,7 @@ fn print_repo_info_json(
         },
     };
 
-    println!("{}", serde_json::to_string_pretty(&info)?);
-    Ok(())
+    crate::output::set(info)
 }
 
 #[allow(clippy::too_many_lines)]
