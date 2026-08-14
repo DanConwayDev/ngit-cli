@@ -35,12 +35,14 @@ async fn status_works_without_a_nostr_remote_or_login() -> Result<()> {
 async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()> {
     let harness = harness().await?;
     let repo = harness.fresh_repo()?;
-    let setup = repo.ngit(["skill", "install"]).output().await?;
+    let setup = repo.ngit(["skill", "install", "--json"]).output().await?;
     assert!(
         setup.status.success(),
         "skill install failed: {}",
         String::from_utf8_lossy(&setup.stderr)
     );
+    let setup_json: serde_json::Value = serde_json::from_slice(&setup.stdout)?;
+    assert_eq!(setup_json["status"], "ok");
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
     assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
     assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());

@@ -1011,7 +1011,7 @@ pub fn print_selected_repo(resolved: &ResolvedRepoCoordinate) {
         .coordinate
         .to_bech32()
         .unwrap_or_else(|_| "<invalid naddr>".to_string());
-    println!(
+    eprintln!(
         "{}",
         dim.apply_to(format!(
             "target repository: {} (source: {})",
@@ -1103,7 +1103,7 @@ async fn get_repo_coordinate_from_user_prompt(
     // TODO: present list of events filter by root_commit
     // TODO: fallback to search based on identifier
     let dim = Style::new().color256(247);
-    println!(
+    eprintln!(
         "{}",
         dim.apply_to(
             "hint: https://gitworkshop.dev/search lists repositories and their nostr address"

@@ -14,13 +14,13 @@ ngit account login --secret-storage file      # bypass the OS store; use ngit's 
 ngit account login --secret-storage git-config # explicitly allow plaintext git-config storage
 ngit account login --nsec-file /private/key --alias alice # store a reusable alias
 ngit account login --local --alias alice       # activate a retained alias for this repository
-ngit account create --name "Alice"
-ngit account export-keys
-ngit account logout                           # removes login config, but preserves stored keys
-ngit account logout --forget                  # logout and delete the stored secret
-ngit account forget-keys <entry>              # delete a preserved credential-store entry
+ngit account create --name "Alice" --json
+ngit account export-keys --json
+ngit account logout --json                    # removes login config, but preserves stored keys
+ngit account logout --forget --json           # logout and delete the stored secret
+ngit account forget-keys <entry> --json       # delete a preserved credential-store entry
 ngit --signer alice account whoami --json --offline # inspect a stored identity without switching
-ngit --signer alice issue create --subject "Bug" --body "Details" # sign one ngit command as alice
+ngit --signer alice issue create --subject "Bug" --body "Details" --json # sign one ngit command as alice
 git -c nostr.signer=alice push origin pr/topic # run one Git command as alice
 ngit --nsec <nsec> <command>                  # inline for CI, no login needed
 ngit --nsec-file /private/key <command>       # one-shot CI/agent key, omitted from argv

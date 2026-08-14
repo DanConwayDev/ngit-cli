@@ -1,4 +1,4 @@
-//! Regression coverage for stdout pollution in `ngit issue list --json`.
+//! Regression coverage for stdout pollution in issue JSON commands.
 //!
 //! The online fetch run by `fetching_with_report`
 //! (`src/lib/client.rs`) used to print its `no updates` / `updates: X`
@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use test_harness::{Harness, PublishRepoOpts};
 
 #[tokio::test]
-async fn issue_list_json_stdout_is_valid_json_when_no_updates() -> Result<()> {
+async fn issue_json_stdout_is_valid_when_relay_updates_are_reported() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -43,6 +43,7 @@ async fn issue_list_json_stdout_is_valid_json_when_no_updates() -> Result<()> {
             "a test issue",
             "--body",
             "body",
+            "--json",
         ])
         .output()
         .await
@@ -53,6 +54,25 @@ async fn issue_list_json_stdout_is_valid_json_when_no_updates() -> Result<()> {
         create.status,
         String::from_utf8_lossy(&create.stdout),
         String::from_utf8_lossy(&create.stderr),
+    );
+    let create_stderr = String::from_utf8_lossy(&create.stderr);
+    assert!(
+        create_stderr.contains("updates:") || create_stderr.contains("no updates"),
+        "test did not exercise relay update reporting:\n{create_stderr}"
+    );
+
+    let create_stdout = String::from_utf8_lossy(&create.stdout).to_string();
+    let create_json: serde_json::Value = serde_json::from_str(&create_stdout)
+        .with_context(|| format!("issue create stdout is not valid JSON:\n{create_stdout}"))?;
+    assert_eq!(create_json["status"], "ok");
+    assert_eq!(create_json["action"], "created");
+    assert_eq!(create_json["entity"], "issue");
+    assert_eq!(create_json["subject"], "a test issue");
+    assert!(
+        create_json["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("nevent1")),
+        "issue create did not return a nevent id: {create_stdout}"
     );
 
     let out = publisher

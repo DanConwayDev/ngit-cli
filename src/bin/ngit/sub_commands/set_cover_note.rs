@@ -99,6 +99,15 @@ async fn publish_set_cover_note_event(
         process_cover_note(&target, &repo_ref, &existing_cover_note_events)
     {
         if existing_cn.content.trim() == body {
+            if crate::output::is_json() {
+                crate::output::set_value(serde_json::json!({
+                    "status": "ok",
+                    "action": "unchanged",
+                    "entity": target_kind.to_lowercase(),
+                    "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+                    "body": body,
+                }));
+            }
             println!(
                 "{target_kind} {} already has this cover note",
                 &event_id.to_hex()[..8],
@@ -164,6 +173,7 @@ async fn publish_set_cover_note_event(
         format!("set {target_kind} cover note"),
     )
     .await?;
+    let cover_note_event_id = cover_note_event.id;
 
     // Save to local cache immediately so subsequent reads reflect the new cover
     // note.
@@ -201,6 +211,20 @@ async fn publish_set_cover_note_event(
 
     if let Some(acceptance) = &maintainer_acceptance {
         finalize_maintainership_acceptance(&git_repo, acceptance).await?;
+    }
+
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": "cover-note-set",
+            "entity": target_kind.to_lowercase(),
+            "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+            "event": crate::output::event_id_to_nevent(
+                cover_note_event_id,
+                repo_ref.relays.first(),
+            ),
+            "body": body,
+        }));
     }
 
     println!("{} {} cover note set", target_kind, &event_id.to_hex()[..8]);

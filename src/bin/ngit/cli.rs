@@ -94,6 +94,9 @@ pub struct Cli {
     ///   `ngit issue create --repo upstream`
     #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
     pub repo: Option<String>,
+    /// Output one machine-readable JSON document on stdout
+    #[arg(long, global = true, conflicts_with = "interactive")]
+    pub json: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -367,11 +370,7 @@ pub enum SkillCommands {
     /// Upgrade the repository skill to the version bundled with ngit
     Upgrade,
     /// Show installed and bundled skill versions without changing files
-    Status {
-        /// Output status as JSON
-        #[arg(long)]
-        json: bool,
-    },
+    Status,
     /// Disable repository skill reminders
     OptOut(SkillOptOutArgs),
 }
@@ -420,10 +419,6 @@ pub struct RepoSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output repository info as JSON; `is_nostr_repo` is false when not in a
-    /// nostr repository
-    #[arg(long)]
-    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -466,9 +461,6 @@ pub enum PrCommands {
         /// help-wanted)
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
         /// Show details for specific proposal (event-id or nevent)
         #[arg(value_name = "ID|nevent")]
         id: Option<String>,
@@ -481,9 +473,6 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
         /// Include full comment thread (default: show count only)
         #[arg(long)]
         comments: bool,
@@ -670,9 +659,6 @@ pub enum IssueCommands {
         /// help-wanted)
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
         /// Include full comment thread when viewing a specific issue (requires
         /// ID)
         #[arg(long)]
@@ -689,9 +675,6 @@ pub enum IssueCommands {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
         /// Include full comment thread (default: show count only)
         #[arg(long)]
         comments: bool,
@@ -831,10 +814,49 @@ pub enum RepoCommands {
 mod tests {
     use std::{fs, path::Path};
 
-    use clap::Parser;
+    use clap::{Command, CommandFactory, Parser};
     use tempfile::tempdir;
 
     use super::{Cli, extract_signer_cli_arguments, read_nsec_file};
+
+    fn assert_json_on_every_leaf(command: &Command, path: &str) {
+        if command.has_subcommands() {
+            for subcommand in command.get_subcommands() {
+                if subcommand.get_name() == "help" {
+                    continue;
+                }
+                assert_json_on_every_leaf(subcommand, &format!("{path} {}", subcommand.get_name()));
+            }
+            return;
+        }
+
+        assert!(
+            command
+                .get_arguments()
+                .any(|argument| argument.get_id() == "json"),
+            "{path} does not inherit --json"
+        );
+    }
+
+    #[test]
+    fn json_is_global_and_available_on_every_command() {
+        let mut command = Cli::command();
+        command.build();
+        assert_json_on_every_leaf(&command, "ngit");
+
+        for args in [
+            ["ngit", "--json", "issue", "create"].as_slice(),
+            ["ngit", "issue", "--json", "create"].as_slice(),
+            ["ngit", "issue", "create", "--json"].as_slice(),
+            ["ngit", "skill", "status", "--json"].as_slice(),
+            ["ngit", "account", "logout", "--forget", "--json"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).unwrap().json,
+                "failed for {args:?}"
+            );
+        }
+    }
 
     fn key_file(path: &Path, value: &[u8]) {
         fs::write(path, value).unwrap();

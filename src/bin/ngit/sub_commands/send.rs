@@ -586,7 +586,7 @@ pub async fn launch(
                 root_proposal.as_ref(),
                 &cover_letter_title_description,
                 &signer,
-                &console::Term::stdout(),
+                &crate::output::term(),
                 &push_options_refs,
                 args.git_server.as_deref(),
             )
@@ -650,6 +650,17 @@ pub async fn launch(
         false,
     )
     .await?;
+
+    if crate::output::is_json() {
+        let result_event = events.first().context("proposal generated no events")?;
+        let entity = if as_pr { "pr" } else { "patch" };
+        let action = if root_proposal.is_some() {
+            "updated"
+        } else {
+            "created"
+        };
+        crate::output::set_event(action, entity, result_event.id, repo_ref.relays.first());
+    }
 
     if root_proposal.is_none() {
         if let Some(event) = events.first() {

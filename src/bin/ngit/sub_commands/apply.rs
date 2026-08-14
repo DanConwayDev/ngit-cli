@@ -140,8 +140,15 @@ fn apply_pr(
     }
 
     if stdout {
-        for patch in &patch_texts {
-            print!("{patch}\n\n");
+        if crate::output::is_json() {
+            crate::output::set_value(serde_json::json!({
+                "status": "ok",
+                "patches": patch_texts,
+            }));
+        } else {
+            for patch in &patch_texts {
+                print!("{patch}\n\n");
+            }
         }
     } else {
         apply_patch_texts(patch_texts)?;
@@ -156,7 +163,11 @@ fn apply_patch_texts(patch_texts: Vec<String>) -> Result<()> {
     let mut am = std::process::Command::new("git")
         .arg("am")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::inherit())
+        .stdout(if crate::output::is_json() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        })
         .stderr(std::process::Stdio::inherit())
         .spawn()
         .context("failed to spawn git am")?;
@@ -172,15 +183,30 @@ fn apply_patch_texts(patch_texts: Vec<String>) -> Result<()> {
             .context("failed to write patch content into git am stdin buffer")?;
     }
     stdin.flush()?;
-    am.wait_with_output()
-        .context("failed to read git am stdout")?;
+    let output = am
+        .wait_with_output()
+        .context("failed to read git am output")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+    if !output.status.success() {
+        bail!("git am failed");
+    }
     Ok(())
 }
 
 fn output_patches_to_stdout(mut patches: Vec<nostr::prelude::Event>) {
     patches.reverse();
-    for patch in patches {
-        print!("{}\n\n", patch.content);
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "patches": patches.into_iter().map(|patch| patch.content).collect::<Vec<_>>(),
+        }));
+    } else {
+        for patch in patches {
+            print!("{}\n\n", patch.content);
+        }
     }
 }
 

@@ -65,23 +65,25 @@ text, or a quoted command substitution for a file:
 # correct — $'...' quoting gives real newlines
 ngit send HEAD~2 \
   --subject "My Feature" \
-  --description $'First paragraph.\n\nSecond paragraph.'
+  --description $'First paragraph.\n\nSecond paragraph.' \
+  --json
 
 # Existing Markdown file (POSIX shells such as bash and zsh): quote the
 # substitution so the complete file is passed as one argument with real newlines.
 ngit send HEAD~2 \
   --subject "My Feature" \
-  --description "$(cat .git/pr-description.md)"
+  --description "$(cat .git/pr-description.md)" \
+  --json
 
 # WRONG — \n inside double quotes is not interpreted; event contains literal \n\n
 ngit send HEAD~2 --subject "My Feature" --description "First paragraph.\n\nSecond paragraph."
 
-ngit send --defaults                                    # non-interactive
-ngit send HEAD~2 --in-reply-to <PR-event-id>           # update existing PR
-ngit send --defaults --target-branch release/2.x        # target a non-default branch
-ngit send --defaults --base <commit|branch|nevent>      # override this publication's inference
+ngit send --defaults --json                             # non-interactive
+ngit send HEAD~2 --in-reply-to <PR-event-id> --json    # update existing PR
+ngit send --defaults --target-branch release/2.x --json # target a non-default branch
+ngit send --defaults --base <commit|branch|nevent> --json # override this publication's inference
 ngit send --defaults --in-reply-to <PR-event-id> \
-  --base <commit|branch|nevent>                          # override an inferred parent
+  --base <commit|branch|nevent> --json                   # override an inferred parent
 ```
 
 Both `git push` and `ngit send` automatically use the unique most-advanced tip
@@ -103,23 +105,23 @@ ngit pr list --json --status open,draft,closed,applied
 ngit pr list --json --label bug
 ngit pr view <ID|nevent> --json
 ngit pr view <ID|nevent> --json --comments
-ngit pr comment <ID|nevent> --body "Looks good"
-ngit pr comment <ID|nevent> --body "Fixed!" --reply-to <comment-ID|nevent>
+ngit pr comment <ID|nevent> --body "Looks good" --json
+ngit pr comment <ID|nevent> --body "Fixed!" --reply-to <comment-ID|nevent> --json
 ```
 
 ## Checkout / apply
 
 ```bash
-ngit pr checkout <ID|nevent>
+ngit pr checkout <ID|nevent> --json
 ```
 
 ## Merge (maintainer)
 
 ```bash
-ngit merge <ID|nevent>                    # merge into the PR's declared target; does not push
-ngit pr checkout <ID|nevent>
-ngit merge                                # infers PR from checked-out pr/ branch
-ngit merge --exclude-description <ID|nevent>
+ngit merge <ID|nevent> --json                    # merge into the PR's declared target; does not push
+ngit pr checkout <ID|nevent> --json
+ngit merge --json                                # infers PR from checked-out pr/ branch
+ngit merge --exclude-description <ID|nevent> --json
 git push origin <target-branch>           # publishes the merge and applied status
 ```
 
@@ -139,11 +141,11 @@ target branch before updating the PR.
 ## Lifecycle
 
 ```bash
-ngit pr close <ID|nevent> --reason "blocked by upstream"
-ngit pr reopen <ID|nevent> --reason "fix was incomplete"
-ngit pr ready <ID|nevent> --reason "addressed review feedback"
-ngit pr draft <ID|nevent> --reason "needs more work"
-ngit pr label <ID|nevent> --label bug --label enhancement
-ngit pr set-subject <ID|nevent> --subject "New title"
-ngit pr set-cover-note <ID|nevent> --body "Updated description. See nostr:nevent1abc…"
+ngit pr close <ID|nevent> --reason "blocked by upstream" --json
+ngit pr reopen <ID|nevent> --reason "fix was incomplete" --json
+ngit pr ready <ID|nevent> --reason "addressed review feedback" --json
+ngit pr draft <ID|nevent> --reason "needs more work" --json
+ngit pr label <ID|nevent> --label bug --label enhancement --json
+ngit pr set-subject <ID|nevent> --subject "New title" --json
+ngit pr set-cover-note <ID|nevent> --body "Updated description. See nostr:nevent1abc…" --json
 ```

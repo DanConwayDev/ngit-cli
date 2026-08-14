@@ -94,6 +94,15 @@ async fn publish_label_event(
 
     if new_labels.is_empty() {
         let already: Vec<String> = labels.iter().map(|l| format!("#{}", l.trim())).collect();
+        if crate::output::is_json() {
+            crate::output::set_value(serde_json::json!({
+                "status": "ok",
+                "action": "unchanged",
+                "entity": target_kind.to_lowercase(),
+                "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+                "labels": existing_labels,
+            }));
+        }
         println!(
             "{target_kind} already has label{}: {}",
             if already.len() == 1 { "" } else { "s" },
@@ -149,6 +158,7 @@ async fn publish_label_event(
         format!("label {target_kind}"),
     )
     .await?;
+    let label_event_id = label_event.id;
 
     // Save to local cache immediately so subsequent reads reflect the new labels.
     save_event_in_local_cache(git_repo_path, &label_event).await?;
@@ -166,6 +176,20 @@ async fn publish_label_event(
         false,
     )
     .await?;
+
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "status": "ok",
+            "action": "labelled",
+            "entity": target_kind.to_lowercase(),
+            "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+            "event": crate::output::event_id_to_nevent(
+                label_event_id,
+                repo_ref.relays.first(),
+            ),
+            "labels": new_labels,
+        }));
+    }
 
     println!(
         "{} {} labelled with {}",

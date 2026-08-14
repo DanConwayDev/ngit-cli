@@ -68,7 +68,11 @@ pub async fn launch(
     let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
     if proposals_and_revisions.is_empty() {
-        println!("no proposals found... create one? try `ngit send`");
+        if json {
+            crate::output::set(Vec::<serde_json::Value>::new())?;
+        } else {
+            println!("no proposals found... create one? try `ngit send`");
+        }
         return Ok(());
     }
 
@@ -407,8 +411,7 @@ fn output_json(
         )
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&json_output)?);
-    Ok(())
+    crate::output::set(json_output)
 }
 
 /// Extract the parent comment ID from a NIP-22 comment event.
@@ -513,7 +516,7 @@ fn show_proposal_details(
                 .collect();
             json_obj["comments"] = serde_json::Value::Array(comments_json);
         }
-        println!("{}", serde_json::to_string_pretty(&json_obj)?);
+        crate::output::set_value(json_obj);
         return Ok(());
     }
 

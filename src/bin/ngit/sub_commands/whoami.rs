@@ -19,10 +19,6 @@ pub struct SubCommandArgs {
     /// use local cache only, skip network fetch
     #[arg(long, action)]
     pub offline: bool,
-
-    /// output as JSON
-    #[arg(long, action)]
-    pub json: bool,
 }
 
 #[derive(Serialize)]
@@ -48,7 +44,7 @@ struct WhoamiJson {
     active: Option<UserJson>,
 }
 
-pub async fn launch(command_args: &SubCommandArgs) -> Result<()> {
+pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     let git_repo = Repo::discover()
         .context("failed to find a git repository")
         .ok();
@@ -98,7 +94,7 @@ pub async fn launch(command_args: &SubCommandArgs) -> Result<()> {
         None
     };
 
-    if command_args.json {
+    if json {
         let active = active_scope.and_then(|scope| match scope {
             "local" => local.as_ref().map(|u| make_user_json(u, scope)),
             "global" => global.as_ref().map(|u| make_user_json(u, scope)),
@@ -112,7 +108,7 @@ pub async fn launch(command_args: &SubCommandArgs) -> Result<()> {
             system: system.as_ref().map(|u| make_user_json(u, "system")),
             active,
         };
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        crate::output::set(output)?;
     } else if local.is_none() && global.is_none() && system.is_none() {
         println!("not logged in");
         println!();

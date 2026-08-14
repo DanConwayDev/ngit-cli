@@ -3,7 +3,7 @@ name: ngit
 description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.5"
+  version: "1.6"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -29,7 +29,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 ## Key rules
 
 - **`pr/` prefix is MANDATORY for PRs** — branch names for pull requests MUST start with `pr/` (e.g. `pr/my-feature`). A branch without this prefix is a plain git push and will never create a PR.
-- **Always use `--json`** on `ngit` commands when reading output — far easier to parse than human-readable text. `git` commands do not support `--json`.
+- **Always use `--json`** on `ngit` subcommands when reading output. It is a global option, so it works at any command position (for example, `ngit --json issue create` and `ngit issue create --json`). Stdout contains exactly one JSON document after the command finishes; relay updates and other human diagnostics stay on stderr. `git` commands do not support `--json`.
 - **Use `--offline`** on all but the first `ngit` command in a session — reads from local cache instantly. `git fetch origin` also refreshes the cache.
 - **Never construct NIP-05 addresses** (`user@domain`). Use the `npub1...` form unless a NIP-05 address was explicitly provided.
 - **`<ID|nevent>`** accepts a `nevent1...` bech32 string, a 64-char hex event ID, or a unique hex prefix with an optional leading `#` (e.g. `#deadbeef`). Ambiguous prefixes fail and list the matches. Get IDs from `ngit pr list --json` or `ngit issue list --json`.
@@ -52,7 +52,7 @@ ngit repo --json --offline            # full metadata when needed
 When a git repository has multiple `nostr://` remotes for different repositories, use global `--repo <REMOTE|NADDR|NOSTR-URL>` to select the target explicitly. Prefer the configured remote name:
 
 ```bash
-ngit --repo upstream issue create --subject "Bug" --body "Details"
+ngit --repo upstream issue create --subject "Bug" --body "Details" --json
 ngit pr --repo upstream list --json
 ```
 

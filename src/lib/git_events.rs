@@ -502,7 +502,7 @@ pub fn event_tag_from_nip19_or_hex(
             }));
         }
         if prompt_for_correction {
-            println!("not a valid {reference_name} event reference");
+            eprintln!("not a valid {reference_name} event reference");
         } else {
             bail!(format!("not a valid {reference_name} event reference"));
         }
