@@ -15,11 +15,15 @@ use super::support::{
     CommandOutput, LoginMode, ReleaseContext, WarningJson, application_json, coded_error,
     coded_error_with_details, coordinate_key, load_applications, resolve_application,
 };
-use crate::cli::{Cli, ReleaseAppInitArgs, ReleaseAppLinkArgs};
+use crate::cli::{ReleaseAppInitArgs, ReleaseAppLinkArgs, SignerParams};
 
 #[allow(clippy::too_many_lines)]
-pub(super) async fn app_init(cli: &Cli, args: &ReleaseAppInitArgs) -> Result<CommandOutput> {
-    let mut context = ReleaseContext::load(cli, false, &args.relays, LoginMode::Required).await?;
+pub(super) async fn app_init(
+    args: &ReleaseAppInitArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
+    let mut context =
+        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
     let signer_public_key = require_current_maintainer(&context)?;
     let identifier = args
         .id
@@ -134,8 +138,12 @@ pub(super) async fn app_init(cli: &Cli, args: &ReleaseAppInitArgs) -> Result<Com
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) async fn app_link(cli: &Cli, args: &ReleaseAppLinkArgs) -> Result<CommandOutput> {
-    let mut context = ReleaseContext::load(cli, false, &args.relays, LoginMode::Required).await?;
+pub(super) async fn app_link(
+    args: &ReleaseAppLinkArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
+    let mut context =
+        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
     let signer_public_key = require_current_maintainer(&context)?;
 
     let authors = selector_author(&args.app).map_or_else(

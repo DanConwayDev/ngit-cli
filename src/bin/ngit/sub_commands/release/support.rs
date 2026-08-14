@@ -28,10 +28,7 @@ use nostr::prelude::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{
-    cli::{Cli, extract_signer_cli_arguments},
-    sub_commands::id_resolver::parse_event_id,
-};
+use crate::{cli::SignerParams, sub_commands::id_resolver::parse_event_id};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LoginMode {
@@ -246,10 +243,10 @@ pub(super) struct ReleaseContext {
 
 impl ReleaseContext {
     pub(super) async fn load(
-        cli: &Cli,
         offline: bool,
         explicit_relays: &[String],
         login_mode: LoginMode,
+        auth: SignerParams<'_>,
     ) -> Result<Self> {
         let git_repo = Repo::discover().context("failed to find a git repository")?;
         let git_repo_path = git_repo.get_path()?;
@@ -260,25 +257,26 @@ impl ReleaseContext {
         }
         let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &selected.coordinate).await?;
 
-        let signer_info = extract_signer_cli_arguments(cli)?;
         let login = match login_mode {
-            LoginMode::Optional => load_existing_login(
-                &Some(&git_repo),
-                &signer_info,
-                &cli.password,
-                &None,
-                Some(&client),
-                true,
-                false,
-                false,
-            )
-            .await
-            .ok(),
+            LoginMode::Optional => optional_login(
+                load_existing_login(
+                    &Some(&git_repo),
+                    auth.info,
+                    auth.password,
+                    &None,
+                    Some(&client),
+                    true,
+                    false,
+                    false,
+                )
+                .await,
+                auth.info.is_some(),
+            )?,
             LoginMode::Required => Some(
                 login::login_or_signup(
                     &Some(&git_repo),
-                    &signer_info,
-                    &cli.password,
+                    auth.info,
+                    auth.password,
                     Some(&client),
                     true,
                 )
@@ -598,6 +596,14 @@ impl ReleaseContext {
             }
         }
         get_events_from_local_cache(self.git_repo_path()?, filters).await
+    }
+}
+
+fn optional_login<T>(login: Result<T>, explicit_signer: bool) -> Result<Option<T>> {
+    match login {
+        Ok(login) => Ok(Some(login)),
+        Err(error) if explicit_signer => Err(error),
+        Err(_) => Ok(None),
     }
 }
 
@@ -1105,9 +1111,20 @@ mod tests {
     use nostr::prelude::EventId;
 
     use super::{
-        AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult,
+        AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, optional_login,
         publication_failure_message, publication_json, publication_recovery,
     };
+
+    #[test]
+    fn optional_release_login_fails_closed_for_explicit_signers() {
+        let explicit =
+            optional_login::<()>(Err(anyhow::anyhow!("selected signer failed")), true).unwrap_err();
+        assert_eq!(explicit.to_string(), "selected signer failed");
+
+        let configured =
+            optional_login::<()>(Err(anyhow::anyhow!("configured signer failed")), false).unwrap();
+        assert!(configured.is_none());
+    }
 
     #[test]
     fn publication_json_reports_only_ordered_batch_outcomes() {

@@ -7,27 +7,30 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    cli::{Cli, ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands, ReleaseSubCommandArgs},
+    cli::{
+        ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands, ReleaseSubCommandArgs,
+        SignerParams,
+    },
     cli_interactor::CliError,
 };
 
-pub async fn launch(cli: &Cli, args: &ReleaseSubCommandArgs) -> Result<()> {
+pub async fn launch(args: &ReleaseSubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
     let json_output = wants_json(&args.release_command);
     let command = command_name(&args.release_command);
     let result = match &args.release_command {
-        ReleaseCommands::List(args) => read::release_list(cli, args).await,
-        ReleaseCommands::View(args) => read::release_view(cli, args).await,
-        ReleaseCommands::Publish(args) => write::release_publish(cli, args).await,
+        ReleaseCommands::List(args) => read::release_list(args, signer).await,
+        ReleaseCommands::View(args) => read::release_view(args, signer).await,
+        ReleaseCommands::Publish(args) => write::release_publish(args, signer).await,
         ReleaseCommands::App(args) => match &args.app_command {
-            ReleaseAppCommands::List(args) => read::app_list(cli, args).await,
-            ReleaseAppCommands::View(args) => read::app_view(cli, args).await,
-            ReleaseAppCommands::Init(args) => write::app_init(cli, args).await,
-            ReleaseAppCommands::Link(args) => write::app_link(cli, args).await,
+            ReleaseAppCommands::List(args) => read::app_list(args, signer).await,
+            ReleaseAppCommands::View(args) => read::app_view(args, signer).await,
+            ReleaseAppCommands::Init(args) => write::app_init(args, signer).await,
+            ReleaseAppCommands::Link(args) => write::app_link(args, signer).await,
         },
         ReleaseCommands::Asset(args) => match &args.asset_command {
-            ReleaseAssetCommands::List(args) => read::asset_list(cli, args).await,
-            ReleaseAssetCommands::View(args) => read::asset_view(cli, args).await,
-            ReleaseAssetCommands::Add(args) => write::asset_add(cli, args).await,
+            ReleaseAssetCommands::List(args) => read::asset_list(args, signer).await,
+            ReleaseAssetCommands::View(args) => read::asset_view(args, signer).await,
+            ReleaseAssetCommands::Add(args) => write::asset_add(args, signer).await,
         },
     };
 

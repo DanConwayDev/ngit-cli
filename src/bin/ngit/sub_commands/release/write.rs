@@ -31,21 +31,34 @@ use super::support::{
     load_releases, release_json, resolve_application, resolve_release,
 };
 use crate::{
-    cli::{Cli, ReleaseAppInitArgs, ReleaseAppLinkArgs, ReleaseAssetAddArgs, ReleasePublishArgs},
+    cli::{
+        ReleaseAppInitArgs, ReleaseAppLinkArgs, ReleaseAssetAddArgs, ReleasePublishArgs,
+        SignerParams,
+    },
     sub_commands::id_resolver::parse_event_id,
 };
 
-pub(super) async fn app_init(cli: &Cli, args: &ReleaseAppInitArgs) -> Result<CommandOutput> {
-    super::write_app::app_init(cli, args).await
+pub(super) async fn app_init(
+    args: &ReleaseAppInitArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
+    super::write_app::app_init(args, signer).await
 }
 
-pub(super) async fn app_link(cli: &Cli, args: &ReleaseAppLinkArgs) -> Result<CommandOutput> {
-    super::write_app::app_link(cli, args).await
+pub(super) async fn app_link(
+    args: &ReleaseAppLinkArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
+    super::write_app::app_link(args, signer).await
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Result<CommandOutput> {
-    let mut context = ReleaseContext::load(cli, false, &args.relays, LoginMode::Required).await?;
+pub(super) async fn release_publish(
+    args: &ReleasePublishArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
+    let mut context =
+        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
     let manifest = resolve_manifest(&context, args)?;
     let app_selector = args.app.as_deref().or_else(|| {
         manifest
@@ -317,8 +330,12 @@ pub(super) async fn release_publish(cli: &Cli, args: &ReleasePublishArgs) -> Res
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) async fn asset_add(cli: &Cli, args: &ReleaseAssetAddArgs) -> Result<CommandOutput> {
-    let mut context = ReleaseContext::load(cli, false, &args.relays, LoginMode::Required).await?;
+pub(super) async fn asset_add(
+    args: &ReleaseAssetAddArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
+    let mut context =
+        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
     let applications = trusted_applications_for_write(&mut context).await?;
     let releases = load_releases(&mut context, &applications, true).await?;
     let release =

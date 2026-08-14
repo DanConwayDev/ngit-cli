@@ -428,7 +428,7 @@ async fn main() {
                     .await
                 }
             },
-            Commands::Release(args) => sub_commands::release::launch(&cli, args).await,
+            Commands::Release(args) => sub_commands::release::launch(args, signer_params).await,
             Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,
             Commands::Skill(args) => {
                 sub_commands::skill::launch(&args.skill_command, cli.force, cli.json).await

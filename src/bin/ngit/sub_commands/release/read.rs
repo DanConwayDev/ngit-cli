@@ -26,19 +26,22 @@ use super::support::{
 };
 use crate::{
     cli::{
-        Cli, ReleaseAppListArgs, ReleaseAppViewArgs, ReleaseAssetListArgs, ReleaseAssetViewArgs,
-        ReleaseListArgs, ReleaseViewArgs,
+        ReleaseAppListArgs, ReleaseAppViewArgs, ReleaseAssetListArgs, ReleaseAssetViewArgs,
+        ReleaseListArgs, ReleaseViewArgs, SignerParams,
     },
     sub_commands::id_resolver::parse_event_id,
 };
 
-pub(super) async fn app_list(cli: &Cli, args: &ReleaseAppListArgs) -> Result<CommandOutput> {
+pub(super) async fn app_list(
+    args: &ReleaseAppListArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
     let login_mode = if args.mine {
         LoginMode::Required
     } else {
         LoginMode::Optional
     };
-    let mut context = ReleaseContext::load(cli, args.offline, &args.relays, login_mode).await?;
+    let mut context = ReleaseContext::load(args.offline, &args.relays, login_mode, signer).await?;
     let authors = if args.mine {
         vec![
             context
@@ -107,9 +110,12 @@ pub(super) async fn app_list(cli: &Cli, args: &ReleaseAppListArgs) -> Result<Com
     ))
 }
 
-pub(super) async fn app_view(cli: &Cli, args: &ReleaseAppViewArgs) -> Result<CommandOutput> {
+pub(super) async fn app_view(
+    args: &ReleaseAppViewArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
     let mut context =
-        ReleaseContext::load(cli, args.offline, &args.relays, LoginMode::Optional).await?;
+        ReleaseContext::load(args.offline, &args.relays, LoginMode::Optional, signer).await?;
     let mut authors: BTreeSet<PublicKey> = context.repo_ref.maintainers.iter().copied().collect();
     if let Some(signer) = context.current_signer() {
         authors.insert(signer);
@@ -149,9 +155,12 @@ pub(super) async fn app_view(cli: &Cli, args: &ReleaseAppViewArgs) -> Result<Com
     ))
 }
 
-pub(super) async fn release_list(cli: &Cli, args: &ReleaseListArgs) -> Result<CommandOutput> {
+pub(super) async fn release_list(
+    args: &ReleaseListArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
     let mut context =
-        ReleaseContext::load(cli, args.offline, &args.relays, LoginMode::Optional).await?;
+        ReleaseContext::load(args.offline, &args.relays, LoginMode::Optional, signer).await?;
     let mut applications = load_trusted_linked_applications(&mut context).await?;
     if let Some(selector) = &args.app {
         let selected = resolve_application(&applications, selector)?.coordinate();
@@ -241,28 +250,34 @@ pub(super) async fn release_list(cli: &Cli, args: &ReleaseListArgs) -> Result<Co
     ))
 }
 
-pub(super) async fn release_view(cli: &Cli, args: &ReleaseViewArgs) -> Result<CommandOutput> {
+pub(super) async fn release_view(
+    args: &ReleaseViewArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
     view_release(
-        cli,
         &args.release,
         args.app.as_deref(),
         args.verify,
         args.offline,
         &args.relays,
         "release.view",
+        signer,
     )
     .await
 }
 
-pub(super) async fn asset_list(cli: &Cli, args: &ReleaseAssetListArgs) -> Result<CommandOutput> {
+pub(super) async fn asset_list(
+    args: &ReleaseAssetListArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
     let mut output = view_release(
-        cli,
         &args.release,
         args.app.as_deref(),
         false,
         args.offline,
         &args.relays,
         "release.asset.list",
+        signer,
     )
     .await?;
     let assets = output
@@ -275,9 +290,12 @@ pub(super) async fn asset_list(cli: &Cli, args: &ReleaseAssetListArgs) -> Result
     Ok(output)
 }
 
-pub(super) async fn asset_view(cli: &Cli, args: &ReleaseAssetViewArgs) -> Result<CommandOutput> {
+pub(super) async fn asset_view(
+    args: &ReleaseAssetViewArgs,
+    signer: SignerParams<'_>,
+) -> Result<CommandOutput> {
     let mut context =
-        ReleaseContext::load(cli, args.offline, &args.relays, LoginMode::Optional).await?;
+        ReleaseContext::load(args.offline, &args.relays, LoginMode::Optional, signer).await?;
     let (asset, authority, release_value, application_value) =
         if let Some(release_selector) = &args.release {
             let applications = load_trusted_linked_applications(&mut context).await?;
@@ -350,15 +368,15 @@ pub(super) async fn asset_view(cli: &Cli, args: &ReleaseAssetViewArgs) -> Result
 
 #[allow(clippy::too_many_lines)]
 async fn view_release(
-    cli: &Cli,
     selector: &str,
     app_selector: Option<&str>,
     verify: bool,
     offline: bool,
     relays: &[String],
     command: &'static str,
+    signer: SignerParams<'_>,
 ) -> Result<CommandOutput> {
-    let mut context = ReleaseContext::load(cli, offline, relays, LoginMode::Optional).await?;
+    let mut context = ReleaseContext::load(offline, relays, LoginMode::Optional, signer).await?;
     let applications = load_trusted_linked_applications(&mut context).await?;
     let releases = load_releases(&mut context, &applications, false).await?;
     let (release, is_latest, latest_event_id) = resolve_release_for_read(
