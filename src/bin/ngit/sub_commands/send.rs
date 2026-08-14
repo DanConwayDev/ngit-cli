@@ -24,13 +24,14 @@ use crate::{
         cli_error,
     },
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache,
-        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
+        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
+        warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions, identify_ahead_behind},
     git_events::{event_is_patch_set_root, event_tag_from_nip19_or_hex},
     login,
     repo_ref::get_repo_coordinates_for_publishing,
+    sub_commands::repository_fetch::fetching_with_account,
 };
 
 #[derive(Debug, clap::Args)]
@@ -171,10 +172,17 @@ pub async fn launch(
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    let repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
+    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
 
     if !no_fetch {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        fetching_with_account(
+            &git_repo,
+            git_repo_path,
+            &mut client,
+            &mut repo_coordinates,
+            signer,
+        )
+        .await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;

@@ -11,39 +11,50 @@ use ngit::{
         get_parent_commit_from_patch, get_pr_tip_event_or_most_recent_patch_with_ancestors,
         pr_event_clone_tag_urls, tag_value,
     },
+    git_http_auth::prepare_private_git_auth_for_repo,
     repo_ref::RepoRef,
 };
 
 use crate::{
-    client::{
-        Client, Connect, fetching_with_report, get_repo_ref_from_cache,
-        warn_if_invited_as_maintainer,
-    },
+    cli::SignerParams,
+    client::{Client, Connect, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::{
         get_nostr_remote_for_resolved_coordinate, get_resolved_repo_coordinate_when_remote_unknown,
     },
-    sub_commands::id_resolver::{pr_description, resolve_pr_root_or_prefix},
+    sub_commands::{
+        id_resolver::{pr_description, resolve_pr_root_or_prefix},
+        repository_fetch::fetching_with_account,
+    },
 };
 
-pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
+pub async fn launch(id: &str, force: bool, offline: bool, auth: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     let resolved_repo =
-        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &client).await?;
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
     let nostr_remote = get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo).await?;
-    let repo_coordinates = resolved_repo.coordinate;
+    let mut repo_coordinates = resolved_repo.coordinate;
 
     if !offline {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        fetching_with_account(
+            &git_repo,
+            git_repo_path,
+            &mut client,
+            &mut repo_coordinates,
+            auth,
+        )
+        .await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
+    let private_signer =
+        prepare_private_git_auth_for_repo(&repo_ref, &git_repo, auth.info, auth.password).await?;
 
     let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
@@ -76,7 +87,9 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
             nostr_remote.as_ref().map(|remote| remote.name.as_str()),
             force,
+            private_signer.as_ref(),
         )
+        .await
     } else {
         checkout_patch(
             &git_repo,
@@ -85,7 +98,9 @@ pub async fn launch(id: &str, force: bool, offline: bool) -> Result<()> {
             &most_recent_proposal_patch_chain_or_pr_or_pr_update,
             nostr_remote.as_ref().map(|remote| remote.name.as_str()),
             force,
+            private_signer.as_ref(),
         )
+        .await
     }
 }
 
@@ -119,13 +134,14 @@ fn print_diverged_branch_help(branch_name: &str) {
     eprintln!("{}", console::style("  ngit push --force").yellow());
 }
 
-fn checkout_pr(
+async fn checkout_pr(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::prelude::Event],
     nostr_remote_name: Option<&str>,
     force: bool,
+    private_signer: Option<&std::sync::Arc<ngit::signer::NgitSigner>>,
 ) -> Result<()> {
     let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
     let proposal_tip_event = most_recent_proposal_patch_chain_or_pr_or_pr_update
@@ -142,7 +158,9 @@ fn checkout_pr(
             repo_ref,
             &pr_event_clone_tag_urls(proposal_tip_event),
             &console::Term::stderr(),
-        )?;
+            private_signer,
+        )
+        .await?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
         git_repo.checkout(&branch_name)?;
         let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
@@ -208,7 +226,9 @@ fn checkout_pr(
             repo_ref,
             &pr_event_clone_tag_urls(proposal_tip_event),
             &console::Term::stderr(),
-        )?;
+            private_signer,
+        )
+        .await?;
         git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
         git_repo.checkout(&branch_name)?;
         let tracked = maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
@@ -229,13 +249,14 @@ fn checkout_pr(
 }
 
 #[allow(clippy::too_many_lines)]
-fn checkout_patch(
+async fn checkout_patch(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,
     most_recent_proposal_patch_chain_or_pr_or_pr_update: &[nostr::prelude::Event],
     nostr_remote_name: Option<&str>,
     force: bool,
+    private_signer: Option<&std::sync::Arc<ngit::signer::NgitSigner>>,
 ) -> Result<()> {
     if git_repo.has_outstanding_changes()? {
         bail!("working directory is not clean. Discard or stash (un)staged changes and try again.");
@@ -250,20 +271,6 @@ fn checkout_patch(
     // already present, so this is free in the common case. Errors are ignored
     // — `apply_patch_chain` will surface a meaningful error if the commit is
     // still missing.
-    let ensure_patch_parent = || {
-        if let Some(oldest_patch) = most_recent_proposal_patch_chain_or_pr_or_pr_update.last() {
-            if let Ok(parent_oid) = get_parent_commit_from_patch(oldest_patch, Some(git_repo)) {
-                let _ = ensure_commit_local(
-                    &parent_oid,
-                    git_repo,
-                    repo_ref,
-                    &[],
-                    &console::Term::stderr(),
-                );
-            }
-        }
-    };
-
     // Case 1: branch doesn't exist yet — create and apply.
     let branch_exists = git_repo
         .get_local_branch_names()
@@ -272,7 +279,13 @@ fn checkout_patch(
         .any(|n| n.eq(&branch_name));
 
     if !branch_exists {
-        ensure_patch_parent();
+        ensure_patch_parent(
+            git_repo,
+            repo_ref,
+            most_recent_proposal_patch_chain_or_pr_or_pr_update,
+            private_signer,
+        )
+        .await;
         let _ = git_repo
             .apply_patch_chain(
                 &branch_name,
@@ -297,7 +310,13 @@ fn checkout_patch(
             .context("there should be at least one patch")?,
     ) else {
         git_repo.checkout(&branch_name)?;
-        ensure_patch_parent();
+        ensure_patch_parent(
+            git_repo,
+            repo_ref,
+            most_recent_proposal_patch_chain_or_pr_or_pr_update,
+            private_signer,
+        )
+        .await;
         let _ = git_repo
             .apply_patch_chain(
                 &branch_name,
@@ -344,7 +363,13 @@ fn checkout_patch(
         // tip, meaning the author appended new patches. Fast-forward.
         if local_is_ancestor_of_published {
             git_repo.checkout(&branch_name)?;
-            ensure_patch_parent();
+            ensure_patch_parent(
+                git_repo,
+                repo_ref,
+                most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                private_signer,
+            )
+            .await;
             let _ = git_repo
                 .apply_patch_chain(
                     &branch_name,
@@ -379,7 +404,13 @@ fn checkout_patch(
         // Require --force to overwrite.
         if force {
             git_repo.checkout(&branch_name)?;
-            ensure_patch_parent();
+            ensure_patch_parent(
+                git_repo,
+                repo_ref,
+                most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                private_signer,
+            )
+            .await;
             let _ = git_repo
                 .apply_patch_chain(
                     &branch_name,
@@ -407,7 +438,13 @@ fn checkout_patch(
     // diverged: require --force to overwrite.
     if force {
         git_repo.checkout(&branch_name)?;
-        ensure_patch_parent();
+        ensure_patch_parent(
+            git_repo,
+            repo_ref,
+            most_recent_proposal_patch_chain_or_pr_or_pr_update,
+            private_signer,
+        )
+        .await;
         let _ = git_repo
             .apply_patch_chain(
                 &branch_name,
@@ -427,6 +464,29 @@ fn checkout_patch(
     bail!(
         "branch '{branch_name}' has diverged from the published proposal; use --force to overwrite"
     )
+}
+
+async fn ensure_patch_parent(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    patches: &[nostr::prelude::Event],
+    private_signer: Option<&std::sync::Arc<ngit::signer::NgitSigner>>,
+) {
+    let Some(oldest_patch) = patches.last() else {
+        return;
+    };
+    let Ok(parent_oid) = get_parent_commit_from_patch(oldest_patch, Some(git_repo)) else {
+        return;
+    };
+    let _ = ensure_commit_local(
+        &parent_oid,
+        git_repo,
+        repo_ref,
+        &[],
+        &console::Term::stderr(),
+        private_signer,
+    )
+    .await;
 }
 
 /// After a successful checkout of a PR/patch branch, configure it to track

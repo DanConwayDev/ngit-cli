@@ -6,8 +6,9 @@ use ngit::{
         accept_maintainership_with_defaults, default_acceptance_maintainers, wait_for_grasp_servers,
     },
     cli_interactor::cli_error,
-    client::{Params, fetching_with_report, get_repo_ref_from_cache, send_events},
+    client::{Params, get_repo_ref_from_cache, send_events},
     git::nostr_url::NostrUrlDecoded,
+    login::user::publish_private_git_relay_list,
     repo_ref::{RepoRef, apply_grasp_infrastructure, latest_event_repo_ref},
     signer::NgitSigner,
 };
@@ -19,6 +20,7 @@ use crate::{
     git::{Repo, RepoActions},
     login,
     repo_ref::{print_selected_repo, try_resolve_repo_coordinate},
+    sub_commands::repository_fetch::prepare_account_for_repo_fetch,
 };
 
 #[derive(Debug, clap::Args)]
@@ -53,10 +55,18 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
         ));
     };
     print_selected_repo(&resolved_repo_coordinate);
-    let repo_coordinate = resolved_repo_coordinate.coordinate;
+    let mut repo_coordinate = resolved_repo_coordinate.coordinate;
 
     // Fetch latest data from relays
-    fetching_with_report(git_repo_path, &client, &repo_coordinate).await?;
+    let private_discovery =
+        prepare_account_for_repo_fetch(&mut client, &mut repo_coordinate, &signer, &user_ref).await;
+    ngit::client::fetching_with_private_discovery(
+        git_repo_path,
+        &client,
+        &mut repo_coordinate,
+        &private_discovery,
+    )
+    .await?;
 
     let Some(repo_ref) =
         (get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await).ok()
@@ -239,6 +249,7 @@ async fn accept_with_grasp_servers(
         relays: relays.clone(),
         blossoms,
         hashtags,
+        private: repo_ref.private,
         selected_maintainer: *my_pubkey,
         maintainers_without_annoucnement: None,
         maintainers,
@@ -250,6 +261,12 @@ async fn accept_with_grasp_servers(
     let repo_event = my_repo_ref.to_event(signer).await?;
 
     client.set_signer(signer.clone()).await;
+
+    if repo_ref.private {
+        publish_private_git_relay_list(client, &relays, user_ref, signer)
+            .await
+            .context("failed to publish private Git relay discovery list")?;
+    }
 
     let _ = send_events(
         client,
@@ -264,7 +281,14 @@ async fn accept_with_grasp_servers(
     .context("failed to publish co-maintainer announcement")?;
 
     if !grasp_servers.is_empty() {
-        wait_for_grasp_servers(git_repo, grasp_servers, my_pubkey, identifier).await?;
+        wait_for_grasp_servers(
+            git_repo,
+            grasp_servers,
+            my_pubkey,
+            identifier,
+            repo_ref.private.then(|| signer.clone()),
+        )
+        .await?;
     }
 
     // Deliberately leave `nostr.repo` and the origin remote untouched: the

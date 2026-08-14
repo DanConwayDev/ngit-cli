@@ -19,14 +19,17 @@ use nostr::prelude::{
 use crate::{
     cli::SignerParams,
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache,
-        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
+        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
+        warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     login,
     repo_ref::get_repo_coordinates_for_publishing,
-    sub_commands::id_resolver::{pr_description, proposal_roots, resolve_pr_root_or_prefix},
+    sub_commands::{
+        id_resolver::{pr_description, proposal_roots, resolve_pr_root_or_prefix},
+        repository_fetch::fetching_with_account,
+    },
 };
 
 #[allow(clippy::too_many_lines)]
@@ -34,11 +37,18 @@ pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
 
     if !offline {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        fetching_with_account(
+            &git_repo,
+            git_repo_path,
+            &mut client,
+            &mut repo_coordinates,
+            auth,
+        )
+        .await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;

@@ -13,15 +13,17 @@ use ngit::{
         get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, pr_event_clone_tag_urls,
         process_cover_note, status_kinds, tag_value,
     },
+    git_http_auth::prepare_private_git_auth_for_repo,
     repo_ref::RepoRef,
 };
 use nostr::prelude::{Kind, RelayUrl, ToBech32, filter::SingleLetterTag, nip19::Nip19Event};
 
 use crate::{
+    cli::SignerParams,
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache,
-        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
+        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
+        warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::{
@@ -35,6 +37,7 @@ use crate::{
     sub_commands::{
         checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
         id_resolver::resolve_pr_root_id_or_prefix,
+        repository_fetch::fetching_with_account,
     },
 };
 
@@ -46,20 +49,29 @@ pub async fn launch(
     show_comments: bool,
     id: Option<String>,
     offline: bool,
+    auth: SignerParams<'_>,
 ) -> Result<()> {
     if std::env::var("NGIT_INTERACTIVE_MODE").is_ok() {
-        return launch_interactive().await;
+        return launch_interactive(auth).await;
     }
 
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let mut repo_coordinates =
+        get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
 
     if !offline {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        fetching_with_account(
+            &git_repo,
+            git_repo_path,
+            &mut client,
+            &mut repo_coordinates,
+            auth,
+        )
+        .await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
@@ -635,7 +647,7 @@ fn chrono_timestamp(unix_secs: u64) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn launch_interactive() -> Result<()> {
+async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -643,17 +655,24 @@ async fn launch_interactive() -> Result<()> {
     // TODO: check for existing maintaiers file
     // TODO: check for other claims
 
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     let resolved_repo =
-        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &client).await?;
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
     let nostr_remote_name: Option<String> =
         get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo)
             .await?
             .map(|remote| remote.name);
-    let repo_coordinates = resolved_repo.coordinate;
+    let mut repo_coordinates = resolved_repo.coordinate;
 
-    fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+    fetching_with_account(
+        &git_repo,
+        git_repo_path,
+        &mut client,
+        &mut repo_coordinates,
+        auth,
+    )
+    .await?;
     let nostr_remote_name: Option<&str> = nostr_remote_name.as_deref();
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
@@ -879,13 +898,22 @@ async fn launch_interactive() -> Result<()> {
                             return Ok(());
                         }
                     }
+                    let private_signer = prepare_private_git_auth_for_repo(
+                        &repo_ref,
+                        &git_repo,
+                        auth.info,
+                        auth.password,
+                    )
+                    .await?;
                     ensure_commit_local(
                         &proposal_tip,
                         &git_repo,
                         &repo_ref,
                         &pr_event_clone_tag_urls(proposal_tip_event),
                         &console::Term::stderr(),
-                    )?;
+                        private_signer.as_ref(),
+                    )
+                    .await?;
                     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
                     git_repo.checkout(&branch_name)?;
                     let tracked = maybe_setup_nostr_remote_tracking(

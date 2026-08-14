@@ -22,8 +22,10 @@ use crate::{
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
         remote_helper,
     },
+    git_http_auth::{authorization_for_url, refresh_private_git_auth_for_url},
     repo_ref::is_grasp_server_clone_url,
     repo_state::RepoState,
+    signer::NgitSigner,
     utils::{
         Direction, get_read_protocols_to_try, get_short_git_server_name, join_with_and,
         onion_proxy_options_for_url, set_protocol_preference,
@@ -163,6 +165,7 @@ pub async fn list_from_remotes(
     git_servers: &[String],
     decoded_nostr_url: &NostrUrlDecoded,
     nostr_state: Option<&RepoState>,
+    private_signer: Option<&Arc<NgitSigner>>,
 ) -> HashMap<String, (HashMap<String, String>, bool)> {
     if git_servers.is_empty() {
         return HashMap::new();
@@ -208,6 +211,7 @@ pub async fn list_from_remotes(
             let decoded_nostr_url = decoded_nostr_url.clone();
             let spinner_state_clone = spinner_state.clone();
             let verbose_for_task = verbose;
+            let private_signer = private_signer.cloned();
 
             async move {
                 let server_name = get_short_git_server_name(&url);
@@ -279,6 +283,18 @@ pub async fn list_from_remotes(
                                 .red()
                                 .to_string(),
                         );
+                    }
+                }
+
+                if let Some(signer) = private_signer.as_ref() {
+                    if let Err(error) = refresh_private_git_auth_for_url(&url, signer).await {
+                        update_progress_bar_with_error(
+                            server_column_width,
+                            &server_name,
+                            pb,
+                            &error,
+                        );
+                        return Err((url, error));
                     }
                 }
 
@@ -566,8 +582,19 @@ fn list_from_remote_url(
     if !dont_authenticate {
         remote_callbacks.credentials(auth.credentials(&git_config));
     }
-    let proxy = onion_proxy_options_for_url(git_server_remote_url)?;
-    git_server_remote.connect_auth(git2::Direction::Fetch, Some(remote_callbacks), proxy)?;
+    let mut fetch_options = git2::FetchOptions::new();
+    fetch_options.remote_callbacks(remote_callbacks);
+    if let Some(proxy) = onion_proxy_options_for_url(git_server_remote_url)? {
+        fetch_options.proxy_options(proxy);
+    }
+    let authorization = authorization_for_url(git_server_remote_url);
+    if let Some(header) = authorization.as_deref() {
+        fetch_options.custom_headers(&[header]);
+    }
+    // `connect_auth` cannot carry custom HTTP headers. An empty download
+    // performs the same advertisement exchange while preserving access to
+    // `Remote::list`, and applies the NIP-98 header to `/info/refs`.
+    git_server_remote.download(&[] as &[&str], Some(&mut fetch_options))?;
     let mut state = HashMap::new();
     for head in git_server_remote.list()? {
         if let Some(symbolic_reference) = head.symref_target() {

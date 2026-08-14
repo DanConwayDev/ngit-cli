@@ -1502,6 +1502,10 @@ pub async fn signup_non_interactive(
         save_event_in_global_cache(git_repo_path, &relay_list).await?;
 
         if publish {
+            // Account creation publishes before the complete login object is
+            // returned. Attach these newly created keys explicitly so the
+            // selected outbox can request NIP-42 authentication.
+            client.nip42_set_auth_signer(Arc::new(crate::NgitSigner::Keys(keys.clone())));
             let _ = send_events(
                 client,
                 git_repo_path,

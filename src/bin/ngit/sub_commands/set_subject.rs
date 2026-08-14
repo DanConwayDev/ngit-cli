@@ -11,13 +11,16 @@ use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 use crate::{
     cli::SignerParams,
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache,
-        get_repo_ref_from_cache, save_event_in_local_cache,
+        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
+        save_event_in_local_cache,
     },
     git::{Repo, RepoActions},
     login,
     repo_ref::get_repo_coordinates_for_publishing,
-    sub_commands::id_resolver::{load_and_resolve_issue, load_and_resolve_pr_root},
+    sub_commands::{
+        id_resolver::{load_and_resolve_issue, load_and_resolve_pr_root},
+        repository_fetch::fetching_with_account,
+    },
 };
 
 /// Shared implementation: publish a NIP-32 kind-1985 `#subject` label event
@@ -42,11 +45,18 @@ async fn publish_set_subject_event(
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &client).await?;
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
 
     if !offline {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        fetching_with_account(
+            &git_repo,
+            git_repo_path,
+            &mut client,
+            &mut repo_coordinates,
+            auth,
+        )
+        .await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;

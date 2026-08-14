@@ -16,14 +16,21 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use client::{
-    Connect, FetchReport, consolidate_fetch_reports, get_repo_ref_from_cache, is_verbose,
+    Connect, FetchReport, PrivateRelayProbeDecision, consolidate_fetch_outcome,
+    get_repo_ref_from_cache, is_verbose, private_relay_probe_decision,
     warn_if_invited_as_maintainer,
 };
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
     client::{self, Client, Params},
     git::{self, Repo, utils::set_git_timeout},
-    login::{SignerInfo, existing::load_existing_login},
+    git_http_auth::{clear_private_git_auth, prepare_private_git_auth},
+    login::{
+        SignerInfo,
+        existing::load_existing_login,
+        user::{PrivateGitRelayDiscovery, discover_private_git_relay_list, get_user_details},
+    },
+    signer::NgitSigner,
     utils::read_line,
 };
 use nostr::nips::nip19::Nip19Coordinate;
@@ -237,13 +244,19 @@ pub async fn run(args: &[String]) -> Result<()> {
     };
 
     let git_repo_path = git_repo.get_path()?;
+    let repository_is_known_private = git_repo
+        .git_repo
+        .config()
+        .ok()
+        .and_then(|config| config.get_bool("nostr.private").ok())
+        .unwrap_or(false);
 
     let _ = set_git_timeout(Some(&git_repo));
     let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    match load_existing_login(
+    let login = match load_existing_login(
         &Some(&git_repo),
         &command_signer,
         &None,
@@ -255,9 +268,22 @@ pub async fn run(args: &[String]) -> Result<()> {
     )
     .await
     {
-        Ok((signer, _, _)) => {
-            // signer for to respond to relay auth request
-            client.set_signer(signer).await;
+        Ok((signer, cached_user_ref, _)) => {
+            client.set_signer(signer.clone()).await;
+            // A fresh clone has no repository-local profile cache. Refresh the
+            // selected account's public NIP-65 data before looking for its
+            // encrypted kind-10318 relay list; relay challenges during this
+            // bootstrap still cannot trigger signer acquisition or AUTH.
+            let user_ref = get_user_details(
+                &cached_user_ref.public_key,
+                Some(&client),
+                Some(git_repo_path),
+                false,
+                true,
+            )
+            .await
+            .unwrap_or(cached_user_ref);
+            Some((signer, user_ref))
         }
         // an explicit `-c nostr.signer=` selection must fail closed rather
         // than silently degrading to anonymous relay access
@@ -266,17 +292,42 @@ pub async fn run(args: &[String]) -> Result<()> {
                 error.context("failed to resolve the signer selected with `git -c nostr.signer`")
             );
         }
+        Err(error) if repository_is_known_private => {
+            return Err(error
+                .context("private repository relay authentication requires a logged-in account"));
+        }
         // without a selection, a missing login only means anonymous relay
-        // access
-        Err(_) => {}
-    }
+        // access; a private repository will fail explicitly when it needs
+        // authenticated relay or Git transport
+        Err(_) => None,
+    };
+    let signer = login.as_ref().map(|(signer, _)| signer.clone());
 
-    let fetch_report =
-        fetching_with_report_for_helper(git_repo_path, &client, &decoded_nostr_url.coordinate)
-            .await?;
+    let mut discovery_coordinate = decoded_nostr_url.coordinate.clone();
+    let private_discovery = if let Some((signer, user_ref)) = login.as_ref() {
+        let mut discovery_relays = user_ref.relays.read();
+        for relay in user_ref.relays.write() {
+            if !discovery_relays.contains(&relay) {
+                discovery_relays.push(relay);
+            }
+        }
+        if discovery_relays.is_empty() {
+            discovery_relays.extend(client.get_relay_default_set().iter().cloned());
+        }
+        discover_private_git_relay_list(&client, discovery_relays, signer).await
+    } else {
+        PrivateGitRelayDiscovery::Absent
+    };
 
-    let mut repo_ref =
-        get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate).await?;
+    let fetch_report = fetching_with_report_for_helper(
+        git_repo_path,
+        &client,
+        &mut discovery_coordinate,
+        &private_discovery,
+    )
+    .await?;
+
+    let mut repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &discovery_coordinate).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let _ = ngit::agent_guidance::warn_if_maintainer(&git_repo, &repo_ref).await;
 
@@ -324,9 +375,12 @@ pub async fn run(args: &[String]) -> Result<()> {
                 println!("unsupported");
             }
             ["fetch", oid, refstr] => {
-                fetch::run_fetch(&git_repo, &repo_ref, &stdin, oid, refstr).await?;
+                refresh_private_git_auth(&repo_ref, signer.as_ref()).await?;
+                fetch::run_fetch(&git_repo, &repo_ref, &stdin, oid, refstr, signer.as_ref())
+                    .await?;
             }
             ["push", refspec] => {
+                refresh_private_git_auth(&repo_ref, signer.as_ref()).await?;
                 let title_description = push_options.validate()?;
                 push::run_push(
                     &git_repo,
@@ -341,18 +395,25 @@ pub async fn run(args: &[String]) -> Result<()> {
                     push_options.git_server.clone(),
                     push_options.proposal.clone(),
                     &push_options.force_with_lease,
+                    signer.as_ref(),
                     command_signer.as_ref(),
                 )
                 .await?;
                 push_options = PushOptions::default();
             }
             ["list"] => {
-                list_outputs =
-                    Some(list::run_list(&git_repo, &repo_ref, false, &fetch_report).await?);
+                refresh_private_git_auth(&repo_ref, signer.as_ref()).await?;
+                list_outputs = Some(
+                    list::run_list(&git_repo, &repo_ref, false, &fetch_report, signer.as_ref())
+                        .await?,
+                );
             }
             ["list", "for-push"] => {
-                list_outputs =
-                    Some(list::run_list(&git_repo, &repo_ref, true, &fetch_report).await?);
+                refresh_private_git_auth(&repo_ref, signer.as_ref()).await?;
+                list_outputs = Some(
+                    list::run_list(&git_repo, &repo_ref, true, &fetch_report, signer.as_ref())
+                        .await?,
+                );
             }
             [] => {
                 return Ok(());
@@ -362,6 +423,21 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
         }
     }
+}
+
+async fn refresh_private_git_auth(
+    repo_ref: &ngit::repo_ref::RepoRef,
+    signer: Option<&std::sync::Arc<NgitSigner>>,
+) -> Result<()> {
+    clear_private_git_auth();
+    if repo_ref.private {
+        prepare_private_git_auth(
+            &repo_ref.git_server,
+            signer.context("private repository Git access requires a logged-in account")?,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn process_args(args: &[String]) -> Result<Option<(Option<String>, NostrUrlDecoded, Repo)>> {
@@ -413,25 +489,91 @@ async fn process_args(args: &[String]) -> Result<Option<(Option<String>, NostrUr
 async fn fetching_with_report_for_helper(
     git_repo_path: &Path,
     client: &Client,
-    selected_maintainer_coordinate: &Nip19Coordinate,
+    selected_maintainer_coordinate: &mut Nip19Coordinate,
+    private_discovery: &PrivateGitRelayDiscovery,
 ) -> Result<FetchReport> {
     let term = console::Term::stderr();
     let verbose = is_verbose();
     if verbose {
         term.write_line("nostr: fetching...")?;
     }
-    let (relay_reports, progress_reporter) = client
-        .fetch_all(
-            Some(git_repo_path),
-            Some(selected_maintainer_coordinate),
-            &HashSet::new(),
-        )
-        .await?;
-    let has_errors = relay_reports.iter().any(std::result::Result::is_err);
-    if !has_errors || !verbose {
-        let _ = progress_reporter.clear();
+    let cached_repo_ref =
+        get_repo_ref_from_cache(Some(git_repo_path), selected_maintainer_coordinate)
+            .await
+            .ok();
+    let private_discovery_unavailable =
+        matches!(private_discovery, PrivateGitRelayDiscovery::Unavailable(_));
+    if let Some(repo_ref) = cached_repo_ref
+        .as_ref()
+        .filter(|repo_ref| repo_ref.private || private_discovery_unavailable)
+    {
+        selected_maintainer_coordinate
+            .relays
+            .clone_from(&repo_ref.relays);
     }
-    let report = consolidate_fetch_reports(relay_reports);
+
+    if let PrivateGitRelayDiscovery::Unavailable(error) = private_discovery {
+        if cached_repo_ref.is_none() {
+            bail!("private Git relay discovery is unavailable: {error}");
+        }
+    }
+    let private_probe =
+        cached_repo_ref.is_none() && private_discovery.requires_repository_only_probe();
+    let mut repository_relays_only = cached_repo_ref
+        .as_ref()
+        .is_some_and(|repo_ref| repo_ref.private)
+        || private_discovery_unavailable
+        || private_probe;
+    let report = loop {
+        let mut private_coordinate = selected_maintainer_coordinate.clone();
+        private_coordinate.relays = private_discovery.relays().to_vec();
+        let fetch_coordinate = if repository_relays_only && private_probe {
+            &private_coordinate
+        } else {
+            &*selected_maintainer_coordinate
+        };
+        let (relay_reports, progress_reporter) = client
+            .fetch_all(
+                Some(git_repo_path),
+                Some(fetch_coordinate),
+                &HashSet::new(),
+                repository_relays_only,
+            )
+            .await?;
+        let outcome = consolidate_fetch_outcome(relay_reports);
+        if !outcome.had_errors || !verbose {
+            let _ = progress_reporter.clear();
+        }
+        if repository_relays_only && private_probe {
+            let discovered_privacy =
+                get_repo_ref_from_cache(Some(git_repo_path), selected_maintainer_coordinate)
+                    .await
+                    .ok()
+                    .map(|repo_ref| repo_ref.private);
+            let private_probe_completed =
+                outcome.all_required_relays_completed(private_discovery.relays().len());
+            match private_relay_probe_decision(discovered_privacy, private_probe_completed) {
+                PrivateRelayProbeDecision::UsePrivateResult => {
+                    if let Ok(repo_ref) =
+                        get_repo_ref_from_cache(Some(git_repo_path), selected_maintainer_coordinate)
+                            .await
+                    {
+                        selected_maintainer_coordinate.relays = repo_ref.relays;
+                    }
+                }
+                PrivateRelayProbeDecision::RetryPublicDiscovery => {
+                    repository_relays_only = false;
+                    continue;
+                }
+                PrivateRelayProbeDecision::FailClosed => {
+                    bail!(
+                        "private repository relay probe failed; refusing to query public discovery relays"
+                    );
+                }
+            }
+        }
+        break outcome.report;
+    };
     if report.to_string().is_empty() {
         if verbose {
             term.write_line("nostr: no updates")?;

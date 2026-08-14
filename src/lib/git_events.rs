@@ -143,6 +143,7 @@ pub async fn sign_ordered_status_event(
 pub const KIND_PULL_REQUEST: Kind = Kind::Custom(1618);
 pub const KIND_PULL_REQUEST_UPDATE: Kind = Kind::Custom(1619);
 pub const KIND_USER_GRASP_LIST: Kind = Kind::Custom(10317);
+pub const KIND_PRIVATE_GIT_RELAY_LIST: Kind = Kind::Custom(10318);
 /// NIP-22 comment (kind 1111) — threaded comments on any event.
 pub const KIND_COMMENT: Kind = Kind::Custom(1111);
 /// NIP-32 label event (kind 1985) — applies hashtag labels to an existing

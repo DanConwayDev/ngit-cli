@@ -808,6 +808,7 @@ mod tests {
                 .collect(),
             blossoms: vec![],
             hashtags: vec![],
+            private: false,
             maintainers: vec![public_key],
             selected_maintainer: public_key,
             maintainers_without_annoucnement: None,

@@ -162,6 +162,7 @@ async fn main() {
                         false,
                         id.clone(),
                         *offline,
+                        signer_params,
                     )
                     .await
                 }
@@ -177,17 +178,18 @@ async fn main() {
                         *comments,
                         Some(id.clone()),
                         *offline,
+                        signer_params,
                     )
                     .await
                 }
                 PrCommands::Checkout { id, force, offline } => {
-                    sub_commands::checkout::launch(id, *force, *offline).await
+                    sub_commands::checkout::launch(id, *force, *offline, signer_params).await
                 }
                 PrCommands::Apply {
                     id,
                     stdout,
                     offline,
-                } => sub_commands::apply::launch(id, *stdout, *offline).await,
+                } => sub_commands::apply::launch(id, *stdout, *offline, signer_params).await,
                 PrCommands::Send(sub_args) => {
                     sub_commands::send::launch(&cli, sub_args, false, signer_params).await
                 }
@@ -308,6 +310,7 @@ async fn main() {
                         *comments,
                         id.clone(),
                         *offline,
+                        signer_params,
                     )
                     .await
                 }
@@ -323,6 +326,7 @@ async fn main() {
                         *comments,
                         Some(id.clone()),
                         *offline,
+                        signer_params,
                     )
                     .await
                 }
@@ -433,6 +437,7 @@ async fn main() {
                     args.id.as_deref(),
                     args.offline,
                     args.exclude_description,
+                    signer_params,
                 )
                 .await
             }

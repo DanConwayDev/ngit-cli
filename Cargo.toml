@@ -20,6 +20,7 @@ auth-git2 = "0.6.0"
 # the version `nostr` depends on so the two `Sha1Hash` types stay identical.
 # `nostr` 0.45.0 moved from `bitcoin_hashes` 0.14 to 1.x.
 bitcoin_hashes = "1.1"
+base64 = "0.22.1"
 chacha20poly1305 = "0.10.1"
 chrono = "0.4"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -45,7 +46,7 @@ mailparse = "0.16.1"
 # NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
 # is safe again: it no longer admits breaking pre-releases the way a caret
 # on `0.45.0-alpha.N` did. Bump these together.
-nostr = { version = "0.45.0", features = ["nip49"] }
+nostr = { version = "0.45.0", features = ["nip44", "nip49"] }
 nostr-connect = "0.45.0"
 nostr-database = "0.45.0"
 nostr-lmdb = "0.45.0"
