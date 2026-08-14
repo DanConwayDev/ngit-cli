@@ -1,7 +1,7 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nostr::prelude::{PublicKey, ToBech32, nip46::NostrConnectUri};
+use nostr::prelude::{Event, Filter, Kind, Metadata, PublicKey, ToBech32, nip46::NostrConnectUri};
 use nostr_connect::client::NostrConnect;
 
 use super::{
@@ -16,7 +16,7 @@ use crate::client::Client;
 use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptPasswordParms},
-    client::fetch_public_key,
+    client::{fetch_public_key, get_event_from_global_cache},
     git::{Repo, RepoActions, get_git_config_item, get_git_config_item_system},
 };
 
@@ -68,8 +68,8 @@ pub async fn load_existing_login(
     prompt_for_password: bool,
     fetch_profile_updates: bool,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
-    let requested_signer_info = signer_info;
-    let (signer_info, source) = get_signer_info(git_repo, signer_info, password, source).await?;
+    let (signer_info, source, alias) =
+        get_signer_info(git_repo, signer_info, password, source).await?;
 
     let (signer, public_key) = get_signer(&signer_info, prompt_for_password).await?;
 
@@ -87,22 +87,24 @@ pub async fn load_existing_login(
     .await?;
 
     if !silent {
-        let alias = selected_alias(git_repo, requested_signer_info, &source)?;
         print_logged_in_as(&user_ref, client.is_none(), &source, alias.as_deref())?;
     }
     Ok((signer, user_ref, source))
 }
 
+/// The alias a persisted `nostr.signer` selector names, for display.
+///
+/// Config-scoped `nostr.signer` values keep strict npub/alias semantics, so
+/// the selector's shape alone identifies an alias; callers display it after
+/// the login has already resolved it. One-shot command-line selections are
+/// never persisted, so their alias comes from [`get_signer_info`] at
+/// resolution time instead.
 pub fn selected_alias(
     git_repo: &Option<&Repo>,
-    requested_signer_info: &Option<SignerInfo>,
     source: &SignerInfoSource,
 ) -> Result<Option<String>> {
     let selector = match source {
-        SignerInfoSource::CommandLineArguments => match requested_signer_info {
-            Some(SignerInfo::Selection { selector }) => Some(selector.clone()),
-            _ => None,
-        },
+        SignerInfoSource::CommandLineArguments => None,
         SignerInfoSource::GitLocal => {
             let repo = git_repo.context("cannot read local signer alias without a repository")?;
             get_git_config_item(&Some(repo), "nostr.signer")?
@@ -110,17 +112,22 @@ pub fn selected_alias(
         SignerInfoSource::GitGlobal => get_git_config_item(&None, "nostr.signer")?,
         SignerInfoSource::GitSystem => get_git_config_item_system("nostr.signer")?,
     };
-    Ok(selector.filter(|selector| !selector.starts_with("npub1")))
+    Ok(selector.filter(|selector| {
+        !selector.starts_with("npub1") && credential_store::normalize_alias(selector).is_ok()
+    }))
 }
 
 /// priority order: cli arguments, local git config, global git config, system
 /// git config
+///
+/// The third element is the normalized alias the selector resolved through,
+/// captured here so display code never re-probes the credential store.
 pub async fn get_signer_info(
     git_repo: &Option<&Repo>,
     signer_info: &Option<SignerInfo>,
     password: &Option<String>,
     source: &Option<SignerInfoSource>,
-) -> Result<(SignerInfo, SignerInfoSource)> {
+) -> Result<(SignerInfo, SignerInfoSource, Option<String>)> {
     Ok(match source {
         None => {
             let mut result = None;
@@ -185,13 +192,15 @@ pub async fn get_signer_info(
         }
         Some(SignerInfoSource::CommandLineArguments) => {
             if let Some(signer_info) = signer_info {
-                let signer_info = match signer_info {
+                let (signer_info, alias) = match signer_info {
                     SignerInfo::Selection { selector } => {
-                        resolve_selected_signer(git_repo, selector, password).await?
+                        let resolved =
+                            resolve_selection(git_repo, selector, password, true).await?;
+                        (resolved.signer_info, resolved.alias)
                     }
-                    signer_info => signer_info.clone(),
+                    signer_info => (signer_info.clone(), None),
                 };
-                (signer_info, SignerInfoSource::CommandLineArguments)
+                (signer_info, SignerInfoSource::CommandLineArguments, alias)
             } else {
                 bail!("failed to get signer from cli signer arguments because none were specified")
             }
@@ -202,9 +211,12 @@ pub async fn get_signer_info(
             if let Some(selector) = get_git_config_item(&Some(git_repo), "nostr.signer")
                 .context("failed get local git config")?
             {
+                let resolved =
+                    resolve_selection(&Some(git_repo), &selector, password, false).await?;
                 (
-                    resolve_selected_signer(&Some(git_repo), &selector, password).await?,
+                    resolved.signer_info,
                     SignerInfoSource::GitLocal,
+                    resolved.alias,
                 )
             } else if let Ok(nsec) = get_git_config_item(&Some(git_repo), "nostr.nsec")
                 .context("failed get local git config")?
@@ -220,6 +232,7 @@ pub async fn get_signer_info(
                         verify_npub: false,
                     },
                     SignerInfoSource::GitLocal,
+                    None,
                 )
             } else if let Ok(bunker_uri) = get_git_config_item(&Some(git_repo), "nostr.bunker-uri")
                 .context("failed get local git config")?
@@ -231,7 +244,7 @@ pub async fn get_signer_info(
                     .context("git local config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, true)?,
                     npub: get_git_config_item(&Some(git_repo), "nostr.npub")
                         .context("failed get local git config")?,
-                }, SignerInfoSource::GitLocal)
+                }, SignerInfoSource::GitLocal, None)
             } else {
                 bail!("no signer info in local git config")
             }
@@ -240,9 +253,11 @@ pub async fn get_signer_info(
             if let Some(selector) = get_git_config_item(&None, "nostr.signer")
                 .context("failed to get global git config")?
             {
+                let resolved = resolve_selection(git_repo, &selector, password, false).await?;
                 (
-                    resolve_selected_signer(git_repo, &selector, password).await?,
+                    resolved.signer_info,
                     SignerInfoSource::GitGlobal,
+                    resolved.alias,
                 )
             } else if let Some(nsec) = get_git_config_item(&None, "nostr.nsec")
                 .context("failed to get global git config")?
@@ -257,6 +272,7 @@ pub async fn get_signer_info(
                         verify_npub: false,
                     },
                     SignerInfoSource::GitGlobal,
+                    None,
                 )
             } else if let Some(bunker_uri) = get_git_config_item(&None, "nostr.bunker-uri")
                 .context("failed to get global git config")?
@@ -267,7 +283,7 @@ pub async fn get_signer_info(
                     .context("git global config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, true)?,
                     npub: get_git_config_item(&None, "nostr.npub")
                         .context("failed get global git config")?,
-                }, SignerInfoSource::GitGlobal)
+                }, SignerInfoSource::GitGlobal, None)
             } else {
                 bail!("no signer info in global git config")
             }
@@ -276,9 +292,11 @@ pub async fn get_signer_info(
             if let Some(selector) = get_git_config_item_system("nostr.signer")
                 .context("failed to get system git config")?
             {
+                let resolved = resolve_selection(git_repo, &selector, password, false).await?;
                 (
-                    resolve_selected_signer(git_repo, &selector, password).await?,
+                    resolved.signer_info,
                     SignerInfoSource::GitSystem,
+                    resolved.alias,
                 )
             } else if let Some(nsec) = get_git_config_item_system("nostr.nsec")
                 .context("failed to get system git config")?
@@ -293,6 +311,7 @@ pub async fn get_signer_info(
                         verify_npub: false,
                     },
                     SignerInfoSource::GitSystem,
+                    None,
                 )
             } else if let Some(bunker_uri) = get_git_config_item_system("nostr.bunker-uri")
                 .context("failed to get system git config")?
@@ -303,7 +322,7 @@ pub async fn get_signer_info(
                     .context("system git config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, false)?,
                     npub: get_git_config_item_system("nostr.npub")
                         .context("failed to get system git config")?,
-                }, SignerInfoSource::GitSystem)
+                }, SignerInfoSource::GitSystem, None)
             } else {
                 bail!("no signer info in system git config")
             }
@@ -372,17 +391,205 @@ fn resolve_scope_secret(
     )
 }
 
-async fn resolve_selected_signer(
+/// A signer selector resolved to concrete signer material.
+#[derive(Debug)]
+pub struct ResolvedSelection {
+    pub signer_info: SignerInfo,
+    /// canonical npub of the selected identity — the only form of a
+    /// selection that may be persisted
+    pub npub: String,
+    /// the normalized alias the selector resolved through, when it was one
+    pub alias: Option<String>,
+}
+
+/// Resolve a selector with npub → alias → cached-profile-name precedence.
+///
+/// Profile names are mutable and non-unique, so they are a selection-time
+/// convenience only: callers that persist the selection must write
+/// [`ResolvedSelection::npub`] (or the matched alias), never the selector
+/// text.
+pub async fn resolve_selection(
     git_repo: &Option<&Repo>,
     selector: &str,
     password: &Option<String>,
-) -> Result<SignerInfo> {
-    let expected_npub = resolve_selector_npub(git_repo, selector)?;
-    resolve_signer_for_npub(git_repo, &expected_npub, password)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "selected signer {expected_npub} is not available in the OS credential store, credentials.json, or git config"
-        )
+    allow_profile_name: bool,
+) -> Result<ResolvedSelection> {
+    match resolve_selector_npub(git_repo, selector) {
+        Ok(npub) => {
+            let alias = if selector.starts_with("npub1") {
+                None
+            } else {
+                credential_store::normalize_alias(selector).ok()
+            };
+            let signer_info =
+                resolve_signer_for_npub(git_repo, &npub, password)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "selected signer {npub} is not available in the OS credential store, credentials.json, or git config"
+                    )
+                })?;
+            Ok(ResolvedSelection {
+                signer_info,
+                npub,
+                alias,
+            })
+        }
+        Err(error) if allow_profile_name && selector_may_be_profile_name(selector, &error) => {
+            resolve_selection_by_profile_name(git_repo, selector, password).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Only two alias-resolution outcomes may fall through to profile-name
+/// lookup: a valid alias token with no mapping anywhere, and a selector that
+/// can never be an alias token. Store `Unavailable` / `Invalid` errors keep
+/// alias resolution authoritative and propagate unchanged, and an invalid
+/// npub is always an npub error.
+fn selector_may_be_profile_name(selector: &str, error: &anyhow::Error) -> bool {
+    !selector.starts_with("npub1")
+        && (error.downcast_ref::<SignerAliasNotFound>().is_some()
+            || credential_store::normalize_alias(selector).is_err())
+}
+
+async fn resolve_selection_by_profile_name(
+    git_repo: &Option<&Repo>,
+    selector: &str,
+    password: &Option<String>,
+) -> Result<ResolvedSelection> {
+    let git_repo_path = if let Some(git_repo) = git_repo {
+        Some(git_repo.get_path()?)
+    } else {
+        None
+    };
+    let events =
+        get_event_from_global_cache(git_repo_path, vec![Filter::default().kind(Kind::Metadata)])
+            .await
+            .context(
+                "failed to read cached profiles while resolving the selected signer by name",
+            )?;
+    select_credentialed_profile(selector, &events, |npub| {
+        resolve_signer_for_npub(git_repo, npub, password)
     })
+}
+
+/// Pick the single cached profile named `selector` whose npub `probe`
+/// resolves to usable signer material.
+///
+/// A candidate without stored credentials (`Ok(None)`) is filtered out —
+/// this is what makes cached name-squatting harmless — but a broken or
+/// unavailable entry (`Err`) fails the whole selection instead of being
+/// skipped, because skipping it could silently select a different
+/// same-named account. More than one credentialed match fails closed.
+fn select_credentialed_profile(
+    selector: &str,
+    events: &[Event],
+    mut probe: impl FnMut(&str) -> Result<Option<SignerInfo>>,
+) -> Result<ResolvedSelection> {
+    let candidates = cached_profile_candidates(selector, events);
+    if candidates.is_empty() {
+        bail!(
+            "no cached profile is named '{selector}'; profiles enter ngit's cache when their account logs in. Select the signer with `--signer <npub>` or a signer alias instead"
+        );
+    }
+    let mut credentialed = Vec::new();
+    for candidate in candidates {
+        match probe(&candidate.npub) {
+            Ok(Some(signer_info)) => credentialed.push((candidate, signer_info)),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(error.context(format!(
+                    "failed to check stored signer credentials for cached profile '{}' ({}); fix or remove that entry, or select the signer with `--signer <npub>`",
+                    candidate.label, candidate.npub
+                )));
+            }
+        }
+    }
+    match credentialed.len() {
+        0 => bail!(
+            "no stored signer credentials belong to a cached profile named '{selector}'; log that account in first, or select the signer with `--signer <npub>` or a signer alias"
+        ),
+        1 => {
+            let (candidate, signer_info) = credentialed.remove(0);
+            Ok(ResolvedSelection {
+                signer_info,
+                npub: candidate.npub,
+                alias: None,
+            })
+        }
+        _ => {
+            let listing = credentialed
+                .iter()
+                .map(|(candidate, _)| format!("\n  {} ({})", candidate.label, candidate.npub))
+                .collect::<String>();
+            bail!(
+                "profile name '{selector}' matches more than one stored signer:{listing}\nselect one with `--signer <npub>` or a signer alias instead"
+            )
+        }
+    }
+}
+
+struct ProfileCandidate {
+    npub: String,
+    label: String,
+}
+
+/// Cached accounts whose newest kind-0 profile is named `selector`, matching
+/// the metadata `name` and `display_name` fields case-insensitively after
+/// trimming.
+fn cached_profile_candidates(selector: &str, events: &[Event]) -> Vec<ProfileCandidate> {
+    let target = normalize_profile_name(selector);
+    if target.is_empty() {
+        return Vec::new();
+    }
+    // Keep only the NIP-01 winner per pubkey: newest timestamp, then lowest
+    // event ID when timestamps tie.
+    let mut newest: HashMap<PublicKey, &Event> = HashMap::new();
+    for event in events.iter().filter(|event| event.kind == Kind::Metadata) {
+        match newest.entry(event.pubkey) {
+            std::collections::hash_map::Entry::Occupied(mut held) => {
+                if event.created_at > held.get().created_at
+                    || (event.created_at == held.get().created_at && event.id < held.get().id)
+                {
+                    held.insert(event);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(event);
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    for event in newest.into_values() {
+        let Ok(metadata) = Metadata::from_json(&event.content) else {
+            continue;
+        };
+        let names = [metadata.name.as_deref(), metadata.display_name.as_deref()];
+        if !names
+            .iter()
+            .flatten()
+            .any(|name| normalize_profile_name(name) == target)
+        {
+            continue;
+        }
+        let npub = event
+            .pubkey
+            .to_bech32()
+            // nostr declares `Err = Infallible` for this impl.
+            .unwrap_or_default();
+        let label = names
+            .iter()
+            .flatten()
+            .map(|name| name.trim())
+            .find(|name| !name.is_empty())
+            .map_or_else(|| npub.clone(), std::string::ToString::to_string);
+        candidates.push(ProfileCandidate { npub, label });
+    }
+    candidates.sort_by(|a, b| a.npub.cmp(&b.npub));
+    candidates
+}
+
+fn normalize_profile_name(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 /// Resolve stored signer material for one expected npub.
@@ -733,7 +940,7 @@ async fn get_signer(
 
 #[cfg(test)]
 mod tests {
-    use nostr::prelude::{Keys, ToBech32};
+    use nostr::prelude::{EventBuilder, Keys, Timestamp, ToBech32, event::FinalizeEvent};
 
     use super::*;
     use crate::git::{Repo, RepoActions, test_helpers::GitTestRepo};
@@ -751,7 +958,7 @@ mod tests {
         let selection = SignerInfo::Selection {
             selector: "fred".to_string(),
         };
-        let (info, source) = get_signer_info(
+        let (info, source, alias) = get_signer_info(
             &Some(&repo),
             &Some(selection),
             &None,
@@ -759,6 +966,7 @@ mod tests {
         )
         .await?;
         assert_eq!(source, SignerInfoSource::CommandLineArguments);
+        assert_eq!(alias.as_deref(), Some("fred"));
         assert!(matches!(
             info,
             SignerInfo::Nsec { npub: Some(selected), .. } if selected == npub
@@ -776,7 +984,7 @@ mod tests {
         repo.save_git_config_item("nostr.npub", &other.public_key().to_bech32()?, false)?;
         repo.save_git_config_item("nostr.nsec", &other.secret_key().to_bech32()?, false)?;
 
-        let error = resolve_selected_signer(&Some(&repo), "fred", &None)
+        let error = resolve_selection(&Some(&repo), "fred", &None, true)
             .await
             .unwrap_err();
         let message = format!("{error:#}");
@@ -824,7 +1032,9 @@ mod tests {
             false,
         )?;
 
-        let info = resolve_selected_signer(&Some(&repo), &npub, &None).await?;
+        let info = resolve_selection(&Some(&repo), &npub, &None, false)
+            .await?
+            .signer_info;
         assert!(matches!(info, SignerInfo::Nsec { .. }));
         Ok(())
     }
@@ -839,6 +1049,209 @@ mod tests {
         };
         let error = get_signer(&info, false).await.unwrap_err();
         assert!(error.to_string().contains("different npub"));
+        Ok(())
+    }
+
+    fn profile_event(
+        keys: &Keys,
+        name: Option<&str>,
+        display_name: Option<&str>,
+        created_at: u64,
+    ) -> Result<Event> {
+        let mut metadata = Metadata::new();
+        if let Some(name) = name {
+            metadata = metadata.name(name);
+        }
+        if let Some(display_name) = display_name {
+            metadata = metadata.display_name(display_name);
+        }
+        Ok(EventBuilder::new(Kind::Metadata, metadata.as_json())
+            .custom_created_at(Timestamp::from(created_at))
+            .finalize(keys)?)
+    }
+
+    fn nsec_info(keys: &Keys) -> Result<SignerInfo> {
+        Ok(SignerInfo::Nsec {
+            nsec: keys.secret_key().to_bech32()?,
+            password: None,
+            npub: Some(keys.public_key().to_bech32()?),
+            verify_npub: true,
+        })
+    }
+
+    #[test]
+    fn profile_names_match_case_insensitively_after_trimming() -> Result<()> {
+        let keys = Keys::generate();
+        let named = vec![profile_event(&keys, Some("DanConwayDev"), None, 10)?];
+        assert_eq!(
+            cached_profile_candidates("  danconwaydev ", &named).len(),
+            1
+        );
+        assert!(cached_profile_candidates("danconway", &named).is_empty());
+        let displayed = vec![profile_event(&keys, None, Some("Dan's Agent"), 10)?];
+        assert_eq!(
+            cached_profile_candidates("dan's agent", &displayed).len(),
+            1
+        );
+        assert!(cached_profile_candidates("", &displayed).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_newest_cached_profile_per_account_is_matched() -> Result<()> {
+        let keys = Keys::generate();
+        let events = vec![
+            profile_event(&keys, Some("old-name"), None, 10)?,
+            profile_event(&keys, Some("new-name"), None, 20)?,
+        ];
+        assert!(cached_profile_candidates("old-name", &events).is_empty());
+        assert_eq!(cached_profile_candidates("new-name", &events).len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn equal_timestamp_profiles_use_the_lower_event_id() -> Result<()> {
+        let keys = Keys::generate();
+        let first = profile_event(&keys, Some("first-name"), None, 10)?;
+        let second = profile_event(&keys, Some("second-name"), None, 10)?;
+        let (winner_name, loser_name) = if first.id < second.id {
+            ("first-name", "second-name")
+        } else {
+            ("second-name", "first-name")
+        };
+        let events = vec![first, second];
+
+        assert_eq!(cached_profile_candidates(winner_name, &events).len(), 1);
+        assert!(cached_profile_candidates(loser_name, &events).is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn alias_mapping_beats_cached_profile_name() -> Result<()> {
+        let fixture = GitTestRepo::new("main")?;
+        let repo = Repo::from_path(&fixture.dir)?;
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32()?;
+        repo.save_git_config_item("nostr.signer-alias.fred", &npub, false)?;
+        repo.save_git_config_item("nostr.npub", &npub, false)?;
+        repo.save_git_config_item("nostr.nsec", &keys.secret_key().to_bech32()?, false)?;
+
+        // an existing alias resolves without consulting cached profiles, so a
+        // same-named profile for another account can never shadow it
+        let resolved = resolve_selection(&Some(&repo), "fred", &None, true).await?;
+        assert_eq!(resolved.npub, npub);
+        assert_eq!(resolved.alias.as_deref(), Some("fred"));
+        Ok(())
+    }
+
+    #[test]
+    fn only_name_shaped_alias_failures_trigger_profile_name_lookup() {
+        let alias_not_found = anyhow::Error::new(SignerAliasNotFound {
+            alias: "fred".to_string(),
+        });
+        assert!(selector_may_be_profile_name("fred", &alias_not_found));
+        // selectors that can never be alias tokens fall through regardless of
+        // the reported alias error
+        assert!(selector_may_be_profile_name(
+            "DanConwayDev's Agent",
+            &anyhow::anyhow!("signer alias must start with a letter")
+        ));
+        // an unavailable alias store keeps alias resolution authoritative
+        assert!(!selector_may_be_profile_name(
+            "fred",
+            &anyhow::Error::new(credential_store::LookupError::Unavailable(anyhow::anyhow!(
+                "store down"
+            )))
+        ));
+        // an invalid npub is an npub error, never a profile name
+        assert!(!selector_may_be_profile_name(
+            "npub1notavalidkey",
+            &anyhow::anyhow!("--signer contains an invalid npub")
+        ));
+    }
+
+    #[test]
+    fn uncredentialed_same_named_profile_is_filtered_out() -> Result<()> {
+        let credentialed = Keys::generate();
+        let squatter = Keys::generate();
+        let npub = credentialed.public_key().to_bech32()?;
+        let events = vec![
+            profile_event(&credentialed, Some("Shared Name"), None, 10)?,
+            profile_event(&squatter, Some("shared name"), None, 20)?,
+        ];
+        let resolved = select_credentialed_profile("Shared Name", &events, |candidate| {
+            Ok(if candidate == npub {
+                Some(nsec_info(&credentialed)?)
+            } else {
+                None
+            })
+        })?;
+        assert_eq!(resolved.npub, npub);
+        assert!(resolved.alias.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_credentialed_profile_name_fails_closed() -> Result<()> {
+        let first = Keys::generate();
+        let second = Keys::generate();
+        let events = vec![
+            profile_event(&first, Some("Shared Name"), None, 10)?,
+            profile_event(&second, Some("Shared Name"), None, 20)?,
+        ];
+        let error = select_credentialed_profile("Shared Name", &events, |candidate| {
+            Ok(Some(SignerInfo::Nsec {
+                nsec: "unused".to_string(),
+                password: None,
+                npub: Some(candidate.to_string()),
+                verify_npub: true,
+            }))
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(&first.public_key().to_bech32()?));
+        assert!(message.contains(&second.public_key().to_bech32()?));
+        assert!(message.contains("--signer <npub>"));
+        Ok(())
+    }
+
+    #[test]
+    fn broken_candidate_credentials_propagate_instead_of_being_skipped() -> Result<()> {
+        let broken = Keys::generate();
+        let usable = Keys::generate();
+        let broken_npub = broken.public_key().to_bech32()?;
+        let events = vec![
+            profile_event(&broken, Some("Shared Name"), None, 10)?,
+            profile_event(&usable, Some("Shared Name"), None, 20)?,
+        ];
+        let error = select_credentialed_profile("Shared Name", &events, |candidate| {
+            if candidate == broken_npub {
+                Err(anyhow::Error::new(credential_store::LookupError::Invalid(
+                    "corrupt entry".to_string(),
+                )))
+            } else {
+                Ok(Some(nsec_info(&usable)?))
+            }
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(&broken_npub));
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_profile_names_yield_cache_guidance() -> Result<()> {
+        let error = select_credentialed_profile("No Such Name", &[], |_| Ok(None)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("--signer <npub>"), "got: {message}");
+        assert!(message.contains("cache"), "got: {message}");
+
+        // a matched profile without stored credentials points at logging in
+        let keys = Keys::generate();
+        let events = vec![profile_event(&keys, Some("Casper"), None, 10)?];
+        let error = select_credentialed_profile("casper", &events, |_| Ok(None)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("--signer <npub>"), "got: {message}");
+        assert!(message.contains("log"), "got: {message}");
         Ok(())
     }
 }

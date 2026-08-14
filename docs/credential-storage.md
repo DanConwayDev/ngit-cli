@@ -39,9 +39,9 @@ enumerated:
 
 ## Selecting signers
 
-`--signer <npub|alias>` selects an existing signer for one command without
-changing the configured profile. An alias maps to an npub in any of these
-places:
+`--signer <npub|alias|profile-name>` selects an existing signer for one
+command without changing the configured profile. An alias maps to an npub in
+any of these places:
 
 - OS credential store: `alias:fred` contains `npub1…`
 - `credentials.json`: `nostr/alias:fred` contains `npub1…`
@@ -56,6 +56,25 @@ npub) makes a signer the default for that Git-config scope. `ngit account login
 `git-config` secret storage was selected, the selected credential backend as
 well. After logout retains a stored signer, `ngit account login --local --alias
 fred` reactivates it without requiring the nsec or bunker URL again.
+
+A cached profile name is a third selector form: `--signer DanConwayDev` or
+`--signer "DanConwayDev's Agent"`. Selector precedence is npub, then alias,
+then profile name — a name is only consulted when the selector is not an
+npub and no alias mapping exists (including selectors that could never be
+alias tokens). The name is compared case-insensitively, after trimming,
+against the `name` and `display_name` fields of the newest cached kind-0
+profile per account, and only accounts with stored signer credentials count,
+so a same-named profile cached from someone else's account cannot be
+selected. Exactly one credentialed account may match: no match produces
+guidance to select by npub or alias instead (profiles enter the cache when
+their account logs in), and two or more matches fail closed listing each
+candidate's name and npub. A broken or unavailable credential entry for a
+matching account fails the selection rather than being skipped. Because
+profile names are mutable and non-unique they are never persisted:
+`ngit account login --signer <name>` resolves the name once and writes the
+resolved npub to `nostr.signer`, exactly like npub reactivation, while a
+one-shot `--signer <name>` re-resolves on every invocation and writes
+nothing.
 
 For a credential-store-backed selection, the selected Git-config scope contains
 `nostr.signer` and `nostr.npub`, plus `nostr.signer-alias.<alias>` when an alias

@@ -22,7 +22,7 @@ use ngit::login::credential_store::SERVICE;
 use nostr_sdk::prelude::*;
 use serde_json::Value;
 use tempfile::NamedTempFile;
-use test_harness::Harness;
+use test_harness::{Harness, repo::Repo};
 
 #[tokio::test]
 async fn export_keys_without_account_suggests_login_or_creation() -> Result<()> {
@@ -1378,5 +1378,275 @@ async fn local_logins_for_same_key_share_one_entry() -> Result<()> {
         "second login was broken by first logout: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+/// `account create --local --name <name>` stores the fresh secret in the
+/// file store and saves the account's kind-0 profile into the repo-scoped
+/// global cache; the follow-up logout retains both. Returns the npub.
+async fn create_named_account_then_logout(
+    repo: &Repo,
+    credentials: &NamedTempFile,
+    name: &str,
+) -> Result<String> {
+    let output = repo
+        .ngit(["account", "create", "--local", "--name", name])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "account create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let npub = repo
+        .config("nostr.npub")
+        .await?
+        .context("nostr.npub missing after account create")?;
+    let output = repo
+        .ngit(["account", "logout"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "logout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(npub)
+}
+
+#[tokio::test]
+async fn profile_name_selects_the_sole_credentialed_account_for_one_command() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    create_named_account_then_logout(&repo, &credentials, "Lighthouse Alice").await?;
+
+    // case-insensitive match against the cached kind-0 profile
+    let output = repo
+        .ngit(["--signer", "lighthouse ALICE", "account", "export-keys"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "profile-name selection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // a one-shot selection resolves per invocation and persists nothing
+    assert!(repo.config("nostr.signer").await?.is_none());
+    assert!(repo.config("nostr.npub").await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn login_with_profile_name_persists_the_npub_not_the_name() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let npub =
+        create_named_account_then_logout(&repo, &credentials, "Casper The Friendly Ghost").await?;
+
+    let output = repo
+        .ngit([
+            "--signer",
+            "casper the friendly ghost",
+            "account",
+            "login",
+            "--local",
+            "--offline",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "profile-name login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.signer").await?.as_deref(),
+        Some(npub.as_str()),
+        "login must persist the resolved npub, never the profile name"
+    );
+    assert_eq!(
+        repo.config("nostr.npub").await?.as_deref(),
+        Some(npub.as_str())
+    );
+    assert!(
+        repo.config("nostr.nsec").await?.is_none(),
+        "a credential-backed selection must not restore a redundant nsec pointer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_named_cached_profile_without_credentials_is_ignored() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+
+    // squat the name: the profile stays cached but its credentials are gone
+    let squatter_npub =
+        create_named_account_then_logout(&repo, &credentials, "Shared Name").await?;
+    let output = repo
+        .ngit(["account", "forget-keys", &squatter_npub])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "forget-keys failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let real_npub = create_named_account_then_logout(&repo, &credentials, "shared name").await?;
+
+    let output = repo
+        .ngit([
+            "--signer",
+            "Shared Name",
+            "account",
+            "login",
+            "--local",
+            "--offline",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "the sole credentialed account was not selected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.signer").await?.as_deref(),
+        Some(real_npub.as_str()),
+        "selection must resolve to the credentialed account"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_credentialed_same_named_accounts_fail_closed() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let first = create_named_account_then_logout(&repo, &credentials, "Shared Name").await?;
+    let second = create_named_account_then_logout(&repo, &credentials, "Shared Name").await?;
+
+    let output = repo
+        .ngit([
+            "--signer",
+            "shared name",
+            "account",
+            "login",
+            "--local",
+            "--offline",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        !output.status.success(),
+        "ambiguous profile name was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&first) && stderr.contains(&second),
+        "ambiguity error must list each candidate npub: {stderr}"
+    );
+    for key in ["nostr.signer", "nostr.npub", "nostr.nsec"] {
+        assert!(
+            repo.config(key).await?.is_none(),
+            "failed selection must not change {key}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_profile_name_yields_guidance_and_preserves_the_login() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+
+    // both a name-shaped selector and a valid-but-unmapped alias token get
+    // cache guidance rather than a bare alias-not-found error
+    for selector in ["No Such Name", "nosuchname"] {
+        let output = repo
+            .ngit([
+                "--signer",
+                selector,
+                "account",
+                "login",
+                "--local",
+                "--offline",
+            ])
+            .env("NGIT_SECRET_STORAGE", "file")
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .output()
+            .await?;
+        assert!(
+            !output.status.success(),
+            "unknown profile name '{selector}' unexpectedly logged in"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--signer <npub>"),
+            "missing selector guidance for '{selector}': {stderr}"
+        );
+        assert!(
+            stderr.to_lowercase().contains("cache"),
+            "missing cache explanation for '{selector}': {stderr}"
+        );
+        assert_eq!(
+            repo.config("nostr.nsec").await?.as_deref(),
+            Some(npub.as_str()),
+            "failed selection must preserve the current login"
+        );
+    }
     Ok(())
 }

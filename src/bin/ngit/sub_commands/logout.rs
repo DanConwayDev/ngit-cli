@@ -67,7 +67,7 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
         let alias = loaded
             .as_ref()
             .ok()
-            .and_then(|(_, _, source)| selected_alias(&git_repo, &None, source).ok().flatten());
+            .and_then(|(_, _, source)| selected_alias(&git_repo, source).ok().flatten());
         let pointers = credential_store::config_pointers(&scope, npub.as_deref());
         if forget {
             forget_pointers(&pointers)?;

@@ -36,7 +36,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 - **`--json` output uses `nevent1…` bech32** for all `id` and `reply_to` fields (not raw hex). Use these values directly as `<ID|nevent>` arguments and in `nostr:` URI references.
 - **Reference other issues/PRs/comments in `--body` using `nostr:` URIs** — e.g. `nostr:nevent1abc…` or `nostr:naddr1abc…`. Never paste raw hex IDs into body text. The `id` field from `--json` output is already a valid `nevent1…` string; prefix it with `nostr:` to form the URI. Example: `--body "Relates to nostr:nevent1abc…"`. ngit automatically converts these into the correct event tags.
 - **Multiline files are safe with normal `ngit` text options, but not with `git push -o`.** For `ngit ... --body` or `ngit ... --description`, pass the file as one quoted argument: `--body "$(cat note.md)"`. For a Git push option, real newlines are forbidden; use literal `\n` only for a short inline value. Never convert a file into `-o description=...`.
-- **Use `--signer <npub|alias>` to select a non-default stored identity for one `ngit` command.** Do not export or pass an nsec merely to switch between configured accounts. `git push` cannot receive ngit's global CLI flags; select its identity through the applicable `nostr.signer` Git config first.
+- **Use `--signer <npub|alias|name>` to select a non-default stored identity for one `ngit` command.** Do not export or pass an nsec merely to switch between configured accounts. `git push` cannot receive ngit's global CLI flags; select its identity through the applicable `nostr.signer` Git config first.
 
 ## Detecting a nostr repo
 

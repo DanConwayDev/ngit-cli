@@ -18,7 +18,7 @@ ngit sync --ref-name main        # sync specific ref
 | `--json`              | Structured output (ngit commands only) |
 | `--repo <TARGET>`     | Select remote, naddr, or nostr URL     |
 | `--repo-relay-only`   | Publish only to repository relays      |
-| `--signer <NPUB|ALIAS>` | Use a stored signer for one command  |
+| `--signer <NPUB|ALIAS|NAME>` | Use a stored signer for one command |
 | `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
 | `--nsec-file <PATH>`  | Read a one-shot key from a private file|
 | `-f`, `--force`       | Bypass safety guards                   |
