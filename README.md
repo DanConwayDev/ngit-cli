@@ -48,8 +48,18 @@ Run `ngit --customize` to list supported git config keys and their environment-v
 
 ```sh
 git config nostr.repo-relay-only true       # only publish nostr events to repo relays
-git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes up to 10 minutes of socket silence
+git config nostr.auto-pr-branches false     # fetch PR branches only after `ngit pr checkout`
+git config nostr.http-io-timeout-ms 600000  # allow large GRASP pushes up to 10 minutes of socket silence
 ```
+
+`nostr.auto-pr-branches` defaults to `true` and follows normal Git config
+precedence, so repository-local config overrides global config. Set it to
+`false` to avoid advertising and downloading every open or draft PR branch;
+add `--global` to make that the default for all repositories. Running
+`ngit pr checkout <id>` opts that PR branch back in and configures it for later
+`git fetch` and `git pull`. Run `git fetch --prune` once to remove any PR
+branches fetched before opting out. To override a global setting during the
+initial clone, use `git clone --config nostr.auto-pr-branches=true <nostr-url>`.
 
 Set `NGIT_CACHE_DIR` to place ngit's global event cache in a different
 writable directory, for example in a sandbox or ephemeral agent environment.

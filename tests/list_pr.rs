@@ -36,9 +36,13 @@
 //!
 //! All three resolve to the PR's `tip` (last commit in the series).
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+};
 
 use anyhow::{Context, Result};
+use nostr::prelude::ToBech32;
 use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedPr, PublishedRepo, Repo};
 
 async fn setup() -> Result<(Harness, PublishedRepo, [PublishedPr; 3])> {
@@ -78,8 +82,20 @@ struct LsRemoteOutput {
 }
 
 async fn ls_remote(repo: &Repo, remote: &str) -> Result<LsRemoteOutput> {
-    let out = repo
-        .git(["ls-remote", remote])
+    ls_remote_with_global_home(repo, remote, None).await
+}
+
+async fn ls_remote_with_global_home(
+    repo: &Repo,
+    remote: &str,
+    global_home: Option<&Path>,
+) -> Result<LsRemoteOutput> {
+    let mut command = repo.git(["ls-remote", remote]);
+    if let Some(path) = global_home {
+        command.env("HOME", path);
+        command.env_remove("GIT_CONFIG_GLOBAL");
+    }
+    let out = command
         .output()
         .await
         .with_context(|| format!("spawn git ls-remote {remote}"))?;
@@ -103,6 +119,69 @@ async fn ls_remote(repo: &Repo, remote: &str) -> Result<LsRemoteOutput> {
         refs.insert(name.to_string(), oid.to_string());
     }
     Ok(LsRemoteOutput { refs })
+}
+
+async fn set_global_config(repo: &Repo, home: &Path, key: &str, value: &str) -> Result<()> {
+    std::fs::create_dir_all(home).context("failed to create isolated global config home")?;
+    let config_path = home.join(".gitconfig");
+    let args: [&std::ffi::OsStr; 5] = [
+        std::ffi::OsStr::new("config"),
+        std::ffi::OsStr::new("--file"),
+        config_path.as_os_str(),
+        std::ffi::OsStr::new(key),
+        std::ffi::OsStr::new(value),
+    ];
+    let out = repo
+        .git(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to set global git config {key}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git config --file <isolated-global> {key} exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(())
+}
+
+async fn git_ok<I, S>(repo: &Repo, args: I, label: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let out = repo
+        .git(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn {label}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{label} exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(())
+}
+
+async fn rev_parse(repo: &Repo, reference: &str) -> Result<String> {
+    let out = repo
+        .git(["rev-parse", reference])
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn git rev-parse {reference}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git rev-parse {reference} exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(String::from_utf8(out.stdout)
+        .context("git rev-parse stdout not utf-8")?
+        .trim()
+        .to_string())
 }
 
 /// Folds legacy
@@ -165,6 +244,267 @@ async fn open_pr_proposals_are_listed_under_pr_namespaces() -> Result<()> {
         ls.refs.get("refs/heads/main").map(String::as_str),
         Some(published.initial_oid.as_str()),
         "main should still be listed alongside the PR namespaces",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabling_auto_pr_branches_only_tracks_explicitly_checked_out_pr() -> Result<()> {
+    let (harness, published, prs) = setup().await?;
+    let test_repo = harness
+        .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+
+    let global_home = test_repo.dir().join(".git/test-global-home");
+    set_global_config(&test_repo, &global_home, "nostr.auto-pr-branches", "false").await?;
+    let globally_disabled =
+        ls_remote_with_global_home(&test_repo, "origin", Some(&global_home)).await?;
+    assert!(
+        globally_disabled
+            .refs
+            .keys()
+            .all(|name| !name.starts_with("refs/heads/pr/") && !name.starts_with("refs/pr/")),
+        "global config should disable automatic PR refs: {:#?}",
+        globally_disabled.refs,
+    );
+
+    git_ok(
+        &test_repo,
+        ["config", "--local", "nostr.auto-pr-branches", "true"],
+        "override global automatic PR branch setting locally",
+    )
+    .await?;
+    let locally_enabled =
+        ls_remote_with_global_home(&test_repo, "origin", Some(&global_home)).await?;
+    for pr in &prs {
+        assert!(
+            locally_enabled
+                .refs
+                .contains_key(&format!("refs/heads/{}", expected_long_branch(pr))),
+            "local true should override global false for {:?}",
+            pr.branch_name,
+        );
+    }
+
+    git_ok(
+        &test_repo,
+        ["config", "--local", "nostr.auto-pr-branches", "false"],
+        "disable automatic PR branches",
+    )
+    .await?;
+
+    let before_checkout = ls_remote(&test_repo, "origin").await?;
+    assert!(
+        before_checkout
+            .refs
+            .keys()
+            .all(|name| !name.starts_with("refs/heads/pr/") && !name.starts_with("refs/pr/")),
+        "no PR refs should be advertised before an explicit checkout: {:#?}",
+        before_checkout.refs,
+    );
+
+    let selected = &prs[0];
+    let branch = expected_long_branch(selected);
+    let checkout = test_repo
+        .ngit(["pr", "checkout", &selected.event_id.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        checkout.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        checkout.status,
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr),
+    );
+
+    assert_eq!(
+        test_repo
+            .config(&format!("branch.{branch}.remote"))
+            .await?
+            .as_deref(),
+        Some("origin"),
+        "checked-out PR branch should track the nostr remote",
+    );
+    assert_eq!(
+        test_repo
+            .config(&format!("branch.{branch}.merge"))
+            .await?
+            .as_deref(),
+        Some(format!("refs/heads/{branch}").as_str()),
+        "checked-out PR branch should track its remote branch",
+    );
+
+    let after_checkout = ls_remote(&test_repo, "origin").await?;
+    assert_eq!(
+        after_checkout
+            .refs
+            .get(&format!("refs/heads/{branch}"))
+            .map(String::as_str),
+        Some(selected.tip.as_str()),
+        "the explicitly checked-out PR should remain fetchable",
+    );
+    for unselected in &prs[1..] {
+        assert!(
+            !after_checkout
+                .refs
+                .contains_key(&format!("refs/heads/{}", expected_long_branch(unselected))),
+            "unselected PR {:?} should remain hidden",
+            unselected.branch_name,
+        );
+    }
+
+    git_ok(&test_repo, ["checkout", "main"], "git checkout main").await?;
+    git_ok(
+        &test_repo,
+        ["branch", "-f", &branch, &selected.commits[0]],
+        "rewind checked-out PR branch",
+    )
+    .await?;
+    git_ok(
+        &test_repo,
+        ["update-ref", "-d", &format!("refs/remotes/origin/{branch}")],
+        "remove selected PR remote-tracking ref",
+    )
+    .await?;
+    git_ok(
+        &test_repo,
+        ["checkout", &branch],
+        "check out rewound PR branch",
+    )
+    .await?;
+    git_ok(
+        &test_repo,
+        ["pull", "--ff-only"],
+        "pull explicitly selected PR branch",
+    )
+    .await?;
+
+    assert_eq!(
+        rev_parse(&test_repo, "HEAD").await?,
+        selected.tip,
+        "git pull should fast-forward the selected PR branch",
+    );
+    assert_eq!(
+        rev_parse(&test_repo, &format!("refs/remotes/origin/{branch}")).await?,
+        selected.tip,
+        "git pull should recreate the selected PR remote-tracking ref",
+    );
+
+    Ok(())
+}
+
+/// A proposal author addresses their own PR by its bare branch name
+/// (`pr/<branch>`), but `ngit pr checkout` creates the shorthand-id suffixed
+/// name regardless of authorship. With automatic PR branches disabled, either
+/// local branch must opt the author's own proposal back in.
+#[tokio::test]
+async fn disabled_auto_pr_branches_own_pr_opts_in_via_bare_branch_or_checkout() -> Result<()> {
+    let (harness, published, prs) = setup().await?;
+    // The clone itself runs with the default (enabled) config, so all
+    // proposal objects are already local when the phases below start.
+    let test_repo = harness
+        .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+
+    let own = &prs[0];
+    git_ok(
+        &test_repo,
+        [
+            "config",
+            "--local",
+            "nostr.npub",
+            &own.author_pubkey.to_bech32()?,
+        ],
+        "configure the clone as the proposal author",
+    )
+    .await?;
+    git_ok(
+        &test_repo,
+        ["config", "--local", "nostr.auto-pr-branches", "false"],
+        "disable automatic PR branches",
+    )
+    .await?;
+
+    // Phase 1: the author's original machine keeps the bare branch name.
+    let bare_branch = format!("pr/{}", own.branch_name);
+    git_ok(
+        &test_repo,
+        ["branch", &bare_branch, &own.tip],
+        "create the author's bare proposal branch",
+    )
+    .await?;
+
+    let with_bare = ls_remote(&test_repo, "origin").await?;
+    assert_eq!(
+        with_bare
+            .refs
+            .get(&format!("refs/heads/{bare_branch}"))
+            .map(String::as_str),
+        Some(own.tip.as_str()),
+        "the bare local branch should keep the author's own PR advertised",
+    );
+    assert_eq!(
+        with_bare
+            .refs
+            .keys()
+            .filter(|name| name.starts_with("refs/heads/pr/"))
+            .count(),
+        1,
+        "only the author's opted-in proposal should be advertised: {:#?}",
+        with_bare.refs,
+    );
+
+    // Phase 2: a fresh machine has no bare branch; checkout must opt back in
+    // even though it creates the suffixed branch name.
+    git_ok(
+        &test_repo,
+        ["branch", "-D", &bare_branch],
+        "delete the bare proposal branch",
+    )
+    .await?;
+    let hidden = ls_remote(&test_repo, "origin").await?;
+    assert!(
+        hidden
+            .refs
+            .keys()
+            .all(|name| !name.starts_with("refs/heads/pr/")),
+        "no PR refs should be advertised without a matching local branch: {:#?}",
+        hidden.refs,
+    );
+
+    let checkout = test_repo
+        .ngit(["pr", "checkout", &own.event_id.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        checkout.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        checkout.status,
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr),
+    );
+
+    let suffixed_branch = expected_long_branch(own);
+    assert_eq!(
+        test_repo
+            .config(&format!("branch.{suffixed_branch}.merge"))
+            .await?
+            .as_deref(),
+        Some(format!("refs/heads/{suffixed_branch}").as_str()),
+        "checked-out own PR branch should track its remote branch",
+    );
+
+    let after_checkout = ls_remote(&test_repo, "origin").await?;
+    assert_eq!(
+        after_checkout
+            .refs
+            .get(&format!("refs/heads/{suffixed_branch}"))
+            .map(String::as_str),
+        Some(own.tip.as_str()),
+        "checkout must opt the author's own PR back in under the suffixed name",
     );
 
     Ok(())

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use client::get_state_from_cache;
@@ -17,6 +17,8 @@ use ngit::{
 use repo_ref::RepoRef;
 
 use super::fetch::make_commits_for_proposal;
+
+const AUTO_PR_BRANCHES_CONFIG: &str = "nostr.auto-pr-branches";
 
 #[derive(Clone)]
 pub(super) struct ListResult {
@@ -117,16 +119,26 @@ pub async fn run_list(
     };
 
     state.retain(|k, _| !k.starts_with("refs/heads/pr/"));
+    let auto_pr_branches = auto_pr_branches_enabled(git_repo)?;
 
     state.extend(
         // get as refs/heads/pr/<branch-name>(<shorthand-event-id>)
-        get_open_and_draft_proposals_state(&term, git_repo, repo_ref, &remote_states).await?,
+        get_open_and_draft_proposals_state(
+            &term,
+            git_repo,
+            repo_ref,
+            &remote_states,
+            auto_pr_branches,
+        )
+        .await?,
     );
 
-    state.extend(
-        // get as refs/pr/<branch-name>(<shorthand-event-id>) and refs/pr/<event-id>/head
-        get_all_proposals_state(git_repo, repo_ref).await?,
-    );
+    if auto_pr_branches {
+        state.extend(
+            // get as refs/pr/<branch-name>(<shorthand-event-id>) and refs/pr/<event-id>/head
+            get_all_proposals_state(git_repo, repo_ref).await?,
+        );
+    }
 
     // TODO 'for push' should we check with the git servers to see if any of them
     // allow push from the user?
@@ -148,15 +160,52 @@ pub async fn run_list(
     })
 }
 
-/// fetches branches and tags from git servers so patch parent commits can be
-/// used to build patches with correct commit ids
+/// Advertise open and draft proposals as branches. When automatic PR branches
+/// are disabled, only proposals with a matching local branch are included —
+/// for a proposal author that is either the bare branch name or the
+/// shorthand-id suffixed name that `ngit pr checkout` creates.
 #[allow(clippy::too_many_lines)]
 async fn get_open_and_draft_proposals_state(
     term: &console::Term,
     git_repo: &Repo,
     repo_ref: &RepoRef,
     remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
+    auto_pr_branches: bool,
 ) -> Result<HashMap<String, String>> {
+    let selected_local_branches = if auto_pr_branches {
+        None
+    } else {
+        let branches = git_repo
+            .get_local_branch_names()
+            .context("failed to list local branches while selecting proposal branches")?
+            .into_iter()
+            .filter(|name| name.starts_with("pr/"))
+            .collect::<HashSet<_>>();
+
+        if branches.is_empty() {
+            return Ok(HashMap::new());
+        }
+        Some(branches)
+    };
+
+    let mut open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
+    let current_user = get_curent_user(git_repo)?;
+
+    if let Some(selected_local_branches) = &selected_local_branches {
+        open_and_draft_proposals.retain(|_, (proposal, _, _)| {
+            selected_branch_names(
+                proposal,
+                current_user.as_ref(),
+                Some(selected_local_branches),
+            )
+            .is_ok_and(|names| !names.is_empty())
+        });
+
+        if open_and_draft_proposals.is_empty() {
+            return Ok(HashMap::new());
+        }
+    }
+
     // we cannot use commit_id in the latest patch in a proposal because:
     // 1) the `commit` tag is optional
     // 2) if the commit tag is wrong, it will cause errors which stop clone from
@@ -169,9 +218,11 @@ async fn get_open_and_draft_proposals_state(
         if fetch_from_git_server(
             git_repo,
             &oids_from_git_servers
-                .values()
-                .filter(|v| !v.starts_with("ref: "))
-                .cloned()
+                .iter()
+                .filter(|(name, value)| {
+                    !name.starts_with("refs/heads/pr/") && !value.starts_with("ref: ")
+                })
+                .map(|(_, value)| value.clone())
                 .collect::<Vec<String>>(),
             git_server_url,
             &repo_ref.to_nostr_git_url(&None),
@@ -183,8 +234,6 @@ async fn get_open_and_draft_proposals_state(
             break;
         }
     }
-
-    let open_and_draft_proposals = get_open_or_draft_proposals(git_repo, repo_ref).await?;
 
     // Collect PR/PR-update tip OIDs that are still missing after the bulk prefetch.
     // We borrow proposals here so we can move them in the state-building loop
@@ -240,63 +289,63 @@ async fn get_open_and_draft_proposals_state(
     }
 
     let mut state = HashMap::new();
-    let current_user = get_curent_user(git_repo)?;
     for (_, (proposal, events_to_apply, _)) in open_and_draft_proposals {
-        if let Ok(cl) = event_to_cover_letter(&proposal) {
-            if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
-                branch_name = if let Some(public_key) = current_user {
-                    if proposal.pubkey.eq(&public_key) {
-                        format!("pr/{}", cl.branch_name_without_id_or_prefix)
-                    } else {
-                        branch_name
-                    }
-                } else {
-                    branch_name
-                };
-                // if events_to_apply contains a PR or PR Update event it should be the only
-                // event in the Vec
-                if let Some(pr_or_pr_update) = events_to_apply
-                    .iter()
-                    .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
-                {
-                    match tag_value(pr_or_pr_update, "c") {
-                        Ok(tip) => {
-                            // Only advertise once confirmed locally available — this
-                            // guarantees the subsequent fetch phase can serve the object.
-                            if git_repo.does_commit_exist(&tip).is_ok_and(|r| r) {
-                                state.insert(format!("refs/heads/{branch_name}"), tip);
-                            }
-                        }
-                        Err(_) => {
-                            let _ = term.write_line(
-                                format!(
-                                    "WARNING: failed to fetch branch {branch_name} error: {} event poorly formatted",
-                                    if pr_or_pr_update.kind.eq(&KIND_PULL_REQUEST) {
-                                        "PR"
-                                    } else {
-                                        "PR update"
-                                    }
-                                )
-                                .as_str(),
-                            );
+        let Ok(branch_names) = selected_branch_names(
+            &proposal,
+            current_user.as_ref(),
+            selected_local_branches.as_ref(),
+        ) else {
+            continue;
+        };
+        let Some(branch_name) = branch_names.first() else {
+            continue;
+        };
+        // if events_to_apply contains a PR or PR Update event it should be the only
+        // event in the Vec
+        if let Some(pr_or_pr_update) = events_to_apply
+            .iter()
+            .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
+        {
+            match tag_value(pr_or_pr_update, "c") {
+                Ok(tip) => {
+                    // Only advertise once confirmed locally available — this
+                    // guarantees the subsequent fetch phase can serve the object.
+                    if git_repo.does_commit_exist(&tip).is_ok_and(|r| r) {
+                        for name in &branch_names {
+                            state.insert(format!("refs/heads/{name}"), tip.clone());
                         }
                     }
-                } else {
-                    match make_commits_for_proposal(git_repo, repo_ref, &events_to_apply) {
-                        Ok(tip) => {
-                            state.insert(format!("refs/heads/{branch_name}"), tip);
-                        }
-                        Err(error) => {
-                            if let Ok(Some(public_key)) = get_curent_user(git_repo) {
-                                if repo_ref.maintainers.contains(&public_key)
-                                    || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
-                                {
-                                    term.write_line(
-                                        format!("WARNING (only shown to maintainers or author): failed to fetch branch {branch_name}, error: {error}")
-                                            .as_str(),
-                                    )?;
+                }
+                Err(_) => {
+                    let _ = term.write_line(
+                            format!(
+                                "WARNING: failed to fetch branch {branch_name} error: {} event poorly formatted",
+                                if pr_or_pr_update.kind.eq(&KIND_PULL_REQUEST) {
+                                    "PR"
+                                } else {
+                                    "PR update"
                                 }
-                            }
+                            )
+                            .as_str(),
+                        );
+                }
+            }
+        } else {
+            match make_commits_for_proposal(git_repo, repo_ref, &events_to_apply) {
+                Ok(tip) => {
+                    for name in &branch_names {
+                        state.insert(format!("refs/heads/{name}"), tip.clone());
+                    }
+                }
+                Err(error) => {
+                    if let Ok(Some(public_key)) = get_curent_user(git_repo) {
+                        if repo_ref.maintainers.contains(&public_key)
+                            || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
+                        {
+                            term.write_line(
+                                    format!("WARNING (only shown to maintainers or author): failed to fetch branch {branch_name}, error: {error}")
+                                        .as_str(),
+                                )?;
                         }
                     }
                 }
@@ -304,6 +353,69 @@ async fn get_open_and_draft_proposals_state(
         }
     }
     Ok(state)
+}
+
+fn auto_pr_branches_enabled(git_repo: &Repo) -> Result<bool> {
+    let config = git_repo
+        .git_repo
+        .config()
+        .context("failed to open git config while reading proposal branch settings")?;
+
+    match config.get_bool(AUTO_PR_BRANCHES_CONFIG) {
+        Ok(enabled) => Ok(enabled),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(true),
+        Err(error) => Err(error).context(format!(
+            "failed to read {AUTO_PR_BRANCHES_CONFIG} as a boolean"
+        )),
+    }
+}
+
+/// Candidate branch names for a proposal, preferred name first. Proposal
+/// authors address their own proposal by its bare branch name, but the
+/// shorthand-id suffixed form is kept as a fallback because
+/// `ngit pr checkout` creates the suffixed name regardless of authorship.
+fn proposal_branch_names(
+    proposal: &nostr::prelude::Event,
+    current_user: Option<&nostr::prelude::PublicKey>,
+) -> Result<Vec<String>> {
+    let cover_letter = event_to_cover_letter(proposal)?;
+    let suffixed = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
+    if current_user.is_some_and(|public_key| proposal.pubkey.eq(public_key)) {
+        Ok(vec![
+            format!("pr/{}", cover_letter.branch_name_without_id_or_prefix),
+            suffixed,
+        ])
+    } else {
+        Ok(vec![suffixed])
+    }
+}
+
+/// The single preferred branch name for a proposal.
+fn proposal_branch_name(
+    proposal: &nostr::prelude::Event,
+    current_user: Option<&nostr::prelude::PublicKey>,
+) -> Result<String> {
+    let mut names = proposal_branch_names(proposal, current_user)?;
+    Ok(names.swap_remove(0))
+}
+
+/// Branch names to advertise for a proposal. With automatic PR branches
+/// enabled this is the single preferred name. When disabled, it is every
+/// candidate name with a matching local branch, so that an author's
+/// `ngit pr checkout` opts their own proposal back in even though checkout
+/// creates the suffixed branch name.
+fn selected_branch_names(
+    proposal: &nostr::prelude::Event,
+    current_user: Option<&nostr::prelude::PublicKey>,
+    selected_local_branches: Option<&HashSet<String>>,
+) -> Result<Vec<String>> {
+    let mut names = proposal_branch_names(proposal, current_user)?;
+    if let Some(selected) = selected_local_branches {
+        names.retain(|name| selected.contains(name));
+    } else {
+        names.truncate(1);
+    }
+    Ok(names)
 }
 
 /// we assume latest default branch oid has been fetched so patch parent commits
@@ -316,31 +428,18 @@ async fn get_all_proposals_state(
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
     let current_user = get_curent_user(git_repo)?;
     for (proposal, events_to_apply, _) in all_proposals.values() {
-        if let Ok(cl) = event_to_cover_letter(proposal) {
-            if let Ok(mut branch_name) = cl.get_branch_name_with_pr_prefix_and_shorthand_id() {
-                branch_name = if let Some(public_key) = current_user {
-                    if proposal.pubkey.eq(&public_key) {
-                        format!("pr/{}", cl.branch_name_without_id_or_prefix)
-                    } else {
-                        branch_name
-                    }
-                } else {
-                    branch_name
-                };
-                if let Some(pr_or_pr_update) = events_to_apply
-                    .iter()
-                    .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
-                {
-                    if let Ok(tip) = tag_value(pr_or_pr_update, "c") {
-                        state.insert(format!("refs/{branch_name}"), tip.clone());
-                        state.insert(format!("refs/pr/{}/head", proposal.id), tip);
-                    }
-                } else if let Ok(tip) =
-                    make_commits_for_proposal(git_repo, repo_ref, events_to_apply)
-                {
+        if let Ok(branch_name) = proposal_branch_name(proposal, current_user.as_ref()) {
+            if let Some(pr_or_pr_update) = events_to_apply
+                .iter()
+                .find(|e| e.kind.eq(&KIND_PULL_REQUEST) || e.kind.eq(&KIND_PULL_REQUEST_UPDATE))
+            {
+                if let Ok(tip) = tag_value(pr_or_pr_update, "c") {
                     state.insert(format!("refs/{branch_name}"), tip.clone());
                     state.insert(format!("refs/pr/{}/head", proposal.id), tip);
                 }
+            } else if let Ok(tip) = make_commits_for_proposal(git_repo, repo_ref, events_to_apply) {
+                state.insert(format!("refs/{branch_name}"), tip.clone());
+                state.insert(format!("refs/pr/{}/head", proposal.id), tip);
             }
         }
     }

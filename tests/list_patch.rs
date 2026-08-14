@@ -112,6 +112,26 @@ async fn ls_remote(repo: &Repo, remote: &str) -> Result<LsRemoteOutput> {
     Ok(LsRemoteOutput { refs })
 }
 
+async fn git_ok<I, S>(repo: &Repo, args: I, label: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let out = repo
+        .git(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn {label}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{label} exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(())
+}
+
 /// Patch-kind counterpart of
 /// `tests/list_pr.rs::open_pr_proposals_are_listed_under_pr_namespaces`.
 /// Same three-ref-form-per-proposal assertion shape; the construction
@@ -154,6 +174,67 @@ async fn open_patch_proposals_are_listed_under_pr_namespaces() -> Result<()> {
         ls.refs.get("refs/heads/main").map(String::as_str),
         Some(published.initial_oid.as_str()),
         "main should still be listed alongside the patch-series PR namespaces",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_auto_pr_branches_reconstructs_only_checked_out_patch_series() -> Result<()> {
+    let (harness, published, series) = setup().await?;
+    let test_repo = harness
+        .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+
+    git_ok(
+        &test_repo,
+        ["config", "--local", "nostr.auto-pr-branches", "false"],
+        "disable automatic PR branches",
+    )
+    .await?;
+
+    let before_checkout = ls_remote(&test_repo, "origin").await?;
+    assert!(
+        before_checkout
+            .refs
+            .keys()
+            .all(|name| !name.starts_with("refs/heads/pr/") && !name.starts_with("refs/pr/")),
+        "no patch-series refs should be advertised before checkout: {:#?}",
+        before_checkout.refs,
+    );
+
+    let selected = &series[0];
+    let checkout = test_repo
+        .ngit(["pr", "checkout", &root_event_id(selected)?.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        checkout.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        checkout.status,
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr),
+    );
+
+    let branch = expected_long_branch(selected)?;
+    let after_checkout = ls_remote(&test_repo, "origin").await?;
+    assert_eq!(
+        after_checkout
+            .refs
+            .get(&format!("refs/heads/{branch}"))
+            .map(String::as_str),
+        Some(selected.tip.as_str()),
+        "the checked-out patch series should be reconstructed and advertised",
+    );
+    assert_eq!(
+        after_checkout
+            .refs
+            .keys()
+            .filter(|name| name.starts_with("refs/heads/pr/"))
+            .count(),
+        1,
+        "only the checked-out patch series should appear as a PR branch",
     );
 
     Ok(())

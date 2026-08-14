@@ -146,6 +146,13 @@ Values are semicolon-separated URLs without spaces.
     Useful when you do not want to broadcast to your personal relay set.
     Also available as: {repo_relay_only_flag}
 
+  {auto_pr_branches}
+    Set to false to stop advertising every open or draft PR as a `pr/*` branch.
+    Defaults to true; local config overrides global config. `ngit pr checkout`
+    still creates and tracks the selected PR branch so `git fetch` and
+    `git pull` keep it current. Use `git fetch --prune` to remove branches
+    fetched before disabling this setting.
+
   {trust_server_domains}
     Semicolon-separated git-server hostnames that `ngit sync` should trust when
     they are fast-forward ahead of nostr state, without `--trust-server`.
@@ -211,6 +218,7 @@ implementation details used for efficiency.
         nostate = key("nostr.nostate true"),
         repo_relay_only = key("nostr.repo-relay-only true"),
         repo_relay_only_flag = cmd("ngit --repo-relay-only send"),
+        auto_pr_branches = key("nostr.auto-pr-branches false"),
         trust_server_domains = key("nostr.trust-server-domains"),
         trust_server_example =
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
