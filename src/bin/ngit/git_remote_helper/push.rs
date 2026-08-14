@@ -25,7 +25,7 @@ use ngit::{
         get_status, sign_ordered_status_event, status_kinds, tag_value,
     },
     list::list_from_remotes,
-    login::{existing::load_existing_login, user::UserRef},
+    login::{SignerInfo, existing::load_existing_login, user::UserRef},
     proposal_base::{
         ProposalBaseInference, commits_after_base, infer_proposal_base,
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
@@ -70,6 +70,7 @@ pub(super) async fn run_push(
     git_server: Option<String>,
     proposal_options: super::ProposalOptions,
     force_with_lease: &HashMap<String, Option<String>>,
+    command_signer: Option<&SignerInfo>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
 
@@ -168,6 +169,7 @@ pub(super) async fn run_push(
             &git_server_push_options,
             git_server.as_deref(),
             &proposal_options,
+            command_signer,
         )
         .await?;
 
@@ -402,10 +404,12 @@ async fn create_events_and_proposals(
     git_server_push_options: &[String],
     git_server: Option<&str>,
     proposal_options: &super::ProposalOptions,
+    command_signer: Option<&SignerInfo>,
 ) -> Result<PushEventsPlan> {
+    let command_signer = command_signer.cloned();
     let (signer, mut user_ref, _) = load_existing_login(
         &Some(git_repo),
-        &None,
+        &command_signer,
         &None,
         &None,
         Some(client),

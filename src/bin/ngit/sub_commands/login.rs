@@ -75,7 +75,10 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
             &[
                 ("--nsec <key>", "provide secret key (nsec or hex)"),
                 ("--bunker-url <url>", "bunker:// URL from signer app"),
-                ("--signer <npub|alias|name>", "reactivate a stored signer"),
+                (
+                    "--signer <alias|npub|nostr-display-name>",
+                    "reactivate a stored signer",
+                ),
                 ("--alias <alias>", "reactivate an existing stored alias"),
                 ("--interactive", "for interactive nostr connect login"),
             ],

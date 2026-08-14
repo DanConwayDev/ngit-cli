@@ -20,7 +20,8 @@ ngit account logout                           # removes login config, but preser
 ngit account logout --forget                  # logout and delete the stored secret
 ngit account forget-keys <entry>              # delete a preserved credential-store entry
 ngit --signer alice account whoami --json --offline # inspect a stored identity without switching
-ngit --signer alice issue create --subject "Bug" --body "Details" # sign one command as alice
+ngit --signer alice issue create --subject "Bug" --body "Details" # sign one ngit command as alice
+git -c nostr.signer=alice push origin pr/topic # run one Git command as alice
 ngit --nsec <nsec> <command>                  # inline for CI, no login needed
 ngit --nsec-file /private/key <command>       # one-shot CI/agent key, omitted from argv
 ```
@@ -28,8 +29,11 @@ ngit --nsec-file /private/key <command>       # one-shot CI/agent key, omitted f
 By default, login/create use the OS credential store and fall back to ngit's user-only file store. Git config contains the credential entry name rather than the secret. Select `auto`, `file`, or `git-config` with `--secret-storage`, `NGIT_SECRET_STORAGE`, or `nostr.secret-storage`; plaintext git-config storage must be requested explicitly. Existing plaintext values remain supported.
 
 Aliases name stored signers without exposing their secrets. On ordinary
-commands, `--signer` selects an alias, npub, or cached profile name for one
-direct `ngit` invocation without rewriting the configured login.
+commands, `--signer <alias|npub|nostr-display-name>` selects an identity for one
+direct `ngit` invocation without rewriting the configured login. For a Git
+command such as `push`, use
+`git -c nostr.signer=<alias|npub|nostr-display-name> <command>` for the same
+one-shot behavior.
 `ngit account login --signer <alias>` deliberately activates that stored
 signer; add `--local` to make it the repository default, including for
 `git push`, or omit `--local` to make it the global default.

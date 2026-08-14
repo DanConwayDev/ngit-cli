@@ -225,7 +225,7 @@ implementation details used for efficiency.
         login_cmd = cmd("ngit account login"),
         signer_selection = key("nostr.signer"),
         signer_alias = key("nostr.signer-alias.<alias>"),
-        signer_flag = cmd("ngit --signer <npub|alias|name> <command>"),
+        signer_flag = cmd("ngit --signer <alias|npub|nostr-display-name> <command>"),
         nsec = key("nostr.nsec"),
         npub = key("nostr.npub"),
         bunker_uri = key("nostr.bunker-uri"),

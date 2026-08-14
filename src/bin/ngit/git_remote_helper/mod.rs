@@ -11,6 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
@@ -22,7 +23,7 @@ use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
     client::{self, Client, Params},
     git::{self, Repo, utils::set_git_timeout},
-    login::existing::load_existing_login,
+    login::{SignerInfo, existing::load_existing_login},
     utils::read_line,
 };
 use nostr::nips::nip19::Nip19Coordinate;
@@ -31,6 +32,50 @@ use nostr::nips::nip19::Nip19Coordinate;
 /// re-invokes `ngit`. Deliberately absent from the clap CLI so it
 /// never appears in user-facing help.
 pub const INTERNAL_COMMAND: &str = "__git-remote-nostr";
+
+/// Read a config value supplied by the invoking Git command (for example,
+/// `git -c nostr.signer=alice push`). Git passes `-c` values to remote helpers
+/// through its command-config environment; asking Git to decode that internal
+/// representation avoids duplicating Git's quoting rules here.
+fn command_config_value(key: &str) -> Result<Option<String>> {
+    if std::env::var_os("GIT_CONFIG_PARAMETERS").is_none()
+        && std::env::var_os("GIT_CONFIG_COUNT").is_none()
+    {
+        return Ok(None);
+    }
+
+    command_config_value_from(&mut Command::new("git"), key)
+}
+
+fn command_config_value_from(command: &mut Command, key: &str) -> Result<Option<String>> {
+    let output = command
+        .args(["config", "--null", "--show-scope", "--get", key])
+        .output()
+        .context("failed to read Git command-scoped config")?;
+
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        bail!(
+            "failed to read Git command-scoped config: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let mut fields = output.stdout.split(|byte| *byte == 0);
+    let scope = fields.next().unwrap_or_default();
+    let value = fields.next().unwrap_or_default();
+    if scope != b"command" {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        std::str::from_utf8(value)
+            .context("Git command-scoped config is not valid UTF-8")?
+            .to_string(),
+    ))
+}
 
 #[derive(Default, Clone)]
 struct PushOptions {
@@ -178,6 +223,11 @@ pub(crate) mod push;
 /// corrupt git's remote-helper protocol.
 #[allow(clippy::too_many_lines)]
 pub async fn run(args: &[String]) -> Result<()> {
+    // Capture this before any libgit2-backed operation. libgit2 does not read
+    // the command-config environment that Git forwards to remote helpers.
+    let command_signer =
+        command_config_value("nostr.signer")?.map(|selector| SignerInfo::Selection { selector });
+
     if std::env::var("NGITTEST").is_ok() {
         std::env::set_var("NGIT_VERBOSE", "1");
     }
@@ -193,9 +243,9 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    if let Ok((signer, _, _)) = load_existing_login(
+    match load_existing_login(
         &Some(&git_repo),
-        &None,
+        &command_signer,
         &None,
         &None,
         None,
@@ -205,8 +255,20 @@ pub async fn run(args: &[String]) -> Result<()> {
     )
     .await
     {
-        // signer for to respond to relay auth request
-        client.set_signer(signer).await;
+        Ok((signer, _, _)) => {
+            // signer for to respond to relay auth request
+            client.set_signer(signer).await;
+        }
+        // an explicit `-c nostr.signer=` selection must fail closed rather
+        // than silently degrading to anonymous relay access
+        Err(error) if command_signer.is_some() => {
+            return Err(
+                error.context("failed to resolve the signer selected with `git -c nostr.signer`")
+            );
+        }
+        // without a selection, a missing login only means anonymous relay
+        // access
+        Err(_) => {}
     }
 
     let fetch_report =
@@ -279,6 +341,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                     push_options.git_server.clone(),
                     push_options.proposal.clone(),
                     &push_options.force_with_lease,
+                    command_signer.as_ref(),
                 )
                 .await?;
                 push_options = PushOptions::default();
@@ -382,6 +445,64 @@ async fn fetching_with_report_for_helper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_signer_from_git_command_config() {
+        let mut command = Command::new("git");
+        command
+            .env_remove("GIT_CONFIG_COUNT")
+            .env("GIT_CONFIG_PARAMETERS", "'nostr.signer'='Dan Conway'");
+
+        assert_eq!(
+            command_config_value_from(&mut command, "nostr.signer").unwrap(),
+            Some("Dan Conway".to_string())
+        );
+    }
+
+    /// A `nostr.signer` from git *config* must never count as a per-command
+    /// selection: only that keeps a broken configured signer from failing
+    /// read-only commands, which fall back to anonymous relay access.
+    #[test]
+    fn config_scope_signer_is_not_a_command_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            ["init", "-q", "."].as_slice(),
+            ["config", "--local", "nostr.signer", "configured-alice"].as_slice(),
+        ] {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        }
+        let git_in_repo = || {
+            let mut command = Command::new("git");
+            command
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env_remove("GIT_CONFIG_COUNT");
+            command
+        };
+
+        // command-config env for an unrelated key must not promote the
+        // configured signer to command scope
+        let mut command = git_in_repo();
+        command.env("GIT_CONFIG_PARAMETERS", "'other.key'='x'");
+        assert_eq!(
+            command_config_value_from(&mut command, "nostr.signer").unwrap(),
+            None
+        );
+
+        // an explicit `-c nostr.signer` wins over the configured value
+        let mut command = git_in_repo();
+        command.env("GIT_CONFIG_PARAMETERS", "'nostr.signer'='cmd-bob'");
+        assert_eq!(
+            command_config_value_from(&mut command, "nostr.signer").unwrap(),
+            Some("cmd-bob".to_string())
+        );
+    }
 
     #[test]
     fn parses_force_with_lease_cas_option() {

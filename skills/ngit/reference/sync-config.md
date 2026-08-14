@@ -18,7 +18,7 @@ ngit sync --ref-name main        # sync specific ref
 | `--json`              | Structured output (ngit commands only) |
 | `--repo <TARGET>`     | Select remote, naddr, or nostr URL     |
 | `--repo-relay-only`   | Publish only to repository relays      |
-| `--signer <NPUB|ALIAS|NAME>` | Use a stored signer for one command |
+| `--signer <ALIAS|NPUB|NOSTR-DISPLAY-NAME>` | Use a stored signer for one ngit command |
 | `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
 | `--nsec-file <PATH>`  | Read a one-shot key from a private file|
 | `-f`, `--force`       | Bypass safety guards                   |
@@ -33,6 +33,7 @@ git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes
 git config nostr.secret-storage file      # use ngit's user-only credential file
 git config nostr.signer alice             # select the local signer, including for git push
 git config nostr.signer-alias.alice npub1... # portable alias-to-npub mapping
+git -c nostr.signer=alice push origin pr/topic # select a signer for one Git command
 NGIT_CACHE_DIR=/writable/path ngit repo --json # override the global event-cache directory
 ```
 
