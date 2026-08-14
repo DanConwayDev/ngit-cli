@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The repository skill (`SKILL.md`) is now a slim core (v1.5) that points at `reference/*.md` documents installed alongside it. Skill installs and upgrades write both the `SKILL.md` and its five reference files (`repositories.md`, `prs.md`, `issues.md`, `accounts.md`, `sync-config.md`) into each managed discovery path, follow symlinked reference directories to a single canonical copy, refuse to overwrite locally modified reference files without `--force`, and report them in `skill status` alongside modified skills.
 - PR updates now retain an immutable non-default target. Fast-forward revisions preserve the prior `merge-base` unless it identifies an advancing open parent lineage, in which case the child must first contain the latest parent tip. Rewritten stacked PRs automatically follow that lineage; `-o base=...` or `ngit send --base ...` overrides it for the current publication. Targeted, inferred-base, and explicit-base proposals always use PR-kind events so their metadata cannot be dropped.
 - Global event caching now falls back to an in-memory cache when persistent storage is unavailable, allowing ngit to operate in restricted or sandboxed environments. Set `NGIT_CACHE_DIR` to select a writable persistent cache directory; repository caches remain strict and require the Git common directory to be writable.
 - Upgrade NostrDevKit dependencies from the `0.45.0-alpha.2` prerelease series to the stable `0.45.0` release.

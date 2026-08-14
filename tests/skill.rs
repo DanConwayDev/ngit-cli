@@ -1,6 +1,7 @@
 use std::fs;
 
 use anyhow::{Context, Result};
+use ngit::agent_guidance;
 use test_harness::Harness;
 
 async fn harness() -> Result<Harness> {
@@ -45,6 +46,16 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
     assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());
     assert!(!repo.dir().join("AGENTS.md").exists());
     assert!(!repo.dir().join("CLAUDE.md").exists());
+    for (name, content) in agent_guidance::bundled_references() {
+        assert_eq!(
+            fs::read_to_string(repo.dir().join(".agents/skills/ngit/reference").join(name))?,
+            *content
+        );
+        assert_eq!(
+            fs::read_to_string(repo.dir().join(".claude/skills/ngit/reference").join(name))?,
+            *content
+        );
+    }
 
     let status = repo.ngit(["skill", "status", "--json"]).output().await?;
     assert!(status.status.success());
@@ -93,10 +104,10 @@ async fn install_updates_existing_claude_without_creating_agents_files() -> Resu
     Ok(())
 }
 
-/// ngit's own repository keeps a single canonical `skills/ngit/SKILL.md` that
-/// the agent-specific discovery locations symlink to, so the copies cannot
-/// drift. Install must follow those symlinks, update the canonical file once,
-/// and commit it.
+/// ngit's own repository keeps single canonical `skills/ngit/SKILL.md` and
+/// `skills/ngit/reference/*.md` files that the agent-specific discovery
+/// locations symlink to, so the copies cannot drift. Install must follow those
+/// symlinks, update the canonical files once, and commit them.
 #[cfg(unix)]
 #[tokio::test]
 async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<()> {
@@ -109,6 +120,11 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
         &canonical,
         "---\nname: ngit\nversion: \"0.1\"\n---\n\nolder\n",
     )?;
+    let canonical_reference = repo.dir().join("skills/ngit/reference");
+    fs::create_dir_all(&canonical_reference)?;
+    for (name, _) in agent_guidance::bundled_references() {
+        fs::write(canonical_reference.join(name), "placeholder\n")?;
+    }
     for relative in [
         ".agents/skills/ngit/SKILL.md",
         ".claude/skills/ngit/SKILL.md",
@@ -116,6 +132,11 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
         let path = repo.dir().join(relative);
         fs::create_dir_all(path.parent().context("skill path has a parent")?)?;
         std::os::unix::fs::symlink("../../../skills/ngit/SKILL.md", &path)?;
+    }
+    for dir in [".agents/skills/ngit", ".claude/skills/ngit"] {
+        let reference = repo.dir().join(format!("{dir}/reference"));
+        fs::create_dir_all(reference.parent().context("skill dir has a parent")?)?;
+        std::os::unix::fs::symlink("../../../skills/ngit/reference", &reference)?;
     }
     repo.git_ok(["add", "-A"], "stage the canonical skill layout")
         .await?;
@@ -133,6 +154,7 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
     );
 
     assert!(!fs::read_to_string(&canonical)?.contains("older"));
+    assert!(!fs::read_to_string(canonical_reference.join("prs.md"))?.contains("placeholder"));
     for relative in [
         ".agents/skills/ngit/SKILL.md",
         ".claude/skills/ngit/SKILL.md",
@@ -148,6 +170,12 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
             fs::read_to_string(&canonical)?
         );
     }
+    for (name, content) in agent_guidance::bundled_references() {
+        assert_eq!(
+            fs::read_to_string(canonical_reference.join(name))?,
+            *content
+        );
+    }
 
     let status = repo.ngit(["skill", "status", "--json"]).output().await?;
     assert!(status.status.success());
@@ -156,15 +184,28 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
     assert_eq!(json["installed_version"], json["bundled_version"]);
     assert_eq!(json["update_available"], false);
 
-    // The update is committed once, against the shared target.
+    // The update is committed once, against the shared canonical targets.
     let committed = repo
         .git(["show", "--name-only", "--pretty=format:", "HEAD"])
         .output()
         .await?;
-    assert_eq!(
-        String::from_utf8(committed.stdout)?.trim(),
-        "skills/ngit/SKILL.md"
+    let names = String::from_utf8(committed.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().any(|name| name == "skills/ngit/SKILL.md"),
+        "no skill in {names:?}"
     );
+    for (name, _) in agent_guidance::bundled_references() {
+        let expected = format!("skills/ngit/reference/{name}");
+        assert!(
+            names.iter().any(|name| name == &expected),
+            "missing {expected} in {names:?}"
+        );
+    }
     let worktree = repo.git(["status", "--porcelain"]).output().await?;
     assert!(String::from_utf8(worktree.stdout)?.trim().is_empty());
     Ok(())
