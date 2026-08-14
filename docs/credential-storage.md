@@ -11,7 +11,9 @@ via the [`keyring`] crate, under keyring **service `nostr`**. When no OS
 credential store is available, the secret goes to ngit's **file store**
 instead: a JSON file at `<ngit-data-dir>/credentials.json` (on Linux
 `~/.local/share/ngit/credentials.json`) restricted to the current user
-(0700 directory, 0600 file on unix).
+(0700 directory, 0600 file on unix). Updates write and flush a complete
+replacement beside the file before atomically replacing it on Unix and
+Windows, so interruption cannot leave a partially written credential file.
 
 The file store is plaintext by design. The threat this feature counters is
 *incidental* disclosure of git config — which coding agents and other tools
@@ -19,11 +21,13 @@ read routinely — not filesystem compromise by a targeted attacker. A secret
 in an ngit-specific path is far less likely to be casually read and
 republished than one sitting in `~/.gitconfig`.
 
-Entries are named by the npub of the stored key itself, so every login for
+Local-key entries are named by the npub of the stored key itself, so every login for
 the same account shares one entry and the name remains derivable after
-logout. Bunker (NIP-46) logins store the app key under the app key's own
-npub. Entries written by pre-release versions as `<npub>/<8-char-suffix>`
-are still read.
+logout. Bunker (NIP-46) logins use `signer:<user-npub>` and contain one typed,
+versioned record with the expected user npub, sanitized bunker URI, and bunker
+client/app nsec. The one-time `secret=` pairing parameter is removed before
+the record is saved. Entries written by pre-release versions as
+`<npub>/<8-char-suffix>` are still read.
 
 Git config remains the index, because platform keyrings cannot be
 enumerated:
@@ -33,6 +37,55 @@ enumerated:
 | `nostr.nsec`           | credential entry name, plaintext `nsec1…`, or `ncryptsec1…`  |
 | `nostr.bunker-app-key` | credential entry name or plaintext key                       |
 
+## Selecting signers
+
+`--signer <npub|alias>` selects an existing signer for one command without
+changing the configured profile. An alias maps to an npub in any of these
+places:
+
+- OS credential store: `alias:fred` contains `npub1…`
+- `credentials.json`: `nostr/alias:fred` contains `npub1…`
+- git config: `nostr.signer-alias.fred = npub1…`
+
+Aliases are resolved from the OS credential store first, then
+`credentials.json`, then local, global, and system Git config. The JSON store
+is the direct fallback for systems where the OS credential store is
+unavailable. `nostr.signer = fred` (or an
+npub) makes a signer the default for that Git-config scope. `ngit account login
+--alias fred` writes the mapping to the selected Git-config scope and, unless
+`git-config` secret storage was selected, the selected credential backend as
+well. After logout retains a stored signer, `ngit account login --local --alias
+fred` reactivates it without requiring the nsec or bunker URL again.
+
+For a credential-store-backed selection, the selected Git-config scope contains
+`nostr.signer` and `nostr.npub`, plus `nostr.signer-alias.<alias>` when an alias
+is used; it does not keep a redundant `nostr.nsec` or bunker pointer. With
+`secret-storage = git-config`, the nsec or bunker fields remain in that scope
+because they are the signer material rather than credential-store pointers.
+
+An alias stored in the OS credential store or `credentials.json` is
+machine-wide and cannot be reassigned to another npub by logging in again;
+choose a new alias or explicitly remove `alias:<name>` first. Git-config-only
+aliases can differ between repositories when `secret-storage = git-config`,
+provided no higher-priority credential-store alias uses the name, and follow
+local, global, then system scope precedence.
+
+After resolving an alias to its npub, ngit checks all nsec sources before any
+bunker source. Within each type the order is OS credential store,
+`credentials.json`, then matching local/global/system Git config. Bunker
+fields are never assembled across scopes. The chosen nsec is checked by
+deriving its public key. A bunker's user public key is obtained once during
+the initial NIP-46 pairing and persisted with its connection details. Later
+commands seed that stored key into the connection instead of making a new
+identity request or signing a verification-only event. Every real event
+returned by the bunker must still match the requested public key and event ID
+and carry a valid signature. Missing, malformed, or mismatched explicit
+selections fail instead of falling back to a different identity.
+
+When `--signer` is omitted, existing flat local/global/system login selection
+continues to work. A configured `nostr.signer` opts that scope into the new
+selection model.
+
 ## Choosing where secrets live
 
 The `nostr.secret-storage` git config item — overridden by the
@@ -40,7 +93,9 @@ The `nostr.secret-storage` git config item — overridden by the
 `ngit account login --secret-storage <value>` — selects the policy:
 
 - `auto` (default): OS credential store, falling back to the file store.
-- `file`: ngit's file store only, never the OS store.
+- `file`: write to ngit's file store, never the OS store. If different data
+  already exists under the same higher-priority OS entry, login fails with a
+  removal command instead of writing a credential that could never be used.
 - `git-config`: plaintext in git config, as ngit stored secrets previously.
 
 When a secret cannot be stored under `auto` or `file`, login fails with
@@ -67,10 +122,10 @@ account/user field) of an entry under keyring service `nostr`. The npub is
 derived from the stored secret itself and must be verified against the
 retrieved key on read.
 
-The service is `nostr`, not `ngit`, because nothing about an entry is
-ngit-specific: it is named by the npub of the key it holds, and pairs with
-`nostr.*` git config keys. Any nostr application can read and write these
-entries.
+The service is `nostr`, not `ngit`, because these entries pair with `nostr.*`
+git config keys and are useful to other nostr applications. Namespaces keep
+record types distinct: bare `npub1…` for an identity nsec, `signer:npub1…` for
+a typed bunker record, and `alias:<name>` for an alias mapping.
 
 The entry's secret is written as an **`nsec1…` bech32 string**, so the
 platform's own credential UI can display it and a user can recover the key

@@ -2,7 +2,9 @@ use std::{fmt, path::PathBuf, sync::OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use keyring::Error as KeyringError;
-use nostr::prelude::{Keys, PublicKey, ToBech32};
+use nostr::prelude::{Keys, PublicKey, ToBech32, nip46::NostrConnectUri};
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /// Keyring service shared by nostr applications, not specific to ngit: the
 /// git config keys this pairs with are `nostr.*` rather than `ngit.*`, and
@@ -33,6 +35,30 @@ pub enum SecretStorage {
 pub enum Backend {
     Os,
     File,
+}
+
+const SIGNER_RECORD_VERSION: u8 = 1;
+const ALIAS_PREFIX: &str = "alias:";
+const SIGNER_PREFIX: &str = "signer:";
+
+/// A complete credential-store record for a NIP-46 signer. The client key is
+/// an application key used to communicate with the bunker, never the user's
+/// identity key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BunkerSigner {
+    pub npub: String,
+    pub bunker_uri: String,
+    pub client_nsec: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BunkerSignerRecord {
+    version: u8,
+    #[serde(rename = "type")]
+    record_type: String,
+    npub: String,
+    bunker_uri: String,
+    client_nsec: String,
 }
 
 static POLICY_OVERRIDE: OnceLock<SecretStorage> = OnceLock::new();
@@ -101,6 +127,7 @@ pub enum ConfigSecret<'a> {
 pub enum LookupError {
     Missing(String),
     Unavailable(anyhow::Error),
+    Invalid(String),
 }
 
 impl fmt::Display for LookupError {
@@ -114,6 +141,7 @@ impl fmt::Display for LookupError {
                 f,
                 "credential store is unavailable: {error}. Restore access to the OS credential store or ngit's file store, or use --nsec / --bunker-uri with --bunker-app-key for one command"
             ),
+            Self::Invalid(error) => write!(f, "invalid credential-store entry: {error}"),
         }
     }
 }
@@ -167,6 +195,46 @@ pub fn entry_name(keys: &Keys) -> Result<String> {
     keys.public_key().to_bech32().map_err(Into::into)
 }
 
+pub fn signer_entry_name(npub: &str) -> Result<String> {
+    Ok(format!("{SIGNER_PREFIX}{}", canonical_npub(npub)?))
+}
+
+pub fn alias_entry_name(alias: &str) -> Result<String> {
+    Ok(format!("{ALIAS_PREFIX}{}", normalize_alias(alias)?))
+}
+
+/// Normalize an alias for both keyring and git-config use. Git variable names
+/// are case-insensitive and accept only alphanumeric characters and `-`, so
+/// aliases use their common, portable subset.
+pub fn normalize_alias(alias: &str) -> Result<String> {
+    let alias = alias.trim();
+    if alias.is_empty()
+        || alias.len() > 64
+        || !alias
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || !alias
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        bail!(
+            "signer alias must start with a letter and contain at most 64 letters, numbers, or hyphens"
+        );
+    }
+    Ok(alias.to_ascii_lowercase())
+}
+
+fn canonical_npub(npub: &str) -> Result<String> {
+    if !npub.starts_with("npub1") {
+        bail!("signer identity must be an npub");
+    }
+    PublicKey::parse(npub)
+        .context("invalid signer npub")?
+        .to_bech32()
+        .map_err(Into::into)
+}
+
 /// True when the debug-only `NGIT_KEYRING_FILE` redirect is active; the OS
 /// credential store is then bypassed entirely so tests can never touch a
 /// real keychain.
@@ -191,7 +259,7 @@ pub fn store(keys: &Keys, policy: SecretStorage) -> Result<(String, Backend)> {
     } else {
         match store_os(&name, keys) {
             Ok(()) => return Ok((name, Backend::Os)),
-            Err(error) => Some(error),
+            Err(error) => Some(anyhow!(error)),
         }
     };
     store_file(&name, keys).with_context(|| match &os_error {
@@ -201,6 +269,274 @@ pub fn store(keys: &Keys, policy: SecretStorage) -> Result<(String, Backend)> {
         None => "failed to write ngit's file store".to_string(),
     })?;
     Ok((name, Backend::File))
+}
+
+/// Store a complete NIP-46 signer record under `signer:<user-npub>`.
+/// Any one-time pairing secret in the supplied bunker URI is deliberately
+/// removed before serialization.
+pub fn store_bunker_signer(
+    npub: &str,
+    bunker_uri: &str,
+    client_keys: &Keys,
+    policy: SecretStorage,
+) -> Result<(String, Backend)> {
+    let npub = canonical_npub(npub)?;
+    let bunker_uri = sanitized_bunker_uri(bunker_uri)?;
+    let record = BunkerSignerRecord {
+        version: SIGNER_RECORD_VERSION,
+        record_type: "bunker".to_string(),
+        npub: npub.clone(),
+        bunker_uri,
+        client_nsec: client_keys.secret_key().to_bech32()?,
+    };
+    let serialized = Zeroizing::new(
+        serde_json::to_string(&record).context("failed to serialize bunker signer record")?,
+    );
+    let name = signer_entry_name(&npub)?;
+    store_value(&name, serialized.as_str(), policy)
+}
+
+pub fn retrieve_bunker_signer(npub: &str) -> std::result::Result<BunkerSigner, LookupError> {
+    let expected_npub = canonical_npub(npub)
+        .map_err(|error| LookupError::Invalid(format!("invalid selected signer: {error:#}")))?;
+    let name = signer_entry_name(&expected_npub)
+        .map_err(|error| LookupError::Invalid(error.to_string()))?;
+    let serialized = retrieve_value(&name)?;
+    parse_bunker_signer(&name, &expected_npub, &serialized)
+}
+
+pub fn retrieve_bunker_signer_from(
+    npub: &str,
+    backend: Backend,
+) -> std::result::Result<BunkerSigner, LookupError> {
+    let expected_npub = canonical_npub(npub)
+        .map_err(|error| LookupError::Invalid(format!("invalid selected signer: {error:#}")))?;
+    let name = signer_entry_name(&expected_npub)
+        .map_err(|error| LookupError::Invalid(error.to_string()))?;
+    let serialized = retrieve_value_from(&name, backend)?;
+    parse_bunker_signer(&name, &expected_npub, &serialized)
+}
+
+pub fn store_alias(alias: &str, npub: &str, policy: SecretStorage) -> Result<(String, Backend)> {
+    ensure_alias_available(alias, npub)?;
+    let name = alias_entry_name(alias)?;
+    let npub = canonical_npub(npub)?;
+    store_value(&name, &npub, policy)
+}
+
+/// Credential-store aliases are machine-wide because they take precedence
+/// over every Git-config scope. Refuse to shadow an existing mapping with a
+/// different identity; Git-only aliases remain free to vary between repos.
+pub fn ensure_alias_available(alias: &str, npub: &str) -> Result<()> {
+    let alias = normalize_alias(alias)?;
+    let npub = canonical_npub(npub)?;
+    for backend in [Backend::Os, Backend::File] {
+        match retrieve_alias_from(&alias, backend) {
+            Ok(existing) if existing == npub => {}
+            Ok(existing) => {
+                bail!(
+                    "signer alias '{alias}' already identifies {existing} in the {} credential store; choose another alias or remove entry 'alias:{alias}' first",
+                    match backend {
+                        Backend::Os => "OS",
+                        Backend::File => "file",
+                    }
+                );
+            }
+            // An unavailable OS store must not disable the documented file
+            // fallback. If it later recovers, normal read precedence applies.
+            Err(LookupError::Missing(_) | LookupError::Unavailable(_)) => {}
+            Err(error @ LookupError::Invalid(_)) => return Err(anyhow!(error)),
+        }
+    }
+    Ok(())
+}
+
+pub fn retrieve_alias(alias: &str) -> std::result::Result<String, LookupError> {
+    let name = alias_entry_name(alias)
+        .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
+    let npub = retrieve_value(&name)?;
+    canonical_alias_npub(&name, &npub)
+}
+
+pub fn retrieve_alias_from(
+    alias: &str,
+    backend: Backend,
+) -> std::result::Result<String, LookupError> {
+    let name = alias_entry_name(alias)
+        .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
+    let npub = retrieve_value_from(&name, backend)?;
+    canonical_alias_npub(&name, &npub)
+}
+
+fn canonical_alias_npub(name: &str, npub: &str) -> std::result::Result<String, LookupError> {
+    canonical_npub(npub).map_err(|error| {
+        LookupError::Invalid(format!(
+            "credential '{name}' contains an invalid npub: {error:#}"
+        ))
+    })
+}
+
+fn sanitized_bunker_uri(value: &str) -> Result<String> {
+    match NostrConnectUri::parse(value).context("invalid bunker URI in signer record")? {
+        NostrConnectUri::Bunker {
+            remote_signer_public_key,
+            relays,
+            secret: _,
+        } => Ok(NostrConnectUri::Bunker {
+            remote_signer_public_key,
+            relays,
+            secret: None,
+        }
+        .to_string()),
+        NostrConnectUri::Client { .. } => bail!("signer record requires a bunker:// URI"),
+    }
+}
+
+fn parse_bunker_signer(
+    name: &str,
+    expected_npub: &str,
+    serialized: &str,
+) -> std::result::Result<BunkerSigner, LookupError> {
+    let record: BunkerSignerRecord = serde_json::from_str(serialized).map_err(|error| {
+        LookupError::Invalid(format!(
+            "credential '{name}' is not a valid signer record: {error}"
+        ))
+    })?;
+    if record.version != SIGNER_RECORD_VERSION || record.record_type != "bunker" {
+        return Err(LookupError::Invalid(format!(
+            "credential '{name}' uses an unsupported signer record type or version"
+        )));
+    }
+    let npub = canonical_npub(&record.npub).map_err(|error| {
+        LookupError::Invalid(format!(
+            "credential '{name}' contains an invalid npub: {error:#}"
+        ))
+    })?;
+    if npub != expected_npub {
+        return Err(LookupError::Invalid(format!(
+            "credential '{name}' names a different signer"
+        )));
+    }
+    let bunker_uri = sanitized_bunker_uri(&record.bunker_uri).map_err(|error| {
+        LookupError::Invalid(format!(
+            "credential '{name}' contains an invalid bunker URI: {error:#}"
+        ))
+    })?;
+    if bunker_uri != record.bunker_uri {
+        return Err(LookupError::Invalid(format!(
+            "credential '{name}' contains a one-time bunker secret"
+        )));
+    }
+    let client_keys = Keys::parse(&record.client_nsec).map_err(|_| {
+        LookupError::Invalid(format!(
+            "credential '{name}' contains an invalid client nsec"
+        ))
+    })?;
+    Ok(BunkerSigner {
+        npub,
+        bunker_uri,
+        client_nsec: client_keys.secret_key().to_bech32().map_err(|error| {
+            LookupError::Invalid(format!("failed to encode client nsec: {error}"))
+        })?,
+    })
+}
+
+fn store_value(name: &str, value: &str, policy: SecretStorage) -> Result<(String, Backend)> {
+    if policy == SecretStorage::File && !os_store_disabled() {
+        match os_store::get_value(name) {
+            Ok(existing) => ensure_unshadowed_file_value(name, value, Some(&existing))?,
+            Err(OsError::NoEntry | OsError::Store(_)) => {}
+            Err(OsError::Corrupt) => {
+                bail!(
+                    "OS credential '{name}' contains invalid data and would shadow the new file-store entry; remove it before using --secret-storage file"
+                );
+            }
+        }
+    }
+    let os_error = if policy == SecretStorage::File || os_store_disabled() {
+        None
+    } else {
+        match os_store::set_value(name, value) {
+            Ok(()) => match os_store::get_value(name) {
+                Ok(retrieved) if retrieved == value => {
+                    return Ok((name.to_string(), Backend::Os));
+                }
+                Ok(_) => {
+                    let _ = os_store::delete(name);
+                    Some(anyhow!(
+                        "OS credential store read-back returned different data"
+                    ))
+                }
+                Err(error) => {
+                    let _ = os_store::delete(name);
+                    Some(anyhow!(error).context("failed to verify OS credential store write"))
+                }
+            },
+            Err(error) => Some(anyhow!(error)),
+        }
+    };
+    file_store::set_value(name, value).with_context(|| match &os_error {
+        Some(error) => format!(
+            "failed to write ngit's file store after the OS credential store failed: {error:#}"
+        ),
+        None => "failed to write ngit's file store".to_string(),
+    })?;
+    if file_store::get_value(name)?.as_deref() != Some(value) {
+        let _ = file_store::delete(name);
+        bail!("file-store read-back verification failed");
+    }
+    Ok((name.to_string(), Backend::File))
+}
+
+fn ensure_unshadowed_file_value(name: &str, value: &str, existing: Option<&str>) -> Result<()> {
+    if existing.is_some_and(|existing| existing != value) {
+        bail!(
+            "OS credential '{name}' contains different data and would shadow the new file-store entry; remove it with `ngit account forget-keys {name}` before using --secret-storage file"
+        );
+    }
+    Ok(())
+}
+
+fn retrieve_value(name: &str) -> std::result::Result<String, LookupError> {
+    let os_error = match retrieve_value_from(name, Backend::Os) {
+        Ok(value) => return Ok(value),
+        Err(LookupError::Missing(_)) => None,
+        Err(LookupError::Unavailable(error)) => Some(error),
+        Err(error @ LookupError::Invalid(_)) => return Err(error),
+    };
+    match retrieve_value_from(name, Backend::File) {
+        Ok(value) => Ok(value),
+        Err(LookupError::Missing(_)) => os_error.map_or_else(
+            || Err(LookupError::Missing(name.to_string())),
+            |error| Err(LookupError::Unavailable(error)),
+        ),
+        Err(LookupError::Unavailable(error)) => Err(LookupError::Unavailable(match os_error {
+            Some(os_error) => {
+                error.context(format!("OS credential store also failed: {os_error:#}"))
+            }
+            None => error,
+        })),
+        Err(error @ LookupError::Invalid(_)) => Err(error),
+    }
+}
+
+fn retrieve_value_from(name: &str, backend: Backend) -> std::result::Result<String, LookupError> {
+    match backend {
+        Backend::Os if os_store_disabled() => Err(LookupError::Missing(name.to_string())),
+        Backend::Os => match os_store::get_value(name) {
+            Ok(value) => Ok(value),
+            Err(OsError::NoEntry) => Err(LookupError::Missing(name.to_string())),
+            Err(OsError::Corrupt) => Err(LookupError::Invalid(format!(
+                "OS credential '{name}' contains invalid text"
+            ))),
+            Err(error @ OsError::Store(_)) => Err(LookupError::Unavailable(anyhow!(error))),
+        },
+        Backend::File => match file_store::get_value(name) {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => Err(LookupError::Missing(name.to_string())),
+            Err(error) => Err(LookupError::Unavailable(error)),
+        },
+    }
 }
 
 fn store_os(name: &str, keys: &Keys) -> Result<()> {
@@ -235,30 +571,58 @@ pub fn file_store_path() -> Result<PathBuf> {
 }
 
 pub fn retrieve(name: &str) -> std::result::Result<Keys, LookupError> {
-    let expected = parse_pointer(name).ok_or_else(|| LookupError::Missing(name.to_string()))?;
-    let os_error = if os_store_disabled() {
-        None
-    } else {
-        match os_store::get(name) {
-            Ok(keys) if key_matches_npub(&keys, expected) => return Ok(keys),
-            // an entry that fails npub verification is treated as absent
-            Ok(_) => None,
-            Err(OsError::NoEntry) => None,
-            Err(error) => Some(anyhow!(error)),
-        }
+    let os_error = match retrieve_from(name, Backend::Os) {
+        Ok(keys) => return Ok(keys),
+        Err(LookupError::Missing(_)) => None,
+        Err(LookupError::Unavailable(error)) => Some(error),
+        Err(error @ LookupError::Invalid(_)) => return Err(error),
     };
-    match file_store::get(name) {
-        Ok(Some(keys)) if key_matches_npub(&keys, expected) => Ok(keys),
-        Ok(_) => match os_error {
-            Some(error) => Err(LookupError::Unavailable(error)),
-            None => Err(LookupError::Missing(name.to_string())),
-        },
-        Err(error) => Err(LookupError::Unavailable(match os_error {
+    match retrieve_from(name, Backend::File) {
+        Ok(keys) => Ok(keys),
+        Err(LookupError::Missing(_)) => os_error.map_or_else(
+            || Err(LookupError::Missing(name.to_string())),
+            |error| Err(LookupError::Unavailable(error)),
+        ),
+        Err(LookupError::Unavailable(error)) => Err(LookupError::Unavailable(match os_error {
             Some(os_error) => {
                 error.context(format!("OS credential store also failed: {os_error:#}"))
             }
             None => error,
         })),
+        Err(error @ LookupError::Invalid(_)) => Err(error),
+    }
+}
+
+pub fn retrieve_from(name: &str, backend: Backend) -> std::result::Result<Keys, LookupError> {
+    let expected = parse_pointer(name).ok_or_else(|| LookupError::Missing(name.to_string()))?;
+    match backend {
+        Backend::Os if os_store_disabled() => Err(LookupError::Missing(name.to_string())),
+        Backend::Os => match os_store::get(name) {
+            Ok(keys) if key_matches_npub(&keys, expected) => Ok(keys),
+            Ok(_) | Err(OsError::Corrupt) => Err(LookupError::Invalid(format!(
+                "OS credential '{name}' does not match its npub"
+            ))),
+            Err(OsError::NoEntry) => Err(LookupError::Missing(name.to_string())),
+            Err(error @ OsError::Store(_)) => Err(LookupError::Unavailable(anyhow!(error))),
+        },
+        Backend::File => match file_store::get_value(name) {
+            Ok(Some(value)) => {
+                let keys = Keys::parse(&value).map_err(|_| {
+                    LookupError::Invalid(format!(
+                        "file credential '{name}' does not contain a nostr secret key"
+                    ))
+                })?;
+                if key_matches_npub(&keys, expected) {
+                    Ok(keys)
+                } else {
+                    Err(LookupError::Invalid(format!(
+                        "file credential '{name}' does not match its npub"
+                    )))
+                }
+            }
+            Ok(None) => Err(LookupError::Missing(name.to_string())),
+            Err(error) => Err(LookupError::Unavailable(error)),
+        },
     }
 }
 
@@ -271,7 +635,7 @@ fn key_matches_npub(keys: &Keys, expected: &str) -> bool {
 /// Remove the named entry from every backend; `Ok(true)` when an entry was
 /// actually deleted from at least one of them.
 pub fn forget(name: &str) -> Result<bool> {
-    if parse_pointer(name).is_none() {
+    if !valid_entry_name(name) {
         return Ok(false);
     }
     let mut deleted = false;
@@ -290,10 +654,26 @@ pub fn forget(name: &str) -> Result<bool> {
     Ok(deleted)
 }
 
-/// Credential-store pointer values in the given config scope's `nostr.nsec`
-/// / `nostr.bunker-app-key` items.
-pub fn config_pointers(git_repo: &Option<&crate::git::Repo>) -> Vec<String> {
-    ["nostr.nsec", "nostr.bunker-app-key"]
+pub fn valid_entry_name(name: &str) -> bool {
+    parse_pointer(name).is_some()
+        || name
+            .strip_prefix(SIGNER_PREFIX)
+            .is_some_and(|npub| canonical_npub(npub).is_ok())
+        || name
+            .strip_prefix(ALIAS_PREFIX)
+            .is_some_and(|alias| normalize_alias(alias).is_ok())
+}
+
+/// Credential-store entries used by the login in a Git-config scope.
+///
+/// `resolved_npub` is the identity returned by successful signer
+/// construction. Using it avoids resolving an alias a second time with a
+/// subtly different precedence during logout or deletion.
+pub fn config_pointers(
+    git_repo: &Option<&crate::git::Repo>,
+    resolved_npub: Option<&str>,
+) -> Vec<String> {
+    let mut pointers: std::collections::BTreeSet<String> = ["nostr.nsec", "nostr.bunker-app-key"]
         .iter()
         .filter_map(|item| {
             crate::git::get_git_config_item(git_repo, item)
@@ -301,7 +681,42 @@ pub fn config_pointers(git_repo: &Option<&crate::git::Repo>) -> Vec<String> {
                 .flatten()
         })
         .filter(|value| parse_pointer(value).is_some())
-        .collect()
+        .collect();
+
+    if pointers.is_empty() {
+        if let Some(selector) = crate::git::get_git_config_item(git_repo, "nostr.signer")
+            .ok()
+            .flatten()
+        {
+            let npub = if let Some(npub) = resolved_npub {
+                Some(npub.to_string())
+            } else if selector.starts_with("npub1") && PublicKey::parse(&selector).is_ok() {
+                Some(selector)
+            } else if let Ok(alias) = normalize_alias(&selector) {
+                retrieve_alias(&alias).ok().or_else(|| {
+                    crate::git::get_git_config_item(
+                        git_repo,
+                        &format!("nostr.signer-alias.{alias}"),
+                    )
+                    .ok()
+                    .flatten()
+                })
+            } else {
+                None
+            };
+            if let Some(npub) = npub {
+                if !matches!(retrieve(&npub), Err(LookupError::Missing(_))) {
+                    pointers.insert(npub.clone());
+                }
+                if !matches!(retrieve_bunker_signer(&npub), Err(LookupError::Missing(_)))
+                    && signer_entry_name(&npub).is_ok()
+                {
+                    pointers.insert(format!("{SIGNER_PREFIX}{npub}"));
+                }
+            }
+        }
+    }
+    pointers.into_iter().collect()
 }
 
 /// Why an OS credential store operation did not yield a key.
@@ -379,6 +794,19 @@ mod os_store {
             .map_err(OsError::Store)
     }
 
+    pub fn set_value(name: &str, value: &str) -> Result<(), OsError> {
+        entry(name)?.set_password(value).map_err(OsError::Store)
+    }
+
+    pub fn get_value(name: &str) -> Result<String, OsError> {
+        match entry(name)?.get_password() {
+            Ok(value) => Ok(value),
+            Err(KeyringError::BadEncoding(_)) => Err(OsError::Corrupt),
+            Err(KeyringError::NoEntry) => Err(OsError::NoEntry),
+            Err(error) => Err(OsError::Store(error)),
+        }
+    }
+
     pub fn get(name: &str) -> Result<Keys, OsError> {
         let secret_key = match entry(name)?.get_password() {
             Ok(password) => {
@@ -415,6 +843,7 @@ mod file_store {
 
     use anyhow::{Context, Result};
     use nostr::prelude::Keys;
+    use tempfile::NamedTempFile;
 
     pub fn path() -> Result<PathBuf> {
         // Compiled out of release builds so an environment variable can never
@@ -442,6 +871,14 @@ mod file_store {
         delete_at(&path()?, name)
     }
 
+    pub fn set_value(name: &str, value: &str) -> Result<()> {
+        set_value_at(&path()?, name, value)
+    }
+
+    pub fn get_value(name: &str) -> Result<Option<String>> {
+        get_value_at(&path()?, name)
+    }
+
     pub(super) fn set_at(path: &Path, name: &str, keys: &Keys) -> Result<()> {
         let mut values = read(path)?;
         values.insert(entry_key(name), keys.secret_key().to_secret_hex());
@@ -463,6 +900,16 @@ mod file_store {
         Ok(true)
     }
 
+    pub(super) fn set_value_at(path: &Path, name: &str, value: &str) -> Result<()> {
+        let mut values = read(path)?;
+        values.insert(entry_key(name), value.to_string());
+        write(path, &values)
+    }
+
+    pub(super) fn get_value_at(path: &Path, name: &str) -> Result<Option<String>> {
+        Ok(read(path)?.get(&entry_key(name)).cloned())
+    }
+
     fn read(path: &Path) -> Result<BTreeMap<String, String>> {
         if !path.exists() {
             return Ok(BTreeMap::new());
@@ -475,34 +922,37 @@ mod file_store {
     }
 
     fn write(path: &Path, values: &BTreeMap<String, String>) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let mut builder = fs::DirBuilder::new();
-                builder.recursive(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::DirBuilderExt;
-                    builder.mode(0o700);
-                }
-                builder
-                    .create(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
             }
+            builder
+                .create(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let data = serde_json::to_vec_pretty(values).context("failed to serialize file store")?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        let mut temp = NamedTempFile::new_in(parent).with_context(|| {
+            format!("failed to create a temporary file in {}", parent.display())
+        })?;
+        temp.write_all(&data)
+            .and_then(|()| temp.as_file().sync_all())
+            .with_context(|| format!("failed to write a replacement for {}", path.display()))?;
+        temp.persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // 0600 applies on creation only; a pre-existing file keeps its
-            // mode (the tempfile-backed test override relies on this).
-            options.mode(0o600);
-        }
-        options
-            .open(path)
-            .and_then(|mut file| file.write_all(&data))
-            .with_context(|| format!("failed to write {}", path.display()))
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("failed to sync {}", parent.display()))?;
+        Ok(())
     }
 }
 
@@ -597,5 +1047,127 @@ mod tests {
         assert!(!file_store::delete_at(&path, &name)?);
         assert!(file_store::get_at(&path, &name)?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn typed_bunker_record_is_bundled_and_drops_pairing_secret() -> Result<()> {
+        let user = Keys::generate();
+        let remote_signer = Keys::generate();
+        let client = Keys::generate();
+        let user_npub = user.public_key().to_bech32()?;
+        let uri = format!(
+            "bunker://{}?relay=wss%3A%2F%2Frelay.example.com&secret=one-time",
+            remote_signer.public_key()
+        );
+        let sanitized = sanitized_bunker_uri(&uri)?;
+        assert!(!sanitized.contains("secret="));
+
+        let record = BunkerSignerRecord {
+            version: SIGNER_RECORD_VERSION,
+            record_type: "bunker".to_string(),
+            npub: user_npub.clone(),
+            bunker_uri: sanitized.clone(),
+            client_nsec: client.secret_key().to_bech32()?,
+        };
+        let name = signer_entry_name(&user_npub)?;
+        let parsed = parse_bunker_signer(&name, &user_npub, &serde_json::to_string(&record)?)?;
+        assert_eq!(parsed.npub, user_npub);
+        assert_eq!(parsed.bunker_uri, sanitized);
+        assert_eq!(
+            Keys::parse(&parsed.client_nsec)?.public_key(),
+            client.public_key()
+        );
+
+        let mut mismatched = record;
+        mismatched.npub = Keys::generate().public_key().to_bech32()?;
+        assert!(
+            parse_bunker_signer(&name, &user_npub, &serde_json::to_string(&mismatched)?).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn file_store_atomically_replaces_the_complete_document() -> Result<()> {
+        use std::{collections::BTreeMap, io::Read};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("credentials.json");
+        let first = Keys::generate().public_key().to_bech32()?;
+        let second = Keys::generate().public_key().to_bech32()?;
+        file_store::set_value_at(&path, "alias:first", &first)?;
+        let mut previous_document = std::fs::File::open(&path)?;
+
+        file_store::set_value_at(&path, "alias:second", &second)?;
+
+        let mut previous_data = String::new();
+        previous_document.read_to_string(&mut previous_data)?;
+        let previous: BTreeMap<String, String> = serde_json::from_str(&previous_data)?;
+        assert_eq!(previous.get("nostr/alias:first"), Some(&first));
+        assert!(!previous.contains_key("nostr/alias:second"));
+
+        let current: BTreeMap<String, String> = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(current.get("nostr/alias:first"), Some(&first));
+        assert_eq!(current.get("nostr/alias:second"), Some(&second));
+        Ok(())
+    }
+
+    #[test]
+    fn file_store_round_trips_typed_signer_and_alias_records() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("credentials.json");
+        let user = Keys::generate();
+        let remote_signer = Keys::generate();
+        let client = Keys::generate();
+        let npub = user.public_key().to_bech32()?;
+        let signer_name = signer_entry_name(&npub)?;
+        let signer_value = serde_json::to_string(&BunkerSignerRecord {
+            version: SIGNER_RECORD_VERSION,
+            record_type: "bunker".to_string(),
+            npub: npub.clone(),
+            bunker_uri: format!(
+                "bunker://{}?relay=wss%3A%2F%2Frelay.example.com",
+                remote_signer.public_key()
+            ),
+            client_nsec: client.secret_key().to_bech32()?,
+        })?;
+        file_store::set_value_at(&path, &signer_name, &signer_value)?;
+        file_store::set_value_at(&path, "alias:fred", &npub)?;
+
+        assert_eq!(
+            file_store::get_value_at(&path, &signer_name)?.as_deref(),
+            Some(signer_value.as_str())
+        );
+        assert_eq!(
+            file_store::get_value_at(&path, "alias:fred")?.as_deref(),
+            Some(npub.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn alias_names_are_portable_and_namespaced() -> Result<()> {
+        assert_eq!(normalize_alias("Fred-2")?, "fred-2");
+        assert_eq!(alias_entry_name("Fred-2")?, "alias:fred-2");
+        for invalid in [
+            "",
+            "-fred",
+            "2fred",
+            "fred_jones",
+            "fred.jones",
+            "fred jones",
+        ] {
+            assert!(
+                normalize_alias(invalid).is_err(),
+                "accepted invalid alias {invalid:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn file_values_cannot_be_hidden_by_different_os_data() {
+        assert!(ensure_unshadowed_file_value("signer:npub", "new", None).is_ok());
+        assert!(ensure_unshadowed_file_value("signer:npub", "same", Some("same")).is_ok());
+        assert!(ensure_unshadowed_file_value("signer:npub", "new", Some("old")).is_err());
     }
 }

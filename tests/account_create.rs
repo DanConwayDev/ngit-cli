@@ -317,6 +317,922 @@ async fn logout_forget_removes_entry() -> Result<()> {
 }
 
 #[tokio::test]
+async fn login_alias_selects_stored_nsec_without_rewriting_profile() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--alias",
+            "fred",
+            "--nsec",
+            &nsec,
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "aliased login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(repo.config("nostr.signer").await?.as_deref(), Some("fred"));
+    assert!(
+        repo.config("nostr.nsec").await?.is_none(),
+        "a credential-backed alias should be the sole local signer selector"
+    );
+    assert_eq!(
+        repo.config("nostr.signer-alias.fred").await?.as_deref(),
+        Some(npub.as_str())
+    );
+    assert_eq!(
+        repo.config("nostr.npub").await?.as_deref(),
+        Some(npub.as_str())
+    );
+
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert_eq!(
+        entries
+            .get(format!("{SERVICE}/alias:fred"))
+            .and_then(Value::as_str),
+        Some(npub.as_str())
+    );
+    assert!(entries.get(format!("{SERVICE}/{npub}")).is_some());
+
+    let unset = repo
+        .git(["config", "--local", "--unset", "nostr.signer"])
+        .output()
+        .await?;
+    assert!(unset.status.success());
+    let output = repo
+        .ngit(["--signer", "fred", "account", "export-keys"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "alias selection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(repo.config("nostr.signer").await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn alias_only_login_reactivates_a_retained_file_signer() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--nsec",
+            &nsec,
+            "--alias",
+            "dcagent",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "initial login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = repo
+        .ngit(["account", "logout"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "logout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(repo.config("nostr.nsec").await?.is_none());
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--alias",
+            "dcagent",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "alias-only login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.signer").await?.as_deref(),
+        Some("dcagent")
+    );
+    assert_eq!(
+        repo.config("nostr.signer-alias.dcagent").await?.as_deref(),
+        Some(npub.as_str())
+    );
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert_eq!(
+        entries
+            .get(format!("{SERVICE}/alias:dcagent"))
+            .and_then(Value::as_str),
+        Some(npub.as_str())
+    );
+    assert!(entries.get(format!("{SERVICE}/{npub}")).is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn npub_only_login_reactivates_a_retained_file_signer() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+
+    let output = repo
+        .ngit(["account", "logout"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+
+    let output = repo
+        .ngit([
+            "--signer",
+            &npub,
+            "account",
+            "login",
+            "--local",
+            "--offline",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "npub-only login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.signer").await?.as_deref(),
+        Some(npub.as_str())
+    );
+    assert!(
+        repo.config("nostr.nsec").await?.is_none(),
+        "a credential-backed npub should be the sole local signer selector"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn selected_git_config_signer_survives_account_switching_logout() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--secret-storage",
+            "git-config",
+            "--nsec",
+            &nsec,
+            "--alias",
+            "fred",
+        ])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "initial plaintext login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = repo
+        .ngit([
+            "--signer",
+            "fred",
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--secret-storage",
+            "git-config",
+        ])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "Git-config signer was lost during account switching: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.nsec").await?.as_deref(),
+        Some(nsec.as_str())
+    );
+    assert_eq!(repo.config("nostr.signer").await?.as_deref(), Some("fred"));
+    assert_eq!(
+        repo.config("nostr.npub").await?.as_deref(),
+        Some(npub.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_alias_does_not_log_out_the_current_account() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--alias",
+            "unknown",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        !output.status.success(),
+        "unknown alias unexpectedly logged in"
+    );
+    assert_eq!(
+        repo.config("nostr.nsec").await?.as_deref(),
+        Some(npub.as_str()),
+        "failed selection must preserve the current login"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn credential_store_alias_cannot_be_reassigned_to_another_account() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let original = Keys::generate();
+    let original_nsec = original.secret_key().to_bech32()?;
+    let original_npub = original.public_key().to_bech32()?;
+    let replacement_nsec = Keys::generate().secret_key().to_bech32()?;
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--nsec",
+            &original_nsec,
+            "--alias",
+            "fred",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--nsec",
+            &replacement_nsec,
+            "--alias",
+            "fred",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(!output.status.success(), "alias reassignment was accepted");
+    assert_eq!(
+        repo.config("nostr.signer").await?.as_deref(),
+        Some("fred"),
+        "rejected alias reassignment must preserve the selected alias"
+    );
+    assert_eq!(
+        repo.config("nostr.npub").await?.as_deref(),
+        Some(original_npub.as_str()),
+        "rejected alias reassignment must preserve the selected identity"
+    );
+    assert!(
+        repo.config("nostr.nsec").await?.is_none(),
+        "credential-backed aliases must not restore a redundant nsec pointer"
+    );
+    let entries: Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert_eq!(
+        entries
+            .get(format!("{SERVICE}/alias:fred"))
+            .and_then(Value::as_str),
+        Some(original_npub.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_config_only_alias_can_name_different_accounts_in_two_repos() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let first = harness.fresh_repo()?;
+    let second = harness.fresh_repo()?;
+    let first_keys = Keys::generate();
+    let second_keys = Keys::generate();
+
+    for (repo, keys) in [(&first, &first_keys), (&second, &second_keys)] {
+        let nsec = keys.secret_key().to_bech32()?;
+        let output = repo
+            .ngit([
+                "account",
+                "login",
+                "--local",
+                "--offline",
+                "--secret-storage",
+                "git-config",
+                "--nsec",
+                &nsec,
+                "--alias",
+                "fred",
+            ])
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "Git-only alias login failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let first_npub = first_keys.public_key().to_bech32()?;
+    let second_npub = second_keys.public_key().to_bech32()?;
+    assert_eq!(
+        first.config("nostr.signer-alias.fred").await?.as_deref(),
+        Some(first_npub.as_str())
+    );
+    assert_eq!(
+        second.config("nostr.signer-alias.fred").await?.as_deref(),
+        Some(second_npub.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_alias_can_reactivate_a_global_git_config_signer() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let config_home = tempfile::tempdir()?;
+    let git_config_dir = config_home.path().join("git");
+    std::fs::create_dir(&git_config_dir)?;
+    let global = git_config_dir.join("config");
+    let credentials = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+    let global_path = global
+        .as_path()
+        .to_str()
+        .context("global config path is not UTF-8")?;
+    for (key, value) in [
+        ("nostr.nsec", nsec.as_str()),
+        ("nostr.npub", npub.as_str()),
+        ("nostr.signer-alias.fred", npub.as_str()),
+    ] {
+        let output = repo
+            .git(["config", "--file", global_path, key, value])
+            .output()
+            .await?;
+        assert!(output.status.success());
+    }
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--secret-storage",
+            "git-config",
+            "--alias",
+            "fred",
+        ])
+        .env_remove("NGITTEST")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "local alias login from global material failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(repo.config("nostr.signer").await?.as_deref(), Some("fred"));
+    assert_eq!(
+        repo.config("nostr.nsec").await?.as_deref(),
+        Some(nsec.as_str())
+    );
+    let global_nsec = repo
+        .git(["config", "--file", global_path, "--get", "nostr.nsec"])
+        .output()
+        .await?;
+    assert!(global_nsec.status.success(), "global signer was removed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn multiple_file_signers_remain_independently_selectable() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let first = harness.fresh_repo()?;
+    let second = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let fred = Keys::generate();
+    let alice = Keys::generate();
+
+    for (repo, alias, keys) in [(&first, "fred", &fred), (&second, "alice", &alice)] {
+        let nsec = keys.secret_key().to_bech32()?;
+        let output = repo
+            .ngit([
+                "account",
+                "login",
+                "--local",
+                "--offline",
+                "--nsec",
+                &nsec,
+                "--alias",
+                alias,
+            ])
+            .env("NGIT_SECRET_STORAGE", "file")
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .output()
+            .await?;
+        assert!(output.status.success());
+    }
+
+    let output = first
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--alias",
+            "alice",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "second stored signer was not selectable in another repo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let alice_npub = alice.public_key().to_bech32()?;
+    assert_eq!(
+        first.config("nostr.npub").await?.as_deref(),
+        Some(alice_npub.as_str())
+    );
+    let entries: Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    for (alias, keys) in [("fred", &fred), ("alice", &alice)] {
+        let npub = keys.public_key().to_bech32()?;
+        assert!(entries.get(format!("{SERVICE}/{npub}")).is_some());
+        assert_eq!(
+            entries
+                .get(format!("{SERVICE}/alias:{alias}"))
+                .and_then(Value::as_str),
+            Some(npub.as_str())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_new_signer_inputs_do_not_log_out_the_current_account() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let npub = keys.public_key().to_bech32()?;
+    let app_key = Keys::generate().secret_key().to_secret_hex();
+
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(output.status.success());
+
+    for invalid_args in [
+        vec!["--nsec", "not-a-secret"],
+        vec!["--nsec", "ncryptsec1not-valid"],
+        vec!["--bunker-url", "not-a-bunker-url"],
+        vec![
+            "--bunker-uri",
+            "not-a-bunker-uri",
+            "--bunker-app-key",
+            &app_key,
+        ],
+    ] {
+        let output = repo
+            .ngit(
+                ["account", "login", "--local", "--offline"]
+                    .into_iter()
+                    .chain(invalid_args),
+            )
+            .env("NGIT_SECRET_STORAGE", "file")
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .output()
+            .await?;
+        assert!(
+            !output.status.success(),
+            "invalid signer input was accepted"
+        );
+        assert_eq!(
+            repo.config("nostr.nsec").await?.as_deref(),
+            Some(npub.as_str()),
+            "invalid signer input must preserve the current login"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_ncryptsec_login_uses_the_cli_password() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let keys = Keys::generate();
+    let password = "correct horse battery staple";
+    let encrypted = nostr::nips::nip49::EncryptedSecretKey::new(
+        keys.secret_key(),
+        password,
+        1,
+        nostr::nips::nip49::KeySecurity::Medium,
+    )?
+    .to_bech32()?;
+
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--nsec",
+            &encrypted,
+            "--password",
+            password,
+        ])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "encrypted login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.nsec").await?.as_deref(),
+        Some(encrypted.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_login_outside_a_repo_does_not_store_the_secret() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let outside = tempfile::tempdir()?;
+    let credentials = NamedTempFile::new()?;
+    let nsec = Keys::generate().secret_key().to_bech32()?;
+    let output = repo
+        .ngit(["account", "login", "--local", "--offline", "--nsec", &nsec])
+        .current_dir(outside.path())
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+
+    assert!(
+        !output.status.success(),
+        "local login unexpectedly succeeded"
+    );
+    assert!(
+        std::fs::read(credentials.path())?.is_empty(),
+        "a rejected local login must not write a credential"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn credentials_json_alias_mapping_precedes_git_config() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let file_alias_keys = Keys::generate();
+    let git_alias_keys = Keys::generate();
+    let file_alias_npub = file_alias_keys.public_key().to_bech32()?;
+    let git_alias_npub = git_alias_keys.public_key().to_bech32()?;
+    let mut entries = serde_json::Map::new();
+    entries.insert(
+        format!("{SERVICE}/alias:fred"),
+        Value::String(file_alias_npub.clone()),
+    );
+    for (npub, keys) in [
+        (&file_alias_npub, &file_alias_keys),
+        (&git_alias_npub, &git_alias_keys),
+    ] {
+        entries.insert(
+            format!("{SERVICE}/{npub}"),
+            Value::String(keys.secret_key().to_secret_hex()),
+        );
+    }
+    std::fs::write(file.path(), serde_json::to_vec(&entries)?)?;
+    repo.git_ok(
+        [
+            "config",
+            "--local",
+            "nostr.signer-alias.fred",
+            &git_alias_npub,
+        ],
+        "seed lower-priority git alias",
+    )
+    .await?;
+
+    let output = repo
+        .ngit([
+            "--signer",
+            "fred",
+            "account",
+            "login",
+            "--local",
+            "--offline",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "selected login failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        repo.config("nostr.npub").await?.as_deref(),
+        Some(file_alias_npub.as_str()),
+        "credentials.json must override the git config alias mapping"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_forget_uses_the_identity_selected_before_git_alias_mapping() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let selected_keys = Keys::generate();
+    let git_alias_keys = Keys::generate();
+    let selected_npub = selected_keys.public_key().to_bech32()?;
+    let git_alias_npub = git_alias_keys.public_key().to_bech32()?;
+    let mut entries = serde_json::Map::new();
+    entries.insert(
+        format!("{SERVICE}/alias:fred"),
+        Value::String(selected_npub.clone()),
+    );
+    for (npub, keys) in [
+        (&selected_npub, &selected_keys),
+        (&git_alias_npub, &git_alias_keys),
+    ] {
+        entries.insert(
+            format!("{SERVICE}/{npub}"),
+            Value::String(keys.secret_key().to_secret_hex()),
+        );
+    }
+    std::fs::write(file.path(), serde_json::to_vec(&entries)?)?;
+    repo.git_ok(
+        [
+            "config",
+            "--local",
+            "nostr.signer-alias.fred",
+            &git_alias_npub,
+        ],
+        "seed lower-priority git alias",
+    )
+    .await?;
+    repo.git_ok(
+        ["config", "--local", "nostr.signer", "fred"],
+        "select the conflicting alias",
+    )
+    .await?;
+
+    let output = repo
+        .ngit(["account", "logout", "--forget"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "logout --forget failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
+    assert!(
+        entries.get(format!("{SERVICE}/{selected_npub}")).is_none(),
+        "logout must forget the identity selected from credentials.json"
+    );
+    assert!(
+        entries.get(format!("{SERVICE}/{git_alias_npub}")).is_some(),
+        "logout must not forget the conflicting lower-priority Git alias identity"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_clears_broken_local_selection_before_a_valid_global_login() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let global = NamedTempFile::new()?;
+    let global_keys = Keys::generate();
+    let global_nsec = global_keys.secret_key().to_bech32()?;
+    repo.git_ok(
+        ["config", "--local", "nostr.signer", "missing"],
+        "seed broken local signer selection",
+    )
+    .await?;
+    let global_path = global
+        .path()
+        .to_str()
+        .context("global config path is not UTF-8")?;
+    let output = repo
+        .git(["config", "--file", global_path, "nostr.nsec", &global_nsec])
+        .output()
+        .await?;
+    assert!(output.status.success());
+
+    let output = repo
+        .ngit(["account", "logout"])
+        .env_remove("NGITTEST")
+        .env("GIT_CONFIG_GLOBAL", global.path())
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "logout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(repo.config("nostr.signer").await?.is_none());
+
+    let global_nsec_after = repo
+        .git(["config", "--file", global_path, "--get", "nostr.nsec"])
+        .output()
+        .await?;
+    assert!(global_nsec_after.status.success());
+    assert_eq!(
+        String::from_utf8(global_nsec_after.stdout)?.trim(),
+        global_nsec,
+        "logout must leave the lower-priority global login intact"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn plaintext_is_read_without_migration_and_dangling_pointer_has_login_guidance() -> Result<()>
 {
     let harness = Harness::builder(

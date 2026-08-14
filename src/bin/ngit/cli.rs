@@ -35,11 +35,29 @@ pub struct Cli {
     #[arg(long, global = true, hide = true)]
     pub bunker_app_key: Option<String>,
     /// nsec or hex private key
-    #[arg(short, long, global = true, conflicts_with = "nsec_file")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        conflicts_with_all = ["nsec_file", "signer"]
+    )]
     pub nsec: Option<String>,
     /// read an nsec or hex private key from a path resolving to a regular file
-    #[arg(long, global = true, value_name = "PATH", conflicts_with = "nsec")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        conflicts_with_all = ["nsec", "signer"]
+    )]
     pub nsec_file: Option<PathBuf>,
+    /// use a configured signer by npub or alias for this command
+    #[arg(
+        long,
+        global = true,
+        value_name = "NPUB|ALIAS",
+        conflicts_with_all = ["nsec", "nsec_file", "bunker_uri", "bunker_app_key"]
+    )]
+    pub signer: Option<String>,
     /// password to decrypt nsec
     #[arg(short, long, global = true, hide = true)]
     pub password: Option<String>,
@@ -146,13 +164,16 @@ Values are semicolon-separated URLs without spaces.
 
   These are configured by {login_cmd}:
 
+  {signer_selection:<27} selected npub or alias
+  {signer_alias:<27} alias-to-npub mapping, for example `.fred`
   {nsec:<27} credential-store entry name, or a plaintext nsec / ncryptsec
   {npub:<27} used for ncryptsec and remote signer
   {bunker_uri:<27} used for remote signer
   {bunker_app_key:<27} credential-store entry name used for remote signer
   {secret_storage:<27} auto | file | git-config
 
-  Secrets normally live in the OS credential store, or in ngit's file store
+  Use {signer_flag} to select one configured signer without changing the
+  current profile. Secrets normally live in the OS credential store, or in ngit's file store
   when no OS store is available. The value of nostr.nsec or
   nostr.bunker-app-key is then the entry name (the key's npub) under
   keyring service `nostr`;
@@ -201,6 +222,9 @@ implementation details used for efficiency.
         http_io_timeout_example = cmd("git config nostr.http-io-timeout-ms 600000"),
         login_settings = section("Login settings"),
         login_cmd = cmd("ngit account login"),
+        signer_selection = key("nostr.signer"),
+        signer_alias = key("nostr.signer-alias.<alias>"),
+        signer_flag = cmd("ngit --signer <npub|alias> <command>"),
         nsec = key("nostr.nsec"),
         npub = key("nostr.npub"),
         bunker_uri = key("nostr.bunker-uri"),
@@ -225,6 +249,7 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
             nsec,
             password: None,
             npub: None,
+            verify_npub: false,
         }))
     } else if let Some(bunker_uri) = args.bunker_uri.clone() {
         if let Some(bunker_app_key) = args.bunker_app_key.clone() {
@@ -238,6 +263,10 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
         }
     } else if args.bunker_app_key.is_some() {
         bail!("cli argument bunker-uri must be supplied when bunker-app-key is")
+    } else if let Some(selector) = &args.signer {
+        Ok(Some(SignerInfo::Selection {
+            selector: selector.clone(),
+        }))
     } else {
         Ok(None)
     }
@@ -825,6 +854,59 @@ mod tests {
         assert!(
             matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
         );
+    }
+
+    #[test]
+    fn signer_is_global_and_conflicts_with_direct_secrets() {
+        for args in [
+            ["ngit", "--signer", "fred", "issue", "create"].as_slice(),
+            ["ngit", "issue", "create", "--signer", "fred"].as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(
+                extract_signer_cli_arguments(&cli).unwrap(),
+                Some(ngit::login::SignerInfo::Selection {
+                    selector: "fred".to_string()
+                })
+            );
+        }
+        assert!(Cli::try_parse_from(["ngit", "--signer", "fred", "--nsec", "key"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "--signer",
+                "fred",
+                "--bunker-uri",
+                "bunker://example"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bunker_login_url_conflicts_with_other_signer_sources() {
+        for conflicting in [
+            ["--nsec", "key"],
+            ["--nsec-file", "key"],
+            ["--signer", "fred"],
+            ["--bunker-uri", "bunker://example"],
+            ["--bunker-app-key", "key"],
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "ngit",
+                    "account",
+                    "login",
+                    "--bunker-url",
+                    "bunker://example",
+                    conflicting[0],
+                    conflicting[1],
+                ])
+                .is_err(),
+                "--bunker-url accepted conflicting source {}",
+                conflicting[0]
+            );
+        }
     }
 
     #[test]

@@ -43,9 +43,10 @@ pub async fn login_or_signup(
     .await;
     match res {
         Ok(login) => Ok(login),
+        Err(error) if matches!(signer_info, Some(SignerInfo::Selection { .. })) => Err(error),
         Err(error) if Interactor::is_non_interactive() => Err(require_account(error)),
         Err(error) if error.downcast_ref::<SignerInfoNotFound>().is_some() => {
-            fresh_login_or_signup(git_repo, client, None, false, &[]).await
+            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
         }
         Err(error)
             if matches!(
@@ -54,7 +55,7 @@ pub async fn login_or_signup(
             ) =>
         {
             eprintln!("{error}; please log in again");
-            fresh_login_or_signup(git_repo, client, None, false, &[]).await
+            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
         }
         Err(error) => Err(error),
     }
@@ -87,21 +88,27 @@ pub fn require_account(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignerInfo {
     Nsec {
         nsec: String,
         password: Option<String>,
         npub: Option<String>,
+        /// Compare the derived public key with `npub`. Explicit selection
+        /// requires this; legacy profiles retain their existing behavior.
+        verify_npub: bool,
     },
     Bunker {
         bunker_uri: String,
         bunker_app_key: String,
         npub: Option<String>,
     },
+    /// Select a previously stored/configured signer by npub or alias. This is
+    /// resolved before a signer is constructed and never reaches signing code.
+    Selection { selector: String },
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SignerInfoSource {
     GitLocal,
     GitGlobal,
@@ -113,6 +120,7 @@ fn print_logged_in_as(
     user_ref: &UserRef,
     offline_mode: bool,
     source: &SignerInfoSource,
+    alias: Option<&str>,
 ) -> Result<()> {
     if is_verbose() {
         if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
@@ -126,16 +134,57 @@ fn print_logged_in_as(
         }
     }
     eprintln!(
-        "logged in as {}{}",
-        user_ref.metadata.name,
-        match source {
-            SignerInfoSource::CommandLineArguments => " via cli arguments",
-            SignerInfoSource::GitLocal => " to local repository",
-            SignerInfoSource::GitGlobal => "",
-            SignerInfoSource::GitSystem => " via system git config",
-        }
+        "{}",
+        logged_in_message(&user_ref.metadata.name, source, alias)
     );
     Ok(())
+}
+
+pub fn logged_in_message(
+    profile_name: &str,
+    source: &SignerInfoSource,
+    alias: Option<&str>,
+) -> String {
+    let identity = login_identity(profile_name, alias);
+    match source {
+        SignerInfoSource::CommandLineArguments => {
+            format!("logged in for this command as {identity}")
+        }
+        SignerInfoSource::GitLocal => {
+            format!("logged in to this local repository as {identity}")
+        }
+        SignerInfoSource::GitGlobal => format!("logged in globally as {identity}"),
+        SignerInfoSource::GitSystem => {
+            format!("logged in via system Git config as {identity}")
+        }
+    }
+}
+
+pub fn logged_out_message(
+    profile_name: &str,
+    source: &SignerInfoSource,
+    alias: Option<&str>,
+) -> String {
+    let identity = login_identity(profile_name, alias);
+    match source {
+        SignerInfoSource::CommandLineArguments => {
+            format!("stopped using {identity} for this command")
+        }
+        SignerInfoSource::GitLocal => {
+            format!("logged out of this local repository as {identity}")
+        }
+        SignerInfoSource::GitGlobal => format!("logged out globally as {identity}"),
+        SignerInfoSource::GitSystem => {
+            format!("logged out of system Git config as {identity}")
+        }
+    }
+}
+
+pub fn login_identity(profile_name: &str, alias: Option<&str>) -> String {
+    alias.map_or_else(
+        || profile_name.to_string(),
+        |alias| format!("signer alias '{alias}'"),
+    )
 }
 
 // None: in the edge case where the user is logged in via cli arguments rather
@@ -159,4 +208,41 @@ pub fn get_curent_user(git_repo: &Repo) -> Result<Option<PublicKey>> {
             None
         },
     )
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::{SignerInfoSource, logged_in_message, logged_out_message};
+
+    #[test]
+    fn login_status_describes_identity_and_scope() {
+        for (source, expected) in [
+            (
+                SignerInfoSource::CommandLineArguments,
+                "logged in for this command as Dan Conway",
+            ),
+            (
+                SignerInfoSource::GitLocal,
+                "logged in to this local repository as Dan Conway",
+            ),
+            (
+                SignerInfoSource::GitGlobal,
+                "logged in globally as Dan Conway",
+            ),
+            (
+                SignerInfoSource::GitSystem,
+                "logged in via system Git config as Dan Conway",
+            ),
+        ] {
+            assert_eq!(logged_in_message("Dan Conway", &source, None), expected);
+        }
+        assert_eq!(
+            logged_in_message("Dan Conway", &SignerInfoSource::GitLocal, Some("dcagent")),
+            "logged in to this local repository as signer alias 'dcagent'"
+        );
+        assert_eq!(
+            logged_out_message("Dan Conway", &SignerInfoSource::GitLocal, Some("dcagent")),
+            "logged out of this local repository as signer alias 'dcagent'"
+        );
+    }
 }

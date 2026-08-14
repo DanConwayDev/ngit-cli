@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
 use ngit::{
     git::{get_git_config_item, remove_git_config_item},
-    login::{SignerInfoSource, credential_store, existing::load_existing_login},
+    login::{
+        SignerInfoSource, credential_store,
+        existing::{load_existing_login, selected_alias},
+        logged_out_message, login_identity,
+    },
 };
+use nostr::prelude::ToBech32;
 
 use crate::{
     git::Repo,
@@ -22,11 +27,12 @@ pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     logout(git_repo.as_ref(), args.forget).await
 }
 
-const LOGIN_CONFIG_ITEMS: [&str; 4] = [
+const LOGIN_CONFIG_ITEMS: [&str; 5] = [
     "nostr.nsec",
     "nostr.npub",
     "nostr.bunker-uri",
     "nostr.bunker-app-key",
+    "nostr.signer",
 ];
 
 async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
@@ -35,96 +41,84 @@ async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
     } else {
         vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]
     } {
-        if let Ok((_, user_ref, source)) = load_existing_login(
+        let scope = if source == SignerInfoSource::GitLocal {
+            git_repo
+        } else {
+            None
+        };
+        if !has_login_config(scope) {
+            continue;
+        }
+        let loaded = load_existing_login(
             &git_repo,
             &None,
             &None,
-            &Some(source),
+            &Some(source.clone()),
             None,
             true,
             false,
             false,
         )
-        .await
-        {
-            let scope = if source == SignerInfoSource::GitLocal {
-                git_repo
-            } else {
-                None
-            };
-            let pointers = credential_store::config_pointers(&scope);
-            if forget {
-                forget_pointers(&pointers)?;
-            }
-            for item in LOGIN_CONFIG_ITEMS {
-                if let Err(error) = remove_git_config_item(
-                    if source == SignerInfoSource::GitLocal {
-                        &git_repo
-                    } else {
-                        &None
-                    },
-                    item,
-                ) {
+        .await;
+        let npub = loaded
+            .as_ref()
+            .ok()
+            .and_then(|(_, user_ref, _)| user_ref.public_key.to_bech32().ok());
+        let alias = loaded
+            .as_ref()
+            .ok()
+            .and_then(|(_, _, source)| selected_alias(&git_repo, &None, source).ok().flatten());
+        let pointers = credential_store::config_pointers(&scope, npub.as_deref());
+        if forget {
+            forget_pointers(&pointers)?;
+        }
+        for item in LOGIN_CONFIG_ITEMS {
+            if let Err(error) = remove_git_config_item(&scope, item) {
+                if let Ok((_, user_ref, _)) = &loaded {
                     println!(
                         "failed to log out {}as {}",
                         if source == SignerInfoSource::GitLocal {
-                            "from local git repository "
+                            "of this local repository "
                         } else {
-                            ""
+                            "globally "
                         },
-                        user_ref.metadata.name
+                        login_identity(&user_ref.metadata.name, alias.as_deref())
                     );
-                    eprintln!("{error:?}");
-                    eprintln!(
-                        "consider manually removing {} git config items: {}",
-                        if source == SignerInfoSource::GitGlobal {
-                            "global"
-                        } else {
-                            "local"
-                        },
-                        format_items_as_list(&get_global_login_config_items_set())
-                    );
-                    return Ok(());
                 }
+                eprintln!("{error:?}");
+                eprintln!(
+                    "consider manually removing {} git config items: {}",
+                    if source == SignerInfoSource::GitGlobal {
+                        "global"
+                    } else {
+                        "local"
+                    },
+                    format_items_as_list(&get_global_login_config_items_set())
+                );
+                return Ok(());
             }
+        }
+        if let Ok((_, user_ref, _)) = loaded {
             println!(
-                "logged out {}as {}",
-                if source == SignerInfoSource::GitLocal {
-                    "from local git repository "
-                } else {
-                    ""
-                },
-                user_ref.metadata.name
+                "{}",
+                logged_out_message(&user_ref.metadata.name, &source, alias.as_deref())
             );
-            hint_retained_secrets(forget, &pointers);
-            return Ok(());
         }
-    }
-    // A dangling pointer cannot be loaded as a signer, but logout must still
-    // clear it so the user can recover with a fresh login.
-    // NGITTEST limits the sweep to local config, mirroring the login flow, so
-    // tests never touch the developer's real global git config.
-    for scope in if std::env::var("NGITTEST").is_ok() {
-        vec![git_repo]
-    } else {
-        vec![git_repo, None]
-    } {
-        let has_login = ["nostr.nsec", "nostr.bunker-uri", "nostr.bunker-app-key"]
-            .iter()
-            .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()));
-        if has_login {
-            let pointers = credential_store::config_pointers(&scope);
-            if forget {
-                forget_pointers(&pointers)?;
-            }
-            for item in LOGIN_CONFIG_ITEMS {
-                remove_git_config_item(&scope, item)?;
-            }
-            hint_retained_secrets(forget, &pointers);
-            return Ok(());
-        }
+        hint_retained_secrets(forget, &pointers);
+        return Ok(());
     }
     Ok(())
+}
+
+fn has_login_config(scope: Option<&Repo>) -> bool {
+    [
+        "nostr.nsec",
+        "nostr.bunker-uri",
+        "nostr.bunker-app-key",
+        "nostr.signer",
+    ]
+    .iter()
+    .any(|item| get_git_config_item(&scope, item).is_ok_and(|value| value.is_some()))
 }
 
 fn forget_pointers(pointers: &[String]) -> Result<()> {
@@ -146,8 +140,13 @@ fn hint_retained_secrets(forget: bool, pointers: &[String]) {
         return;
     }
     for pointer in pointers {
+        let subject = if pointer.starts_with("signer:") {
+            "the remote signer connection"
+        } else {
+            "the account secret"
+        };
         eprintln!(
-            "the account secret remains in the credential store; remove it with: ngit account forget-keys {pointer}"
+            "{subject} remains in the credential store; remove it with: ngit account forget-keys {pointer}"
         );
     }
 }

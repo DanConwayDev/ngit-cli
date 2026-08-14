@@ -9,9 +9,9 @@ pub struct SubCommandArgs {
 }
 
 pub fn launch(args: &SubCommandArgs) -> Result<()> {
-    if credential_store::parse_pointer(&args.entry).is_none() {
+    if !credential_store::valid_entry_name(&args.entry) {
         bail!(
-            "'{}' is not a credential entry name; expected the npub-based entry name printed at logout",
+            "'{}' is not a credential entry name; expected the entry name printed at logout",
             args.entry
         );
     }
