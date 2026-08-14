@@ -103,7 +103,8 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         signer.password.as_ref(),
         alias.as_deref(),
         command_args.bunker_url.is_some(),
-    )?;
+    )
+    .await?;
     let validated_npub = validate_signer_before_switch(
         signer_for_login.as_ref(),
         command_args.bunker_url.as_deref(),
@@ -247,7 +248,7 @@ fn validate_signer_before_switch(
     }
 }
 
-fn resolve_login_selection(
+async fn resolve_login_selection(
     git_repo: Option<&Repo>,
     signer_info: Option<&SignerInfo>,
     password: Option<&String>,
@@ -281,7 +282,8 @@ fn resolve_login_selection(
         &requested,
         &password.cloned(),
         &Some(SignerInfoSource::CommandLineArguments),
-    )?
+    )
+    .await?
     .0;
     Ok((Some(resolved), Some(selected_by)))
 }

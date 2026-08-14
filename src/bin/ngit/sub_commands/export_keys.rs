@@ -20,6 +20,7 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
 
     let (signer_info, source) =
         get_signer_info(&git_repo.as_ref(), signer.info, signer.password, &None)
+            .await
             .map_err(login::require_account)?;
     let (_, user_ref, source) = load_existing_login(
         &git_repo.as_ref(),

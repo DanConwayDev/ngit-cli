@@ -69,7 +69,7 @@ pub async fn load_existing_login(
     fetch_profile_updates: bool,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let requested_signer_info = signer_info;
-    let (signer_info, source) = get_signer_info(git_repo, signer_info, password, source)?;
+    let (signer_info, source) = get_signer_info(git_repo, signer_info, password, source).await?;
 
     let (signer, public_key) = get_signer(&signer_info, prompt_for_password).await?;
 
@@ -115,7 +115,7 @@ pub fn selected_alias(
 
 /// priority order: cli arguments, local git config, global git config, system
 /// git config
-pub fn get_signer_info(
+pub async fn get_signer_info(
     git_repo: &Option<&Repo>,
     signer_info: &Option<SignerInfo>,
     password: &Option<String>,
@@ -137,7 +137,16 @@ pub fn get_signer_info(
                     SignerInfoSource::GitSystem,
                 ]
             } {
-                match get_signer_info(git_repo, signer_info, password, &Some(source.clone())) {
+                // recursion inside an async fn needs boxing to keep the
+                // future's size computable
+                match Box::pin(get_signer_info(
+                    git_repo,
+                    signer_info,
+                    password,
+                    &Some(source.clone()),
+                ))
+                .await
+                {
                     Ok(res) => {
                         result = Some(res);
                         break;
@@ -178,7 +187,7 @@ pub fn get_signer_info(
             if let Some(signer_info) = signer_info {
                 let signer_info = match signer_info {
                     SignerInfo::Selection { selector } => {
-                        resolve_selected_signer(git_repo, selector, password)?
+                        resolve_selected_signer(git_repo, selector, password).await?
                     }
                     signer_info => signer_info.clone(),
                 };
@@ -194,7 +203,7 @@ pub fn get_signer_info(
                 .context("failed get local git config")?
             {
                 (
-                    resolve_selected_signer(&Some(git_repo), &selector, password)?,
+                    resolve_selected_signer(&Some(git_repo), &selector, password).await?,
                     SignerInfoSource::GitLocal,
                 )
             } else if let Ok(nsec) = get_git_config_item(&Some(git_repo), "nostr.nsec")
@@ -232,7 +241,7 @@ pub fn get_signer_info(
                 .context("failed to get global git config")?
             {
                 (
-                    resolve_selected_signer(git_repo, &selector, password)?,
+                    resolve_selected_signer(git_repo, &selector, password).await?,
                     SignerInfoSource::GitGlobal,
                 )
             } else if let Some(nsec) = get_git_config_item(&None, "nostr.nsec")
@@ -268,7 +277,7 @@ pub fn get_signer_info(
                 .context("failed to get system git config")?
             {
                 (
-                    resolve_selected_signer(git_repo, &selector, password)?,
+                    resolve_selected_signer(git_repo, &selector, password).await?,
                     SignerInfoSource::GitSystem,
                 )
             } else if let Some(nsec) = get_git_config_item_system("nostr.nsec")
@@ -363,22 +372,39 @@ fn resolve_scope_secret(
     )
 }
 
-fn resolve_selected_signer(
+async fn resolve_selected_signer(
     git_repo: &Option<&Repo>,
     selector: &str,
     password: &Option<String>,
 ) -> Result<SignerInfo> {
     let expected_npub = resolve_selector_npub(git_repo, selector)?;
+    resolve_signer_for_npub(git_repo, &expected_npub, password)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "selected signer {expected_npub} is not available in the OS credential store, credentials.json, or git config"
+        )
+    })
+}
+
+/// Resolve stored signer material for one expected npub.
+///
+/// `Ok(None)` means every source reported the entry as missing. Broken or
+/// unavailable sources return `Err` instead, so a damaged credential entry is
+/// reported rather than silently skipped.
+fn resolve_signer_for_npub(
+    git_repo: &Option<&Repo>,
+    expected_npub: &str,
+    password: &Option<String>,
+) -> Result<Option<SignerInfo>> {
     let mut store_error = None;
 
-    match credential_store::retrieve_from(&expected_npub, credential_store::Backend::Os) {
+    match credential_store::retrieve_from(expected_npub, credential_store::Backend::Os) {
         Ok(keys) => {
-            return Ok(SignerInfo::Nsec {
+            return Ok(Some(SignerInfo::Nsec {
                 nsec: keys.secret_key().to_bech32()?,
                 password: password.clone(),
-                npub: Some(expected_npub),
+                npub: Some(expected_npub.to_string()),
                 verify_npub: true,
-            });
+            }));
         }
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
@@ -391,14 +417,14 @@ fn resolve_selected_signer(
         },
     }
 
-    match credential_store::retrieve_from(&expected_npub, credential_store::Backend::File) {
+    match credential_store::retrieve_from(expected_npub, credential_store::Backend::File) {
         Ok(keys) => {
-            return Ok(SignerInfo::Nsec {
+            return Ok(Some(SignerInfo::Nsec {
                 nsec: keys.secret_key().to_bech32()?,
                 password: password.clone(),
-                npub: Some(expected_npub),
+                npub: Some(expected_npub.to_string()),
                 verify_npub: true,
-            });
+            }));
         }
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
@@ -414,27 +440,27 @@ fn resolve_selected_signer(
     // Every nsec source is considered before any bunker source. A matching
     // but unusable nsec profile fails instead of silently switching methods.
     for scope in selection_scopes(git_repo) {
-        let Some(nsec) = matching_nsec_config(git_repo, scope, &expected_npub)? else {
+        let Some(nsec) = matching_nsec_config(git_repo, scope, expected_npub)? else {
             continue;
         };
-        return Ok(SignerInfo::Nsec {
+        return Ok(Some(SignerInfo::Nsec {
             nsec: resolve_scope_secret(git_repo, scope, &nsec, true)?,
             password: password.clone(),
-            npub: Some(expected_npub),
+            npub: Some(expected_npub.to_string()),
             verify_npub: true,
-        });
+        }));
     }
 
     match credential_store::retrieve_bunker_signer_from(
-        &expected_npub,
+        expected_npub,
         credential_store::Backend::Os,
     ) {
         Ok(record) => {
-            return Ok(SignerInfo::Bunker {
+            return Ok(Some(SignerInfo::Bunker {
                 bunker_uri: record.bunker_uri,
                 bunker_app_key: record.client_nsec,
-                npub: Some(expected_npub),
-            });
+                npub: Some(expected_npub.to_string()),
+            }));
         }
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
@@ -448,15 +474,15 @@ fn resolve_selected_signer(
     }
 
     match credential_store::retrieve_bunker_signer_from(
-        &expected_npub,
+        expected_npub,
         credential_store::Backend::File,
     ) {
         Ok(record) => {
-            return Ok(SignerInfo::Bunker {
+            return Ok(Some(SignerInfo::Bunker {
                 bunker_uri: record.bunker_uri,
                 bunker_app_key: record.client_nsec,
-                npub: Some(expected_npub),
-            });
+                npub: Some(expected_npub.to_string()),
+            }));
         }
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
@@ -472,7 +498,7 @@ fn resolve_selected_signer(
     // Legacy flat bunker fields remain readable, but a profile is only a
     // candidate when all of its fields come from the same scope.
     for scope in selection_scopes(git_repo) {
-        if config_value(git_repo, scope, "nostr.npub")?.as_deref() != Some(&expected_npub) {
+        if config_value(git_repo, scope, "nostr.npub")?.as_deref() != Some(expected_npub) {
             continue;
         }
         let Some(bunker_uri) = config_value(git_repo, scope, "nostr.bunker-uri")? else {
@@ -485,11 +511,11 @@ fn resolve_selected_signer(
                     scope.label()
                 )
             })?;
-        return Ok(SignerInfo::Bunker {
+        return Ok(Some(SignerInfo::Bunker {
             bunker_uri,
             bunker_app_key: resolve_scope_secret(git_repo, scope, &app_key, false)?,
-            npub: Some(expected_npub),
-        });
+            npub: Some(expected_npub.to_string()),
+        }));
     }
 
     if let Some(error) = store_error.take() {
@@ -498,9 +524,7 @@ fn resolve_selected_signer(
         )));
     }
 
-    bail!(
-        "selected signer {expected_npub} is not available in the OS credential store, credentials.json, or git config"
-    )
+    Ok(None)
 }
 
 fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<String> {
@@ -714,8 +738,8 @@ mod tests {
     use super::*;
     use crate::git::{Repo, RepoActions, test_helpers::GitTestRepo};
 
-    #[test]
-    fn local_alias_resolves_matching_nsec() -> Result<()> {
+    #[tokio::test]
+    async fn local_alias_resolves_matching_nsec() -> Result<()> {
         let fixture = GitTestRepo::new("main")?;
         let repo = Repo::from_path(&fixture.dir)?;
         let keys = Keys::generate();
@@ -732,7 +756,8 @@ mod tests {
             &Some(selection),
             &None,
             &Some(SignerInfoSource::CommandLineArguments),
-        )?;
+        )
+        .await?;
         assert_eq!(source, SignerInfoSource::CommandLineArguments);
         assert!(matches!(
             info,
@@ -741,8 +766,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn alias_mapping_does_not_accept_a_different_nsec() -> Result<()> {
+    #[tokio::test]
+    async fn alias_mapping_does_not_accept_a_different_nsec() -> Result<()> {
         let fixture = GitTestRepo::new("main")?;
         let repo = Repo::from_path(&fixture.dir)?;
         let expected = Keys::generate().public_key().to_bech32()?;
@@ -751,7 +776,9 @@ mod tests {
         repo.save_git_config_item("nostr.npub", &other.public_key().to_bech32()?, false)?;
         repo.save_git_config_item("nostr.nsec", &other.secret_key().to_bech32()?, false)?;
 
-        let error = resolve_selected_signer(&Some(&repo), "fred", &None).unwrap_err();
+        let error = resolve_selected_signer(&Some(&repo), "fred", &None)
+            .await
+            .unwrap_err();
         let message = format!("{error:#}");
         assert!(
             message.contains("not available") || message.contains("credential store"),
@@ -760,8 +787,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn malformed_selected_alias_fails_closed() -> Result<()> {
+    #[tokio::test]
+    async fn malformed_selected_alias_fails_closed() -> Result<()> {
         let fixture = GitTestRepo::new("main")?;
         let repo = Repo::from_path(&fixture.dir)?;
         repo.save_git_config_item("nostr.signer", "not/a/portable-alias", false)?;
@@ -771,13 +798,15 @@ mod tests {
             false,
         )?;
 
-        let error = get_signer_info(&Some(&repo), &None, &None, &None).unwrap_err();
+        let error = get_signer_info(&Some(&repo), &None, &None, &None)
+            .await
+            .unwrap_err();
         assert!(format!("{error:#}").contains("signer alias"));
         Ok(())
     }
 
-    #[test]
-    fn nsec_precedes_bunker_for_same_selected_npub() -> Result<()> {
+    #[tokio::test]
+    async fn nsec_precedes_bunker_for_same_selected_npub() -> Result<()> {
         let fixture = GitTestRepo::new("main")?;
         let repo = Repo::from_path(&fixture.dir)?;
         let keys = Keys::generate();
@@ -795,7 +824,7 @@ mod tests {
             false,
         )?;
 
-        let info = resolve_selected_signer(&Some(&repo), &npub, &None)?;
+        let info = resolve_selected_signer(&Some(&repo), &npub, &None).await?;
         assert!(matches!(info, SignerInfo::Nsec { .. }));
         Ok(())
     }
