@@ -4,39 +4,51 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
 
-    # ngit-grasp provides the GRASP server binary used by the integration
-    # test harness. Pinned to a specific rev so CI is reproducible — bump
-    # it intentionally rather than tracking a moving target.
-    #
-    # When bumping: a stale local Nix git cache can write a narHash that
-    # doesn't match a fresh fetch, passing locally but breaking CI with a
-    # "NAR hash mismatch" on this input. If that happens, clear the fetch
-    # caches and regenerate the lock from scratch:
-    #   rm -rf ~/.cache/nix/{gitv3,fetcher-cache-v4.sqlite*,tarball-cache,eval-cache-v6}
-    #   rm flake.lock && nix flake lock
-    # then verify `nix develop` still builds before committing flake.lock.
-    ngit-grasp = {
-      url = "git+https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.rust-overlay.follows = "rust-overlay";
-      inputs.flake-utils.follows = "flake-utils";
+    # Buzz provides the relay used by the authenticated Smart HTTP integration
+    # test. Keep this on the exact Nix-support PR revision until that work is
+    # merged upstream.
+    buzz = {
+      url = "github:danconwaydev/buzz/b12739b23da92b0f1e99626b02749ab55c51b8ce";
     };
   };
 
-  outputs = { nixpkgs, rust-overlay, flake-utils, ngit-grasp, ... }:
+  outputs = { nixpkgs, rust-overlay, flake-utils, buzz, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
         manifest = pkgs.lib.importTOML ./Cargo.toml;
-        # ngit-grasp's upstream derivation runs cargo test --lib during the
-        # nix build; 15 of those tests fail inside the build sandbox (they
-        # need git in PATH or other ambient state). We only want the
-        # binary, so disable the test phase here.
-        ngit-grasp-pkg =
-          ngit-grasp.packages.${system}.default.overrideAttrs (_: {
-            doCheck = false;
-          });
+        ngitGraspRevision = "6b83d2ac5b1a26e39cd241d4577fda0a1dbff8dc";
+        # The pinned repository contains Gitlinks without .gitmodules entries.
+        # Nix 2.34 and 2.35 disagree about whether their empty directories are
+        # retained in a flake Git input, producing different NAR hashes for the
+        # same commit. fetchgit gives us a stable tracked-file checkout instead.
+        ngitGraspSource = pkgs.fetchgit {
+          url = "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git";
+          rev = ngitGraspRevision;
+          hash = "sha256-LIjjH3e7m6cqflI9mj7snLccPl69xnjQwak2BGevLus=";
+          fetchSubmodules = false;
+        };
+        ngit-grasp-pkg = pkgs.rustPlatform.buildRustPackage {
+          pname = "ngit-grasp";
+          version = "2.1.2";
+          src = ngitGraspSource;
+          NGIT_BUILD_REVISION = ngitGraspRevision;
+          cargoLock.lockFile = "${ngitGraspSource}/Cargo.lock";
+          cargoBuildFlags = [ "-p" "ngit-grasp" ];
+          nativeBuildInputs = with pkgs; [ pkg-config git ];
+          buildInputs = with pkgs; [ openssl ];
+          # The upstream library tests require Git and other ambient state that
+          # is unavailable in the build sandbox. The ngit integration suite
+          # exercises the resulting binary instead.
+          doCheck = false;
+        };
+        buzz-test-packages = pkgs.lib.optionals pkgs.stdenv.isLinux [
+          buzz.packages.${system}.buzz-relay
+          pkgs.postgresql_17
+          pkgs.redis
+          pkgs.garage_2
+        ];
       in with pkgs; {
         devShells.default = mkShell {
 
@@ -56,7 +68,7 @@
             openssl
             dbus
             ngit-grasp-pkg
-          ];
+          ] ++ buzz-test-packages;
           shellHook = ''
             # auto-install git hooks
             dot_git="$(git rev-parse --git-common-dir)"
@@ -66,11 +78,13 @@
             # For rust-analyzer 'hover' tooltips to work.
             export RUST_SRC_PATH=${pkgs.rustPlatform.rustLibSrc}
 
-            # Point the test harness at the pinned ngit-grasp binary from
-            # the flake input. Without this the harness falls back to the
-            # sibling-clone heuristic, which is fine for local dev but
-            # not what CI gets.
+            # Point the test harness at the exact pinned ngit-grasp binary.
             export NGIT_GRASP_BIN=${ngit-grasp-pkg}/bin/ngit-grasp
+
+          '' + lib.optionalString stdenv.isLinux ''
+            # Run the Buzz integration test against the exact Nix-built
+            # binaries from the pinned PR revision.
+            export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-relay}/bin/buzz-relay
           '';
         };
         # Create packages for each binary defined in Cargo.toml

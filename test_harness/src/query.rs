@@ -11,7 +11,9 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use nostr_sdk::prelude::*;
+use nostr_sdk::{
+    authenticator::SignerAuthenticator, client::ClientBuilder, prelude::*, relay::RelayLimits,
+};
 
 /// Default query budget — generous enough for in-process / loopback relays
 /// under load on CI, short enough to keep tests from hanging indefinitely
@@ -21,6 +23,29 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Connect to `relay_url`, REQ with `filter`, await EOSE, then disconnect.
 pub(crate) async fn fetch_events(relay_url: &str, filter: Filter) -> Result<Vec<Event>> {
     let client = Client::default();
+    fetch_events_with_client(client, relay_url, filter).await
+}
+
+/// Connect and query as `keys`, allowing a private relay to complete NIP-42
+/// before it handles the REQ.
+pub(crate) async fn fetch_events_as(
+    relay_url: &str,
+    keys: &Keys,
+    filter: Filter,
+) -> Result<Vec<Event>> {
+    let client = ClientBuilder::default()
+        .relay_limits(RelayLimits::disable())
+        .verify_subscriptions(true)
+        .authenticator(SignerAuthenticator::new(keys.clone()))
+        .build();
+    fetch_events_with_client(client, relay_url, filter).await
+}
+
+async fn fetch_events_with_client(
+    client: Client,
+    relay_url: &str,
+    filter: Filter,
+) -> Result<Vec<Event>> {
     client
         .add_relay(relay_url)
         .await

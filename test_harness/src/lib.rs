@@ -16,6 +16,10 @@
 //! - [`grasp::GraspServer`] — `ngit-grasp` subprocess on a loopback port,
 //!   speaking NIP-01 + git smart-http. Required for any test that publishes a
 //!   kind-30617 repo announcement or pushes git data through a GRASP server.
+//! - [`buzz::BuzzServer`] — the Nix-built Buzz relay plus isolated Postgres,
+//!   Redis, and Garage subprocesses. It provisions channels and repository
+//!   announcements through their Nostr protocol events, then exposes the relay
+//!   and authenticated Smart HTTP surfaces to ngit.
 //! - [`vanilla_git_server::VanillaGitServer`] — in-process smart-HTTP git
 //!   server with **full push and fetch support**, for tests that need a
 //!   non-grasp clone URL on a repo announcement. Covers the
@@ -40,6 +44,7 @@
 //! - [`snapshot::RepoSnapshot`] — `HEAD` + refs only for now; grows as migrated
 //!   tests demand.
 
+pub mod buzz;
 pub mod grasp;
 pub mod harness;
 pub mod nostr;
@@ -51,12 +56,14 @@ pub mod scenarios;
 pub mod snapshot;
 pub mod vanilla_git_server;
 
+pub use buzz::BuzzServer;
 pub use grasp::GraspServer;
 pub use harness::{Harness, HarnessBuilder};
 pub use nostr::{
     KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_REPO_STATE, event_branch_name_tag, tag_value,
     tag_values, tag_values_multiple,
 };
+pub use nostr_sdk::local_relay::LocalRelayBuilderNip42;
 pub use relay::VanillaRelay;
 pub use repo::Repo;
 pub use scenarios::{

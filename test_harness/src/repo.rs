@@ -147,6 +147,55 @@ impl Repo {
         })
     }
 
+    /// Clone with values written to the new repository before Git invokes the
+    /// remote helper. `git clone --config` is required for credentials in
+    /// harness test mode, where ngit deliberately ignores global Git config.
+    pub(crate) async fn clone_with_repo_config(
+        harness: &Harness,
+        url: &str,
+        repo_config: &[(&str, &str)],
+    ) -> Result<Self> {
+        let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
+        let dir = tempdir.path().to_path_buf();
+
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&dir);
+        for (k, v) in harness.env() {
+            cmd.env(k, v);
+        }
+        cmd.env("PATH", &augmented_path);
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+        cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        cmd.arg("clone");
+        for (key, value) in repo_config {
+            cmd.arg("--config").arg(format!("{key}={value}"));
+        }
+        cmd.args([url, "."]);
+
+        let out = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn git clone {url}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git clone {url} exited {:?}\nstdout: {}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+
+        Self::set_default_identity(&dir)?;
+
+        Ok(Self {
+            _tempdir: tempdir,
+            dir,
+            env: harness.env(),
+            ngit_bin: harness.ngit_bin().to_path_buf(),
+            augmented_path,
+        })
+    }
+
     /// Allocate a fresh tempdir and an augmented `PATH` (with the
     /// `git-remote-nostr` directory prepended) for either constructor.
     fn alloc_tempdir_and_path(harness: &Harness) -> Result<(TempDir, OsString)> {

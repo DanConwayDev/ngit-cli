@@ -106,7 +106,7 @@ impl GraspServer {
         role: impl Into<String>,
         reservation: PortReservation,
     ) -> Result<Self> {
-        Self::start_inner(role.into(), reservation, false).await
+        Self::start_inner(role.into(), reservation, false, None).await
     }
 
     /// Spawn ngit-grasp with GRASP-06 `/prs/` endpoint enabled
@@ -122,7 +122,17 @@ impl GraspServer {
         role: impl Into<String>,
         reservation: PortReservation,
     ) -> Result<Self> {
-        Self::start_inner(role.into(), reservation, true).await
+        Self::start_inner(role.into(), reservation, true, None).await
+    }
+
+    /// Spawn a GRASP-08 private service whose static membership contains the
+    /// supplied npub.
+    pub(crate) async fn start_private(
+        role: impl Into<String>,
+        reservation: PortReservation,
+        member: String,
+    ) -> Result<Self> {
+        Self::start_inner(role.into(), reservation, false, Some(member)).await
     }
 
     /// Common implementation for [`start`][Self::start] and
@@ -132,6 +142,7 @@ impl GraspServer {
         role: String,
         reservation: PortReservation,
         grasp06: bool,
+        private_member: Option<String>,
     ) -> Result<Self> {
         let binary = locate_binary()?;
 
@@ -144,7 +155,9 @@ impl GraspServer {
             let r = reservation
                 .take()
                 .expect("reservation always present on attempt entry");
-            match Self::try_start_once(role.clone(), &binary, r, grasp06).await {
+            match Self::try_start_once(role.clone(), &binary, r, grasp06, private_member.as_deref())
+                .await
+            {
                 Ok(server) => return Ok(server),
                 Err(StartFailure::EarlyExit { status }) if attempt < MAX_BIND_ATTEMPTS => {
                     eprintln!(
@@ -182,6 +195,7 @@ impl GraspServer {
         binary: &Path,
         reservation: PortReservation,
         grasp06: bool,
+        private_member: Option<&str>,
     ) -> std::result::Result<Self, StartFailure> {
         let port = reservation.port();
         let bind_address = format!("127.0.0.1:{port}");
@@ -222,6 +236,11 @@ impl GraspServer {
         // that use plain `start()` are unaffected.
         if grasp06 {
             cmd.env("NGIT_GRASP06_ENABLE", "true");
+        }
+        if let Some(member) = private_member {
+            cmd.env("NGIT_PRIVATE_MODE", "true")
+                .env("NGIT_PRIVATE_MEMBERS", member)
+                .env("NGIT_PRIVATE_PUBLIC_ORIGIN", &url);
         }
 
         // Release the port reservation immediately before spawning the
@@ -367,6 +386,12 @@ impl GraspServer {
     /// only the server implementation differs.
     pub async fn events(&self, filter: Filter) -> Result<Vec<Event>> {
         query::fetch_events(&self.relay_url(), filter).await
+    }
+
+    /// Query a GRASP-08 service as an authenticated member. The short-lived
+    /// client answers the service's NIP-42 challenge before issuing its REQ.
+    pub async fn events_as(&self, keys: &Keys, filter: Filter) -> Result<Vec<Event>> {
+        query::fetch_events_as(&self.relay_url(), keys, filter).await
     }
     /// Read the OID that `refs/nostr/<event_id_hex>` resolves to inside the
     /// bare repository at
