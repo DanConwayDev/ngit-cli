@@ -60,7 +60,7 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
 
     let publish = !args.offline;
 
-    let (_signer, public_key, signer_info, keys) = signup_non_interactive(
+    let (_signer, public_key, signer_info, _keys) = signup_non_interactive(
         args.name.clone(),
         client.as_ref(),
         args.local,
@@ -71,7 +71,6 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
     .context("failed to create account")?;
 
     let npub = public_key.to_bech32()?;
-    let nsec = keys.secret_key().to_bech32()?;
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
             "status": "ok",
@@ -79,19 +78,15 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
             "entity": "account",
             "name": args.name,
             "npub": npub,
-            "nsec": nsec,
             "scope": if args.local { "local" } else { "global" },
             "published": publish,
         }));
     } else {
-        // Display the generated nsec prominently
         println!("\n✓ Account created successfully!");
         println!("\nDisplay name: {}", args.name);
         println!("Public key (npub): {npub}");
-        println!("\n⚠️  IMPORTANT: Save your secret key (nsec) securely!");
-        println!("nsec: {nsec}");
-        println!("\nYou will need this key to log in from other devices.");
-        println!("Run 'ngit account export-keys' to see this again.\n");
+        println!("\nYour secret key (nsec) has been stored securely.");
+        println!("Run 'ngit account export-keys' to view it.\n");
 
         if publish {
             println!("✓ Published metadata to relays");

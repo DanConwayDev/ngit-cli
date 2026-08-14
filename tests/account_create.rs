@@ -121,7 +121,10 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
         "stored npub does not match nsec"
     );
     assert_eq!(json["npub"], npub);
-    assert_eq!(json["nsec"], nsec);
+    assert!(
+        json.get("nsec").is_none(),
+        "account create output must not expose the secret key"
+    );
 
     // --- assertion 3: kind 0 metadata reached the specified relay ----------
 
