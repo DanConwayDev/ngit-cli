@@ -3,7 +3,7 @@ name: ngit
 description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.4"
+  version: "1.5"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -36,6 +36,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 - **`--json` output uses `nevent1…` bech32** for all `id` and `reply_to` fields (not raw hex). Use these values directly as `<ID|nevent>` arguments and in `nostr:` URI references.
 - **Reference other issues/PRs/comments in `--body` using `nostr:` URIs** — e.g. `nostr:nevent1abc…` or `nostr:naddr1abc…`. Never paste raw hex IDs into body text. The `id` field from `--json` output is already a valid `nevent1…` string; prefix it with `nostr:` to form the URI. Example: `--body "Relates to nostr:nevent1abc…"`. ngit automatically converts these into the correct event tags.
 - **Multiline files are safe with normal `ngit` text options, but not with `git push -o`.** For `ngit ... --body` or `ngit ... --description`, pass the file as one quoted argument: `--body "$(cat note.md)"`. For a Git push option, real newlines are forbidden; use literal `\n` only for a short inline value. Never convert a file into `-o description=...`.
+- **Use `--signer <npub|alias>` to select a non-default stored identity for one `ngit` command.** Do not export or pass an nsec merely to switch between configured accounts. `git push` cannot receive ngit's global CLI flags; select its identity through the applicable `nostr.signer` Git config first.
 
 ## Detecting a nostr repo
 
@@ -117,6 +118,13 @@ git push --force origin pr/second-part -o base=<commit|branch|nevent>
 ```
 
 When there is only one commit, omitting `-o title=` and `-o description=` is preferred — ngit uses the commit subject as the title and the commit body as the description. Pass `-d` (or `--defaults`) to confirm this automatically. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
+
+`--signer` applies to direct `ngit` commands, not to `git push`. To publish as
+another stored identity, activate its alias for this repository first with
+`ngit account login --local --alias <alias>`, or set `nostr.signer` in the
+applicable Git-config scope. Keep using `--signer` for direct follow-up actions
+such as comments, labels, and lifecycle changes when they should use a
+non-default identity.
 
 **Do not generate a `git push -o description=...` value from a Markdown file.**
 This restriction is specific to Git push options, which cannot contain real
@@ -259,16 +267,29 @@ ngit account login --bunker-url bunker://...  # NIP-46 remote signer
 ngit account login --local                    # this repo only
 ngit account login --secret-storage file      # bypass the OS store; use ngit's user-only file store
 ngit account login --secret-storage git-config # explicitly allow plaintext git-config storage
+ngit account login --nsec-file /private/key --alias alice # store a reusable alias
+ngit account login --local --alias alice       # activate a retained alias for this repository
 ngit account create --name "Alice"
 ngit account export-keys
 ngit account logout                           # removes login config, but preserves stored keys
 ngit account logout --forget                  # logout and delete the stored secret
 ngit account forget-keys <entry>              # delete a preserved credential-store entry
+ngit --signer alice account whoami --json --offline # inspect a stored identity without switching
+ngit --signer alice issue create --subject "Bug" --body "Details" # sign one command as alice
 ngit --nsec <nsec> <command>                  # inline for CI, no login needed
 ngit --nsec-file /private/key <command>       # one-shot CI/agent key, omitted from argv
 ```
 
 By default, login/create use the OS credential store and fall back to ngit's user-only file store. Git config contains the credential entry name rather than the secret. Select `auto`, `file`, or `git-config` with `--secret-storage`, `NGIT_SECRET_STORAGE`, or `nostr.secret-storage`; plaintext git-config storage must be requested explicitly. Existing plaintext values remain supported.
+
+Aliases name stored signers without exposing their secrets. On ordinary
+commands, `--signer` selects an alias or npub for one direct `ngit` invocation
+without rewriting the configured login. `ngit account login --signer <alias>`
+deliberately activates that stored signer; add `--local` to make it the
+repository default, including for `git push`, or omit `--local` to make it the
+global default. `ngit account login --local --alias <alias>` provides the same
+reactivation shorthand. Explicit signer selection fails closed when the alias
+is missing, ambiguous, or backed by invalid credentials.
 
 ## Sync
 
@@ -286,6 +307,7 @@ ngit sync --ref-name main        # sync specific ref
 | `--json`              | Structured output (ngit commands only) |
 | `--repo <TARGET>`     | Select remote, naddr, or nostr URL     |
 | `--repo-relay-only`   | Publish only to repository relays      |
+| `--signer <NPUB|ALIAS>` | Use a stored signer for one command  |
 | `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
 | `--nsec-file <PATH>`  | Read a one-shot key from a private file|
 | `-f`, `--force`       | Bypass safety guards                   |
@@ -298,6 +320,8 @@ ngit --customize                          # show all options
 git config nostr.repo-relay-only true     # don't broadcast to personal relays
 git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes
 git config nostr.secret-storage file      # use ngit's user-only credential file
+git config nostr.signer alice             # select the local signer, including for git push
+git config nostr.signer-alias.alice npub1... # portable alias-to-npub mapping
 NGIT_CACHE_DIR=/writable/path ngit repo --json # override the global event-cache directory
 ```
 
