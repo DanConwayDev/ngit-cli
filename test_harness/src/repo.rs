@@ -282,16 +282,28 @@ impl Repo {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let mut argv: Vec<std::ffi::OsString> = vec!["push".into()];
-        for a in args {
-            argv.push(a.as_ref().to_owned());
-        }
-        let label = format!("git {}", display_argv(&argv));
-        let out = self
-            .git(&argv)
-            .output()
+        self.nostr_push_with_git_flags(std::iter::empty::<&std::ffi::OsStr>(), args)
             .await
-            .with_context(|| format!("failed to spawn {label}"))?;
+    }
+
+    /// Push to a nostr remote with `git <git_flags...> push <args...>`.
+    ///
+    /// Same contract and guarantees as [`Self::nostr_push`]; `git_flags`
+    /// are global git flags that must precede the subcommand, e.g.
+    /// `-c nostr.signer=<selector>` to select a stored signer for this
+    /// push only.
+    pub async fn nostr_push_with_git_flags<F, T, I, S>(
+        &self,
+        git_flags: F,
+        args: I,
+    ) -> Result<std::process::Output>
+    where
+        F: IntoIterator<Item = T>,
+        T: AsRef<std::ffi::OsStr>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let (label, out) = self.nostr_push_output(git_flags, args).await?;
         if !out.status.success() {
             anyhow::bail!(
                 "{label} exited {:?}\nstdout: {}\nstderr: {}",
@@ -321,7 +333,58 @@ impl Repo {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let mut argv: Vec<std::ffi::OsString> = vec!["push".into()];
+        self.nostr_push_with_git_flags_expecting_failure(
+            std::iter::empty::<&std::ffi::OsStr>(),
+            args,
+        )
+        .await
+    }
+
+    /// Push to a nostr remote that is expected to fail, with
+    /// `git <git_flags...> push <args...>`.
+    ///
+    /// Combines [`Self::nostr_push_with_git_flags`]'s flag handling with
+    /// [`Self::nostr_push_expecting_failure`]'s contract.
+    pub async fn nostr_push_with_git_flags_expecting_failure<F, T, I, S>(
+        &self,
+        git_flags: F,
+        args: I,
+    ) -> Result<std::process::Output>
+    where
+        F: IntoIterator<Item = T>,
+        T: AsRef<std::ffi::OsStr>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let (label, out) = self.nostr_push_output(git_flags, args).await?;
+        if out.status.success() {
+            anyhow::bail!(
+                "{label} succeeded but the test expected it to fail\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        Ok(out)
+    }
+
+    /// Spawn `git <git_flags...> push <args...>` and hand back the label
+    /// used in error messages plus the captured output.
+    async fn nostr_push_output<F, T, I, S>(
+        &self,
+        git_flags: F,
+        args: I,
+    ) -> Result<(String, std::process::Output)>
+    where
+        F: IntoIterator<Item = T>,
+        T: AsRef<std::ffi::OsStr>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut argv: Vec<std::ffi::OsString> = git_flags
+            .into_iter()
+            .map(|flag| flag.as_ref().to_owned())
+            .collect();
+        argv.push("push".into());
         for a in args {
             argv.push(a.as_ref().to_owned());
         }
@@ -331,14 +394,7 @@ impl Repo {
             .output()
             .await
             .with_context(|| format!("failed to spawn {label}"))?;
-        if out.status.success() {
-            anyhow::bail!(
-                "{label} succeeded but the test expected it to fail\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr),
-            );
-        }
-        Ok(out)
+        Ok((label, out))
     }
 
     /// Run `git <args>` and bail with `label` plus captured output on

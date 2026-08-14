@@ -6,7 +6,7 @@ use ngit::{
     git::{get_git_config_item, remove_git_config_item},
     login::{
         SignerInfo, SignerInfoSource, credential_store,
-        existing::{get_signer_info, load_existing_login, selected_alias},
+        existing::{load_existing_login, resolve_selection, selected_alias},
         logged_in_message,
     },
 };
@@ -62,13 +62,6 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         .as_deref()
         .map(credential_store::normalize_alias)
         .transpose()?;
-    let selected_alias = match signer.info {
-        Some(ngit::login::SignerInfo::Selection { selector }) if !selector.starts_with("npub1") => {
-            Some(credential_store::normalize_alias(selector)?)
-        }
-        _ => None,
-    };
-    let login_alias = alias.as_deref().or(selected_alias.as_deref());
     // Early validation: check if we have required parameters in non-interactive
     // mode
     if Interactor::is_non_interactive()
@@ -82,7 +75,10 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
             &[
                 ("--nsec <key>", "provide secret key (nsec or hex)"),
                 ("--bunker-url <url>", "bunker:// URL from signer app"),
-                ("--signer <npub|alias>", "reactivate a stored signer"),
+                (
+                    "--signer <alias|npub|nostr-display-name>",
+                    "reactivate a stored signer",
+                ),
                 ("--alias <alias>", "reactivate an existing stored alias"),
                 ("--interactive", "for interactive nostr connect login"),
             ],
@@ -97,13 +93,15 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
 
     let git_repo = discover_login_repo(command_args.local)?;
 
-    let (signer_for_login, selected_by) = resolve_login_selection(
+    let (signer_for_login, selected_by, selected_alias) = resolve_login_selection(
         git_repo.as_ref(),
         signer.info.as_ref(),
         signer.password.as_ref(),
         alias.as_deref(),
         command_args.bunker_url.is_some(),
-    )?;
+    )
+    .await?;
+    let login_alias = alias.as_deref().or(selected_alias.as_deref());
     let validated_npub = validate_signer_before_switch(
         signer_for_login.as_ref(),
         command_args.bunker_url.as_deref(),
@@ -247,13 +245,16 @@ fn validate_signer_before_switch(
     }
 }
 
-fn resolve_login_selection(
+async fn resolve_login_selection(
     git_repo: Option<&Repo>,
     signer_info: Option<&SignerInfo>,
     password: Option<&String>,
     alias: Option<&str>,
     has_bunker_url: bool,
-) -> Result<(Option<SignerInfo>, Option<String>)> {
+) -> Result<(Option<SignerInfo>, Option<String>, Option<String>)> {
+    // --signer selectors may fall back to cached profile names; --alias is
+    // strictly the alias namespace.
+    let from_signer_flag = matches!(signer_info, Some(SignerInfo::Selection { .. }));
     let mut requested = signer_info.cloned().or_else(|| {
         (!has_bunker_url).then(|| {
             alias.map(|alias| SignerInfo::Selection {
@@ -271,19 +272,19 @@ fn resolve_login_selection(
         }
     }
     let Some(SignerInfo::Selection { selector }) = &requested else {
-        return Ok((requested, None));
+        return Ok((requested, None, None));
     };
-    let selected_by = selector.clone();
     // Resolve before removing the current login. Its only signer material may
     // be in the Git-config scope that account switching is about to clear.
-    let resolved = get_signer_info(
-        &git_repo,
-        &requested,
-        &password.cloned(),
-        &Some(SignerInfoSource::CommandLineArguments),
-    )?
-    .0;
-    Ok((Some(resolved), Some(selected_by)))
+    // Mutable profile names are resolved once, here: only the canonical npub
+    // (or a matched alias) is handed on for persistence.
+    let resolved =
+        resolve_selection(&git_repo, selector, &password.cloned(), from_signer_flag).await?;
+    Ok((
+        Some(resolved.signer_info),
+        Some(resolved.npub),
+        resolved.alias,
+    ))
 }
 
 /// return ( bool - logged out, bool - log in to local git locally)
@@ -346,7 +347,7 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
             }
 
             // Interactive mode: prompt user for what to do
-            let alias = selected_alias(&git_repo, &None, &source)?;
+            let alias = selected_alias(&git_repo, &source)?;
             match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)

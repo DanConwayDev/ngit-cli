@@ -36,12 +36,13 @@ git push --force origin pr/second-part -o base=<commit|branch|nevent>
 
 When there is only one commit, omitting `-o title=` and `-o description=` is preferred — ngit uses the commit subject as the title and the commit body as the description. Pass `-d` (or `--defaults`) to confirm this automatically. `git push` or `git push --force` can update existing PRs (branch must still have the `pr/` prefix).
 
-`--signer` applies to direct `ngit` commands, not to `git push`. To publish as
-another stored identity, activate its alias for this repository first with
-`ngit account login --local --alias <alias>`, or set `nostr.signer` in the
-applicable Git-config scope. Keep using `--signer` for direct follow-up actions
-such as comments, labels, and lifecycle changes when they should use a
-non-default identity.
+`--signer` applies to direct `ngit` commands, not to `git push`. To publish one
+push as another stored identity without changing the configured login, use
+`git -c nostr.signer=<alias|npub|nostr-display-name> push ...`. To make the
+identity the repository default instead, use
+`ngit account login --local --alias <alias>` or set `nostr.signer` in local Git
+config. Keep using `--signer` for direct follow-up actions such as comments,
+labels, and lifecycle changes when they should use a non-default identity.
 
 **Do not generate a `git push -o description=...` value from a Markdown file.**
 This restriction is specific to Git push options, which cannot contain real

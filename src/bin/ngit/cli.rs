@@ -50,11 +50,12 @@ pub struct Cli {
         conflicts_with_all = ["nsec", "signer"]
     )]
     pub nsec_file: Option<PathBuf>,
-    /// use a configured signer by npub or alias for this command
+    /// use a configured signer by npub, alias, or cached profile name for
+    /// this command
     #[arg(
         long,
         global = true,
-        value_name = "NPUB|ALIAS",
+        value_name = "NPUB|ALIAS|NAME",
         conflicts_with_all = ["nsec", "nsec_file", "bunker_uri", "bunker_app_key"]
     )]
     pub signer: Option<String>,
@@ -224,7 +225,7 @@ implementation details used for efficiency.
         login_cmd = cmd("ngit account login"),
         signer_selection = key("nostr.signer"),
         signer_alias = key("nostr.signer-alias.<alias>"),
-        signer_flag = cmd("ngit --signer <npub|alias> <command>"),
+        signer_flag = cmd("ngit --signer <alias|npub|nostr-display-name> <command>"),
         nsec = key("nostr.nsec"),
         npub = key("nostr.npub"),
         bunker_uri = key("nostr.bunker-uri"),

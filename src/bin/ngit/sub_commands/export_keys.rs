@@ -5,7 +5,7 @@ use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
     login::{
         self, SignerInfo,
-        existing::{get_signer_info, load_existing_login, selected_alias},
+        existing::{get_signer_info, load_existing_login},
         fresh::generate_qr,
         logged_in_message,
     },
@@ -18,8 +18,9 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
     let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = { git_repo_result.ok() };
 
-    let (signer_info, source) =
+    let (signer_info, source, alias) =
         get_signer_info(&git_repo.as_ref(), signer.info, signer.password, &None)
+            .await
             .map_err(login::require_account)?;
     let (_, user_ref, source) = load_existing_login(
         &git_repo.as_ref(),
@@ -33,7 +34,6 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
     )
     .await
     .map_err(login::require_account)?;
-    let alias = selected_alias(&git_repo.as_ref(), signer.info, &source)?;
     let logged_in_msg = logged_in_message(&user_ref.metadata.name, &source, alias.as_deref());
     match signer_info {
         SignerInfo::Bunker {

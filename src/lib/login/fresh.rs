@@ -1,4 +1,5 @@
 use std::{
+    io::Write,
     str::FromStr,
     sync::{
         Arc,
@@ -108,26 +109,31 @@ pub async fn fresh_login_or_signup(
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
     let mut saved_source = git_config_source(!save_local);
+    let mut receipts = CredentialStorageReceipts::default();
     if let SignerInfo::Selection { selector } = &signer_info {
         // account login resolves selections before calling this function, but
         // library callers may still supply one. Persist the separately
         // resolved npub so an alias can never be copied into `nostr.npub`.
         if let Some(alias) = alias {
-            save_signer_alias(git_repo, alias, &npub, !save_local)?;
+            save_signer_alias_into(git_repo, alias, &npub, !save_local, &mut receipts)?;
         } else {
             save_signer_selection(git_repo, selector, &npub, !save_local)?;
         }
     } else {
-        saved_source = save_to_git_config(git_repo, &signer_info, !save_local).await?;
+        saved_source =
+            save_to_git_config(git_repo, &signer_info, !save_local, &mut receipts).await?;
         if saved_source != SignerInfoSource::CommandLineArguments {
             let saved_globally = saved_source == SignerInfoSource::GitGlobal;
             if let Some(alias) = alias {
-                save_signer_alias(git_repo, alias, &npub, saved_globally)?;
+                save_signer_alias_into(git_repo, alias, &npub, saved_globally, &mut receipts)?;
             } else if let Some(selector) = selected_by {
                 save_signer_selection(git_repo, selector, &npub, saved_globally)?;
             }
         }
     }
+    // dropping here prints the consolidated storage report ahead of the
+    // login output
+    drop(receipts);
     let user_ref = get_user_details(
         &public_key,
         client,
@@ -181,17 +187,22 @@ pub async fn login_with_bunker_url(
     if let Some(alias) = alias {
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
-    let source = save_to_git_config(git_repo, &signer_info, !save_local).await?;
+    let mut receipts = CredentialStorageReceipts::default();
+    let source = save_to_git_config(git_repo, &signer_info, !save_local, &mut receipts).await?;
     if source != SignerInfoSource::CommandLineArguments {
         if let Some(alias) = alias {
-            save_signer_alias(
+            save_signer_alias_into(
                 git_repo,
                 alias,
                 &npub,
                 source == SignerInfoSource::GitGlobal,
+                &mut receipts,
             )?;
         }
     }
+    // dropping here prints the consolidated storage report ahead of the
+    // login output
+    drop(receipts);
 
     let user_ref = get_user_details(
         &user_public_key,
@@ -816,12 +827,40 @@ pub fn generate_qr(data: &str) -> Result<Vec<String>> {
     Ok(lines)
 }
 
+#[derive(Debug)]
+struct CredentialStorageReport {
+    subject: String,
+    entry: String,
+    backend: credential_store::Backend,
+    os_fallback: bool,
+}
+
+/// Credential-store receipts pending report.
+///
+/// A receipt is registered the moment its store write succeeds and printed
+/// when the guard drops, so the report survives early returns and `?`
+/// propagation between the write and the end of the login flow. Callers drop
+/// the guard explicitly once every write has completed, keeping the report's
+/// position in the happy-path output.
+#[derive(Default)]
+struct CredentialStorageReceipts {
+    secret: Option<CredentialStorageReport>,
+    alias: Option<CredentialStorageReport>,
+}
+
+impl Drop for CredentialStorageReceipts {
+    fn drop(&mut self) {
+        print_credential_storage(self.secret.as_ref(), self.alias.as_ref());
+    }
+}
+
 async fn save_to_git_config(
     git_repo: &Option<&Repo>,
     signer_info: &SignerInfo,
     global: bool,
+    receipts: &mut CredentialStorageReceipts,
 ) -> Result<SignerInfoSource> {
-    let signer_info = protect_secrets(git_repo, signer_info)?;
+    let signer_info = protect_secrets(git_repo, signer_info, receipts)?;
     let signer_info = &signer_info;
     let global = if std::env::var("NGITTEST").is_ok() {
         false
@@ -924,7 +963,9 @@ async fn save_to_git_config(
                             .context("failed to configure the signer in local Git config")?;
                         return Ok(SignerInfoSource::GitLocal);
                     }
-                    _ => return Ok(SignerInfoSource::CommandLineArguments),
+                    _ => {
+                        return Ok(SignerInfoSource::CommandLineArguments);
+                    }
                 }
             }
         }
@@ -978,11 +1019,12 @@ pub fn configured_signer_scope_message(global: bool, signer_info: &SignerInfo) -
 /// Persist an alias in both the selected git-config scope and, when enabled,
 /// the credential store. Git config remains a portable account selector for
 /// repository directories mounted into environments with a different store.
-pub fn save_signer_alias(
+fn save_signer_alias_into(
     git_repo: &Option<&Repo>,
     alias: &str,
     npub: &str,
     global: bool,
+    receipts: &mut CredentialStorageReceipts,
 ) -> Result<()> {
     use crate::login::credential_store::{self, SecretStorage};
 
@@ -992,11 +1034,17 @@ pub fn save_signer_alias(
         .to_bech32()?;
     let policy = credential_store::policy(git_repo);
     let credential_backed = policy != SecretStorage::GitConfig;
-    let alias_backend = credential_backed
+    receipts.alias = credential_backed
         .then(|| credential_store::store_alias(&alias, &npub, policy))
         .transpose()
         .context("failed to save signer alias in the credential store")?
-        .map(|(_, backend)| backend);
+        .map(|(entry, backend)| CredentialStorageReport {
+            subject: format!("signer alias '{alias}'"),
+            entry,
+            backend,
+            os_fallback: policy == SecretStorage::Auto
+                && backend == credential_store::Backend::File,
+        });
 
     let global = global && std::env::var("NGITTEST").is_err();
     let scope = if global {
@@ -1018,25 +1066,92 @@ pub fn save_signer_alias(
         remove_git_config_item(scope, "nostr.bunker-uri")?;
         remove_git_config_item(scope, "nostr.bunker-app-key")?;
     }
-    if let Some(backend) = alias_backend {
-        print_alias_storage(&alias, backend);
-    }
     Ok(())
 }
 
-fn print_alias_storage(alias: &str, backend: credential_store::Backend) {
-    match backend {
-        credential_store::Backend::Os => eprintln!(
-            "signer alias '{alias}' is stored in the OS credential store under service '{}'",
-            credential_store::SERVICE
-        ),
-        credential_store::Backend::File => {
-            let path = credential_store::file_store_path().map_or_else(
-                |_| "ngit's file store".to_string(),
-                |path| path.display().to_string(),
-            );
-            eprintln!("signer alias '{alias}' is stored in {path}");
+fn print_credential_storage(
+    secret: Option<&CredentialStorageReport>,
+    alias: Option<&CredentialStorageReport>,
+) {
+    let file_store = credential_store::file_store_path().map_or_else(
+        |_| "ngit's file store".to_string(),
+        |path| path.display().to_string(),
+    );
+    // this runs from the receipts guard's Drop, possibly mid-unwind, where
+    // an eprintln! panic on a closed stderr would abort the process
+    let mut stderr = std::io::stderr().lock();
+    for message in credential_storage_messages(secret, alias, &file_store) {
+        let _ = writeln!(stderr, "{message}");
+    }
+}
+
+fn credential_storage_messages(
+    secret: Option<&CredentialStorageReport>,
+    alias: Option<&CredentialStorageReport>,
+    file_store: &str,
+) -> Vec<String> {
+    match (secret, alias) {
+        (Some(secret), Some(alias)) if secret.backend == alias.backend => {
+            let message = match secret.backend {
+                credential_store::Backend::Os => format!(
+                    "{} and associated {} are stored in the OS credential store as entries '{}' and '{}' under service '{}'",
+                    alias.subject,
+                    secret.subject,
+                    alias.entry,
+                    secret.entry,
+                    credential_store::SERVICE
+                ),
+                credential_store::Backend::File => format!(
+                    "{} and associated {} are stored in {file_store}{}",
+                    alias.subject,
+                    secret.subject,
+                    os_fallback_suffix(secret.os_fallback || alias.os_fallback)
+                ),
+            };
+            vec![message]
         }
+        (secret, alias) => {
+            let mut messages = Vec::with_capacity(2);
+            if let Some(secret) = secret {
+                messages.push(match secret.backend {
+                    credential_store::Backend::Os => format!(
+                        "{} is stored in the OS credential store as entry '{}' under service '{}'",
+                        secret.subject,
+                        secret.entry,
+                        credential_store::SERVICE
+                    ),
+                    credential_store::Backend::File => format!(
+                        "{} is stored in {file_store}{}",
+                        secret.subject,
+                        os_fallback_suffix(secret.os_fallback)
+                    ),
+                });
+            }
+            if let Some(alias) = alias {
+                messages.push(match alias.backend {
+                    credential_store::Backend::Os => format!(
+                        "{} is stored in the OS credential store as entry '{}' under service '{}'",
+                        alias.subject,
+                        alias.entry,
+                        credential_store::SERVICE
+                    ),
+                    credential_store::Backend::File => format!(
+                        "{} is stored in {file_store}{}",
+                        alias.subject,
+                        os_fallback_suffix(alias.os_fallback)
+                    ),
+                });
+            }
+            messages
+        }
+    }
+}
+
+fn os_fallback_suffix(os_fallback: bool) -> &'static str {
+    if os_fallback {
+        " (OS credential store unavailable)"
+    } else {
+        ""
     }
 }
 
@@ -1100,8 +1215,12 @@ fn get_pubkey_from_signer_info(signer_info: &SignerInfo) -> Result<PublicKey> {
 /// can hold the secret, interactive users are offered plaintext git config
 /// explicitly and non-interactive callers get an error naming
 /// `--secret-storage git-config`, instead of a silent plaintext fallback.
-fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result<SignerInfo> {
-    use crate::login::credential_store::{self, Backend, SecretStorage};
+fn protect_secrets(
+    git_repo: &Option<&Repo>,
+    signer_info: &SignerInfo,
+    receipts: &mut CredentialStorageReceipts,
+) -> Result<SignerInfo> {
+    use crate::login::credential_store::{self, SecretStorage};
     if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if nsec.starts_with("ncryptsec1")) {
         return Ok(signer_info.clone());
     }
@@ -1173,25 +1292,14 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
         SignerInfo::Selection { .. } => unreachable!("selection returned before secret storage"),
     };
     match stored {
-        Ok((protected, pointer, backend)) => {
-            let subject = signer_storage_subject(signer_info);
-            match backend {
-                Backend::Os => eprintln!(
-                    "{subject} is stored in the OS credential store as entry '{pointer}' under service '{}'",
-                    credential_store::SERVICE
-                ),
-                Backend::File => {
-                    let path = credential_store::file_store_path().map_or_else(
-                        |_| "ngit's file store".to_string(),
-                        |path| path.display().to_string(),
-                    );
-                    if policy == SecretStorage::File {
-                        eprintln!("{subject} is stored in {path}");
-                    } else {
-                        eprintln!("OS credential store unavailable; {subject} is stored in {path}");
-                    }
-                }
-            }
+        Ok((protected, entry, backend)) => {
+            receipts.secret = Some(CredentialStorageReport {
+                subject: signer_storage_subject(signer_info).to_string(),
+                entry,
+                backend,
+                os_fallback: policy == SecretStorage::Auto
+                    && backend == credential_store::Backend::File,
+            });
             Ok(protected)
         }
         Err(error) => {
@@ -1211,9 +1319,9 @@ fn protect_secrets(git_repo: &Option<&Repo>, signer_info: &SignerInfo) -> Result
 
 fn signer_storage_subject(signer_info: &SignerInfo) -> &'static str {
     match signer_info {
-        SignerInfo::Nsec { .. } => "the account secret",
-        SignerInfo::Bunker { .. } => "the remote signer connection",
-        SignerInfo::Selection { .. } => "the signer selection",
+        SignerInfo::Nsec { .. } => "account secret",
+        SignerInfo::Bunker { .. } => "remote signer connection",
+        SignerInfo::Selection { .. } => "signer selection",
     }
 }
 
@@ -1319,7 +1427,8 @@ pub async fn signup_non_interactive(
 
     // Store the secret and configure the selected Git-config scope.
     let git_repo = Repo::discover().ok();
-    let config_signer_info = protect_secrets(&git_repo.as_ref(), &signer_info)?;
+    let mut receipts = CredentialStorageReceipts::default();
+    let config_signer_info = protect_secrets(&git_repo.as_ref(), &signer_info, &mut receipts)?;
     if let Err(error) =
         silently_save_to_git_config(&git_repo.as_ref(), &config_signer_info, !save_local)
     {
@@ -1369,6 +1478,8 @@ pub async fn signup_non_interactive(
 
         return Err(error);
     }
+    // dropping here prints the storage report ahead of the remaining output
+    drop(receipts);
 
     let git_repo_path = if let Some(ref git_repo) = git_repo {
         Some(git_repo.get_path()?)
@@ -1523,6 +1634,71 @@ fn print_lines_with_headings(lines: Vec<&str>, printer: &mut Printer) {
         } else {
             printer.println(line.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_reporting_tests {
+    use super::{CredentialStorageReport, credential_storage_messages};
+    use crate::login::credential_store::Backend;
+
+    #[test]
+    fn file_fallback_reports_what_was_stored_before_the_reason() {
+        let secret = CredentialStorageReport {
+            subject: "account secret".to_string(),
+            entry: "npub1account".to_string(),
+            backend: Backend::File,
+            os_fallback: true,
+        };
+        let alias = CredentialStorageReport {
+            subject: "signer alias 'dcagent'".to_string(),
+            entry: "alias:dcagent".to_string(),
+            backend: Backend::File,
+            os_fallback: true,
+        };
+        let path = "/home/dcdev/.local/share/ngit/credentials.json";
+
+        assert_eq!(
+            credential_storage_messages(Some(&secret), Some(&alias), path),
+            vec![format!(
+                "signer alias 'dcagent' and associated account secret are stored in {path} (OS credential store unavailable)"
+            )]
+        );
+        assert_eq!(
+            credential_storage_messages(Some(&secret), None, path),
+            vec![format!(
+                "account secret is stored in {path} (OS credential store unavailable)"
+            )]
+        );
+    }
+
+    #[test]
+    fn empty_receipts_produce_no_messages() {
+        assert!(credential_storage_messages(None, None, "unused").is_empty());
+    }
+
+    #[test]
+    fn os_storage_combines_alias_and_secret_entries() {
+        let secret = CredentialStorageReport {
+            subject: "account secret".to_string(),
+            entry: "npub1account".to_string(),
+            backend: Backend::Os,
+            os_fallback: false,
+        };
+        let alias = CredentialStorageReport {
+            subject: "signer alias 'dcagent'".to_string(),
+            entry: "alias:dcagent".to_string(),
+            backend: Backend::Os,
+            os_fallback: false,
+        };
+
+        assert_eq!(
+            credential_storage_messages(Some(&secret), Some(&alias), "unused"),
+            vec![
+                "signer alias 'dcagent' and associated account secret are stored in the OS credential store as entries 'alias:dcagent' and 'npub1account' under service 'nostr'"
+                    .to_string()
+            ]
+        );
     }
 }
 
