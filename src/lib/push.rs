@@ -33,8 +33,9 @@ use crate::{
         is_grasp_server_in_list, normalize_grasp_server_url,
     },
     utils::{
-        Direction, get_short_git_server_name, get_write_protocols_to_try, join_with_and,
-        onion_proxy_options_for_url, set_protocol_preference,
+        Direction, get_short_git_server_name, get_write_protocols_to_try,
+        is_libgit2_internal_error, join_with_and, onion_proxy_options_for_url,
+        set_protocol_preference,
     },
 };
 
@@ -64,6 +65,7 @@ pub fn push_to_remote(
             remote_refspecs,
             term,
             git_server_push_options,
+            decoded_nostr_url.ssh_key_file_path().as_deref(),
         );
     }
 
@@ -80,14 +82,39 @@ pub fn push_to_remote(
 
         let formatted_url = server_url.format_as(protocol)?;
 
-        match push_to_remote_url(
+        let attempt = push_to_remote_url(
             git_repo,
             &formatted_url,
             decoded_nostr_url.ssh_key_file_path().as_ref(),
             remote_refspecs,
             term,
             git_server_push_options,
-        ) {
+        )
+        .or_else(|error| {
+            // A libgit2 internal assertion means libgit2 itself cannot talk
+            // to this server (e.g. tangled.org's ref advertisement trips
+            // `GIT_ASSERT(eos)` in libgit2 1.9), not that the push was
+            // rejected, so retry the same URL with the system git binary.
+            if !is_libgit2_internal_error(&error) {
+                return Err(error);
+            }
+            term.write_line(
+                format!(
+                    "push: libgit2 failed over {protocol} with an internal error ({error}); retrying with system git..."
+                )
+                .as_str(),
+            )?;
+            remote_helper::push(
+                git_repo,
+                &formatted_url,
+                remote_refspecs,
+                term,
+                git_server_push_options,
+                decoded_nostr_url.ssh_key_file_path().as_deref(),
+            )
+        });
+
+        match attempt {
             Err(error) => {
                 term.write_line(
                     format!(
@@ -865,6 +892,232 @@ mod tests {
             "file:///tmp/project.git",
         ] {
             assert_eq!(git_server_display_url(url), url);
+        }
+    }
+
+    mod system_git_fallback {
+        use std::{
+            io::{Read, Write},
+            net::{TcpListener, TcpStream},
+            path::Path,
+            process::{Command, Stdio},
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+            thread,
+        };
+
+        use anyhow::{Context, Result, ensure};
+        use console::Term;
+        use nostr::prelude::{Kind, PublicKey, nip01::Coordinate, nip19::Nip19Coordinate};
+
+        use crate::{
+            git::{
+                Repo,
+                nostr_url::{NostrUrlDecoded, ServerProtocol},
+            },
+            push::push_to_remote,
+        };
+
+        fn run<'a>(cwd: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<String> {
+            let output = Command::new("git").current_dir(cwd).args(args).output()?;
+            ensure!(
+                output.status.success(),
+                "git command failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_string())
+        }
+
+        fn decoded_nostr_url_forcing_git_protocol() -> NostrUrlDecoded {
+            NostrUrlDecoded {
+                original_string: String::new(),
+                coordinate: Nip19Coordinate {
+                    coordinate: Coordinate {
+                        identifier: "system-git-fallback-test".to_string(),
+                        public_key: PublicKey::parse(
+                            "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                        )
+                        .expect("valid public key"),
+                        kind: Kind::GitRepoAnnouncement,
+                    },
+                    relays: vec![],
+                },
+                protocol: Some(ServerProtocol::Git),
+                ssh_key_file: None,
+                nip05: None,
+            }
+        }
+
+        fn read_pkt(stream: &mut impl Read) -> Result<Option<Vec<u8>>> {
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header)?;
+            let len = usize::from_str_radix(std::str::from_utf8(&header)?, 16)?;
+            if len == 0 {
+                return Ok(None);
+            }
+            ensure!(len >= 4, "invalid pkt-line length");
+            let mut payload = vec![0_u8; len - 4];
+            stream.read_exact(&mut payload)?;
+            Ok(Some(payload))
+        }
+
+        fn write_pkt(stream: &mut impl Write, payload: &[u8]) -> Result<()> {
+            write!(stream, "{:04x}", payload.len() + 4)?;
+            stream.write_all(payload)?;
+            Ok(())
+        }
+
+        /// Reorder the capabilities of the first ref-advertisement pkt so
+        /// `object-format=sha1` is the final byte of the pkt, as tangled.org
+        /// does. libgit2 1.9 fails `GIT_ASSERT(eos)` (smart_pkt.c `set_data`)
+        /// on such advertisements while git parses them fine.
+        fn rewrite_first_advertisement_pkt(payload: &[u8]) -> Result<Vec<u8>> {
+            let nul = payload
+                .iter()
+                .position(|b| *b == 0)
+                .context("first advertisement pkt has no capabilities")?;
+            let mut caps = std::str::from_utf8(&payload[nul + 1..])?
+                .split_whitespace()
+                .filter(|cap| !cap.starts_with("object-format=") && !cap.starts_with("agent="))
+                .collect::<Vec<&str>>();
+            caps.push("object-format=sha1");
+            let mut rewritten = payload[..=nul].to_vec();
+            rewritten.extend_from_slice(caps.join(" ").as_bytes());
+            Ok(rewritten)
+        }
+
+        /// Copy until EOF or a write failure with plain read/write calls.
+        /// `std::io::copy` is avoided because its Linux splice fast path
+        /// stalled this pipe-to-socket relay.
+        fn relay(reader: &mut impl Read, writer: &mut impl Write) {
+            let mut buf = [0_u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if writer.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Serve one `git://` connection by proxying to `git receive-pack`
+        /// on `repo`, rewriting the advertisement to the tangled.org shape.
+        fn serve_connection(mut stream: TcpStream, repo: &Path) -> Result<()> {
+            // Discard the git-daemon request line; the repository is fixed.
+            read_pkt(&mut stream)?.context("expected a git protocol request pkt")?;
+
+            let mut child = Command::new("git")
+                .arg("receive-pack")
+                .arg(repo)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                // The libgit2 connection aborts mid-session by design, which
+                // makes receive-pack print "the remote end hung up".
+                .stderr(Stdio::null())
+                .spawn()?;
+            let mut child_in = child.stdin.take().context("no receive-pack stdin")?;
+            let mut child_out = child.stdout.take().context("no receive-pack stdout")?;
+
+            let mut first = true;
+            while let Some(payload) = read_pkt(&mut child_out)? {
+                let payload = if first {
+                    first = false;
+                    rewrite_first_advertisement_pkt(&payload)?
+                } else {
+                    payload
+                };
+                write_pkt(&mut stream, &payload)?;
+            }
+            stream.write_all(b"0000")?;
+            stream.flush()?;
+
+            // Relay the rest of the session transparently in both directions.
+            let mut stream_reader = stream.try_clone()?;
+            let to_child = thread::spawn(move || {
+                relay(&mut stream_reader, &mut child_in);
+            });
+            relay(&mut child_out, &mut stream);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = to_child.join();
+            let _ = child.wait();
+            Ok(())
+        }
+
+        #[test]
+        fn falls_back_to_system_git_when_libgit2_hits_an_internal_assertion() -> Result<()> {
+            let temp = tempfile::tempdir()?;
+            let source_path = temp.path().join("source");
+            let remote_path = temp.path().join("remote.git");
+
+            run(
+                temp.path(),
+                ["init", "-q", "-b", "main", source_path.to_str().unwrap()],
+            )?;
+            run(&source_path, ["config", "user.name", "ngit test"])?;
+            run(
+                &source_path,
+                ["config", "user.email", "ngit-test@example.invalid"],
+            )?;
+            run(
+                &source_path,
+                ["commit", "-q", "--allow-empty", "-m", "initial"],
+            )?;
+            let oid = run(&source_path, ["rev-parse", "HEAD"])?;
+            run(
+                temp.path(),
+                ["init", "-q", "--bare", remote_path.to_str().unwrap()],
+            )?;
+
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let port = listener.local_addr()?.port();
+            let connections = Arc::new(AtomicUsize::new(0));
+            // Detached server thread: it blocks on accept and dies with the
+            // test process.
+            thread::spawn({
+                let connections = Arc::clone(&connections);
+                let remote_path = remote_path.clone();
+                move || {
+                    for stream in listener.incoming() {
+                        let Ok(stream) = stream else { break };
+                        connections.fetch_add(1, Ordering::SeqCst);
+                        let _ = serve_connection(stream, &remote_path);
+                    }
+                }
+            });
+
+            let updates = push_to_remote(
+                &Repo::from_path(&source_path)?,
+                &format!("git://127.0.0.1:{port}/remote"),
+                &decoded_nostr_url_forcing_git_protocol(),
+                &["refs/heads/main:refs/heads/main".to_string()],
+                &Term::buffered_stderr(),
+                false,
+                &[],
+            )?;
+
+            // `push_to_remote` reports per-ref entries only for rejections.
+            assert!(updates.values().all(Option::is_none));
+            // The first connection is libgit2 failing on the advertisement;
+            // the push must have completed over a second, system-git
+            // connection. A single connection means libgit2 no longer
+            // asserts and this fallback deserves a rethink.
+            assert_eq!(connections.load(Ordering::SeqCst), 2);
+            let pushed = run(
+                temp.path(),
+                [
+                    "--git-dir",
+                    remote_path.to_str().unwrap(),
+                    "rev-parse",
+                    "refs/heads/main",
+                ],
+            )?;
+            assert_eq!(pushed, oid);
+            Ok(())
         }
     }
 }

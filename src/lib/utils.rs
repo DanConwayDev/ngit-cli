@@ -493,6 +493,21 @@ pub fn onion_proxy_options_for_url(url: &str) -> Result<Option<git2::ProxyOption
     Ok(Some(opts))
 }
 
+/// Whether an error is a libgit2 internal assertion failure. libgit2 only
+/// produces "unrecoverable internal error: '...'" (`assert_safe.h`) from
+/// failed `GIT_ASSERT` checks, so this signals a libgit2 bug rather than a
+/// transport, server or authentication failure, and the operation may be
+/// worth retrying with the system git binary. For example, libgit2 1.9
+/// asserts while parsing a ref advertisement whose last capability is
+/// `object-format=...`, which tangled.org sends. Matched on the message
+/// because the git2 crate does not expose libgit2's `GIT_ERROR_INTERNAL`
+/// error class.
+pub fn is_libgit2_internal_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<git2::Error>()
+        .is_some_and(|error| error.message().contains("unrecoverable internal error"))
+}
+
 pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     let error_str = error.to_string();
     for s in [
@@ -513,6 +528,48 @@ pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod is_libgit2_internal_error {
+        use super::*;
+
+        fn git2_error(message: &str) -> anyhow::Error {
+            git2::Error::new(
+                git2::ErrorCode::GenericError,
+                git2::ErrorClass::None,
+                message,
+            )
+            .into()
+        }
+
+        #[test]
+        fn detects_libgit2_assertion_failures() {
+            assert!(is_libgit2_internal_error(&git2_error(
+                "unrecoverable internal error: 'eos'"
+            )));
+        }
+
+        #[test]
+        fn detects_libgit2_assertion_failures_wrapped_with_context() {
+            let error =
+                git2_error("unrecoverable internal error: 'eos'").context("pushing to git server");
+            assert!(is_libgit2_internal_error(&error));
+        }
+
+        #[test]
+        fn ignores_other_git2_errors() {
+            assert!(!is_libgit2_internal_error(&git2_error(
+                "failed to connect to example.com: Connection refused"
+            )));
+        }
+
+        #[test]
+        fn ignores_non_git2_errors() {
+            assert!(!is_libgit2_internal_error(&anyhow::anyhow!(
+                "unrecoverable internal error: 'eos'"
+            )));
+        }
+    }
+
     mod join_with_and {
         use super::*;
         #[test]

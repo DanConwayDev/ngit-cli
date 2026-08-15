@@ -100,12 +100,24 @@ pub(crate) fn push(
     refspecs: &[String],
     term: &Term,
     push_options: &[&str],
+    ssh_key_file: Option<&str>,
 ) -> Result<HashMap<String, Option<String>>> {
-    let mut args = vec![
+    let mut args = vec![];
+    if let Some(ssh_key_file) = ssh_key_file {
+        // Mirror libgit2's `add_ssh_key_from_file` override: use only the
+        // key from the nostr URL's `ssh_key_file` rather than whatever the
+        // user's ssh config or agent would offer.
+        args.push(OsString::from("-c"));
+        args.push(OsString::from(format!(
+            "core.sshCommand=ssh -o IdentitiesOnly=yes -i {}",
+            posix_shell_quote(ssh_key_file)
+        )));
+    }
+    args.extend([
         OsString::from("push"),
         OsString::from("--porcelain"),
         OsString::from("--no-verify"),
-    ];
+    ]);
     args.extend(
         push_options
             .iter()
@@ -124,6 +136,12 @@ pub(crate) fn push(
     } else {
         Err(command_error("push", url, &output))
     }
+}
+
+/// Quote a string for the POSIX shell that git uses to run
+/// `core.sshCommand`, so key paths containing spaces or quotes survive.
+fn posix_shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 struct GitOutput {
@@ -705,6 +723,19 @@ mod tests {
 
         assert!(hints.contains("git-remote-htree"));
         assert!(hints.contains("cargo install git-remote-htree"));
+    }
+
+    #[test]
+    fn shell_quotes_ssh_key_paths_with_spaces_and_quotes() {
+        assert_eq!(
+            posix_shell_quote("/home/me/.ssh/id_ed25519"),
+            "'/home/me/.ssh/id_ed25519'"
+        );
+        assert_eq!(
+            posix_shell_quote("/home/me/my keys/id"),
+            "'/home/me/my keys/id'"
+        );
+        assert_eq!(posix_shell_quote("/home/me/it's"), r"'/home/me/it'\''s'");
     }
 
     #[test]
