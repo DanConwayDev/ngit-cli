@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use indicatif::MultiProgress;
 use nostr::prelude::{
     Event, EventBuilder, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp, ToBech32, Url,
     event::Tag,
@@ -350,6 +351,15 @@ pub async fn publish_private_git_relay_list<C: Connect + Sync>(
     if discovery_relays.is_empty() {
         discovery_relays.extend(client.get_relay_default_set().iter().cloned());
     }
+    let write_relays = {
+        let configured = user_ref.relays.write();
+        if configured.is_empty() {
+            discovery_relays.clone()
+        } else {
+            configured
+        }
+    };
+    ensure_private_relay_list_write_target_was_read(client, &write_relays, public_key).await?;
 
     for attempt in 0..PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS {
         let mut private_relays =
@@ -364,19 +374,11 @@ pub async fn publish_private_git_relay_list<C: Connect + Sync>(
         }
 
         let event = private_relays.to_event(signer).await?;
-        let write_relays = {
-            let configured = user_ref.relays.write();
-            if configured.is_empty() {
-                discovery_relays.clone()
-            } else {
-                configured
-            }
-        };
         let mut published = false;
         let mut last_error = None;
-        for relay in write_relays {
+        for relay in &write_relays {
             match client
-                .send_event_to(None, &relay, event.clone())
+                .send_event_to(None, relay, event.clone())
                 .await
                 .with_context(|| format!("failed to publish private relay list to {relay}"))
             {
@@ -406,6 +408,53 @@ pub async fn publish_private_git_relay_list<C: Connect + Sync>(
     }
     bail!(
         "private Git relay list did not converge after {PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS} attempts"
+    )
+}
+
+async fn ensure_private_relay_list_write_target_was_read<C: Connect + Sync>(
+    client: &C,
+    write_relays: &[String],
+    public_key: PublicKey,
+) -> Result<()> {
+    if write_relays.is_empty() {
+        bail!("no normal relay is available for the private relay list");
+    }
+    let relay_urls = write_relays
+        .iter()
+        .map(|relay| {
+            RelayUrl::parse(relay)
+                .with_context(|| format!("invalid private relay-list write relay URL: {relay}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (results, _) = client
+        .get_events_per_relay(
+            relay_urls,
+            vec![
+                nostr::prelude::Filter::new()
+                    .kind(KIND_PRIVATE_GIT_RELAY_LIST)
+                    .author(public_key)
+                    .limit(10),
+            ],
+            MultiProgress::new(),
+        )
+        .await
+        .context("failed to read the private Git relay list from its write relays")?;
+    if results.iter().any(Result::is_ok) {
+        return Ok(());
+    }
+    let errors = results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    bail!(
+        "refusing to replace the private Git relay list because none of its write relays were read successfully{}",
+        if errors.is_empty() {
+            String::new()
+        } else {
+            format!(": {errors}")
+        }
     )
 }
 
@@ -886,6 +935,10 @@ mod private_git_relay_list_tests {
         let published_for_mock = published.clone();
         let published_for_fetch = published.clone();
         let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .once()
+            .return_once(|_, _, progress| Ok((vec![Ok(vec![])], progress)));
         client.expect_get_events().times(2).returning(move |_, _| {
             Ok(published_for_fetch
                 .lock()
@@ -979,6 +1032,10 @@ mod private_git_relay_list_tests {
         let published_for_fetch = published.clone();
         let published_for_send = published.clone();
         let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .once()
+            .return_once(|_, _, progress| Ok((vec![Ok(vec![])], progress)));
         client.expect_get_events().times(4).returning(move |_, _| {
             let mut call = call_for_fetch.lock().unwrap();
             *call += 1;
@@ -1017,6 +1074,63 @@ mod private_git_relay_list_tests {
             .unwrap();
         assert!(decoded.relays.contains(&requested_relay));
         assert!(decoded.relays.contains(&concurrent_relay));
+    }
+
+    #[tokio::test]
+    async fn publishing_private_relay_list_requires_a_successful_outbox_read() {
+        let (keys, signer) = test_signer();
+        let inbox_relay = "wss://inbox.example".to_string();
+        let outbox_relay = "wss://outbox.example".to_string();
+        let repository_relay = RelayUrl::parse("wss://group.example").unwrap();
+        let user_ref = UserRef {
+            public_key: keys.public_key(),
+            metadata: UserMetadata {
+                name: String::new(),
+                created_at: Timestamp::from(0),
+                nip05: None,
+            },
+            relays: UserRelays {
+                relays: vec![
+                    UserRelayRef {
+                        url: inbox_relay,
+                        read: true,
+                        write: false,
+                    },
+                    UserRelayRef {
+                        url: outbox_relay.clone(),
+                        read: false,
+                        write: true,
+                    },
+                ],
+                created_at: Timestamp::from(0),
+            },
+            grasp_list: UserGraspList {
+                urls: vec![],
+                created_at: Timestamp::from(0),
+            },
+        };
+
+        let expected_outbox = RelayUrl::parse(&outbox_relay).unwrap();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .once()
+            .withf(move |relays, _, _| relays == std::slice::from_ref(&expected_outbox))
+            .return_once(|_, _, progress| {
+                Ok((vec![Err(anyhow::anyhow!("outbox unavailable"))], progress))
+            });
+        client.expect_get_events().never();
+        client.expect_send_event_to().never();
+
+        let error = publish_private_git_relay_list(
+            &client,
+            std::slice::from_ref(&repository_relay),
+            &user_ref,
+            &signer,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("none of its write relays"));
     }
 
     #[tokio::test]
