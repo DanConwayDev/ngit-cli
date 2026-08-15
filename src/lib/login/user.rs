@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
-    fs::{create_dir, create_dir_all, remove_dir},
+    fs::{self, create_dir, create_dir_all, remove_dir},
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -13,6 +14,7 @@ use nostr::prelude::{
     event::Tag,
 };
 use serde::{self, Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -30,6 +32,7 @@ use crate::{
 const PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS: usize = 3;
 const PRIVATE_RELAY_LIST_LOCK_WAIT: Duration = Duration::from_secs(60);
 const PRIVATE_RELAY_LIST_STALE_LOCK_AGE: Duration = Duration::from_secs(30 * 60);
+const PRIVATE_RELAY_LIST_CACHE_DIR: &str = "private-git-relay-lists";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRef {
@@ -163,6 +166,20 @@ impl PrivateGitRelayList {
     }
 
     pub async fn from_event(event: &Event, signer: &Arc<crate::NgitSigner>) -> Result<Self> {
+        #[cfg(test)]
+        let cache_dir: Option<PathBuf> = None;
+        #[cfg(not(test))]
+        let cache_dir = get_dirs()
+            .ok()
+            .map(|dirs| dirs.cache_dir().join(PRIVATE_RELAY_LIST_CACHE_DIR));
+        Self::from_event_with_cache_dir(event, signer, cache_dir.as_deref()).await
+    }
+
+    async fn from_event_with_cache_dir(
+        event: &Event,
+        signer: &Arc<crate::NgitSigner>,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self> {
         if event.kind != KIND_PRIVATE_GIT_RELAY_LIST {
             bail!("event is not a private git relay list");
         }
@@ -177,11 +194,30 @@ impl PrivateGitRelayList {
             bail!("private git relay list must not contain public tags");
         }
 
+        if let Some(cache_dir) = cache_dir {
+            if let Ok(Some(plaintext)) = read_cached_private_git_relay_list(cache_dir, event) {
+                if let Ok(list) = Self::from_plaintext(event, &plaintext) {
+                    return Ok(list);
+                }
+            }
+        }
         let plaintext = signer
             .nip44_decrypt(&event.pubkey, &event.content)
             .await
             .context("failed to decrypt private git relay list")?;
-        let items: Vec<Vec<String>> = serde_json::from_str(&plaintext)
+        let list = Self::from_plaintext(event, &plaintext)?;
+        if let Some(cache_dir) = cache_dir {
+            if let Err(error) = write_cached_private_git_relay_list(cache_dir, event, &plaintext) {
+                if crate::client::is_verbose() {
+                    eprintln!("nostr: failed to cache decrypted private Git relay list: {error:#}");
+                }
+            }
+        }
+        Ok(list)
+    }
+
+    fn from_plaintext(event: &Event, plaintext: &str) -> Result<Self> {
+        let items: Vec<Vec<String>> = serde_json::from_str(plaintext)
             .context("private git relay list content is not a JSON array")?;
         let mut relays = Vec::with_capacity(items.len());
         for item in items {
@@ -203,6 +239,101 @@ impl PrivateGitRelayList {
             source_event: Some(event.clone()),
         })
     }
+}
+
+fn private_git_relay_list_cache_path(cache_dir: &Path, event: &Event) -> PathBuf {
+    cache_dir.join(format!("{}.json", event.id.to_hex()))
+}
+
+fn read_cached_private_git_relay_list(cache_dir: &Path, event: &Event) -> Result<Option<String>> {
+    let path = private_git_relay_list_cache_path(cache_dir, event);
+    match fs::read_to_string(&path) {
+        Ok(plaintext) => Ok(Some(plaintext)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read private relay-list cache {}", path.display())),
+    }
+}
+
+fn write_cached_private_git_relay_list(
+    cache_dir: &Path,
+    event: &Event,
+    plaintext: &str,
+) -> Result<()> {
+    if !cache_dir.exists() {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(cache_dir).with_context(|| {
+            format!(
+                "failed to create private relay-list cache {}",
+                cache_dir.display()
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to secure private relay-list cache {}",
+                cache_dir.display()
+            )
+        })?;
+    }
+
+    let path = private_git_relay_list_cache_path(cache_dir, event);
+    let mut temporary = NamedTempFile::new_in(cache_dir).with_context(|| {
+        format!(
+            "failed to create a temporary private relay-list cache file in {}",
+            cache_dir.display()
+        )
+    })?;
+    temporary
+        .write_all(plaintext.as_bytes())
+        .and_then(|()| temporary.as_file().sync_all())
+        .with_context(|| {
+            format!(
+                "failed to write private relay-list cache {}",
+                path.display()
+            )
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!(
+                    "failed to secure private relay-list cache {}",
+                    path.display()
+                )
+            })?;
+    }
+    temporary
+        .persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            format!(
+                "failed to replace private relay-list cache {}",
+                path.display()
+            )
+        })?;
+    #[cfg(unix)]
+    fs::File::open(cache_dir)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| {
+            format!(
+                "failed to sync private relay-list cache {}",
+                cache_dir.display()
+            )
+        })?;
+    Ok(())
 }
 
 /// Fetch and decrypt the newest valid private Git relay list from the user's
@@ -903,6 +1034,86 @@ mod private_git_relay_list_tests {
             .unwrap();
         assert_eq!(decoded.relays, vec![relay_a, relay_b]);
         assert_eq!(decoded.created_at, event.created_at);
+    }
+
+    #[tokio::test]
+    async fn private_git_relay_list_cache_uses_the_concrete_event_id() {
+        let (keys, signer) = test_signer();
+        let event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://encrypted.example"]]"#,
+            vec![],
+        )
+        .await;
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+
+        let decrypted =
+            PrivateGitRelayList::from_event_with_cache_dir(&event, &signer, Some(&cache_dir))
+                .await
+                .unwrap();
+        assert_eq!(
+            decrypted.relays,
+            vec![RelayUrl::parse("wss://encrypted.example").unwrap()]
+        );
+        let cache_path = private_git_relay_list_cache_path(&cache_dir, &event);
+        assert_eq!(
+            cache_path.file_name().unwrap(),
+            format!("{}.json", event.id.to_hex()).as_str()
+        );
+
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &event,
+            r#"[["g","wss://cached.example"]]"#,
+        )
+        .unwrap();
+        let cached =
+            PrivateGitRelayList::from_event_with_cache_dir(&event, &signer, Some(&cache_dir))
+                .await
+                .unwrap();
+        assert_eq!(
+            cached.relays,
+            vec![RelayUrl::parse("wss://cached.example").unwrap()],
+            "a valid concrete-event cache entry must avoid decrypting again"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(cache_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_private_git_relay_list_cache_is_replaced_after_decryption() {
+        let (keys, signer) = test_signer();
+        let plaintext = r#"[["g","wss://private.example"]]"#;
+        let event = private_list_event_with_plaintext(&keys, &signer, plaintext, vec![]).await;
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+        write_cached_private_git_relay_list(&cache_dir, &event, "not JSON").unwrap();
+
+        let decoded =
+            PrivateGitRelayList::from_event_with_cache_dir(&event, &signer, Some(&cache_dir))
+                .await
+                .unwrap();
+        assert_eq!(
+            decoded.relays,
+            vec![RelayUrl::parse("wss://private.example").unwrap()]
+        );
+        assert_eq!(
+            fs::read_to_string(private_git_relay_list_cache_path(&cache_dir, &event)).unwrap(),
+            plaintext
+        );
     }
 
     #[tokio::test]
