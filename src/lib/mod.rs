@@ -14,6 +14,7 @@ pub mod mbox_parser;
 pub mod proposal_base;
 pub mod push;
 pub mod relay_auth;
+pub mod relay_information;
 pub mod repo_ref;
 pub mod repo_state;
 pub mod signer;

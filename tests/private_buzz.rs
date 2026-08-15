@@ -172,6 +172,15 @@ async fn ngit_clones_and_pushes_a_buzz_channel_repo_without_public_fanout() -> R
         .get("refs/heads/main")
         .context("publisher repository has no main ref after push")?
         .clone();
+    let Err(unauthenticated_error) = harness.clone_url(&nostr_url).await else {
+        bail!("copied Buzz URL cloned without a signer");
+    };
+    assert!(
+        unauthenticated_error
+            .to_string()
+            .contains("private repository relay authentication requires a logged-in account"),
+        "a copied Buzz URL was not classified as private from NIP-11: {unauthenticated_error:#}",
+    );
     let outsider = harness.fresh_repo()?;
     let outsider_login = outsider
         .ngit([

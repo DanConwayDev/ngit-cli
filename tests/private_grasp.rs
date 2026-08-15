@@ -238,6 +238,16 @@ async fn private_member_can_init_clone_and_push_without_public_repo_events() -> 
         "encrypted private relay discovery used unexpected ordinary relays",
     );
 
+    let Err(unauthenticated_error) = harness.clone_url(&clone_url).await else {
+        bail!("copied GRASP-08 URL cloned without a signer");
+    };
+    assert!(
+        unauthenticated_error
+            .to_string()
+            .contains("private repository relay authentication requires a logged-in account"),
+        "a copied GRASP-08 URL was not classified as private from NIP-11: {unauthenticated_error:#}",
+    );
+
     let outsider = harness.fresh_repo()?;
     let outsider_login = outsider
         .ngit([

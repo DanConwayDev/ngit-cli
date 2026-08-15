@@ -30,6 +30,7 @@ use ngit::{
         existing::load_existing_login,
         user::{PrivateGitRelayDiscovery, discover_private_git_relay_list, get_user_details},
     },
+    relay_information::discover_private_repository_relays,
     signer::NgitSigner,
     utils::read_line,
 };
@@ -244,17 +245,21 @@ pub async fn run(args: &[String]) -> Result<()> {
     };
 
     let git_repo_path = git_repo.get_path()?;
-    let repository_is_known_private = git_repo
-        .git_repo
-        .config()
-        .ok()
-        .and_then(|config| config.get_bool("nostr.private").ok())
-        .unwrap_or(false);
+    let nip11_private_relays =
+        discover_private_repository_relays(&decoded_nostr_url.coordinate.relays).await;
+    let repository_is_known_private = !nip11_private_relays.is_empty()
+        || git_repo
+            .git_repo
+            .config()
+            .ok()
+            .and_then(|config| config.get_bool("nostr.private").ok())
+            .unwrap_or(false);
 
     let _ = set_git_timeout(Some(&git_repo));
     let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    client.nip42_register_private_repo_relays(nip11_private_relays.clone());
 
     let login = match load_existing_login(
         &Some(&git_repo),
@@ -304,7 +309,7 @@ pub async fn run(args: &[String]) -> Result<()> {
     let signer = login.as_ref().map(|(signer, _)| signer.clone());
 
     let mut discovery_coordinate = decoded_nostr_url.coordinate.clone();
-    let private_discovery = if let Some((signer, user_ref)) = login.as_ref() {
+    let mut private_discovery = if let Some((signer, user_ref)) = login.as_ref() {
         let mut discovery_relays = user_ref.relays.read();
         for relay in user_ref.relays.write() {
             if !discovery_relays.contains(&relay) {
@@ -318,6 +323,20 @@ pub async fn run(args: &[String]) -> Result<()> {
     } else {
         PrivateGitRelayDiscovery::Absent
     };
+    if !nip11_private_relays.is_empty() {
+        match &mut private_discovery {
+            PrivateGitRelayDiscovery::Available(relays) => {
+                for relay in nip11_private_relays {
+                    if !relays.contains(&relay) {
+                        relays.push(relay);
+                    }
+                }
+            }
+            PrivateGitRelayDiscovery::Absent | PrivateGitRelayDiscovery::Unavailable(_) => {
+                private_discovery = PrivateGitRelayDiscovery::Available(nip11_private_relays);
+            }
+        }
+    }
 
     let fetch_report = fetching_with_report_for_helper(
         git_repo_path,
