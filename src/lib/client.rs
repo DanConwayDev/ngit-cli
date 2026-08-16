@@ -1941,14 +1941,36 @@ pub async fn get_repo_ref_from_cache(
         ..repo_ref
     };
 
-    if let Some(path) = git_repo_path {
-        git2::Repository::discover(path)
-            .context("failed to discover repository while saving privacy state")?
-            .config()?
-            .set_bool("nostr.private", repo_ref.private)?;
-    }
-
     Ok(repo_ref)
+}
+
+/// Record the repository's privacy classification in `.git/config` so later
+/// operations can consult it before any network access.
+///
+/// Only call this when `git_repo_path` belongs to the repository the
+/// operation actually targets: merely browsing another repository's
+/// announcement (e.g. during interactive repository search) must not stamp
+/// its privacy into the current repository's config. Best-effort: the key is
+/// only written when the value changes, and failures degrade to a warning so
+/// read-only flows never fail on config write access.
+pub fn save_repository_privacy_to_git_config(git_repo_path: &Path, private: bool) {
+    let result = (|| -> Result<()> {
+        let repository =
+            git2::Repository::discover(git_repo_path).context("failed to discover repository")?;
+        let mut config = repository
+            .config()
+            .context("failed to open repository config")?;
+        if config.get_bool("nostr.private").ok() == Some(private) {
+            return Ok(());
+        }
+        config
+            .set_bool("nostr.private", private)
+            .context("failed to set nostr.private")?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("warning: failed to record repository privacy in git config: {error:#}");
+    }
 }
 
 fn repository_events_are_private(events: &[Event]) -> bool {
@@ -3211,6 +3233,7 @@ pub async fn fetching_with_private_discovery(
         .ok()
         .filter(|repo_ref| repo_ref.private)
     {
+        save_repository_privacy_to_git_config(git_repo_path, true);
         coordinate
             .relays
             .retain(|relay| repo_ref.relays.contains(relay));
@@ -3254,6 +3277,7 @@ pub async fn fetching_with_private_discovery(
         match private_relay_probe_decision(discovered_privacy, private_probe_completed) {
             PrivateRelayProbeDecision::UsePrivateResult => {
                 if let Some(repo_ref) = discovered_repo_ref {
+                    save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
                     coordinate.relays = repo_ref.relays;
                 }
                 return Ok(private_outcome.report);
@@ -3267,7 +3291,11 @@ pub async fn fetching_with_private_discovery(
         }
     }
 
-    fetching_with_report(git_repo_path, client, coordinate).await
+    let report = fetching_with_report(git_repo_path, client, coordinate).await?;
+    if let Ok(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), coordinate).await {
+        save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
+    }
+    Ok(report)
 }
 
 async fn fetching_with_report_policy(
@@ -4426,6 +4454,66 @@ mod private_repository_tests {
         assert!(!restrict_repository_relays(false, false));
         assert!(!coordinate_hints_are_allowed(true));
         assert!(coordinate_hints_are_allowed(false));
+    }
+
+    #[test]
+    fn repository_privacy_is_persisted_and_updated_in_git_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = git2::Repository::init(dir.path()).unwrap();
+        save_repository_privacy_to_git_config(dir.path(), true);
+        assert!(
+            repository
+                .config()
+                .unwrap()
+                .get_bool("nostr.private")
+                .unwrap()
+        );
+        save_repository_privacy_to_git_config(dir.path(), false);
+        assert!(
+            !repository
+                .config()
+                .unwrap()
+                .get_bool("nostr.private")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn repository_privacy_persistence_degrades_to_warning_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        save_repository_privacy_to_git_config(&dir.path().join("missing"), true);
+    }
+
+    /// An unchanged value must not open `.git/config` for writing: read-only
+    /// flows and concurrent remote-helper processes would otherwise contend
+    /// on `config.lock`, and a failed write must degrade to a warning.
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_repository_privacy_is_not_rewritten_and_write_failures_degrade() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let repository = git2::Repository::init(dir.path()).unwrap();
+        save_repository_privacy_to_git_config(dir.path(), true);
+
+        let git_dir = repository.path().to_path_buf();
+        let writable = std::fs::metadata(&git_dir).unwrap().permissions();
+        let mut read_only = writable.clone();
+        read_only.set_mode(0o555);
+        std::fs::set_permissions(&git_dir, read_only).unwrap();
+
+        // same value: no write is attempted, so the read-only .git is fine
+        save_repository_privacy_to_git_config(dir.path(), true);
+        // changed value: the failed write warns instead of failing the flow
+        save_repository_privacy_to_git_config(dir.path(), false);
+
+        std::fs::set_permissions(&git_dir, writable).unwrap();
+        assert!(
+            repository
+                .config()
+                .unwrap()
+                .get_bool("nostr.private")
+                .unwrap()
+        );
     }
 
     #[test]

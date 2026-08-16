@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 use client::{
     Connect, FetchReport, PrivateRelayProbeDecision, consolidate_fetch_outcome,
     get_repo_ref_from_cache, is_verbose, private_relay_probe_decision,
-    warn_if_invited_as_maintainer,
+    save_repository_privacy_to_git_config, warn_if_invited_as_maintainer,
 };
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
@@ -347,6 +347,9 @@ pub async fn run(args: &[String]) -> Result<()> {
     .await?;
 
     let mut repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &discovery_coordinate).await?;
+    // this is the repository the helper operates on, so its privacy
+    // classification may be recorded in the local git config
+    save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let _ = ngit::agent_guidance::warn_if_maintainer(&git_repo, &repo_ref).await;
 
