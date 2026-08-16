@@ -443,14 +443,28 @@ impl Connect for Client {
         relays: Vec<String>,
         filters: Vec<nostr::prelude::Filter>,
     ) -> Result<Vec<nostr::prelude::Event>> {
+        // relay lists can come from network events (e.g. kind 10002), so a
+        // malformed entry must be skipped rather than panic
+        let relay_urls = relays
+            .iter()
+            .filter_map(|relay| match RelayUrl::parse(relay) {
+                Ok(url) => Some(url),
+                Err(error) => {
+                    eprintln!("warning: skipping invalid relay url {relay}: {error}");
+                    None
+                }
+            })
+            .collect::<Vec<RelayUrl>>();
         let (relay_results, _) = self
-            .get_events_per_relay(
-                relays.iter().map(|r| RelayUrl::parse(r).unwrap()).collect(),
-                filters,
-                MultiProgress::new(),
-            )
+            .get_events_per_relay(relay_urls, filters, MultiProgress::new())
             .await?;
-        get_dedup_events_or_error(relay_results)
+        // relay outages degrade to an empty result; callers that must not
+        // mistake an outage for absent events consult their own caches or
+        // use get_events_per_relay directly
+        if !relay_results.is_empty() && relay_results.iter().all(Result::is_err) {
+            eprintln!("warning: no relay responded while fetching events; continuing without them");
+        }
+        Ok(get_dedup_events(relay_results))
     }
 
     async fn get_events_per_relay(
@@ -1476,19 +1490,6 @@ fn get_dedup_events(relay_results: Vec<Result<Vec<nostr::prelude::Event>>>) -> V
         }
     }
     dedup_events
-}
-
-fn get_dedup_events_or_error(relay_results: Vec<Result<Vec<Event>>>) -> Result<Vec<Event>> {
-    if !relay_results.is_empty() && relay_results.iter().all(Result::is_err) {
-        let errors = relay_results
-            .iter()
-            .filter_map(|result| result.as_ref().err())
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-            .join("; ");
-        bail!("all relays failed while fetching events: {errors}");
-    }
-    Ok(get_dedup_events(relay_results))
 }
 
 pub async fn sign_event(
@@ -4513,20 +4514,6 @@ mod private_repository_tests {
                 .unwrap()
                 .get_bool("nostr.private")
                 .unwrap()
-        );
-    }
-
-    #[test]
-    fn all_relay_failures_are_not_an_empty_successful_query() {
-        let result = get_dedup_events_or_error(vec![
-            Err(anyhow!("relay a unavailable")),
-            Err(anyhow!("relay b authentication failed")),
-        ]);
-        assert!(result.is_err());
-        assert_eq!(
-            get_dedup_events_or_error(vec![Ok(vec![]), Err(anyhow!("relay b unavailable"))])
-                .unwrap(),
-            vec![]
         );
     }
 

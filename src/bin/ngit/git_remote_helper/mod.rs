@@ -534,6 +534,13 @@ async fn fetching_with_report_for_helper(
             .clone_from(&repo_ref.relays);
     }
 
+    // `Unavailable` only arises when the kind-10318 state is unknown for a
+    // reason other than a plain relay outage (a signer/decrypt failure, or no
+    // discovery relay to ask): outages degrade to `Absent` upstream after the
+    // on-disk relay-list cache is consulted, so public repositories keep
+    // working through indexer discovery. What remains may hide a private
+    // repository, so without a cached announcement discovery fails closed
+    // rather than leak the coordinate to public discovery relays.
     if let PrivateGitRelayDiscovery::Unavailable(error) = private_discovery {
         if cached_repo_ref.is_none() {
             bail!("private Git relay discovery is unavailable: {error}");
