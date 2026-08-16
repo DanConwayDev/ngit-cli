@@ -127,6 +127,29 @@ impl PrivateGitRelayDiscovery {
     }
 }
 
+/// Why a kind-10318 event could not be decoded into a private Git relay list.
+///
+/// The distinction matters when walking candidate events from newest to
+/// oldest: an `Invalid` event may be skipped so an older valid list can be
+/// found, but a `Signer` failure (a NIP-46 bunker timeout, a refused
+/// nip44_decrypt) leaves the state of the list unknown and must never be
+/// treated as "no list exists".
+#[derive(Debug)]
+enum PrivateGitRelayListDecodeError {
+    /// The event is structurally not a usable private git relay list.
+    Invalid(anyhow::Error),
+    /// The signer failed before the list content could be established.
+    Signer(anyhow::Error),
+}
+
+impl PrivateGitRelayListDecodeError {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Invalid(error) | Self::Signer(error) => error,
+        }
+    }
+}
+
 impl PrivateGitRelayList {
     pub fn new(relays: Vec<RelayUrl>) -> Result<Self> {
         Ok(Self {
@@ -166,6 +189,15 @@ impl PrivateGitRelayList {
     }
 
     pub async fn from_event(event: &Event, signer: &Arc<crate::NgitSigner>) -> Result<Self> {
+        Self::from_event_classified(event, signer)
+            .await
+            .map_err(PrivateGitRelayListDecodeError::into_error)
+    }
+
+    async fn from_event_classified(
+        event: &Event,
+        signer: &Arc<crate::NgitSigner>,
+    ) -> Result<Self, PrivateGitRelayListDecodeError> {
         #[cfg(test)]
         let cache_dir: Option<PathBuf> = None;
         #[cfg(not(test))]
@@ -179,19 +211,31 @@ impl PrivateGitRelayList {
         event: &Event,
         signer: &Arc<crate::NgitSigner>,
         cache_dir: Option<&Path>,
-    ) -> Result<Self> {
+    ) -> Result<Self, PrivateGitRelayListDecodeError> {
+        use PrivateGitRelayListDecodeError::{Invalid, Signer};
         if event.kind != KIND_PRIVATE_GIT_RELAY_LIST {
-            bail!("event is not a private git relay list");
+            return Err(Invalid(anyhow::anyhow!(
+                "event is not a private git relay list"
+            )));
         }
         event
             .verify()
-            .context("invalid private git relay list event")?;
-        let public_key = signer.get_public_key().await?;
+            .context("invalid private git relay list event")
+            .map_err(Invalid)?;
+        let public_key = signer
+            .get_public_key()
+            .await
+            .context("signer failed to provide a public key for the private git relay list")
+            .map_err(Signer)?;
         if event.pubkey != public_key {
-            bail!("private git relay list was not authored by the signer");
+            return Err(Invalid(anyhow::anyhow!(
+                "private git relay list was not authored by the signer"
+            )));
         }
         if !event.tags.is_empty() {
-            bail!("private git relay list must not contain public tags");
+            return Err(Invalid(anyhow::anyhow!(
+                "private git relay list must not contain public tags"
+            )));
         }
 
         if let Some(cache_dir) = cache_dir {
@@ -204,8 +248,9 @@ impl PrivateGitRelayList {
         let plaintext = signer
             .nip44_decrypt(&event.pubkey, &event.content)
             .await
-            .context("failed to decrypt private git relay list")?;
-        let list = Self::from_plaintext(event, &plaintext)?;
+            .context("failed to decrypt private git relay list")
+            .map_err(Signer)?;
+        let list = Self::from_plaintext(event, &plaintext).map_err(Invalid)?;
         if let Some(cache_dir) = cache_dir {
             if let Err(error) = write_cached_private_git_relay_list(cache_dir, event, &plaintext) {
                 if crate::client::is_verbose() {
@@ -365,10 +410,18 @@ pub async fn fetch_private_git_relay_list<C: Connect + Sync>(
             .then_with(|| left.id.cmp(&right.id))
     });
     for event in events {
-        if let Ok(list) = PrivateGitRelayList::from_event(&event, signer).await {
-            #[cfg(not(test))]
-            let _ = save_event_in_global_cache(None, &event).await;
-            return Ok(Some(list));
+        match PrivateGitRelayList::from_event_classified(&event, signer).await {
+            Ok(list) => {
+                #[cfg(not(test))]
+                let _ = save_event_in_global_cache(None, &event).await;
+                return Ok(Some(list));
+            }
+            // A structurally unusable event is skipped so an older valid
+            // list can still be found.
+            Err(PrivateGitRelayListDecodeError::Invalid(_)) => {}
+            // A signer/decrypt failure leaves the list state unknown; it
+            // must never be reported as an absent list.
+            Err(PrivateGitRelayListDecodeError::Signer(error)) => return Err(error),
         }
     }
     Ok(None)
@@ -428,7 +481,8 @@ async fn cached_private_git_relay_list(
     }
 }
 
-#[cfg(not(test))]
+/// Select the NIP-01 winner among candidate kind-10318 events, skipping
+/// structurally invalid events but propagating signer/decrypt failures.
 async fn newest_valid_private_git_relay_list(
     mut events: Vec<Event>,
     signer: &Arc<crate::NgitSigner>,
@@ -440,8 +494,10 @@ async fn newest_valid_private_git_relay_list(
             .then_with(|| left.id.cmp(&right.id))
     });
     for event in events {
-        if let Ok(list) = PrivateGitRelayList::from_event(&event, signer).await {
-            return Ok(Some(list));
+        match PrivateGitRelayList::from_event_classified(&event, signer).await {
+            Ok(list) => return Ok(Some(list)),
+            Err(PrivateGitRelayListDecodeError::Invalid(_)) => {}
+            Err(PrivateGitRelayListDecodeError::Signer(error)) => return Err(error),
         }
     }
     Ok(None)
@@ -1491,6 +1547,89 @@ mod private_git_relay_list_tests {
         assert!(
             PrivateGitRelayDiscovery::Available(vec![private_hint])
                 .requires_repository_only_probe()
+        );
+    }
+
+    fn undecryptable_private_list_event(keys: &Keys) -> Event {
+        // Content that is not valid NIP-44 ciphertext makes nip44_decrypt
+        // fail, exercising the same classification as a refused or timed-out
+        // remote signer.
+        keys.sign_event(
+            EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, "not nip44 ciphertext")
+                .finalize_unsigned(keys.public_key()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn failing_decrypt_is_an_error_rather_than_an_absent_list() {
+        let (keys, signer) = test_signer();
+        let event = undecryptable_private_list_event(&keys);
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(move |_, _| Ok(vec![event]));
+
+        assert!(
+            fetch_private_git_relay_list(
+                &client,
+                vec!["wss://normal.example".to_string()],
+                &signer,
+            )
+            .await
+            .is_err(),
+            "a failing decrypt leaves the list state unknown and must not read as absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_decrypt_marks_discovery_unavailable_not_absent() {
+        let (keys, signer) = test_signer();
+        let event = undecryptable_private_list_event(&keys);
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(move |_, _| Ok(vec![event]));
+
+        assert!(matches!(
+            discover_private_git_relay_list(
+                &client,
+                vec!["wss://normal.example".to_string()],
+                &signer,
+            )
+            .await,
+            PrivateGitRelayDiscovery::Unavailable(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_events_are_skipped_during_fetch() {
+        let (keys, signer) = test_signer();
+        let event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://private.example"]]"#,
+            vec![Tag::parse(["g", "wss://leaked.example"]).unwrap()],
+        )
+        .await;
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(move |_, _| Ok(vec![event]));
+
+        assert!(
+            fetch_private_git_relay_list(
+                &client,
+                vec!["wss://normal.example".to_string()],
+                &signer,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "an event that is structurally not a list is skipped, not fatal"
         );
     }
 }
