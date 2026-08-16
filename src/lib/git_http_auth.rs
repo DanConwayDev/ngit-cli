@@ -91,6 +91,12 @@ async fn build_private_git_authorization(
         // SSH, git, and filesystem transports do not issue HTTP requests.
         return Ok(None);
     };
+    // GRASP-08 deliberately specifies a single repo-root NIP-98 credential
+    // with a fixed `GET` method tag for ALL Smart HTTP operations, including
+    // the `git-upload-pack`/`git-receive-pack` POSTs. Buzz validates exactly
+    // this shape, so the method tag must stay `GET` regardless of the HTTP
+    // method actually used. This is an intentional GRASP-08/Buzz contract,
+    // not a NIP-98 spec mismatch — do not "fix" it to match the HTTP verb.
     let event = signer
         .sign_event_builder(EventBuilder::new(NIP98_KIND, "").tags([
             Tag::parse(["u", canonical.as_str()])?,
