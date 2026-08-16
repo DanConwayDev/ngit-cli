@@ -259,19 +259,6 @@ impl Harness {
     ) -> Result<Repo> {
         Repo::clone_with_git_config(self, url, git_config).await
     }
-
-    /// Clone a URL after installing configuration in the newly initialized
-    /// repository. Unlike command-scoped `git -c`, `git clone --config`
-    /// makes the values visible as local config when the remote helper starts.
-    /// This is how private-clone tests provide a member credential without
-    /// touching global Git configuration.
-    pub async fn clone_url_with_repo_config(
-        &self,
-        url: &str,
-        repo_config: &[(&str, &str)],
-    ) -> Result<Repo> {
-        Repo::clone_with_repo_config(self, url, repo_config).await
-    }
 }
 
 /// Fluent builder for [`Harness`].
