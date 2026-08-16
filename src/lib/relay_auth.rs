@@ -60,7 +60,7 @@ impl RelayAuthPolicy {
     where
         I: IntoIterator<Item = RelayUrl>,
     {
-        let mut modes = self.modes.write().unwrap();
+        let mut modes = self.modes.write().unwrap_or_else(|e| e.into_inner());
         for relay in relays {
             modes
                 .entry(relay)
@@ -98,24 +98,30 @@ impl RelayAuthPolicy {
 
     /// Attach the signer explicitly selected or created by the command.
     pub fn set_signer(&self, signer: Arc<NgitSigner>) {
-        *self.signer.write().unwrap() = Some(signer);
+        *self.signer.write().unwrap_or_else(|e| e.into_inner()) = Some(signer);
     }
 
     pub fn mode_for(&self, relay: &RelayUrl) -> RelayAuthMode {
         self.modes
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(relay)
             .copied()
             .unwrap_or_default()
     }
 
     fn signer(&self) -> Option<Arc<NgitSigner>> {
-        self.signer.read().unwrap().clone()
+        self.signer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn record_declined(&self, relay: &RelayUrl) {
-        self.declined.write().unwrap().insert(relay.clone());
+        self.declined
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(relay.clone());
     }
 
     /// True when a previously declined relay can now be authenticated. Clears
@@ -124,7 +130,10 @@ impl RelayAuthPolicy {
         if self.mode_for(relay) == RelayAuthMode::Never || self.signer().is_none() {
             return false;
         }
-        self.declined.write().unwrap().remove(relay)
+        self.declined
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(relay)
     }
 }
 

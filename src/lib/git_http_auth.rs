@@ -61,7 +61,7 @@ pub async fn prepare_private_git_auth(
         }
         prepared.insert(canonical, authorization);
     }
-    *authorizations().write().unwrap() = prepared;
+    *authorizations().write().unwrap_or_else(|e| e.into_inner()) = prepared;
     Ok(())
 }
 
@@ -78,7 +78,7 @@ pub async fn refresh_private_git_auth_for_url(
     };
     authorizations()
         .write()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .insert(canonical, authorization);
     Ok(())
 }
@@ -138,13 +138,20 @@ pub async fn prepare_private_git_auth_for_repo(
 }
 
 pub fn clear_private_git_auth() {
-    authorizations().write().unwrap().clear();
+    authorizations()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// Look up the custom header for a libgit2 operation at a repository root.
 pub fn authorization_for_url(url: &str) -> Option<String> {
     let canonical = canonical_repository_url(url).ok()?;
-    authorizations().read().unwrap().get(&canonical).cloned()
+    authorizations()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&canonical)
+        .cloned()
 }
 
 #[cfg(test)]
