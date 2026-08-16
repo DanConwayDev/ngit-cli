@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use ngit::login::credential_store;
+use ngit::login::{credential_store, user};
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
@@ -22,6 +22,11 @@ pub fn launch(args: &SubCommandArgs) -> Result<()> {
         );
     } else {
         eprintln!("no stored secret found for '{}'", args.entry);
+    }
+    // Cached decrypted relay lists must not outlive the forgotten secret, but
+    // a failed cache wipe must not block the removal itself.
+    if let Err(error) = user::wipe_private_git_relay_list_cache() {
+        eprintln!("warning: failed to remove cached decrypted private relay lists: {error:#}");
     }
     Ok(())
 }

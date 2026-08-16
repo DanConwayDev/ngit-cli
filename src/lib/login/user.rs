@@ -286,8 +286,14 @@ impl PrivateGitRelayList {
     }
 }
 
+/// Cache entries are namespaced by author so lifecycle operations for one
+/// account cannot disturb another account's entries in the shared directory.
+fn private_git_relay_list_cache_file_name(event: &Event) -> String {
+    format!("{}-{}.json", event.pubkey.to_hex(), event.id.to_hex())
+}
+
 fn private_git_relay_list_cache_path(cache_dir: &Path, event: &Event) -> PathBuf {
-    cache_dir.join(format!("{}.json", event.id.to_hex()))
+    cache_dir.join(private_git_relay_list_cache_file_name(event))
 }
 
 fn read_cached_private_git_relay_list(cache_dir: &Path, event: &Event) -> Result<Option<String>> {
@@ -300,6 +306,19 @@ fn read_cached_private_git_relay_list(cache_dir: &Path, event: &Event) -> Result
     }
 }
 
+/// Without unix permission tightening (0o700 directory, 0o600 files) we
+/// refuse to persist decrypted plaintext at all: decryption still works, the
+/// result is simply not cached.
+#[cfg(not(unix))]
+fn write_cached_private_git_relay_list(
+    _cache_dir: &Path,
+    _event: &Event,
+    _plaintext: &str,
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn write_cached_private_git_relay_list(
     cache_dir: &Path,
     event: &Event,
@@ -369,6 +388,7 @@ fn write_cached_private_git_relay_list(
                 path.display()
             )
         })?;
+    remove_superseded_private_git_relay_list_cache_entries(cache_dir, event);
     #[cfg(unix)]
     fs::File::open(cache_dir)
         .and_then(|directory| directory.sync_all())
@@ -379,6 +399,60 @@ fn write_cached_private_git_relay_list(
             )
         })?;
     Ok(())
+}
+
+/// The cache is keyed by concrete event id, so a superseded list (for
+/// example one that still named a since-removed sensitive relay) would
+/// otherwise remain on disk indefinitely. Removal is best-effort and only
+/// touches entries belonging to the event's author; other accounts share the
+/// directory.
+#[cfg(unix)]
+fn remove_superseded_private_git_relay_list_cache_entries(cache_dir: &Path, event: &Event) {
+    let keep = private_git_relay_list_cache_file_name(event);
+    let prefix = format!("{}-", event.pubkey.to_hex());
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name != keep {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Best-effort removal of every cached decrypted private Git relay list.
+/// Logout and forget-keys call this so decrypted plaintext does not outlive
+/// the credentials that produced it.
+pub fn wipe_private_git_relay_list_cache() -> Result<()> {
+    #[cfg(test)]
+    {
+        // The library's own tests must never touch the real user cache; they
+        // exercise `wipe_private_git_relay_list_cache_dir` directly.
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        wipe_private_git_relay_list_cache_dir(
+            &get_dirs()?.cache_dir().join(PRIVATE_RELAY_LIST_CACHE_DIR),
+        )
+    }
+}
+
+fn wipe_private_git_relay_list_cache_dir(cache_dir: &Path) -> Result<()> {
+    match fs::remove_dir_all(cache_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to remove private relay-list cache {}",
+                cache_dir.display()
+            )
+        }),
+    }
 }
 
 /// Fetch and decrypt the newest valid private Git relay list from the user's
@@ -1122,8 +1196,9 @@ mod private_git_relay_list_tests {
         assert_eq!(decoded.created_at, event.created_at);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn private_git_relay_list_cache_uses_the_concrete_event_id() {
+    async fn private_git_relay_list_cache_is_keyed_by_author_and_concrete_event_id() {
         let (keys, signer) = test_signer();
         let event = private_list_event_with_plaintext(
             &keys,
@@ -1146,7 +1221,7 @@ mod private_git_relay_list_tests {
         let cache_path = private_git_relay_list_cache_path(&cache_dir, &event);
         assert_eq!(
             cache_path.file_name().unwrap(),
-            format!("{}.json", event.id.to_hex()).as_str()
+            format!("{}-{}.json", event.pubkey.to_hex(), event.id.to_hex()).as_str()
         );
 
         write_cached_private_git_relay_list(
@@ -1179,6 +1254,7 @@ mod private_git_relay_list_tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn invalid_private_git_relay_list_cache_is_replaced_after_decryption() {
         let (keys, signer) = test_signer();
@@ -1767,6 +1843,65 @@ mod private_git_relay_list_tests {
         assert!(decoded.relays.contains(&repository_relay));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn superseded_private_relay_list_cache_entries_for_the_author_are_removed() {
+        let (keys, signer) = test_signer();
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+        let old_event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://old.example"]]"#,
+            vec![],
+        )
+        .await;
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &old_event,
+            r#"[["g","wss://old.example"]]"#,
+        )
+        .unwrap();
+        let (other_keys, other_signer) = test_signer();
+        let other_event = private_list_event_with_plaintext(
+            &other_keys,
+            &other_signer,
+            r#"[["g","wss://other.example"]]"#,
+            vec![],
+        )
+        .await;
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &other_event,
+            r#"[["g","wss://other.example"]]"#,
+        )
+        .unwrap();
+        let new_event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://new.example"]]"#,
+            vec![],
+        )
+        .await;
+
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &new_event,
+            r#"[["g","wss://new.example"]]"#,
+        )
+        .unwrap();
+
+        assert!(
+            !private_git_relay_list_cache_path(&cache_dir, &old_event).exists(),
+            "superseded plaintext for the same account must not remain on disk"
+        );
+        assert!(private_git_relay_list_cache_path(&cache_dir, &new_event).exists());
+        assert!(
+            private_git_relay_list_cache_path(&cache_dir, &other_event).exists(),
+            "another account's cache entries must be left alone"
+        );
+    }
+
     #[test]
     fn stale_lock_takeover_has_a_single_winner() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1779,5 +1914,17 @@ mod private_git_relay_list_tests {
             !take_over_stale_private_relay_list_lock(&path),
             "once the rename has happened every other taker loses"
         );
+    }
+
+    #[test]
+    fn wiping_the_private_relay_list_cache_dir_is_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("entry.json"), "plaintext").unwrap();
+
+        wipe_private_git_relay_list_cache_dir(&cache_dir).unwrap();
+        assert!(!cache_dir.exists());
+        wipe_private_git_relay_list_cache_dir(&cache_dir).unwrap();
     }
 }

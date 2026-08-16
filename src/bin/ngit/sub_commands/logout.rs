@@ -4,7 +4,7 @@ use ngit::{
     login::{
         SignerInfoSource, credential_store,
         existing::{load_existing_login, selected_alias},
-        logged_out_message, login_identity,
+        logged_out_message, login_identity, user,
     },
 };
 use nostr::prelude::ToBech32;
@@ -24,6 +24,11 @@ pub struct SubCommandArgs {
 pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = { git_repo_result.ok() };
+    // Cached decrypted relay lists must not outlive the login session, but a
+    // failed cache wipe must not block the logout itself.
+    if let Err(error) = user::wipe_private_git_relay_list_cache() {
+        eprintln!("warning: failed to remove cached decrypted private relay lists: {error:#}");
+    }
     logout(git_repo.as_ref(), args.forget).await
 }
 
