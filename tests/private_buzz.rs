@@ -96,7 +96,11 @@ async fn ngit_clones_and_pushes_a_buzz_channel_repo_without_public_fanout() -> R
     let outsider_nsec = Keys::generate().secret_key().to_bech32()?;
     let credentials = NamedTempFile::new()?;
 
-    let buzz = BuzzServer::start(&owner).await?;
+    let Some(buzz) = BuzzServer::start(&owner).await? else {
+        // The pinned Buzz binary is unavailable and CI is unset; the fixture
+        // already printed why. Treat as skipped rather than failed.
+        return Ok(());
+    };
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
