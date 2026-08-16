@@ -546,13 +546,10 @@ pub async fn publish_private_git_relay_list<C: Connect + Sync>(
             configured
         }
     };
-    ensure_private_relay_list_write_target_was_read(client, &write_relays, public_key).await?;
-
     for attempt in 0..PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS {
         let mut private_relays =
-            fetch_private_git_relay_list(client, discovery_relays.clone(), signer)
-                .await
-                .context("failed to load the existing private Git relay list")?
+            read_private_relay_list_replacement_base(client, &write_relays, public_key, signer)
+                .await?
                 .unwrap_or(PrivateGitRelayList::new(vec![])?);
         for relay in repository_relays {
             if !private_relays.relays.contains(relay) {
@@ -598,11 +595,21 @@ pub async fn publish_private_git_relay_list<C: Connect + Sync>(
     )
 }
 
-async fn ensure_private_relay_list_write_target_was_read<C: Connect + Sync>(
+/// Read the current private Git relay list from the relays the replacement
+/// will be published to, refusing to proceed unless at least one of them was
+/// read successfully.
+///
+/// The events returned by these same per-relay reads are the replacement
+/// base. A separate base fetch would let a write relay die between the
+/// reachability check and the fetch — or let a reachable-but-empty relay mask
+/// the canonical one — and reintroduce the clobber this guard exists to
+/// prevent.
+async fn read_private_relay_list_replacement_base<C: Connect + Sync>(
     client: &C,
     write_relays: &[String],
     public_key: PublicKey,
-) -> Result<()> {
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<Option<PrivateGitRelayList>> {
     if write_relays.is_empty() {
         bail!("no normal relay is available for the private relay list");
     }
@@ -626,23 +633,30 @@ async fn ensure_private_relay_list_write_target_was_read<C: Connect + Sync>(
         )
         .await
         .context("failed to read the private Git relay list from its write relays")?;
-    if results.iter().any(Result::is_ok) {
-        return Ok(());
+    if !results.iter().any(Result::is_ok) {
+        let errors = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!(
+            "refusing to replace the private Git relay list because none of its write relays were read successfully{}",
+            if errors.is_empty() {
+                String::new()
+            } else {
+                format!(": {errors}")
+            }
+        );
     }
-    let errors = results
-        .iter()
-        .filter_map(|result| result.as_ref().err())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ");
-    bail!(
-        "refusing to replace the private Git relay list because none of its write relays were read successfully{}",
-        if errors.is_empty() {
-            String::new()
-        } else {
-            format!(": {errors}")
-        }
-    )
+    let events = results
+        .into_iter()
+        .filter_map(Result::ok)
+        .flatten()
+        .collect::<Vec<_>>();
+    newest_valid_private_git_relay_list(events, signer)
+        .await
+        .context("failed to load the existing private Git relay list")
 }
 
 struct PrivateRelayListUpdateLock {
@@ -1206,7 +1220,7 @@ mod private_git_relay_list_tests {
             .expect_get_events_per_relay()
             .once()
             .return_once(|_, _, progress| Ok((vec![Ok(vec![])], progress)));
-        client.expect_get_events().times(2).returning(move |_, _| {
+        client.expect_get_events().once().returning(move |_, _| {
             Ok(published_for_fetch
                 .lock()
                 .unwrap()
@@ -1293,28 +1307,42 @@ mod private_git_relay_list_tests {
             .to_event(&signer)
             .await
             .unwrap();
-        let call = Arc::new(Mutex::new(0usize));
+        let base_call = Arc::new(Mutex::new(0usize));
+        let verify_call = Arc::new(Mutex::new(0usize));
         let published = Arc::new(Mutex::new(None));
-        let call_for_fetch = call.clone();
+        let base_call_for_read = base_call.clone();
+        let verify_call_for_fetch = verify_call.clone();
         let published_for_fetch = published.clone();
         let published_for_send = published.clone();
+        let concurrent_for_base = concurrent_event.clone();
         let mut client = <MockConnect as Default>::default();
         client
             .expect_get_events_per_relay()
-            .once()
-            .return_once(|_, _, progress| Ok((vec![Ok(vec![])], progress)));
-        client.expect_get_events().times(4).returning(move |_, _| {
-            let mut call = call_for_fetch.lock().unwrap();
+            .times(2)
+            .returning(move |_, _, progress| {
+                let mut call = base_call_for_read.lock().unwrap();
+                *call += 1;
+                Ok((
+                    vec![Ok(if *call == 1 {
+                        vec![]
+                    } else {
+                        vec![concurrent_for_base.clone()]
+                    })],
+                    progress,
+                ))
+            });
+        client.expect_get_events().times(2).returning(move |_, _| {
+            let mut call = verify_call_for_fetch.lock().unwrap();
             *call += 1;
-            Ok(match *call {
-                1 => vec![],
-                2 | 3 => vec![concurrent_event.clone()],
-                _ => published_for_fetch
+            Ok(if *call == 1 {
+                vec![concurrent_event.clone()]
+            } else {
+                published_for_fetch
                     .lock()
                     .unwrap()
                     .clone()
                     .into_iter()
-                    .collect(),
+                    .collect()
             })
         });
         client
@@ -1631,5 +1659,95 @@ mod private_git_relay_list_tests {
             .is_none(),
             "an event that is structurally not a list is skipped, not fatal"
         );
+    }
+
+    #[tokio::test]
+    async fn replacement_base_is_derived_from_the_write_relay_reads() {
+        let (keys, signer) = test_signer();
+        let reachable_relay = "wss://reachable.example".to_string();
+        let dead_relay = "wss://dead.example".to_string();
+        let existing_relay = RelayUrl::parse("wss://existing.example").unwrap();
+        let repository_relay = RelayUrl::parse("wss://group.example").unwrap();
+        let user_ref = UserRef {
+            public_key: keys.public_key(),
+            metadata: UserMetadata {
+                name: String::new(),
+                created_at: Timestamp::from(0),
+                nip05: None,
+            },
+            relays: UserRelays {
+                relays: vec![
+                    UserRelayRef {
+                        url: reachable_relay,
+                        read: true,
+                        write: true,
+                    },
+                    UserRelayRef {
+                        url: dead_relay,
+                        read: true,
+                        write: true,
+                    },
+                ],
+                created_at: Timestamp::from(0),
+            },
+            grasp_list: UserGraspList {
+                urls: vec![],
+                created_at: Timestamp::from(0),
+            },
+        };
+        let existing_event = PrivateGitRelayList::new(vec![existing_relay.clone()])
+            .unwrap()
+            .to_event(&signer)
+            .await
+            .unwrap();
+
+        let published = Arc::new(Mutex::new(None));
+        let published_for_send = published.clone();
+        let published_for_fetch = published.clone();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .once()
+            .return_once(move |_, _, progress| {
+                Ok((
+                    vec![Err(anyhow::anyhow!("dead relay")), Ok(vec![existing_event])],
+                    progress,
+                ))
+            });
+        client.expect_get_events().once().returning(move |_, _| {
+            Ok(published_for_fetch
+                .lock()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect())
+        });
+        client
+            .expect_send_event_to()
+            .times(2)
+            .returning(move |_, _, event| {
+                let id = event.id;
+                *published_for_send.lock().unwrap() = Some(event);
+                Ok(id)
+            });
+
+        publish_private_git_relay_list(
+            &client,
+            std::slice::from_ref(&repository_relay),
+            &user_ref,
+            &signer,
+        )
+        .await
+        .unwrap();
+
+        let event = published.lock().unwrap().clone().unwrap();
+        let decoded = PrivateGitRelayList::from_event(&event, &signer)
+            .await
+            .unwrap();
+        assert!(
+            decoded.relays.contains(&existing_relay),
+            "a dead or empty write relay must not mask the canonical list"
+        );
+        assert!(decoded.relays.contains(&repository_relay));
     }
 }
