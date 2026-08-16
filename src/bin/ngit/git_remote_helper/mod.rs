@@ -245,15 +245,21 @@ pub async fn run(args: &[String]) -> Result<()> {
     };
 
     let git_repo_path = git_repo.get_path()?;
-    let nip11_private_relays =
-        discover_private_repository_relays(&decoded_nostr_url.coordinate.relays).await;
-    let repository_is_known_private = !nip11_private_relays.is_empty()
-        || git_repo
-            .git_repo
-            .config()
-            .ok()
-            .and_then(|config| config.get_bool("nostr.private").ok())
-            .unwrap_or(false);
+    // an explicit local classification answers the privacy question, so the
+    // NIP-11 probes (up to their full timeout on every git operation) are
+    // only paid when `nostr.private` is not set yet
+    let configured_privacy = git_repo
+        .git_repo
+        .config()
+        .ok()
+        .and_then(|config| config.get_bool("nostr.private").ok());
+    let nip11_private_relays = if configured_privacy.is_some() {
+        vec![]
+    } else {
+        discover_private_repository_relays(&decoded_nostr_url.coordinate.relays).await
+    };
+    let repository_is_known_private =
+        configured_privacy == Some(true) || !nip11_private_relays.is_empty();
 
     let _ = set_git_timeout(Some(&git_repo));
     let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
