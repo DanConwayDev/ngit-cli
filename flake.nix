@@ -1,7 +1,10 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     flake-utils.url = "github:numtide/flake-utils";
 
     # Buzz provides the relay used by the authenticated Smart HTTP integration
@@ -9,6 +12,7 @@
     # merged upstream.
     buzz = {
       url = "github:danconwaydev/buzz/b12739b23da92b0f1e99626b02749ab55c51b8ce";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
