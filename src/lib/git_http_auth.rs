@@ -41,10 +41,13 @@ pub fn canonical_repository_url(url: &str) -> Result<String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
-/// Sign and install one reusable NIP-98 credential for a Smart HTTP operation.
+/// Sign and install reusable NIP-98 credentials for a Smart HTTP operation.
 ///
-/// Replacing the process-local registry before each operation prevents a
-/// credential from one account or repository leaking into a later operation.
+/// Entries are merged into the process-local registry (never wholesale
+/// replaced) so concurrent operations preparing other repository roots cannot
+/// observe their credentials vanishing. Isolation between accounts is
+/// provided by the explicit [`clear_private_git_auth`] call at the start of
+/// each operation.
 pub async fn prepare_private_git_auth(
     git_server_urls: &[String],
     signer: &Arc<NgitSigner>,
@@ -61,7 +64,10 @@ pub async fn prepare_private_git_auth(
         }
         prepared.insert(canonical, authorization);
     }
-    *authorizations().write().unwrap_or_else(|e| e.into_inner()) = prepared;
+    authorizations()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .extend(prepared);
     Ok(())
 }
 
@@ -201,6 +207,19 @@ mod tests {
             authorization_for_url("https://git.example/repo.git/"),
             Some(header)
         );
+    }
+
+    #[tokio::test]
+    async fn preparing_one_server_keeps_other_servers_credentials() {
+        let signer = Arc::new(NgitSigner::Keys(Keys::generate()));
+        prepare_private_git_auth(&["https://keep.example/repo.git".to_string()], &signer)
+            .await
+            .unwrap();
+        prepare_private_git_auth(&["https://other.example/repo.git".to_string()], &signer)
+            .await
+            .unwrap();
+        assert!(authorization_for_url("https://keep.example/repo.git").is_some());
+        assert!(authorization_for_url("https://other.example/repo.git").is_some());
     }
 
     #[tokio::test]
