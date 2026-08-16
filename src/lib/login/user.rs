@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -687,7 +687,7 @@ impl PrivateRelayListUpdateLock {
                         .and_then(|modified| SystemTime::now().duration_since(modified).ok())
                         .is_some_and(|age| age > PRIVATE_RELAY_LIST_STALE_LOCK_AGE);
                     if stale {
-                        let _ = remove_dir(&path);
+                        take_over_stale_private_relay_list_lock(&path);
                         continue;
                     }
                     if started.elapsed() >= PRIVATE_RELAY_LIST_LOCK_WAIT {
@@ -713,6 +713,22 @@ impl PrivateRelayListUpdateLock {
 impl Drop for PrivateRelayListUpdateLock {
     fn drop(&mut self) {
         let _ = remove_dir(&self.path);
+    }
+}
+
+/// Retire a stale lock without racing other would-be takers: rename it to a
+/// unique name first, so at most one process wins the takeover, then remove
+/// the renamed directory. Losers fall back to the ordinary acquisition loop.
+fn take_over_stale_private_relay_list_lock(path: &Path) -> bool {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since_epoch| since_epoch.as_nanos());
+    let takeover = path.with_extension(format!("stale-{}-{nanos}", std::process::id()));
+    if fs::rename(path, &takeover).is_ok() {
+        let _ = remove_dir(&takeover);
+        true
+    } else {
+        false
     }
 }
 
@@ -1749,5 +1765,19 @@ mod private_git_relay_list_tests {
             "a dead or empty write relay must not mask the canonical list"
         );
         assert!(decoded.relays.contains(&repository_relay));
+    }
+
+    #[test]
+    fn stale_lock_takeover_has_a_single_winner() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("private-git-relay-list-test.lock");
+        fs::create_dir(&path).unwrap();
+
+        assert!(take_over_stale_private_relay_list_lock(&path));
+        assert!(!path.exists(), "the winner removes the stale lock");
+        assert!(
+            !take_over_stale_private_relay_list_lock(&path),
+            "once the rename has happened every other taker loses"
+        );
     }
 }
