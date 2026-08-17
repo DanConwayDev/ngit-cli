@@ -24,9 +24,11 @@
 //! init publishes its events in-process before returning, so there is
 //! nothing asynchronous left to poll for.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
-use test_harness::Harness;
+use test_harness::{Harness, UnavailableTcpEndpoint};
 
 const DISPLAY_NAME: &str = "Republish Project";
 /// `ngit init` slugifies `--name` into the `d` tag by replacing spaces
@@ -85,10 +87,9 @@ async fn state_event_on(
 async fn run_init(repo: &test_harness::Repo, args: &[&str]) -> Result<std::process::Output> {
     let mut full = vec!["init", "--name", DISPLAY_NAME];
     full.extend_from_slice(args);
-    repo.ngit(full)
-        .output()
-        .await
-        .context("failed to spawn ngit init")
+    let mut command = repo.ngit(full);
+    command.kill_on_drop(true);
+    command.output().await.context("failed to spawn ngit init")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -226,21 +227,21 @@ async fn failed_republish_leaves_previous_state_authoritative() -> Result<()> {
         .await?
         .context("no kind-30618 on the default relay after the first init")?;
 
-    // A port that was just bound and released: connecting is refused, so
-    // listing the "git server" fails fast and no server is listable.
-    let dead_url = {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").context("failed to reserve a dead port")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
-        format!("http://127.0.0.1:{port}/repo.git")
-    };
+    // The test owns this endpoint throughout the failure assertion. It accepts
+    // and closes every connection, so listing the "git server" fails promptly
+    // without releasing a supposedly dead port that another process can claim.
+    let unavailable = UnavailableTcpEndpoint::start().await?;
+    let dead_url = format!("http://{}/repo.git", unavailable.addr());
 
-    let failed = run_init(
-        &repo,
-        &["--clone", &dead_url, "--relay", &default_relay_url],
+    let failed = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_init(
+            &repo,
+            &["--clone", &dead_url, "--relay", &default_relay_url],
+        ),
     )
-    .await?;
+    .await
+    .context("repeat init did not fail promptly for an unavailable git server")??;
     assert!(
         !failed.status.success(),
         "repeat init with no listable git server must fail instead of \
