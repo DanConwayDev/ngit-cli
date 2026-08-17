@@ -4488,26 +4488,22 @@ mod private_repository_tests {
     /// An unchanged value must not open `.git/config` for writing: read-only
     /// flows and concurrent remote-helper processes would otherwise contend
     /// on `config.lock`, and a failed write must degrade to a warning.
-    #[cfg(unix)]
     #[test]
     fn unchanged_repository_privacy_is_not_rewritten_and_write_failures_degrade() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let repository = git2::Repository::init(dir.path()).unwrap();
         save_repository_privacy_to_git_config(dir.path(), true);
 
         let git_dir = repository.path().to_path_buf();
-        let writable = std::fs::metadata(&git_dir).unwrap().permissions();
-        let mut read_only = writable.clone();
-        read_only.set_mode(0o555);
-        std::fs::set_permissions(&git_dir, read_only).unwrap();
+        let config_lock = git_dir.join("config.lock");
+        std::fs::File::create(&config_lock).unwrap();
 
-        // same value: no write is attempted, so the read-only .git is fine
+        // same value: no write is attempted, so the existing lock is fine
         save_repository_privacy_to_git_config(dir.path(), true);
         // changed value: the failed write warns instead of failing the flow
         save_repository_privacy_to_git_config(dir.path(), false);
 
-        std::fs::set_permissions(&git_dir, writable).unwrap();
+        std::fs::remove_file(config_lock).unwrap();
         assert!(
             repository
                 .config()
