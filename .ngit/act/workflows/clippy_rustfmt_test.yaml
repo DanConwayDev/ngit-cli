@@ -11,6 +11,23 @@ jobs:
       - uses: cachix/install-nix-action@v31
         with:
           nix_path: nixpkgs=channel:nixos-unstable
+      - name: Restore Nix store cache
+        continue-on-error: true
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+      - name: Restore Rust build cache
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
       - run: nix develop --command cargo clippy
       - run: nix develop --command cargo fmt --all -- --check
       - run: nix develop --command cargo test
