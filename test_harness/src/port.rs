@@ -40,7 +40,7 @@
 //! stress testing post-reservation, but the cost is zero when they
 //! don't.
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 
 use anyhow::{Context, Result};
 
@@ -119,8 +119,54 @@ pub fn reserve_port() -> Result<PortReservation> {
     })
 }
 
+/// A test-owned loopback endpoint that makes every TCP attempt fail at the
+/// protocol layer by closing each accepted connection without a response.
+///
+/// Unlike binding an ephemeral port and then releasing it to manufacture a
+/// supposedly dead address, this endpoint owns its port for its full lifetime.
+/// A failure-path test therefore cannot race another process that happens to
+/// claim the released port.
+#[derive(Debug)]
+pub struct UnavailableTcpEndpoint {
+    addr: SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl UnavailableTcpEndpoint {
+    /// Bind an ephemeral loopback port and start closing incoming connections.
+    pub async fn start() -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind unavailable TCP test endpoint")?;
+        let addr = listener
+            .local_addr()
+            .context("failed to read unavailable TCP test endpoint address")?;
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        Ok(Self { addr, task })
+    }
+
+    /// The loopback socket address owned by this endpoint.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Drop for UnavailableTcpEndpoint {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt;
+
     use super::*;
 
     /// Two reservations held simultaneously must return distinct ports.
@@ -147,5 +193,30 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", port))
             .expect("port should be bindable immediately after release");
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn unavailable_endpoint_owns_port_and_closes_connections() {
+        let endpoint = UnavailableTcpEndpoint::start().await.unwrap();
+
+        let rebound = TcpListener::bind(endpoint.addr());
+        assert!(
+            rebound.is_err(),
+            "endpoint must keep its assigned port bound for its lifetime"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut stream = tokio::net::TcpStream::connect(endpoint.addr())
+                .await
+                .expect("endpoint should accept TCP connections");
+            let mut byte = [0_u8; 1];
+            let read = stream.read(&mut byte).await;
+            assert!(
+                matches!(read, Ok(0) | Err(_)),
+                "endpoint must close without returning application data"
+            );
+        })
+        .await
+        .expect("endpoint did not close a connection promptly");
     }
 }

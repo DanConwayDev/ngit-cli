@@ -9,6 +9,10 @@
 //!   [`port::PortReservation`] until the consuming fixture is about to start
 //!   its real service. Eliminates same-process port races between parallel
 //!   `#[tokio::test]`s.
+//! - [`port::UnavailableTcpEndpoint`] — test-owned loopback endpoint that
+//!   closes every accepted connection without a response. Failure-path tests
+//!   get prompt protocol errors without releasing a supposedly dead port that
+//!   another process could claim.
 //! - [`relay::VanillaRelay`] — `nostr-relay-builder` `LocalRelay` wrapped to
 //!   own its port and offer a `events(filter)` query helper. Used for user
 //!   metadata (kind 0), relay lists (kind 10002), signer-connect events —
@@ -57,6 +61,7 @@ pub use nostr::{
     KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_REPO_STATE, event_branch_name_tag, tag_value,
     tag_values, tag_values_multiple,
 };
+pub use port::UnavailableTcpEndpoint;
 pub use relay::VanillaRelay;
 pub use repo::Repo;
 pub use scenarios::{
