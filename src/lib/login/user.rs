@@ -1,17 +1,38 @@
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{
+    collections::HashSet,
+    fs::{self, create_dir, create_dir_all, remove_dir},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail};
-use nostr::prelude::{Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Url, event::Tag};
+use indicatif::MultiProgress;
+use nostr::prelude::{
+    Event, EventBuilder, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp, ToBech32, Url,
+    event::Tag,
+};
 use serde::{self, Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 #[cfg(not(test))]
 use crate::client::Client;
 #[cfg(test)]
 use crate::client::MockConnect;
+#[cfg(not(test))]
+use crate::{client::save_event_in_global_cache, get_dirs};
 use crate::{
-    client::{Connect, FetchReport, get_event_from_global_cache, is_verbose, sign_event},
-    git_events::KIND_USER_GRASP_LIST,
+    client::{
+        Connect, FetchReport, get_event_from_global_cache, is_verbose, sign_draft_event, sign_event,
+    },
+    git_events::{KIND_PRIVATE_GIT_RELAY_LIST, KIND_USER_GRASP_LIST},
 };
+
+const PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS: usize = 3;
+const PRIVATE_RELAY_LIST_LOCK_WAIT: Duration = Duration::from_secs(60);
+const PRIVATE_RELAY_LIST_STALE_LOCK_AGE: Duration = Duration::from_secs(30 * 60);
+const PRIVATE_RELAY_LIST_CACHE_DIR: &str = "private-git-relay-lists";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRef {
@@ -79,6 +100,723 @@ impl UserGraspList {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PrivateGitRelayList {
+    pub relays: Vec<RelayUrl>,
+    pub created_at: Timestamp,
+    #[serde(skip)]
+    source_event: Option<Event>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrivateGitRelayDiscovery {
+    Available(Vec<RelayUrl>),
+    Absent,
+    Unavailable(String),
+}
+
+impl PrivateGitRelayDiscovery {
+    pub fn relays(&self) -> &[RelayUrl] {
+        match self {
+            Self::Available(relays) => relays,
+            Self::Absent | Self::Unavailable(_) => &[],
+        }
+    }
+
+    pub fn requires_repository_only_probe(&self) -> bool {
+        matches!(self, Self::Available(relays) if !relays.is_empty())
+    }
+}
+
+/// Why a kind-10318 event could not be decoded into a private Git relay list.
+///
+/// The distinction matters when walking candidate events from newest to
+/// oldest: an `Invalid` event may be skipped so an older valid list can be
+/// found, but a `Signer` failure (a NIP-46 bunker timeout, a refused
+/// nip44_decrypt) leaves the state of the list unknown and must never be
+/// treated as "no list exists".
+#[derive(Debug)]
+enum PrivateGitRelayListDecodeError {
+    /// The event is structurally not a usable private git relay list.
+    Invalid(anyhow::Error),
+    /// The signer failed before the list content could be established.
+    Signer(anyhow::Error),
+}
+
+impl PrivateGitRelayListDecodeError {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Invalid(error) | Self::Signer(error) => error,
+        }
+    }
+}
+
+impl PrivateGitRelayList {
+    pub fn new(relays: Vec<RelayUrl>) -> Result<Self> {
+        Ok(Self {
+            relays: validate_and_dedupe_private_git_relays(relays)?,
+            created_at: Timestamp::from(0),
+            source_event: None,
+        })
+    }
+
+    pub async fn to_event(&mut self, signer: &Arc<crate::NgitSigner>) -> Result<Event> {
+        self.relays = validate_and_dedupe_private_git_relays(self.relays.clone())?;
+        let private_items = self
+            .relays
+            .iter()
+            .map(|relay| vec!["g".to_string(), relay.to_string()])
+            .collect::<Vec<_>>();
+        let plaintext = serde_json::to_string(&private_items)
+            .context("failed to encode private git relay list")?;
+        let public_key = signer.get_public_key().await?;
+        let content = signer
+            .nip44_encrypt(&public_key, &plaintext)
+            .await
+            .context("failed to encrypt private git relay list")?;
+        let event = sign_draft_event(
+            crate::event_ordering::finalize_strictly_later_unsigned(
+                EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, content),
+                public_key,
+                self.source_event.as_ref(),
+            )?,
+            signer,
+            "private git relay list".to_string(),
+        )
+        .await?;
+        self.created_at = event.created_at;
+        self.source_event = Some(event.clone());
+        Ok(event)
+    }
+
+    pub async fn from_event(event: &Event, signer: &Arc<crate::NgitSigner>) -> Result<Self> {
+        Self::from_event_classified(event, signer)
+            .await
+            .map_err(PrivateGitRelayListDecodeError::into_error)
+    }
+
+    async fn from_event_classified(
+        event: &Event,
+        signer: &Arc<crate::NgitSigner>,
+    ) -> Result<Self, PrivateGitRelayListDecodeError> {
+        #[cfg(test)]
+        let cache_dir: Option<PathBuf> = None;
+        #[cfg(not(test))]
+        let cache_dir = get_dirs()
+            .ok()
+            .map(|dirs| dirs.cache_dir().join(PRIVATE_RELAY_LIST_CACHE_DIR));
+        Self::from_event_with_cache_dir(event, signer, cache_dir.as_deref()).await
+    }
+
+    async fn from_event_with_cache_dir(
+        event: &Event,
+        signer: &Arc<crate::NgitSigner>,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self, PrivateGitRelayListDecodeError> {
+        use PrivateGitRelayListDecodeError::{Invalid, Signer};
+        if event.kind != KIND_PRIVATE_GIT_RELAY_LIST {
+            return Err(Invalid(anyhow::anyhow!(
+                "event is not a private git relay list"
+            )));
+        }
+        event
+            .verify()
+            .context("invalid private git relay list event")
+            .map_err(Invalid)?;
+        let public_key = signer
+            .get_public_key()
+            .await
+            .context("signer failed to provide a public key for the private git relay list")
+            .map_err(Signer)?;
+        if event.pubkey != public_key {
+            return Err(Invalid(anyhow::anyhow!(
+                "private git relay list was not authored by the signer"
+            )));
+        }
+        if !event.tags.is_empty() {
+            return Err(Invalid(anyhow::anyhow!(
+                "private git relay list must not contain public tags"
+            )));
+        }
+
+        if let Some(cache_dir) = cache_dir {
+            if let Ok(Some(plaintext)) = read_cached_private_git_relay_list(cache_dir, event) {
+                if let Ok(list) = Self::from_plaintext(event, &plaintext) {
+                    return Ok(list);
+                }
+            }
+        }
+        let plaintext = signer
+            .nip44_decrypt(&event.pubkey, &event.content)
+            .await
+            .context("failed to decrypt private git relay list")
+            .map_err(Signer)?;
+        let list = Self::from_plaintext(event, &plaintext).map_err(Invalid)?;
+        if let Some(cache_dir) = cache_dir {
+            if let Err(error) = write_cached_private_git_relay_list(cache_dir, event, &plaintext) {
+                if crate::client::is_verbose() {
+                    eprintln!("nostr: failed to cache decrypted private Git relay list: {error:#}");
+                }
+            }
+        }
+        Ok(list)
+    }
+
+    fn from_plaintext(event: &Event, plaintext: &str) -> Result<Self> {
+        let items: Vec<Vec<String>> = serde_json::from_str(plaintext)
+            .context("private git relay list content is not a JSON array")?;
+        let mut relays = Vec::with_capacity(items.len());
+        for item in items {
+            let [tag, relay] = item.as_slice() else {
+                bail!("private git relay list items must be two-element arrays");
+            };
+            if tag != "g" {
+                bail!("private git relay list items must be g tags");
+            }
+            relays.push(
+                RelayUrl::parse(relay)
+                    .with_context(|| format!("invalid private git relay URL: {relay}"))?,
+            );
+        }
+
+        Ok(Self {
+            relays: validate_and_dedupe_private_git_relays(relays)?,
+            created_at: event.created_at,
+            source_event: Some(event.clone()),
+        })
+    }
+}
+
+/// Cache entries are namespaced by author so lifecycle operations for one
+/// account cannot disturb another account's entries in the shared directory.
+fn private_git_relay_list_cache_file_name(event: &Event) -> String {
+    format!("{}-{}.json", event.pubkey.to_hex(), event.id.to_hex())
+}
+
+fn private_git_relay_list_cache_path(cache_dir: &Path, event: &Event) -> PathBuf {
+    cache_dir.join(private_git_relay_list_cache_file_name(event))
+}
+
+fn read_cached_private_git_relay_list(cache_dir: &Path, event: &Event) -> Result<Option<String>> {
+    let path = private_git_relay_list_cache_path(cache_dir, event);
+    match fs::read_to_string(&path) {
+        Ok(plaintext) => Ok(Some(plaintext)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read private relay-list cache {}", path.display())),
+    }
+}
+
+/// Without unix permission tightening (0o700 directory, 0o600 files) we
+/// refuse to persist decrypted plaintext at all: decryption still works, the
+/// result is simply not cached.
+#[cfg(not(unix))]
+fn write_cached_private_git_relay_list(
+    _cache_dir: &Path,
+    _event: &Event,
+    _plaintext: &str,
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_cached_private_git_relay_list(
+    cache_dir: &Path,
+    event: &Event,
+    plaintext: &str,
+) -> Result<()> {
+    if !cache_dir.exists() {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(cache_dir).with_context(|| {
+            format!(
+                "failed to create private relay-list cache {}",
+                cache_dir.display()
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to secure private relay-list cache {}",
+                cache_dir.display()
+            )
+        })?;
+    }
+
+    let path = private_git_relay_list_cache_path(cache_dir, event);
+    let mut temporary = NamedTempFile::new_in(cache_dir).with_context(|| {
+        format!(
+            "failed to create a temporary private relay-list cache file in {}",
+            cache_dir.display()
+        )
+    })?;
+    temporary
+        .write_all(plaintext.as_bytes())
+        .and_then(|()| temporary.as_file().sync_all())
+        .with_context(|| {
+            format!(
+                "failed to write private relay-list cache {}",
+                path.display()
+            )
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!(
+                    "failed to secure private relay-list cache {}",
+                    path.display()
+                )
+            })?;
+    }
+    temporary
+        .persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            format!(
+                "failed to replace private relay-list cache {}",
+                path.display()
+            )
+        })?;
+    remove_superseded_private_git_relay_list_cache_entries(cache_dir, event);
+    #[cfg(unix)]
+    fs::File::open(cache_dir)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| {
+            format!(
+                "failed to sync private relay-list cache {}",
+                cache_dir.display()
+            )
+        })?;
+    Ok(())
+}
+
+/// The cache is keyed by concrete event id, so a superseded list (for
+/// example one that still named a since-removed sensitive relay) would
+/// otherwise remain on disk indefinitely. Removal is best-effort and only
+/// touches entries belonging to the event's author; other accounts share the
+/// directory.
+#[cfg(unix)]
+fn remove_superseded_private_git_relay_list_cache_entries(cache_dir: &Path, event: &Event) {
+    let keep = private_git_relay_list_cache_file_name(event);
+    let prefix = format!("{}-", event.pubkey.to_hex());
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name != keep {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Best-effort removal of every cached decrypted private Git relay list.
+/// Logout and forget-keys call this so decrypted plaintext does not outlive
+/// the credentials that produced it.
+pub fn wipe_private_git_relay_list_cache() -> Result<()> {
+    #[cfg(test)]
+    {
+        // The library's own tests must never touch the real user cache; they
+        // exercise `wipe_private_git_relay_list_cache_dir` directly.
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        wipe_private_git_relay_list_cache_dir(
+            &get_dirs()?.cache_dir().join(PRIVATE_RELAY_LIST_CACHE_DIR),
+        )
+    }
+}
+
+fn wipe_private_git_relay_list_cache_dir(cache_dir: &Path) -> Result<()> {
+    match fs::remove_dir_all(cache_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to remove private relay-list cache {}",
+                cache_dir.display()
+            )
+        }),
+    }
+}
+
+/// Fetch and decrypt the newest valid private Git relay list from the user's
+/// ordinary discovery relays.
+pub async fn fetch_private_git_relay_list<C: Connect + Sync>(
+    client: &C,
+    relays: Vec<String>,
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<Option<PrivateGitRelayList>> {
+    if relays.is_empty() {
+        bail!("no normal relay is available for private Git relay discovery");
+    }
+    let public_key = signer.get_public_key().await?;
+    let mut events = client
+        .get_events(
+            relays,
+            vec![
+                nostr::prelude::Filter::new()
+                    .kind(KIND_PRIVATE_GIT_RELAY_LIST)
+                    .author(public_key)
+                    .limit(10),
+            ],
+        )
+        .await?;
+    events.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    for event in events {
+        match PrivateGitRelayList::from_event_classified(&event, signer).await {
+            Ok(list) => {
+                #[cfg(not(test))]
+                let _ = save_event_in_global_cache(None, &event).await;
+                return Ok(Some(list));
+            }
+            // A structurally unusable event is skipped so an older valid
+            // list can still be found.
+            Err(PrivateGitRelayListDecodeError::Invalid(_)) => {}
+            // A signer/decrypt failure leaves the list state unknown; it
+            // must never be reported as an absent list.
+            Err(PrivateGitRelayListDecodeError::Signer(error)) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+/// Discover the account's private Git relays without treating a discovery
+/// outage as proof that the list is absent.
+pub async fn discover_private_git_relay_list<C: Connect + Sync>(
+    client: &C,
+    relays: Vec<String>,
+    signer: &Arc<crate::NgitSigner>,
+) -> PrivateGitRelayDiscovery {
+    let discovery = match fetch_private_git_relay_list(client, relays, signer).await {
+        Ok(Some(list)) if list.relays.is_empty() => PrivateGitRelayDiscovery::Absent,
+        Ok(Some(list)) => PrivateGitRelayDiscovery::Available(list.relays),
+        Ok(None) => match cached_private_git_relay_list(signer).await {
+            Ok(Some(list)) if list.relays.is_empty() => PrivateGitRelayDiscovery::Absent,
+            Ok(Some(list)) => PrivateGitRelayDiscovery::Available(list.relays),
+            Ok(None) | Err(_) => PrivateGitRelayDiscovery::Absent,
+        },
+        Err(error) => match cached_private_git_relay_list(signer).await {
+            Ok(Some(list)) if list.relays.is_empty() => PrivateGitRelayDiscovery::Absent,
+            Ok(Some(list)) => PrivateGitRelayDiscovery::Available(list.relays),
+            Ok(None) | Err(_) => PrivateGitRelayDiscovery::Unavailable(error.to_string()),
+        },
+    };
+    if let PrivateGitRelayDiscovery::Available(relays) = &discovery {
+        // Decrypting kind 10318 is the trusted signal that these URLs are
+        // account-private repository relays. The caller acquired `signer` to
+        // decrypt the event before this classification is installed.
+        client.nip42_register_private_repo_relays(relays.clone());
+    }
+    discovery
+}
+
+async fn cached_private_git_relay_list(
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<Option<PrivateGitRelayList>> {
+    #[cfg(test)]
+    {
+        let _ = signer;
+        Ok(None)
+    }
+    #[cfg(not(test))]
+    {
+        let public_key = signer.get_public_key().await?;
+        let events = get_event_from_global_cache(
+            None,
+            vec![
+                nostr::prelude::Filter::new()
+                    .kind(KIND_PRIVATE_GIT_RELAY_LIST)
+                    .author(public_key),
+            ],
+        )
+        .await?;
+        newest_valid_private_git_relay_list(events, signer).await
+    }
+}
+
+/// Select the NIP-01 winner among candidate kind-10318 events, skipping
+/// structurally invalid events but propagating signer/decrypt failures.
+async fn newest_valid_private_git_relay_list(
+    mut events: Vec<Event>,
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<Option<PrivateGitRelayList>> {
+    events.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    for event in events {
+        match PrivateGitRelayList::from_event_classified(&event, signer).await {
+            Ok(list) => return Ok(Some(list)),
+            Err(PrivateGitRelayListDecodeError::Invalid(_)) => {}
+            Err(PrivateGitRelayListDecodeError::Signer(error)) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+/// Add private relay-list entries to a repository coordinate and report
+/// whether private discovery should be attempted before public discovery.
+pub fn add_private_git_relay_hints(
+    coordinate: &mut nostr::nips::nip19::Nip19Coordinate,
+    relays: &[RelayUrl],
+) -> bool {
+    for relay in relays {
+        if !coordinate.relays.contains(relay) {
+            coordinate.relays.push(relay.clone());
+        }
+    }
+    !relays.is_empty()
+}
+
+/// Publish an updated private Git relay list to the user's ordinary relays.
+///
+/// This list is account-scoped rather than repository-related, so GRASP-08
+/// permits publishing it to the user's normal discovery relays.
+pub async fn publish_private_git_relay_list<C: Connect + Sync>(
+    client: &C,
+    repository_relays: &[RelayUrl],
+    user_ref: &UserRef,
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<()> {
+    let public_key = signer.get_public_key().await?;
+    let _lock = PrivateRelayListUpdateLock::acquire(&public_key).await?;
+    let mut discovery_relays = user_ref.relays.read();
+    for relay in user_ref.relays.write() {
+        if !discovery_relays.contains(&relay) {
+            discovery_relays.push(relay);
+        }
+    }
+    if discovery_relays.is_empty() {
+        discovery_relays.extend(client.get_relay_default_set().iter().cloned());
+    }
+    let write_relays = {
+        let configured = user_ref.relays.write();
+        if configured.is_empty() {
+            discovery_relays.clone()
+        } else {
+            configured
+        }
+    };
+    for attempt in 0..PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS {
+        let mut private_relays =
+            read_private_relay_list_replacement_base(client, &write_relays, public_key, signer)
+                .await?
+                .unwrap_or(PrivateGitRelayList::new(vec![])?);
+        for relay in repository_relays {
+            if !private_relays.relays.contains(relay) {
+                private_relays.relays.push(relay.clone());
+            }
+        }
+
+        let event = private_relays.to_event(signer).await?;
+        let mut published = false;
+        let mut last_error = None;
+        for relay in &write_relays {
+            match client
+                .send_event_to(None, relay, event.clone())
+                .await
+                .with_context(|| format!("failed to publish private relay list to {relay}"))
+            {
+                Ok(_) => published = true,
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if !published {
+            return Err(last_error.unwrap_or_else(|| {
+                anyhow::anyhow!("no normal discovery relay is available for the private relay list")
+            }));
+        }
+
+        let canonical = fetch_private_git_relay_list(client, discovery_relays.clone(), signer)
+            .await
+            .context("failed to verify the updated private Git relay list")?;
+        if canonical.as_ref().is_some_and(|list| {
+            repository_relays
+                .iter()
+                .all(|relay| list.relays.contains(relay))
+        }) {
+            return Ok(());
+        }
+        if attempt + 1 == PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS {
+            break;
+        }
+    }
+    bail!(
+        "private Git relay list did not converge after {PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS} attempts"
+    )
+}
+
+/// Read the current private Git relay list from the relays the replacement
+/// will be published to, refusing to proceed unless at least one of them was
+/// read successfully.
+///
+/// The events returned by these same per-relay reads are the replacement
+/// base. A separate base fetch would let a write relay die between the
+/// reachability check and the fetch — or let a reachable-but-empty relay mask
+/// the canonical one — and reintroduce the clobber this guard exists to
+/// prevent.
+async fn read_private_relay_list_replacement_base<C: Connect + Sync>(
+    client: &C,
+    write_relays: &[String],
+    public_key: PublicKey,
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<Option<PrivateGitRelayList>> {
+    if write_relays.is_empty() {
+        bail!("no normal relay is available for the private relay list");
+    }
+    let relay_urls = write_relays
+        .iter()
+        .map(|relay| {
+            RelayUrl::parse(relay)
+                .with_context(|| format!("invalid private relay-list write relay URL: {relay}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (results, _) = client
+        .get_events_per_relay(
+            relay_urls,
+            vec![
+                nostr::prelude::Filter::new()
+                    .kind(KIND_PRIVATE_GIT_RELAY_LIST)
+                    .author(public_key)
+                    .limit(10),
+            ],
+            MultiProgress::new(),
+        )
+        .await
+        .context("failed to read the private Git relay list from its write relays")?;
+    if !results.iter().any(Result::is_ok) {
+        let errors = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!(
+            "refusing to replace the private Git relay list because none of its write relays were read successfully{}",
+            if errors.is_empty() {
+                String::new()
+            } else {
+                format!(": {errors}")
+            }
+        );
+    }
+    let events = results
+        .into_iter()
+        .filter_map(Result::ok)
+        .flatten()
+        .collect::<Vec<_>>();
+    newest_valid_private_git_relay_list(events, signer)
+        .await
+        .context("failed to load the existing private Git relay list")
+}
+
+struct PrivateRelayListUpdateLock {
+    path: PathBuf,
+}
+
+impl PrivateRelayListUpdateLock {
+    async fn acquire(public_key: &PublicKey) -> Result<Self> {
+        #[cfg(test)]
+        let cache_dir = std::env::temp_dir().join("ngit-private-relay-list-test-locks");
+        #[cfg(not(test))]
+        let cache_dir = get_dirs()?.cache_dir().to_path_buf();
+        create_dir_all(&cache_dir)
+            .with_context(|| format!("failed to create cache directory {}", cache_dir.display()))?;
+        let path = cache_dir.join(format!(
+            "private-git-relay-list-{}.lock",
+            public_key.to_hex()
+        ));
+        let started = tokio::time::Instant::now();
+        loop {
+            match create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = path
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                        .is_some_and(|age| age > PRIVATE_RELAY_LIST_STALE_LOCK_AGE);
+                    if stale {
+                        take_over_stale_private_relay_list_lock(&path);
+                        continue;
+                    }
+                    if started.elapsed() >= PRIVATE_RELAY_LIST_LOCK_WAIT {
+                        bail!(
+                            "timed out waiting for another private Git relay list update to finish"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to acquire private relay list lock {}",
+                            path.display()
+                        )
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PrivateRelayListUpdateLock {
+    fn drop(&mut self) {
+        let _ = remove_dir(&self.path);
+    }
+}
+
+/// Retire a stale lock without racing other would-be takers: rename it to a
+/// unique name first, so at most one process wins the takeover, then remove
+/// the renamed directory. Losers fall back to the ordinary acquisition loop.
+fn take_over_stale_private_relay_list_lock(path: &Path) -> bool {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since_epoch| since_epoch.as_nanos());
+    let takeover = path.with_extension(format!("stale-{}-{nanos}", std::process::id()));
+    if fs::rename(path, &takeover).is_ok() {
+        let _ = remove_dir(&takeover);
+        true
+    } else {
+        false
+    }
+}
+
+fn validate_and_dedupe_private_git_relays(relays: Vec<RelayUrl>) -> Result<Vec<RelayUrl>> {
+    let mut deduped = Vec::with_capacity(relays.len());
+    for relay in relays {
+        if !deduped.contains(&relay) {
+            deduped.push(relay);
+        }
+    }
+    Ok(deduped)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserRelayRef {
     pub url: String,
     pub read: bool,
@@ -101,7 +839,12 @@ pub async fn get_user_details(
                     term.write_line("searching for profile updates...")?;
                 }
                 let (reports, progress_reporter) = client
-                    .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
+                    .fetch_all(
+                        git_repo_path,
+                        None,
+                        &HashSet::from_iter(vec![*public_key]),
+                        false,
+                    )
                     .await?;
                 finish_profile_fetch(&reports, progress_reporter)?;
                 if is_verbose() && !reports.iter().any(|report| report.is_err()) {
@@ -128,7 +871,12 @@ pub async fn get_user_details(
                 term.write_line("searching for profile...")?;
             }
             let (reports, progress_reporter) = client
-                .fetch_all(git_repo_path, None, &HashSet::from_iter(vec![*public_key]))
+                .fetch_all(
+                    git_repo_path,
+                    None,
+                    &HashSet::from_iter(vec![*public_key]),
+                    false,
+                )
                 .await?;
             finish_profile_fetch(&reports, progress_reporter)?;
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
@@ -387,5 +1135,796 @@ mod tests {
             clears.load(Ordering::Relaxed) > 0,
             "a successful fetch must clear transient relay details even when no profile was found"
         );
+    }
+}
+
+#[cfg(test)]
+mod private_git_relay_list_tests {
+    use std::sync::Mutex;
+
+    use nostr::prelude::{
+        Keys,
+        event::{FinalizeUnsignedEvent, SignEvent},
+    };
+
+    use super::*;
+
+    fn test_signer() -> (Keys, Arc<crate::NgitSigner>) {
+        let keys = Keys::generate();
+        let signer = Arc::new(crate::NgitSigner::Keys(keys.clone()));
+        (keys, signer)
+    }
+
+    async fn private_list_event_with_plaintext(
+        keys: &Keys,
+        signer: &Arc<crate::NgitSigner>,
+        plaintext: &str,
+        tags: Vec<Tag>,
+    ) -> Event {
+        let content = signer
+            .nip44_encrypt(&keys.public_key(), plaintext)
+            .await
+            .unwrap();
+        keys.sign_event(
+            EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, content)
+                .tags(tags)
+                .finalize_unsigned(keys.public_key()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn private_git_relay_list_round_trips_without_public_urls() {
+        let (_keys, signer) = test_signer();
+        let relay_a = RelayUrl::parse("wss://private-a.example").unwrap();
+        let relay_b = RelayUrl::parse("ws://private-b.example").unwrap();
+        let mut list =
+            PrivateGitRelayList::new(vec![relay_a.clone(), relay_b.clone(), relay_a.clone()])
+                .unwrap();
+
+        assert_eq!(list.relays, vec![relay_a.clone(), relay_b.clone()]);
+        let event = list.to_event(&signer).await.unwrap();
+        assert_eq!(event.kind, KIND_PRIVATE_GIT_RELAY_LIST);
+        assert!(event.tags.is_empty());
+        assert!(!event.content.contains(relay_a.as_str()));
+        assert!(!event.content.contains(relay_b.as_str()));
+
+        let decoded = PrivateGitRelayList::from_event(&event, &signer)
+            .await
+            .unwrap();
+        assert_eq!(decoded.relays, vec![relay_a, relay_b]);
+        assert_eq!(decoded.created_at, event.created_at);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_git_relay_list_cache_is_keyed_by_author_and_concrete_event_id() {
+        let (keys, signer) = test_signer();
+        let event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://encrypted.example"]]"#,
+            vec![],
+        )
+        .await;
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+
+        let decrypted =
+            PrivateGitRelayList::from_event_with_cache_dir(&event, &signer, Some(&cache_dir))
+                .await
+                .unwrap();
+        assert_eq!(
+            decrypted.relays,
+            vec![RelayUrl::parse("wss://encrypted.example").unwrap()]
+        );
+        let cache_path = private_git_relay_list_cache_path(&cache_dir, &event);
+        assert_eq!(
+            cache_path.file_name().unwrap(),
+            format!("{}-{}.json", event.pubkey.to_hex(), event.id.to_hex()).as_str()
+        );
+
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &event,
+            r#"[["g","wss://cached.example"]]"#,
+        )
+        .unwrap();
+        let cached =
+            PrivateGitRelayList::from_event_with_cache_dir(&event, &signer, Some(&cache_dir))
+                .await
+                .unwrap();
+        assert_eq!(
+            cached.relays,
+            vec![RelayUrl::parse("wss://cached.example").unwrap()],
+            "a valid concrete-event cache entry must avoid decrypting again"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(cache_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_private_git_relay_list_cache_is_replaced_after_decryption() {
+        let (keys, signer) = test_signer();
+        let plaintext = r#"[["g","wss://private.example"]]"#;
+        let event = private_list_event_with_plaintext(&keys, &signer, plaintext, vec![]).await;
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+        write_cached_private_git_relay_list(&cache_dir, &event, "not JSON").unwrap();
+
+        let decoded =
+            PrivateGitRelayList::from_event_with_cache_dir(&event, &signer, Some(&cache_dir))
+                .await
+                .unwrap();
+        assert_eq!(
+            decoded.relays,
+            vec![RelayUrl::parse("wss://private.example").unwrap()]
+        );
+        assert_eq!(
+            fs::read_to_string(private_git_relay_list_cache_path(&cache_dir, &event)).unwrap(),
+            plaintext
+        );
+    }
+
+    #[tokio::test]
+    async fn publishing_private_relay_list_adds_acceptance_relays() {
+        let (keys, signer) = test_signer();
+        let normal_relay = "wss://normal.example".to_string();
+        let repository_relay = RelayUrl::parse("wss://group.example").unwrap();
+        let user_ref = UserRef {
+            public_key: keys.public_key(),
+            metadata: UserMetadata {
+                name: String::new(),
+                created_at: Timestamp::from(0),
+                nip05: None,
+            },
+            relays: UserRelays {
+                relays: vec![UserRelayRef {
+                    url: normal_relay.clone(),
+                    read: true,
+                    write: true,
+                }],
+                created_at: Timestamp::from(0),
+            },
+            grasp_list: UserGraspList {
+                urls: vec![],
+                created_at: Timestamp::from(0),
+            },
+        };
+
+        let published = Arc::new(Mutex::new(None));
+        let published_for_mock = published.clone();
+        let published_for_fetch = published.clone();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .once()
+            .return_once(|_, _, progress| Ok((vec![Ok(vec![])], progress)));
+        client.expect_get_events().once().returning(move |_, _| {
+            Ok(published_for_fetch
+                .lock()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect())
+        });
+        client
+            .expect_send_event_to()
+            .once()
+            .withf(move |path, relay, _| path.is_none() && relay == normal_relay)
+            .return_once(move |_, _, event| {
+                let id = event.id;
+                *published_for_mock.lock().unwrap() = Some(event);
+                Ok(id)
+            });
+
+        publish_private_git_relay_list(
+            &client,
+            std::slice::from_ref(&repository_relay),
+            &user_ref,
+            &signer,
+        )
+        .await
+        .unwrap();
+
+        let event = published.lock().unwrap().clone().unwrap();
+        let decoded = PrivateGitRelayList::from_event(&event, &signer)
+            .await
+            .unwrap();
+        assert_eq!(decoded.relays, vec![repository_relay]);
+        assert!(event.tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_private_relay_discovery_is_not_treated_as_absent() {
+        let (_keys, signer) = test_signer();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(|_, _| Err(anyhow::anyhow!("all discovery relays failed")));
+
+        assert!(matches!(
+            discover_private_git_relay_list(
+                &client,
+                vec!["wss://offline.example".to_string()],
+                &signer,
+            )
+            .await,
+            PrivateGitRelayDiscovery::Unavailable(error)
+                if error.contains("all discovery relays failed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn publishing_private_relay_list_merges_a_concurrent_winner() {
+        let (keys, signer) = test_signer();
+        let normal_relay = "wss://normal.example".to_string();
+        let requested_relay = RelayUrl::parse("wss://requested.example").unwrap();
+        let concurrent_relay = RelayUrl::parse("wss://concurrent.example").unwrap();
+        let user_ref = UserRef {
+            public_key: keys.public_key(),
+            metadata: UserMetadata {
+                name: String::new(),
+                created_at: Timestamp::from(0),
+                nip05: None,
+            },
+            relays: UserRelays {
+                relays: vec![UserRelayRef {
+                    url: normal_relay,
+                    read: true,
+                    write: true,
+                }],
+                created_at: Timestamp::from(0),
+            },
+            grasp_list: UserGraspList {
+                urls: vec![],
+                created_at: Timestamp::from(0),
+            },
+        };
+        let concurrent_event = PrivateGitRelayList::new(vec![concurrent_relay.clone()])
+            .unwrap()
+            .to_event(&signer)
+            .await
+            .unwrap();
+        let base_call = Arc::new(Mutex::new(0usize));
+        let verify_call = Arc::new(Mutex::new(0usize));
+        let published = Arc::new(Mutex::new(None));
+        let base_call_for_read = base_call.clone();
+        let verify_call_for_fetch = verify_call.clone();
+        let published_for_fetch = published.clone();
+        let published_for_send = published.clone();
+        let concurrent_for_base = concurrent_event.clone();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .times(2)
+            .returning(move |_, _, progress| {
+                let mut call = base_call_for_read.lock().unwrap();
+                *call += 1;
+                Ok((
+                    vec![Ok(if *call == 1 {
+                        vec![]
+                    } else {
+                        vec![concurrent_for_base.clone()]
+                    })],
+                    progress,
+                ))
+            });
+        client.expect_get_events().times(2).returning(move |_, _| {
+            let mut call = verify_call_for_fetch.lock().unwrap();
+            *call += 1;
+            Ok(if *call == 1 {
+                vec![concurrent_event.clone()]
+            } else {
+                published_for_fetch
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .into_iter()
+                    .collect()
+            })
+        });
+        client
+            .expect_send_event_to()
+            .times(2)
+            .returning(move |_, _, event| {
+                let id = event.id;
+                *published_for_send.lock().unwrap() = Some(event);
+                Ok(id)
+            });
+
+        publish_private_git_relay_list(
+            &client,
+            std::slice::from_ref(&requested_relay),
+            &user_ref,
+            &signer,
+        )
+        .await
+        .unwrap();
+
+        let event = published.lock().unwrap().clone().unwrap();
+        let decoded = PrivateGitRelayList::from_event(&event, &signer)
+            .await
+            .unwrap();
+        assert!(decoded.relays.contains(&requested_relay));
+        assert!(decoded.relays.contains(&concurrent_relay));
+    }
+
+    #[tokio::test]
+    async fn publishing_private_relay_list_requires_a_successful_outbox_read() {
+        let (keys, signer) = test_signer();
+        let inbox_relay = "wss://inbox.example".to_string();
+        let outbox_relay = "wss://outbox.example".to_string();
+        let repository_relay = RelayUrl::parse("wss://group.example").unwrap();
+        let user_ref = UserRef {
+            public_key: keys.public_key(),
+            metadata: UserMetadata {
+                name: String::new(),
+                created_at: Timestamp::from(0),
+                nip05: None,
+            },
+            relays: UserRelays {
+                relays: vec![
+                    UserRelayRef {
+                        url: inbox_relay,
+                        read: true,
+                        write: false,
+                    },
+                    UserRelayRef {
+                        url: outbox_relay.clone(),
+                        read: false,
+                        write: true,
+                    },
+                ],
+                created_at: Timestamp::from(0),
+            },
+            grasp_list: UserGraspList {
+                urls: vec![],
+                created_at: Timestamp::from(0),
+            },
+        };
+
+        let expected_outbox = RelayUrl::parse(&outbox_relay).unwrap();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .once()
+            .withf(move |relays, _, _| relays == std::slice::from_ref(&expected_outbox))
+            .return_once(|_, _, progress| {
+                Ok((vec![Err(anyhow::anyhow!("outbox unavailable"))], progress))
+            });
+        client.expect_get_events().never();
+        client.expect_send_event_to().never();
+
+        let error = publish_private_git_relay_list(
+            &client,
+            std::slice::from_ref(&repository_relay),
+            &user_ref,
+            &signer,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("none of its write relays"));
+    }
+
+    #[tokio::test]
+    async fn private_git_relay_list_rejects_non_websocket_and_malformed_items() {
+        let (keys, signer) = test_signer();
+        for plaintext in [
+            r#"[["g","https://private.example"]]"#,
+            r#"[["r","wss://private.example"]]"#,
+            r#"[["g","wss://private.example","extra"]]"#,
+            r#"{"g":"wss://private.example"}"#,
+        ] {
+            let event = private_list_event_with_plaintext(&keys, &signer, plaintext, vec![]).await;
+            assert!(
+                PrivateGitRelayList::from_event(&event, &signer)
+                    .await
+                    .is_err(),
+                "unexpectedly accepted {plaintext}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn private_git_relay_list_rejects_public_tags_and_other_authors() {
+        let (keys, signer) = test_signer();
+        let event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://private.example"]]"#,
+            vec![Tag::parse(["g", "wss://leaked.example"]).unwrap()],
+        )
+        .await;
+        assert!(
+            PrivateGitRelayList::from_event(&event, &signer)
+                .await
+                .is_err()
+        );
+
+        let (_, other_signer) = test_signer();
+        let private_event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://private.example"]]"#,
+            vec![],
+        )
+        .await;
+        assert!(
+            PrivateGitRelayList::from_event(&private_event, &other_signer)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn private_git_relay_list_uses_nip01_id_tiebreak_and_orders_replacement() {
+        let (keys, signer) = test_signer();
+        let created_at = Timestamp::now();
+        let relay_a = RelayUrl::parse("wss://private-a.example").unwrap();
+        let relay_b = RelayUrl::parse("wss://private-b.example").unwrap();
+        let event_a = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://private-a.example"]]"#,
+            vec![],
+        )
+        .await;
+        let event_a = keys
+            .sign_event(
+                EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, event_a.content)
+                    .custom_created_at(created_at)
+                    .finalize_unsigned(keys.public_key()),
+            )
+            .unwrap();
+        let event_b = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://private-b.example"]]"#,
+            vec![],
+        )
+        .await;
+        let event_b = keys
+            .sign_event(
+                EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, event_b.content)
+                    .custom_created_at(created_at)
+                    .finalize_unsigned(keys.public_key()),
+            )
+            .unwrap();
+        let (winner, loser, expected_relay) = if event_a.id < event_b.id {
+            (event_a, event_b, relay_a)
+        } else {
+            (event_b, event_a, relay_b)
+        };
+
+        let winner_for_fetch = winner.clone();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(move |_, _| Ok(vec![loser, winner_for_fetch]));
+        let mut fetched = fetch_private_git_relay_list(
+            &client,
+            vec!["wss://discovery.example".to_string()],
+            &signer,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(fetched.relays, vec![expected_relay]);
+
+        let replacement = fetched.to_event(&signer).await.unwrap();
+        assert!(
+            replacement.tags.is_empty(),
+            "ordered replacements must not expose a nonce or relay tag"
+        );
+        assert_eq!(
+            crate::event_ordering::latest_event([&winner, &replacement])
+                .unwrap()
+                .id,
+            replacement.id,
+            "a newly signed kind-10318 replacement must win NIP-01 ordering"
+        );
+    }
+
+    #[test]
+    fn private_relay_hints_are_added_before_repository_discovery() {
+        let keys = Keys::generate();
+        let public_hint = RelayUrl::parse("wss://public-hint.example").unwrap();
+        let private_hint = RelayUrl::parse("wss://private-hint.example").unwrap();
+        let mut coordinate = nostr::nips::nip19::Nip19Coordinate {
+            coordinate: nostr::nips::nip01::Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: keys.public_key(),
+                identifier: "repo".to_string(),
+            },
+            relays: vec![public_hint.clone()],
+        };
+
+        assert!(add_private_git_relay_hints(
+            &mut coordinate,
+            std::slice::from_ref(&private_hint)
+        ));
+        assert_eq!(coordinate.relays, vec![public_hint, private_hint.clone()]);
+        assert!(!add_private_git_relay_hints(&mut coordinate, &[]));
+        assert!(
+            !PrivateGitRelayDiscovery::Absent.requires_repository_only_probe(),
+            "an ordinary naddr relay hint is not evidence of private discovery"
+        );
+        assert!(
+            PrivateGitRelayDiscovery::Available(vec![private_hint])
+                .requires_repository_only_probe()
+        );
+    }
+
+    fn undecryptable_private_list_event(keys: &Keys) -> Event {
+        // Content that is not valid NIP-44 ciphertext makes nip44_decrypt
+        // fail, exercising the same classification as a refused or timed-out
+        // remote signer.
+        keys.sign_event(
+            EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, "not nip44 ciphertext")
+                .finalize_unsigned(keys.public_key()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn failing_decrypt_is_an_error_rather_than_an_absent_list() {
+        let (keys, signer) = test_signer();
+        let event = undecryptable_private_list_event(&keys);
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(move |_, _| Ok(vec![event]));
+
+        assert!(
+            fetch_private_git_relay_list(
+                &client,
+                vec!["wss://normal.example".to_string()],
+                &signer,
+            )
+            .await
+            .is_err(),
+            "a failing decrypt leaves the list state unknown and must not read as absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_decrypt_marks_discovery_unavailable_not_absent() {
+        let (keys, signer) = test_signer();
+        let event = undecryptable_private_list_event(&keys);
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(move |_, _| Ok(vec![event]));
+
+        assert!(matches!(
+            discover_private_git_relay_list(
+                &client,
+                vec!["wss://normal.example".to_string()],
+                &signer,
+            )
+            .await,
+            PrivateGitRelayDiscovery::Unavailable(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_events_are_skipped_during_fetch() {
+        let (keys, signer) = test_signer();
+        let event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://private.example"]]"#,
+            vec![Tag::parse(["g", "wss://leaked.example"]).unwrap()],
+        )
+        .await;
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events()
+            .once()
+            .return_once(move |_, _| Ok(vec![event]));
+
+        assert!(
+            fetch_private_git_relay_list(
+                &client,
+                vec!["wss://normal.example".to_string()],
+                &signer,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "an event that is structurally not a list is skipped, not fatal"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_base_is_derived_from_the_write_relay_reads() {
+        let (keys, signer) = test_signer();
+        let reachable_relay = "wss://reachable.example".to_string();
+        let dead_relay = "wss://dead.example".to_string();
+        let existing_relay = RelayUrl::parse("wss://existing.example").unwrap();
+        let repository_relay = RelayUrl::parse("wss://group.example").unwrap();
+        let user_ref = UserRef {
+            public_key: keys.public_key(),
+            metadata: UserMetadata {
+                name: String::new(),
+                created_at: Timestamp::from(0),
+                nip05: None,
+            },
+            relays: UserRelays {
+                relays: vec![
+                    UserRelayRef {
+                        url: reachable_relay,
+                        read: true,
+                        write: true,
+                    },
+                    UserRelayRef {
+                        url: dead_relay,
+                        read: true,
+                        write: true,
+                    },
+                ],
+                created_at: Timestamp::from(0),
+            },
+            grasp_list: UserGraspList {
+                urls: vec![],
+                created_at: Timestamp::from(0),
+            },
+        };
+        let existing_event = PrivateGitRelayList::new(vec![existing_relay.clone()])
+            .unwrap()
+            .to_event(&signer)
+            .await
+            .unwrap();
+
+        let published = Arc::new(Mutex::new(None));
+        let published_for_send = published.clone();
+        let published_for_fetch = published.clone();
+        let mut client = <MockConnect as Default>::default();
+        client
+            .expect_get_events_per_relay()
+            .once()
+            .return_once(move |_, _, progress| {
+                Ok((
+                    vec![Err(anyhow::anyhow!("dead relay")), Ok(vec![existing_event])],
+                    progress,
+                ))
+            });
+        client.expect_get_events().once().returning(move |_, _| {
+            Ok(published_for_fetch
+                .lock()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect())
+        });
+        client
+            .expect_send_event_to()
+            .times(2)
+            .returning(move |_, _, event| {
+                let id = event.id;
+                *published_for_send.lock().unwrap() = Some(event);
+                Ok(id)
+            });
+
+        publish_private_git_relay_list(
+            &client,
+            std::slice::from_ref(&repository_relay),
+            &user_ref,
+            &signer,
+        )
+        .await
+        .unwrap();
+
+        let event = published.lock().unwrap().clone().unwrap();
+        let decoded = PrivateGitRelayList::from_event(&event, &signer)
+            .await
+            .unwrap();
+        assert!(
+            decoded.relays.contains(&existing_relay),
+            "a dead or empty write relay must not mask the canonical list"
+        );
+        assert!(decoded.relays.contains(&repository_relay));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn superseded_private_relay_list_cache_entries_for_the_author_are_removed() {
+        let (keys, signer) = test_signer();
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+        let old_event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://old.example"]]"#,
+            vec![],
+        )
+        .await;
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &old_event,
+            r#"[["g","wss://old.example"]]"#,
+        )
+        .unwrap();
+        let (other_keys, other_signer) = test_signer();
+        let other_event = private_list_event_with_plaintext(
+            &other_keys,
+            &other_signer,
+            r#"[["g","wss://other.example"]]"#,
+            vec![],
+        )
+        .await;
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &other_event,
+            r#"[["g","wss://other.example"]]"#,
+        )
+        .unwrap();
+        let new_event = private_list_event_with_plaintext(
+            &keys,
+            &signer,
+            r#"[["g","wss://new.example"]]"#,
+            vec![],
+        )
+        .await;
+
+        write_cached_private_git_relay_list(
+            &cache_dir,
+            &new_event,
+            r#"[["g","wss://new.example"]]"#,
+        )
+        .unwrap();
+
+        assert!(
+            !private_git_relay_list_cache_path(&cache_dir, &old_event).exists(),
+            "superseded plaintext for the same account must not remain on disk"
+        );
+        assert!(private_git_relay_list_cache_path(&cache_dir, &new_event).exists());
+        assert!(
+            private_git_relay_list_cache_path(&cache_dir, &other_event).exists(),
+            "another account's cache entries must be left alone"
+        );
+    }
+
+    #[test]
+    fn stale_lock_takeover_has_a_single_winner() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("private-git-relay-list-test.lock");
+        fs::create_dir(&path).unwrap();
+
+        assert!(take_over_stale_private_relay_list_lock(&path));
+        assert!(!path.exists(), "the winner removes the stale lock");
+        assert!(
+            !take_over_stale_private_relay_list_lock(&path),
+            "once the rename has happened every other taker loses"
+        );
+    }
+
+    #[test]
+    fn wiping_the_private_relay_list_cache_dir_is_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache_dir = temporary.path().join(PRIVATE_RELAY_LIST_CACHE_DIR);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("entry.json"), "plaintext").unwrap();
+
+        wipe_private_git_relay_list_cache_dir(&cache_dir).unwrap();
+        assert!(!cache_dir.exists());
+        wipe_private_git_relay_list_cache_dir(&cache_dir).unwrap();
     }
 }

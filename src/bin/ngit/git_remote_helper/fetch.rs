@@ -1,13 +1,15 @@
 use core::str;
-use std::{collections::HashMap, io::Stdin};
+use std::{collections::HashMap, io::Stdin, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
     fetch::fetch_from_git_server,
     git::{Repo, RepoActions},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_is_cover_letter},
+    git_http_auth::prepare_private_git_auth,
     login::get_curent_user,
     repo_ref::{RepoRef, is_grasp_server_in_list},
+    signer::NgitSigner,
     utils::{
         find_proposal_and_patches_by_branch_name, get_oids_from_fetch_batch,
         get_open_or_draft_proposals,
@@ -21,6 +23,7 @@ pub async fn run_fetch(
     stdin: &Stdin,
     oid: &str,
     refstr: &str,
+    signer: Option<&Arc<NgitSigner>>,
 ) -> Result<()> {
     let mut fetch_batch = get_oids_from_fetch_batch(stdin, oid, refstr)?;
 
@@ -50,6 +53,13 @@ pub async fn run_fetch(
             break;
         }
 
+        if repo_ref.private {
+            prepare_private_git_auth(
+                std::slice::from_ref(git_server_url),
+                signer.context("private repository Git access requires a logged-in account")?,
+            )
+            .await?;
+        }
         if let Err(error) = fetch_from_git_server(
             git_repo,
             &missing,

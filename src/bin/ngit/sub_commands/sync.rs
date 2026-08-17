@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, bail};
 use git2::Oid;
 use ngit::{
     client::{
-        Client, Connect, Params, fetching_with_report, get_repo_ref_from_cache,
+        Client, Connect, Params, fetching_with_private_discovery, get_repo_ref_from_cache,
         get_state_from_cache, warn_if_invited_as_maintainer,
     },
     fetch::fetch_from_git_server,
@@ -15,6 +16,7 @@ use ngit::{
         Repo, RepoActions, get_git_config_item,
         nostr_url::{CloneUrl, NostrUrlDecoded},
     },
+    git_http_auth::{clear_private_git_auth, prepare_private_git_auth},
     list::{get_ahead_behind, list_from_remotes},
     login::{self, existing::load_existing_login},
     repo_ref::{
@@ -31,6 +33,7 @@ use crate::{
     state_transaction::{
         LiveOps, ServerForcePolicy, ServerPushOutcome, StateTransaction, StateTransactionFailure,
     },
+    sub_commands::repository_fetch::prepare_account_for_repo_fetch,
 };
 
 #[derive(Debug, Default, clap::Args)]
@@ -116,26 +119,48 @@ pub(crate) async fn sync_with_client(
         None
     };
 
+    // Install the selected account before touching repository relays so
+    // private NIP-42 reads work on the first fetch. Public sync remains usable
+    // without an account unless --force or an explicit selection requires it.
+    let active_login = match load_existing_login(
+        &Some(git_repo),
+        auth.info,
+        auth.password,
+        &None,
+        Some(&*client),
+        false,
+        false,
+        false,
+    )
+    .await
+    {
+        Ok((signer, user_ref, _)) => {
+            client.set_signer(signer.clone()).await;
+            Some((signer, user_ref))
+        }
+        Err(error) if args.force => return Err(login::require_account(error)),
+        Err(error) if auth.info.is_some() => return Err(error),
+        Err(error)
+            if git_repo
+                .git_repo
+                .config()
+                .ok()
+                .and_then(|config| config.get_bool("nostr.private").ok())
+                .unwrap_or(false) =>
+        {
+            return Err(error
+                .context("private repository relay authentication requires a logged-in account"));
+        }
+        Err(_) => None,
+    };
+
     let force_login = if args.force {
-        let (signer, user_ref, _) = load_existing_login(
-            &Some(git_repo),
-            auth.info,
-            auth.password,
-            &None,
-            Some(&*client),
-            false,
-            false,
-            false,
-        )
-        .await
-        .map_err(login::require_account)?;
-        client.set_signer(signer.clone()).await;
-        Some((signer, user_ref))
+        active_login.clone()
     } else {
         None
     };
 
-    let resolved_repo = get_resolved_repo_coordinate_for_publishing(git_repo, &*client).await?;
+    let resolved_repo = get_resolved_repo_coordinate_for_publishing(git_repo, client).await?;
     let selected_remote = get_nostr_remote_for_resolved_coordinate(git_repo, &resolved_repo)
         .await?
         .context(
@@ -143,12 +168,35 @@ pub(crate) async fn sync_with_client(
         )?;
     let nostr_remote_name = selected_remote.name;
     let decoded_nostr_url = selected_remote.decoded_url;
-    let repo_coordinate = resolved_repo.coordinate;
+    let mut repo_coordinate = resolved_repo.coordinate;
+    let private_discovery = if let Some((signer, user_ref)) = active_login.as_ref() {
+        prepare_account_for_repo_fetch(client, &mut repo_coordinate, signer, user_ref).await
+    } else {
+        ngit::login::user::PrivateGitRelayDiscovery::Absent
+    };
 
-    let fetch_report = fetching_with_report(git_repo_path, &*client, &repo_coordinate).await?;
+    let fetch_report = fetching_with_private_discovery(
+        git_repo_path,
+        &*client,
+        &mut repo_coordinate,
+        &private_discovery,
+    )
+    .await?;
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
+
+    clear_private_git_auth();
+    let private_signer = if repo_ref.private {
+        let signer = active_login
+            .as_ref()
+            .map(|(signer, _)| signer.clone())
+            .context("private repository access requires a logged-in account")?;
+        prepare_private_git_auth(&repo_ref.git_server, &signer).await?;
+        Some(signer)
+    } else {
+        None
+    };
 
     let nostr_state = get_state_from_cache(Some(git_repo_path), &repo_ref).await?;
 
@@ -156,7 +204,7 @@ pub(crate) async fn sync_with_client(
 
     // Whether a signer is already configured on the client — needed later
     // for NIP-42 auth when grasp relays are seeded with the state event.
-    let mut client_has_signer = client_has_signer || args.force;
+    let mut client_has_signer = client_has_signer || active_login.is_some();
 
     let term = console::Term::stderr();
 
@@ -166,11 +214,18 @@ pub(crate) async fn sync_with_client(
         &repo_ref.git_server,
         &decoded_nostr_url,
         Some(&nostr_state),
+        private_signer.as_ref(),
     )
     .await;
 
-    let missing_refs =
-        fetch_missing_refs(git_repo, &nostr_state, &remote_states, &decoded_nostr_url);
+    let missing_refs = fetch_missing_refs(
+        git_repo,
+        &nostr_state,
+        &remote_states,
+        &decoded_nostr_url,
+        private_signer.as_ref(),
+    )
+    .await?;
 
     let (ahead_refs, diverging_refs) = find_ahead_and_diverging_refs(
         git_repo,
@@ -178,7 +233,9 @@ pub(crate) async fn sync_with_client(
         &remote_states,
         &decoded_nostr_url,
         &term,
-    );
+        private_signer.as_ref(),
+    )
+    .await?;
 
     // Ahead refs to adopt into a candidate replacement state (via
     // --trust-server or nostr.trust-server-domains), with the login that
@@ -870,13 +927,14 @@ struct DivergingRef {
 ///
 /// If multiple servers are ahead on the same ref but their commits have
 /// diverged from each other the ref is skipped to avoid guessing.
-fn find_ahead_and_diverging_refs(
+async fn find_ahead_and_diverging_refs(
     git_repo: &Repo,
     nostr_state: &RepoState,
     remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
     decoded_nostr_url: &NostrUrlDecoded,
     term: &console::Term,
-) -> (Vec<AheadRef>, Vec<DivergingRef>) {
+    private_signer: Option<&Arc<ngit::signer::NgitSigner>>,
+) -> Result<(Vec<AheadRef>, Vec<DivergingRef>)> {
     // ref_name -> [(ahead_oid, source_url, commits_ahead)]
     let mut per_ref: HashMap<String, Vec<(String, String, usize)>> = HashMap::new();
     let mut diverging: Vec<DivergingRef> = vec![];
@@ -905,7 +963,11 @@ fn find_ahead_and_diverging_refs(
             }
 
             // Try ahead/behind; if the remote OID is not local, fetch it first.
-            let check = get_ahead_behind(git_repo, nostr_oid, remote_oid).or_else(|_| {
+            let mut check = get_ahead_behind(git_repo, nostr_oid, remote_oid);
+            if check.is_err() {
+                if let Some(signer) = private_signer {
+                    prepare_private_git_auth(std::slice::from_ref(url), signer).await?;
+                }
                 let _ = fetch_from_git_server(
                     git_repo,
                     std::slice::from_ref(remote_oid),
@@ -914,8 +976,8 @@ fn find_ahead_and_diverging_refs(
                     term,
                     is_grasp_server_clone_url(url),
                 );
-                get_ahead_behind(git_repo, nostr_oid, remote_oid)
-            });
+                check = get_ahead_behind(git_repo, nostr_oid, remote_oid);
+            }
 
             if let Ok((ahead, behind)) = check {
                 if !ahead.is_empty() && behind.is_empty() {
@@ -979,7 +1041,7 @@ fn find_ahead_and_diverging_refs(
         });
     }
 
-    (ahead_result, diverging)
+    Ok((ahead_result, diverging))
 }
 
 fn invalid_nostr_state_ref(ref_name: &str) -> bool {
@@ -1075,12 +1137,13 @@ fn identify_missing_refs(git_repo: &Repo, state: &HashMap<String, String>) -> Ve
 }
 
 /// returns refs that are still missing
-pub(crate) fn fetch_missing_refs(
+pub(crate) async fn fetch_missing_refs(
     git_repo: &Repo,
     nostr_state: &RepoState,
     remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
     nostr_url_decoded: &NostrUrlDecoded,
-) -> Vec<String> {
+    private_signer: Option<&Arc<ngit::signer::NgitSigner>>,
+) -> Result<Vec<String>> {
     let mut tried_remotes: Vec<String> = vec![];
     let required_oids = identify_missing_refs(git_repo, &nostr_state.state);
     if !required_oids.is_empty() {
@@ -1115,6 +1178,9 @@ pub(crate) fn fetch_missing_refs(
                 break;
             }
             tried_remotes.push(url.clone());
+            if let Some(signer) = private_signer {
+                prepare_private_git_auth(std::slice::from_ref(url), signer).await?;
+            }
             let _ = fetch_from_git_server(
                 git_repo,
                 oids,
@@ -1130,7 +1196,7 @@ pub(crate) fn fetch_missing_refs(
 
     let still_missing_oids = identify_missing_refs(git_repo, &nostr_state.state);
     if still_missing_oids.is_empty() {
-        vec![]
+        Ok(vec![])
     } else {
         let missing_refs: Vec<String> = nostr_state
             .state
@@ -1147,7 +1213,7 @@ pub(crate) fn fetch_missing_refs(
             "could not find refs on repo git servers: {}",
             join_with_and(&missing_refs)
         );
-        missing_refs
+        Ok(missing_refs)
     }
 }
 
@@ -1447,8 +1513,8 @@ mod tests {
     // find_ahead_refs
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn server_in_sync_returns_empty() {
+    #[tokio::test]
+    async fn server_in_sync_returns_empty() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         let oid_a = test_repo.populate().unwrap();
@@ -1470,7 +1536,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             result.0.is_empty(),
             "in-sync server should not appear as ahead"
@@ -1478,8 +1547,8 @@ mod tests {
         assert!(result.1.is_empty(), "in-sync server should not diverge");
     }
 
-    #[test]
-    fn server_strictly_ahead_is_detected() {
+    #[tokio::test]
+    async fn server_strictly_ahead_is_detected() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         let oid_a = test_repo.populate().unwrap();
@@ -1505,7 +1574,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(ahead.len(), 1, "exactly one ref should be detected ahead");
         assert_eq!(ahead[0].ref_name, "refs/heads/main");
@@ -1517,8 +1589,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn server_behind_nostr_state_not_detected_as_ahead() {
+    #[tokio::test]
+    async fn server_behind_nostr_state_not_detected_as_ahead() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         let oid_a = test_repo.populate().unwrap();
@@ -1545,7 +1617,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             ahead.is_empty(),
             "server behind nostr state should not appear as ahead"
@@ -1556,8 +1631,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn diverged_server_not_detected_as_ahead() {
+    #[tokio::test]
+    async fn diverged_server_not_detected_as_ahead() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         test_repo.populate().unwrap();
@@ -1594,7 +1669,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             ahead.is_empty(),
             "diverged server commit should not be detected as strictly ahead"
@@ -1605,8 +1683,8 @@ mod tests {
         assert_eq!(diverging[0].commits_behind, 1);
     }
 
-    #[test]
-    fn two_servers_ahead_consistent_takes_furthest() {
+    #[tokio::test]
+    async fn two_servers_ahead_consistent_takes_furthest() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         let oid_a = test_repo.populate().unwrap();
@@ -1643,7 +1721,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(ahead.len(), 1, "should detect one ahead ref");
         assert_eq!(
@@ -1658,8 +1739,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn two_servers_diverged_from_each_other_skipped() {
+    #[tokio::test]
+    async fn two_servers_diverged_from_each_other_skipped() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         test_repo.populate().unwrap();
@@ -1713,7 +1794,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             ahead.is_empty(),
@@ -1728,8 +1812,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn symbolic_and_pr_refs_ignored() {
+    #[tokio::test]
+    async fn symbolic_and_pr_refs_ignored() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         let oid_a = test_repo.populate().unwrap();
@@ -1762,7 +1846,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             ahead.is_empty(),
             "symbolic refs and PR refs must be ignored"
@@ -1773,8 +1860,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn single_server_diverged_is_reported() {
+    #[tokio::test]
+    async fn single_server_diverged_is_reported() {
         let test_repo = GitTestRepo::default();
         let git_repo = Repo::from_path(&test_repo.dir).unwrap();
         test_repo.populate().unwrap();
@@ -1808,7 +1895,10 @@ mod tests {
             &remote_states,
             &dummy_decoded_url(),
             &term,
-        );
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(ahead.is_empty(), "diverged server must not appear as ahead");
         assert_eq!(diverging.len(), 1, "diverged server should be reported");

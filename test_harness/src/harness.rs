@@ -14,6 +14,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use nostr_sdk::{
+    local_relay::LocalRelayBuilderNip42,
+    prelude::{PublicKey, ToBech32},
+};
 
 use crate::{
     grasp::GraspServer, port, relay::VanillaRelay, repo::Repo, vanilla_git_server::VanillaGitServer,
@@ -44,6 +48,8 @@ pub struct Harness {
     /// migrated test will, and resolving it once is cheaper than threading
     /// it through later.
     git_remote_nostr_bin: PathBuf,
+    /// Per-test environment overrides applied to every child process.
+    child_env: BTreeMap<String, String>,
 }
 
 impl Harness {
@@ -59,6 +65,7 @@ impl Harness {
             vanilla_git_server_roles: Vec::new(),
             ngit_bin: ngit_bin.into(),
             git_remote_nostr_bin: git_remote_nostr_bin.into(),
+            child_env: BTreeMap::new(),
         }
     }
 
@@ -203,6 +210,11 @@ impl Harness {
             env.push(("NGIT_GRASP_DEFAULT_SET".to_string(), grasp_urls));
         }
 
+        for (key, value) in &self.child_env {
+            env.retain(|(existing, _)| existing != key);
+            env.push((key.clone(), value.clone()));
+        }
+
         env
     }
 
@@ -251,18 +263,29 @@ impl Harness {
 
 /// Fluent builder for [`Harness`].
 pub struct HarnessBuilder {
-    relay_roles: Vec<String>,
-    /// Each entry is `(role_label, grasp06_enabled)`. `grasp06_enabled` is
-    /// `true` when registered via
+    /// Each entry is `(role_label, nip42_options)`. Standard relays have no
+    /// NIP-42 gate; auth-policy tests provide read/write requirements.
+    relay_roles: Vec<(String, Option<LocalRelayBuilderNip42>)>,
+    /// Each entry is `(role_label, grasp06_enabled, private_member)`.
+    /// `grasp06_enabled` is `true` when registered via
     /// [`with_grasp_server_grasp06`][Self::with_grasp_server_grasp06];
     /// `false` for the standard [`with_grasp_server`][Self::with_grasp_server].
-    grasp_roles: Vec<(String, bool)>,
+    grasp_roles: Vec<(String, bool, Option<String>)>,
     vanilla_git_server_roles: Vec<String>,
     ngit_bin: PathBuf,
     git_remote_nostr_bin: PathBuf,
+    child_env: BTreeMap<String, String>,
 }
 
 impl HarnessBuilder {
+    /// Override an environment variable for every child process spawned by
+    /// this harness. Overrides remain scoped to the test-owned harness and do
+    /// not mutate the test process environment.
+    pub fn with_child_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.child_env.insert(key.into(), value.into());
+        self
+    }
+
     /// Register a vanilla nostr relay under the given role label.
     ///
     /// Standard roles consumed by `Params::default()`:
@@ -270,7 +293,17 @@ impl HarnessBuilder {
     /// accepted but won't be injected into ngit's env — useful for tests
     /// that publish to a relay ngit shouldn't know about.
     pub fn with_relay(mut self, role: impl Into<String>) -> Self {
-        self.relay_roles.push(role.into());
+        self.relay_roles.push((role.into(), None));
+        self
+    }
+
+    /// Register a vanilla relay requiring NIP-42 for reads, writes, or both.
+    pub fn with_relay_nip42(
+        mut self,
+        role: impl Into<String>,
+        nip42: LocalRelayBuilderNip42,
+    ) -> Self {
+        self.relay_roles.push((role.into(), Some(nip42)));
         self
     }
 
@@ -280,7 +313,7 @@ impl HarnessBuilder {
     /// regardless of role — the role label is purely for the test's own
     /// look-ups via `Harness::grasp(role)`.
     pub fn with_grasp_server(mut self, role: impl Into<String>) -> Self {
-        self.grasp_roles.push((role.into(), false));
+        self.grasp_roles.push((role.into(), false, None));
         self
     }
 
@@ -296,7 +329,27 @@ impl HarnessBuilder {
     /// surface (kind-30617 announcements, NIP-34 patches, state events) is
     /// still present on the same port.
     pub fn with_grasp_server_grasp06(mut self, role: impl Into<String>) -> Self {
-        self.grasp_roles.push((role.into(), true));
+        self.grasp_roles.push((role.into(), true, None));
+        self
+    }
+
+    /// Register a GRASP-08 private service with one statically configured
+    /// member. The member authenticates both relay access (NIP-42) and Git
+    /// Smart HTTP access (the repository-scoped GRASP-08 NIP-98 profile).
+    pub fn with_private_grasp_server(
+        mut self,
+        role: impl Into<String>,
+        member: &PublicKey,
+    ) -> Self {
+        self.grasp_roles.push((
+            role.into(),
+            false,
+            Some(
+                member
+                    .to_bech32()
+                    .expect("nostr public keys always bech32-encode"),
+            ),
+        ));
         self
     }
 
@@ -338,20 +391,26 @@ impl HarnessBuilder {
         }
 
         let mut relays: BTreeMap<String, Vec<VanillaRelay>> = BTreeMap::new();
-        for role in self.relay_roles {
+        for (role, nip42) in self.relay_roles {
             let reservation = port::reserve_port()
                 .with_context(|| format!("failed to reserve port for relay role {role:?}"))?;
-            let relay = VanillaRelay::start(role.clone(), reservation)
+            let relay = VanillaRelay::start(role.clone(), reservation, nip42)
                 .await
                 .with_context(|| format!("failed to start relay for role {role:?}"))?;
             relays.entry(role).or_default().push(relay);
         }
 
         let mut grasps: BTreeMap<String, Vec<GraspServer>> = BTreeMap::new();
-        for (role, grasp06) in self.grasp_roles {
+        for (role, grasp06, private_member) in self.grasp_roles {
             let reservation = port::reserve_port()
                 .with_context(|| format!("failed to reserve port for grasp role {role:?}"))?;
-            let server = if grasp06 {
+            let server = if let Some(member) = private_member {
+                GraspServer::start_private(role.clone(), reservation, member)
+                    .await
+                    .with_context(|| {
+                        format!("failed to start ngit-grasp (GRASP-08) for role {role:?}")
+                    })?
+            } else if grasp06 {
                 GraspServer::start_grasp06(role.clone(), reservation)
                     .await
                     .with_context(|| {
@@ -382,6 +441,7 @@ impl HarnessBuilder {
             vanilla_git_servers,
             ngit_bin: self.ngit_bin,
             git_remote_nostr_bin: self.git_remote_nostr_bin,
+            child_env: self.child_env,
         })
     }
 }

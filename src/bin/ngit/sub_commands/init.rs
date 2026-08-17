@@ -26,6 +26,7 @@ use ngit::{
         nostr_url::{CloneUrl, NostrUrlDecoded},
         validate_git_server_clone_url,
     },
+    git_http_auth::{clear_private_git_auth, prepare_private_git_auth},
     list::{list_from_remote, list_from_remotes},
     repo_ref::{
         apply_grasp_infrastructure, detect_existing_grasp_servers, extract_npub, extract_pks,
@@ -42,12 +43,18 @@ use nostr::prelude::{
 use crate::{
     cli::{Cli, SignerParams},
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
-    client::{Client, Connect, fetching_with_report, get_repo_ref_from_cache},
+    client::{
+        Client, Connect, fetching_with_private_discovery, fetching_with_report,
+        get_repo_ref_from_cache,
+    },
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
     git_remote_helper::push::{
         create_rejected_refspecs_and_remotes_refspecs, generate_updated_state,
     },
     login,
+    login::user::{
+        PrivateGitRelayDiscovery, discover_private_git_relay_list, publish_private_git_relay_list,
+    },
     push_bookkeeping::{record_accepted_push_refspecs, set_branch_upstream},
     repo_ref::{
         RepoCoordinateSource, RepoRef, ResolvedRepoCoordinate, get_repo_config_from_yaml,
@@ -136,6 +143,7 @@ struct ResolvedFields {
     earliest_unique_commit: String,
     blossoms: Vec<Url>,
     hashtags: Vec<String>,
+    private: bool,
     selected_grasp_servers: Vec<String>,
     /// Existing announcements for this coordinate, retained so a republish can
     /// order itself after the current NIP-01 winner.
@@ -471,6 +479,13 @@ pub struct SubCommandArgs {
     /// (default is to preserve them so tags added by future ngit versions
     /// or third-party tools aren't silently lost)
     clean: bool,
+    #[clap(long, conflicts_with = "public")]
+    /// mark the repository private and restrict discovery to its repository
+    /// relays
+    private: bool,
+    #[clap(long, conflicts_with = "private")]
+    /// remove the private marker from this maintainer's announcement
+    public: bool,
 }
 
 impl SubCommandArgs {
@@ -488,6 +503,8 @@ impl SubCommandArgs {
             || self.earliest_unique_commit.is_some()
             || repo_relay_only
             || self.clean
+            || self.private
+            || self.public
     }
 }
 
@@ -1127,6 +1144,14 @@ fn resolve_fields(
         vec![]
     };
 
+    let private = if args.private {
+        true
+    } else if args.public {
+        false
+    } else {
+        state.repo_ref().is_some_and(|repo_ref| repo_ref.private)
+    };
+
     Ok(ResolvedFields {
         identifier,
         name,
@@ -1139,6 +1164,7 @@ fn resolve_fields(
         earliest_unique_commit,
         blossoms,
         hashtags,
+        private,
         selected_grasp_servers,
         announcement_events: state
             .repo_ref()
@@ -1302,6 +1328,7 @@ async fn publish_and_finalize(
         relays: fields.relays.clone(),
         blossoms: fields.blossoms,
         hashtags: fields.hashtags,
+        private: fields.private,
         selected_maintainer: user_ref.public_key,
         maintainers_without_annoucnement: None,
         maintainers: fields.maintainers.clone(),
@@ -1309,6 +1336,11 @@ async fn publish_and_finalize(
         nostr_git_url: None,
         extra_tags: fields.extra_tags,
     };
+    clear_private_git_auth();
+    if repo_ref.private {
+        client.nip42_register_private_repo_relays(repo_ref.relays.clone());
+        prepare_private_git_auth(&repo_ref.git_server, &signer).await?;
+    }
 
     // Whether the network fetch in `launch` already covered the
     // coordinate being announced. The fetch runs only when a repo
@@ -1430,6 +1462,10 @@ async fn publish_and_finalize(
     // Step 5: Publish events
     client.set_signer(signer.clone()).await;
 
+    if repo_ref.private {
+        publish_private_git_relay_list(client, &repo_ref.relays, user_ref, &signer).await?;
+    }
+
     let _ = send_events(
         client,
         Some(git_repo_path),
@@ -1481,6 +1517,7 @@ async fn publish_and_finalize(
                     &fields.selected_grasp_servers,
                     &user_ref.public_key,
                     &fields.identifier,
+                    repo_ref.private.then(|| signer.clone()),
                 )
                 .await?;
             }
@@ -1509,6 +1546,7 @@ async fn publish_and_finalize(
                     &fields.selected_grasp_servers,
                     &user_ref.public_key,
                     &fields.identifier,
+                    repo_ref.private.then(|| signer.clone()),
                 )
                 .await?;
             }
@@ -1532,6 +1570,7 @@ async fn publish_and_finalize(
                     &fields.selected_grasp_servers,
                     &user_ref.public_key,
                     &fields.identifier,
+                    repo_ref.private.then(|| signer.clone()),
                 )
                 .await?;
             }
@@ -1639,8 +1678,15 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
     )
     .await?;
 
+    client.set_signer(signer.clone()).await;
     let resolved_repo_coordinate = try_resolve_repo_coordinate(&git_repo).await?;
-    let repo_coordinate = resolved_repo_coordinate
+    let private_discovery = if resolved_repo_coordinate.is_some() {
+        discover_private_git_relay_list(&client, discovery_relays(&user_ref, &client), &signer)
+            .await
+    } else {
+        PrivateGitRelayDiscovery::Absent
+    };
+    let mut repo_coordinate = resolved_repo_coordinate
         .as_ref()
         .map(|resolved| resolved.coordinate.clone());
 
@@ -1663,8 +1709,14 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
     )?;
 
     // Phase 4: Network fetch (only if coordinate exists)
-    let repo_ref = if let Some(repo_coordinate) = &repo_coordinate {
-        fetching_with_report(git_repo_path, &client, repo_coordinate).await?;
+    let repo_ref = if let Some(repo_coordinate) = &mut repo_coordinate {
+        fetching_with_private_discovery(
+            git_repo_path,
+            &client,
+            repo_coordinate,
+            &private_discovery,
+        )
+        .await?;
         (get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await).ok()
     } else {
         None
@@ -1802,6 +1854,19 @@ fn parse_relay_url(s: &str) -> Result<RelayUrl> {
     .context(format!("failed to parse relay url: {s}"))
 }
 
+fn discovery_relays(user_ref: &ngit::login::user::UserRef, client: &Client) -> Vec<String> {
+    let mut relays = user_ref.relays.read();
+    for relay in user_ref.relays.write() {
+        if !relays.contains(&relay) {
+            relays.push(relay);
+        }
+    }
+    if relays.is_empty() {
+        relays.extend(client.get_relay_default_set().iter().cloned());
+    }
+    relays
+}
+
 fn main_or_master_branch_name(git_repo: &Repo) -> Result<&'static str> {
     let local_branches = git_repo
         .get_local_branch_names()
@@ -1845,6 +1910,7 @@ async fn push_initial_branch(
         &repo_ref.git_server,
         nostr_url_decoded,
         None,
+        Some(signer),
     )
     .await;
 
@@ -1895,11 +1961,7 @@ async fn push_initial_branch(
     )
     .await?;
 
-    let repo_relay_only = git_repo
-        .get_git_config_item("nostr.repo-relay-only", None)
-        .ok()
-        .flatten()
-        .is_some_and(|v| v == "true");
+    let repo_relay_only = repository_relay_only(git_repo, repo_ref);
     let my_write_relays = if repo_relay_only {
         vec![]
     } else {
@@ -1999,6 +2061,7 @@ async fn republish_cached_state(
         &repo_ref.git_server,
         nostr_url_decoded,
         None,
+        Some(signer),
     )
     .await;
     if remote_states.is_empty() {
@@ -2010,8 +2073,14 @@ async fn republish_cached_state(
 
     // Fetch state objects missing locally from whichever listed server
     // has them, so they can be pushed to the servers that don't.
-    let missing_refs =
-        super::sync::fetch_missing_refs(git_repo, &candidate, &remote_states, nostr_url_decoded);
+    let missing_refs = super::sync::fetch_missing_refs(
+        git_repo,
+        &candidate,
+        &remote_states,
+        nostr_url_decoded,
+        Some(signer),
+    )
+    .await?;
 
     // Plans source branch pushes from the candidate's own oids: the
     // nostr remote's tracking refs may not exist yet on a repository
@@ -2042,11 +2111,7 @@ async fn republish_cached_state(
             .collect(),
     );
 
-    let repo_relay_only = git_repo
-        .get_git_config_item("nostr.repo-relay-only", None)
-        .ok()
-        .flatten()
-        .is_some_and(|v| v == "true");
+    let repo_relay_only = repository_relay_only(git_repo, repo_ref);
     let my_write_relays = if repo_relay_only {
         vec![]
     } else {
@@ -2164,13 +2229,20 @@ async fn publish_origin_state(
         &repo_ref.git_server,
         nostr_url_decoded,
         None,
+        Some(signer),
     )
     .await;
 
     // Fetch state objects missing locally from whichever listed server
     // has them, so they can be pushed to the servers that don't.
-    let missing_refs =
-        super::sync::fetch_missing_refs(git_repo, &candidate, &remote_states, nostr_url_decoded);
+    let missing_refs = super::sync::fetch_missing_refs(
+        git_repo,
+        &candidate,
+        &remote_states,
+        nostr_url_decoded,
+        Some(signer),
+    )
+    .await?;
 
     // Plans source branch pushes from the candidate's own oids: the
     // nostr remote has no tracking refs yet.
@@ -2200,11 +2272,7 @@ async fn publish_origin_state(
             .collect(),
     );
 
-    let repo_relay_only = git_repo
-        .get_git_config_item("nostr.repo-relay-only", None)
-        .ok()
-        .flatten()
-        .is_some_and(|v| v == "true");
+    let repo_relay_only = repository_relay_only(git_repo, repo_ref);
     let my_write_relays = if repo_relay_only {
         vec![]
     } else {
@@ -2263,6 +2331,15 @@ async fn publish_origin_state(
         );
     }
     Ok(())
+}
+
+fn repository_relay_only(git_repo: &Repo, repo_ref: &RepoRef) -> bool {
+    repo_ref.private
+        || git_repo
+            .get_git_config_item("nostr.repo-relay-only", None)
+            .ok()
+            .flatten()
+            .is_some_and(|value| value == "true")
 }
 
 /// Best-effort: keep the git server URL that `origin` pointed at before

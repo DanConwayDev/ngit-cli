@@ -30,11 +30,13 @@ use crate::client::MockConnect;
 use crate::{
     client::{Connect, send_events},
     git::{Repo, RepoActions},
-    login::user::UserRef,
+    git_http_auth::refresh_private_git_auth_for_url,
+    login::user::{UserRef, publish_private_git_relay_list},
     repo_ref::{
         RepoRef, apply_grasp_infrastructure, format_grasp_server_url_as_clone_url,
         latest_event_repo_ref,
     },
+    signer::NgitSigner,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,6 +51,7 @@ pub struct MaintainerAcceptance {
     selected_grasp_servers: Vec<String>,
     public_key: PublicKey,
     identifier: String,
+    private_signer: Option<Arc<NgitSigner>>,
 }
 
 /// Maintainers to list when accepting without an explicit relationship choice.
@@ -155,6 +158,7 @@ pub async fn build_maintainership_acceptance_with_defaults(
         relays: relays.clone(),
         blossoms,
         hashtags,
+        private: repo_ref.private,
         selected_maintainer: *my_pubkey,
         maintainers_without_annoucnement: None,
         maintainers,
@@ -178,6 +182,7 @@ pub async fn build_maintainership_acceptance_with_defaults(
         selected_grasp_servers,
         public_key: *my_pubkey,
         identifier: identifier.clone(),
+        private_signer: repo_ref.private.then(|| signer.clone()),
     })
 }
 
@@ -193,6 +198,7 @@ pub async fn finalize_maintainership_acceptance(
             &acceptance.selected_grasp_servers,
             &acceptance.public_key,
             &acceptance.identifier,
+            acceptance.private_signer.clone(),
         )
         .await?;
     }
@@ -233,6 +239,12 @@ pub async fn accept_maintainership_with_defaults(
     eprintln!("info: publishing your repository announcement to nostr...");
 
     client.set_signer(signer.clone()).await;
+
+    if repo_ref.private {
+        publish_private_git_relay_list(client, &acceptance.relays, user_ref, signer)
+            .await
+            .context("failed to publish private Git relay discovery list")?;
+    }
 
     let _ = send_events(
         client,
@@ -330,6 +342,7 @@ struct PollContext {
     ready_count: Arc<AtomicU64>,
     spinner_pb: ProgressBar,
     reveal_state: Arc<ServerRevealState>,
+    private_signer: Option<Arc<NgitSigner>>,
 }
 
 fn check_git_server_ready(git_repo_path: &std::path::Path, git_server_url: &str) -> bool {
@@ -339,7 +352,12 @@ fn check_git_server_ready(git_repo_path: &std::path::Path, git_server_url: &str)
     let Ok(mut remote) = git_repo.remote_anonymous(git_server_url) else {
         return false;
     };
-    match remote.connect(git2::Direction::Fetch) {
+    let mut fetch_options = git2::FetchOptions::new();
+    let authorization = crate::git_http_auth::authorization_for_url(git_server_url);
+    if let Some(header) = authorization.as_deref() {
+        fetch_options.custom_headers(&[header]);
+    }
+    match remote.download(&[] as &[&str], Some(&mut fetch_options)) {
         Ok(()) => {
             let _ = remote.disconnect();
             true
@@ -432,6 +450,13 @@ fn finish_server_bar(
     }
 }
 
+async fn refresh_poll_authorization(url: &str, private_signer: Option<&Arc<NgitSigner>>) -> bool {
+    match private_signer {
+        Some(signer) => refresh_private_git_auth_for_url(url, signer).await.is_ok(),
+        None => true,
+    }
+}
+
 async fn poll_single_server(
     url: String,
     git_repo_path: std::path::PathBuf,
@@ -442,6 +467,14 @@ async fn poll_single_server(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(ctx.timeout_secs);
     let mut ready = false;
     loop {
+        if !refresh_poll_authorization(&url, ctx.private_signer.as_ref()).await {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(poll_interval).await;
+            continue;
+        }
+
         let is_ready = tokio::task::spawn_blocking({
             let url = url.clone();
             let path = git_repo_path.clone();
@@ -515,6 +548,7 @@ pub async fn wait_for_grasp_servers(
     grasp_servers: &[String],
     public_key: &PublicKey,
     identifier: &str,
+    private_signer: Option<Arc<NgitSigner>>,
 ) -> Result<()> {
     let clone_urls: Vec<String> = grasp_servers
         .iter()
@@ -572,6 +606,7 @@ pub async fn wait_for_grasp_servers(
         ready_count: ready_count.clone(),
         spinner_pb: spinner_pb.clone(),
         reveal_state: reveal_state.clone(),
+        private_signer,
     });
     let futures: Vec<_> = clone_urls
         .iter()
@@ -599,4 +634,33 @@ pub async fn wait_for_grasp_servers(
     finalize_spinner(all_ready, &spinner_pb, final_ready, total);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::prelude::Keys;
+
+    use super::*;
+    use crate::git_http_auth::authorization_for_url;
+
+    #[tokio::test]
+    async fn poll_authorization_is_only_installed_with_a_private_signer() {
+        let signer = Arc::new(NgitSigner::Keys(Keys::generate()));
+        let host = signer
+            .get_public_key()
+            .await
+            .unwrap()
+            .to_hex()
+            .chars()
+            .take(16)
+            .collect::<String>();
+        let public_url = format!("https://public-{host}.example/repo.git");
+        let private_url = format!("https://private-{host}.example/repo.git");
+
+        assert!(refresh_poll_authorization(&public_url, None).await);
+        assert!(authorization_for_url(&public_url).is_none());
+
+        assert!(refresh_poll_authorization(&private_url, Some(&signer)).await);
+        assert!(authorization_for_url(&private_url).is_some());
+    }
 }

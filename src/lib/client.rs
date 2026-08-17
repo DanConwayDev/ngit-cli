@@ -11,7 +11,7 @@
 // certain that the implementation is going to make it to stable but we don't
 // want to inadvertlty use other features of nightly that might be removed.
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::{Display, Write},
     fs::create_dir_all,
     path::{Path, PathBuf},
@@ -44,7 +44,6 @@ use nostr_database::{NostrDatabase, SaveEventStatus};
 use nostr_lmdb::NostrLmdb;
 use nostr_memory::MemoryDatabase;
 use nostr_sdk::{
-    authenticator::SignerAuthenticator,
     client::ClientBuilder,
     error::{Error as NostrSdkError, ErrorKind as NostrSdkErrorKind},
     proxy::Proxy,
@@ -60,7 +59,11 @@ use crate::{
         KIND_USER_GRASP_LIST, event_is_cover_letter, event_is_patch_set_root,
         event_is_revision_root, event_is_valid_pr_or_pr_update, status_kinds,
     },
-    login::{get_likely_logged_in_user, user::get_user_ref_from_cache},
+    login::{
+        get_likely_logged_in_user,
+        user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
+    },
+    relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
     repo_ref::{RepoRef, normalize_grasp_server_url},
     repo_state::RepoState,
     signer::NgitSigner,
@@ -141,6 +144,19 @@ fn apply_onion_proxy(builder: ClientBuilder) -> ClientBuilder {
     }
 }
 
+/// Build nostr-sdk with ngit's session-scoped NIP-42 policy. The client always
+/// has the policy authenticator installed, but it cannot sign until the command
+/// explicitly attaches a signer.
+fn build_nostr_client(auth_policy: Arc<RelayAuthPolicy>) -> nostr_sdk::client::Client {
+    apply_onion_proxy(
+        ClientBuilder::default()
+            .relay_limits(RelayLimits::disable())
+            .verify_subscriptions(true)
+            .authenticator(PolicyAuthenticator::new(auth_policy)),
+    )
+    .build()
+}
+
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
 
 static INVITED_MAINTAINER_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
@@ -201,6 +217,7 @@ pub struct Client {
     fallback_signer_relays: Vec<String>,
     grasp_default_set: Vec<String>,
     relays_not_to_retry: Arc<RwLock<HashMap<RelayUrl, String>>>,
+    auth_policy: Arc<RelayAuthPolicy>,
 }
 
 impl Client {
@@ -238,6 +255,17 @@ pub trait Connect {
     fn get_blaster_relays(&self) -> &Vec<String>;
     fn get_fallback_signer_relays(&self) -> &Vec<String>;
     fn get_grasp_default_set(&self) -> &Vec<String>;
+    /// Permit repository-relay authentication only with a signer already
+    /// attached to this command.
+    fn nip42_register_repo_relays(&self, relays: Vec<RelayUrl>);
+    /// Require an explicitly acquired signer for known-private repository
+    /// relays. This classification never acquires the signer itself.
+    fn nip42_register_private_repo_relays(&self, relays: Vec<RelayUrl>);
+    /// Permit authentication to the user's own relays for this publish.
+    fn nip42_register_publish_relays(&self, relays: Vec<RelayUrl>);
+    /// Attach a signer during account-creation publication, before a complete
+    /// login object exists.
+    fn nip42_set_auth_signer(&self, signer: Arc<NgitSigner>);
     async fn send_event_to<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -260,6 +288,7 @@ pub trait Connect {
         git_repo_path: Option<&'a Path>,
         repo_coordinates: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
+        repository_relays_only: bool,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)>;
     async fn fetch_all_from_relay<'a>(
         &self,
@@ -276,34 +305,27 @@ impl Connect for Client {
     }
 
     fn new(opts: Params) -> Self {
+        let auth_policy = Arc::new(RelayAuthPolicy::default());
+        if let Some(keys) = opts.keys {
+            auth_policy.set_signer(Arc::new(NgitSigner::Keys(keys)));
+        }
         Client {
-            client: if let Some(keys) = opts.keys {
-                apply_onion_proxy(
-                    ClientBuilder::default()
-                        .relay_limits(RelayLimits::disable())
-                        .verify_subscriptions(true)
-                        .authenticator(SignerAuthenticator::new(keys)),
-                )
-                .build()
-            } else {
-                apply_onion_proxy(
-                    ClientBuilder::default()
-                        .relay_limits(RelayLimits::disable())
-                        .verify_subscriptions(true),
-                )
-                .build()
-            },
+            client: build_nostr_client(Arc::clone(&auth_policy)),
             relay_default_set: opts.relay_default_set,
             announcement_indexer_relays: opts.announcement_indexer_relays,
             blaster_relays: opts.blaster_relays,
             fallback_signer_relays: opts.fallback_signer_relays,
             grasp_default_set: opts.grasp_default_set,
             relays_not_to_retry: Arc::new(RwLock::new(HashMap::new())),
+            auth_policy,
         }
     }
 
     async fn set_signer(&mut self, signer: Arc<NgitSigner>) {
-        self.client = signer.build_client();
+        self.auth_policy.set_signer(signer);
+        // Preserve existing behavior: attaching a signer drops any anonymous
+        // connections. Relay classifications survive through the shared policy.
+        self.client = build_nostr_client(Arc::clone(&self.auth_policy));
     }
 
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
@@ -358,6 +380,22 @@ impl Connect for Client {
         &self.grasp_default_set
     }
 
+    fn nip42_register_repo_relays(&self, relays: Vec<RelayUrl>) {
+        self.auth_policy.register_repo_relays(relays);
+    }
+
+    fn nip42_register_private_repo_relays(&self, relays: Vec<RelayUrl>) {
+        self.auth_policy.register_private_repo_relays(relays);
+    }
+
+    fn nip42_register_publish_relays(&self, relays: Vec<RelayUrl>) {
+        self.auth_policy.register_publish_relays(relays);
+    }
+
+    fn nip42_set_auth_signer(&self, signer: Arc<NgitSigner>) {
+        self.auth_policy.set_signer(signer);
+    }
+
     async fn send_event_to<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -366,6 +404,15 @@ impl Connect for Client {
     ) -> Result<nostr::prelude::EventId> {
         ensure_onion_url_reachable(url)?;
         self.client.add_relay(url).await?;
+        // A challenge declined before this relay became an authenticated
+        // target is spent. Reconnect once so the relay can issue a fresh one.
+        if let Ok(relay_url) = RelayUrl::parse(url) {
+            if self.auth_policy.take_stale_declined(&relay_url) {
+                if let Some(relay) = self.client.relay(&relay_url).await? {
+                    relay.disconnect();
+                }
+            }
+        }
         #[allow(clippy::large_futures)]
         self.client.connect_relay(url).await?;
         match self
@@ -396,13 +443,27 @@ impl Connect for Client {
         relays: Vec<String>,
         filters: Vec<nostr::prelude::Filter>,
     ) -> Result<Vec<nostr::prelude::Event>> {
+        // relay lists can come from network events (e.g. kind 10002), so a
+        // malformed entry must be skipped rather than panic
+        let relay_urls = relays
+            .iter()
+            .filter_map(|relay| match RelayUrl::parse(relay) {
+                Ok(url) => Some(url),
+                Err(error) => {
+                    eprintln!("warning: skipping invalid relay url {relay}: {error}");
+                    None
+                }
+            })
+            .collect::<Vec<RelayUrl>>();
         let (relay_results, _) = self
-            .get_events_per_relay(
-                relays.iter().map(|r| RelayUrl::parse(r).unwrap()).collect(),
-                filters,
-                MultiProgress::new(),
-            )
+            .get_events_per_relay(relay_urls, filters, MultiProgress::new())
             .await?;
+        // relay outages degrade to an empty result; callers that must not
+        // mistake an outage for absent events consult their own caches or
+        // use get_events_per_relay directly
+        if !relay_results.is_empty() && relay_results.iter().all(Result::is_err) {
+            eprintln!("warning: no relay responded while fetching events; continuing without them");
+        }
         Ok(get_dedup_events(relay_results))
     }
 
@@ -511,6 +572,7 @@ impl Connect for Client {
         git_repo_path: Option<&'a Path>,
         selected_maintainer_coordinate: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
+        repository_relays_only: bool,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
         let relay_default_set = &self
             .relay_default_set
@@ -529,6 +591,7 @@ impl Connect for Client {
             user_profiles,
             relay_default_set.clone(),
             announcement_indexer_relays.clone(),
+            repository_relays_only,
         )
         .await?;
 
@@ -632,6 +695,15 @@ impl Connect for Client {
         let mut relay_reports: Vec<Result<FetchReport>> = vec![];
 
         loop {
+            match request.repo_auth_mode {
+                RelayAuthMode::Never => {}
+                RelayAuthMode::IfSignerAttached => self
+                    .auth_policy
+                    .register_repo_relays(request.repo_relays.iter().cloned()),
+                RelayAuthMode::Required => self
+                    .auth_policy
+                    .register_private_repo_relays(request.repo_relays.iter().cloned()),
+            }
             let relay_requests = request
                 .repo_relays
                 .union(&request.user_relays_for_profiles)
@@ -824,15 +896,22 @@ impl Connect for Client {
             }
             processed_relay_scopes.extend(processed_this_round);
 
-            if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
-                if let Ok(repo_ref) =
-                    get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await
-                {
-                    request.repo_relays = repo_ref.relays.iter().cloned().collect();
+            if !request.lock_repository_relays {
+                if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
+                    if let Ok(repo_ref) =
+                        get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await
+                    {
+                        if repo_ref.private {
+                            request.repo_auth_mode = RelayAuthMode::Required;
+                        }
+                        request.repo_relays = repo_ref.relays.iter().cloned().collect();
+                    }
                 }
             }
 
-            request.user_relays_for_profiles = {
+            request.user_relays_for_profiles = if request.repository_relays_only {
+                HashSet::new()
+            } else {
                 let mut set = HashSet::new();
                 for user in &request
                     .profiles_to_fetch_from_user_relays
@@ -899,6 +978,15 @@ impl Connect for Client {
             .clone()
             .context("fetch_all_from_relay called without a relay")?;
         ensure_onion_url_reachable(relay_url.as_str())?;
+
+        // A challenge declined while this URL was only an indexer is spent.
+        // Once an announcement promotes it to a repository relay, reconnect so
+        // it can issue a fresh challenge under the upgraded policy.
+        if self.auth_policy.take_stale_declined(&relay_url) {
+            if let Some(relay) = self.client.relay(&relay_url).await? {
+                relay.disconnect();
+            }
+        }
 
         let relay_column_width = request.relay_column_width;
 
@@ -1741,6 +1829,7 @@ pub async fn get_repo_ref_from_cache(
         }
     }
     repo_events.sort_by_key(|e| e.created_at);
+    let private = repository_events_are_private(&repo_events);
     let repo_ref = RepoRef::try_from((
         repo_events
             .iter()
@@ -1849,10 +1938,46 @@ pub async fn get_repo_ref_from_cache(
         hashtags: latest_metadata
             .as_ref()
             .map_or_else(|| repo_ref.hashtags.clone(), |r| r.hashtags.clone()),
+        private,
         ..repo_ref
     };
 
     Ok(repo_ref)
+}
+
+/// Record the repository's privacy classification in `.git/config` so later
+/// operations can consult it before any network access.
+///
+/// Only call this when `git_repo_path` belongs to the repository the
+/// operation actually targets: merely browsing another repository's
+/// announcement (e.g. during interactive repository search) must not stamp
+/// its privacy into the current repository's config. Best-effort: the key is
+/// only written when the value changes, and failures degrade to a warning so
+/// read-only flows never fail on config write access.
+pub fn save_repository_privacy_to_git_config(git_repo_path: &Path, private: bool) {
+    let result = (|| -> Result<()> {
+        let repository =
+            git2::Repository::discover(git_repo_path).context("failed to discover repository")?;
+        let mut config = repository
+            .config()
+            .context("failed to open repository config")?;
+        if config.get_bool("nostr.private").ok() == Some(private) {
+            return Ok(());
+        }
+        config
+            .set_bool("nostr.private", private)
+            .context("failed to set nostr.private")?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("warning: failed to record repository privacy in git config: {error:#}");
+    }
+}
+
+fn repository_events_are_private(events: &[Event]) -> bool {
+    events.iter().any(|event| {
+        RepoRef::try_from((event.clone(), None)).is_ok_and(|repo_ref| repo_ref.private)
+    })
 }
 
 pub async fn warn_if_invited_as_maintainer(git_repo_path: &Path, repo_ref: &RepoRef) {
@@ -1903,12 +2028,24 @@ async fn create_relays_request(
     user_profiles: &HashSet<PublicKey>,
     fallback_relays: HashSet<RelayUrl>,
     announcement_indexer_relays: HashSet<RelayUrl>,
+    repository_relays_only: bool,
 ) -> Result<FetchRequest> {
     let repo_ref = if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
         (get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await).ok()
     } else {
         None
     };
+    let cached_repository_is_private = repo_ref.as_ref().is_some_and(|repo_ref| repo_ref.private);
+    let repo_auth_mode = if cached_repository_is_private {
+        RelayAuthMode::Required
+    } else {
+        RelayAuthMode::IfSignerAttached
+    };
+    let repository_relays_only =
+        restrict_repository_relays(repository_relays_only, cached_repository_is_private);
+    let lock_repository_relays = repository_relays_only
+        && coordinate_hints_are_allowed(cached_repository_is_private)
+        && selected_maintainer_coordinate.is_some_and(|coordinate| !coordinate.relays.is_empty());
 
     let repo_coordinates = {
         // add Nip19Coordinates of users listed in maintainers to explicitly
@@ -2034,7 +2171,9 @@ async fn create_relays_request(
         map
     };
 
-    let user_relays_for_profiles = {
+    let user_relays_for_profiles = if repository_relays_only {
+        HashSet::new()
+    } else {
         let mut set = HashSet::new();
         for user in &profiles_to_fetch_from_user_relays
             .clone()
@@ -2101,24 +2240,33 @@ async fn create_relays_request(
 
     let repo_relays = {
         // With repository context, only relays from a cached announcement are
-        // authoritative for state and collaboration events. Without
-        // repository context these carry the fallback profile-bootstrap
-        // relays; no repository filters exist in that mode.
-        let mut relays = if selected_maintainer_coordinate.is_none() {
+        // authoritative for state and collaboration events. A repository-only
+        // probe without a cached private announcement comes from decrypted
+        // kind-10318 hints, which are authoritative for that discovery pass.
+        let mut relays = if selected_maintainer_coordinate.is_none() && !repository_relays_only {
             fallback_relays.clone()
         } else {
             HashSet::new()
         };
-        if let Some(repo_ref) = &repo_ref {
-            for r in repo_ref.relays.clone() {
-                relays.insert(r);
+        if !lock_repository_relays {
+            if let Some(repo_ref) = &repo_ref {
+                for r in repo_ref.relays.clone() {
+                    relays.insert(r);
+                }
             }
+        }
+        if lock_repository_relays {
+            relays.extend(
+                repo_coordinates
+                    .iter()
+                    .flat_map(|coordinate| coordinate.relays.iter().cloned()),
+            );
         }
         relays
     };
 
     let announcement_indexer_relays = {
-        if repo_coordinates_without_relays.is_empty() {
+        if repo_coordinates_without_relays.is_empty() || repository_relays_only {
             HashSet::new()
         } else {
             // URL/naddr relay hints locate announcements; they do not become
@@ -2159,6 +2307,9 @@ async fn create_relays_request(
         repo_relays,
         announcement_indexer_relays,
         scope: RelayFetchScope::Repository,
+        repo_auth_mode,
+        repository_relays_only,
+        lock_repository_relays,
         relay_column_width,
         repo_coordinates_without_relays: if let Some(repo_ref) = &repo_ref {
             repo_ref.coordinates_with_timestamps()
@@ -2200,6 +2351,14 @@ async fn create_relays_request(
         profiles_to_fetch_from_user_relays,
         user_relays_for_profiles,
     })
+}
+
+fn restrict_repository_relays(requested: bool, cached_repository_is_private: bool) -> bool {
+    requested || cached_repository_is_private
+}
+
+fn coordinate_hints_are_allowed(cached_repository_is_private: bool) -> bool {
+    !cached_repository_is_private
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -2511,6 +2670,58 @@ pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchRepo
     }
     report
 }
+
+/// A consolidated relay fetch that retains whether every relay completed.
+///
+/// An empty report after EOSE is materially different from an empty report
+/// caused by a relay error during private repository discovery.
+pub struct FetchOutcome {
+    pub report: FetchReport,
+    pub had_errors: bool,
+    pub relay_count: usize,
+}
+
+pub fn consolidate_fetch_outcome(reports: Vec<Result<FetchReport>>) -> FetchOutcome {
+    let had_errors = reports.iter().any(Result::is_err);
+    let relay_count = reports.len();
+    FetchOutcome {
+        report: consolidate_fetch_reports(reports),
+        had_errors,
+        relay_count,
+    }
+}
+
+impl FetchOutcome {
+    pub fn all_required_relays_completed(&self, required_relay_count: usize) -> bool {
+        required_relay_count > 0 && self.relay_count >= required_relay_count && !self.had_errors
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateRelayProbeDecision {
+    UsePrivateResult,
+    RetryPublicDiscovery,
+    FailClosed,
+}
+
+/// Decide whether a query limited to kind-10318 relay hints may be broadened.
+///
+/// A private announcement keeps the result restricted even if another
+/// repository relay failed. Otherwise every repository relay must have
+/// completed successfully before ordinary public discovery is safe.
+pub fn private_relay_probe_decision(
+    discovered_privacy: Option<bool>,
+    all_required_relays_completed: bool,
+) -> PrivateRelayProbeDecision {
+    if discovered_privacy == Some(true) {
+        PrivateRelayProbeDecision::UsePrivateResult
+    } else if all_required_relays_completed {
+        PrivateRelayProbeDecision::RetryPublicDiscovery
+    } else {
+        PrivateRelayProbeDecision::FailClosed
+    }
+}
+
 pub fn get_fetch_filters(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     proposal_ids: &HashSet<EventId>,
@@ -2906,8 +3117,11 @@ enum RelayFetchScope {
 pub struct FetchRequest {
     repo_relays: HashSet<RelayUrl>,
     announcement_indexer_relays: HashSet<RelayUrl>,
+    repository_relays_only: bool,
+    lock_repository_relays: bool,
     selected_relay: Option<RelayUrl>,
     scope: RelayFetchScope,
+    repo_auth_mode: RelayAuthMode,
     relay_column_width: usize,
     repo_coordinates_without_relays: Vec<(Nip19Coordinate, Option<Timestamp>)>,
     state: Option<(Timestamp, EventId)>,
@@ -2978,6 +3192,137 @@ pub async fn fetching_with_report(
     #[cfg(not(test))] client: &Client,
     selected_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<FetchReport> {
+    fetching_with_report_policy(git_repo_path, client, selected_maintainer_coordinate, false).await
+}
+
+/// Fetch repository data without sending repository coordinates to configured
+/// indexers or fallback relays.
+pub async fn fetching_with_report_from_repository_relays(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    selected_maintainer_coordinate: &Nip19Coordinate,
+) -> Result<FetchReport> {
+    fetching_with_report_policy(git_repo_path, client, selected_maintainer_coordinate, true).await
+}
+
+async fn fetching_with_report_from_repository_relays_with_outcome(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    selected_maintainer_coordinate: &Nip19Coordinate,
+) -> Result<FetchOutcome> {
+    fetching_with_report_policy_outcome(git_repo_path, client, selected_maintainer_coordinate, true)
+        .await
+}
+
+/// Fetch with private discovery hints, probing only those repository relays
+/// until repository privacy is known.
+///
+/// Once a cached or freshly fetched announcement marks the repository private,
+/// the coordinate is never sent to configured announcement indexers or
+/// fallback relays.
+pub async fn fetching_with_private_discovery(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    coordinate: &mut Nip19Coordinate,
+    private_discovery: &PrivateGitRelayDiscovery,
+) -> Result<FetchReport> {
+    if let Some(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), coordinate)
+        .await
+        .ok()
+        .filter(|repo_ref| repo_ref.private)
+    {
+        save_repository_privacy_to_git_config(git_repo_path, true);
+        coordinate
+            .relays
+            .retain(|relay| repo_ref.relays.contains(relay));
+        for relay in repo_ref.relays {
+            if !coordinate.relays.contains(&relay) {
+                coordinate.relays.push(relay);
+            }
+        }
+        return fetching_with_report_from_repository_relays(git_repo_path, client, coordinate)
+            .await;
+    }
+
+    if let PrivateGitRelayDiscovery::Unavailable(error) = private_discovery {
+        if get_repo_ref_from_cache(Some(git_repo_path), coordinate)
+            .await
+            .is_ok()
+        {
+            return fetching_with_report_from_repository_relays(git_repo_path, client, coordinate)
+                .await;
+        }
+        bail!("private Git relay discovery is unavailable: {error}");
+    }
+
+    if private_discovery.requires_repository_only_probe() {
+        let mut private_coordinate = coordinate.clone();
+        private_coordinate.relays = private_discovery.relays().to_vec();
+        let private_outcome = fetching_with_report_from_repository_relays_with_outcome(
+            git_repo_path,
+            client,
+            &private_coordinate,
+        )
+        .await?;
+        let discovered_repo_ref = get_repo_ref_from_cache(Some(git_repo_path), coordinate)
+            .await
+            .ok();
+        let discovered_privacy = discovered_repo_ref
+            .as_ref()
+            .map(|repo_ref| repo_ref.private);
+        let private_probe_completed =
+            private_outcome.all_required_relays_completed(private_discovery.relays().len());
+        match private_relay_probe_decision(discovered_privacy, private_probe_completed) {
+            PrivateRelayProbeDecision::UsePrivateResult => {
+                if let Some(repo_ref) = discovered_repo_ref {
+                    save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
+                    coordinate.relays = repo_ref.relays;
+                }
+                return Ok(private_outcome.report);
+            }
+            PrivateRelayProbeDecision::RetryPublicDiscovery => {}
+            PrivateRelayProbeDecision::FailClosed => {
+                bail!(
+                    "private repository relay probe failed; refusing to query public discovery relays"
+                );
+            }
+        }
+    }
+
+    let report = fetching_with_report(git_repo_path, client, coordinate).await?;
+    if let Ok(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), coordinate).await {
+        save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
+    }
+    Ok(report)
+}
+
+async fn fetching_with_report_policy(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    selected_maintainer_coordinate: &Nip19Coordinate,
+    repository_relays_only: bool,
+) -> Result<FetchReport> {
+    Ok(fetching_with_report_policy_outcome(
+        git_repo_path,
+        client,
+        selected_maintainer_coordinate,
+        repository_relays_only,
+    )
+    .await?
+    .report)
+}
+
+async fn fetching_with_report_policy_outcome(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    selected_maintainer_coordinate: &Nip19Coordinate,
+    repository_relays_only: bool,
+) -> Result<FetchOutcome> {
     let verbose = is_verbose();
     if verbose {
         let term = console::Term::stderr();
@@ -2988,23 +3333,24 @@ pub async fn fetching_with_report(
             Some(git_repo_path),
             Some(selected_maintainer_coordinate),
             &HashSet::new(),
+            repository_relays_only,
         )
         .await?;
-    if !relay_reports.iter().any(std::result::Result::is_err) {
+    let outcome = consolidate_fetch_outcome(relay_reports);
+    if !outcome.had_errors {
         let _ = progress_reporter.clear();
     }
-    let report = consolidate_fetch_reports(relay_reports);
     // Route the summary to stderr so stdout stays clean for JSON-emitting
     // subcommands (e.g. `ngit issue list --json | jq .`). The progress bars
     // above also write to stderr, keeping all human-facing fetch chatter off
     // stdout.
     let term = console::Term::stderr();
-    if report.to_string().is_empty() {
+    if outcome.report.to_string().is_empty() {
         term.write_line("no updates")?;
     } else {
-        term.write_line(&format!("updates: {report}"))?;
+        term.write_line(&format!("updates: {}", outcome.report))?;
     }
-    Ok(report)
+    Ok(outcome)
 }
 
 /// Like `fetching_with_report` but suppresses the "no updates" / "updates: X"
@@ -3016,17 +3362,31 @@ pub async fn fetching_quietly(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     selected_maintainer_coordinate: &Nip19Coordinate,
+    private_discovery: &PrivateGitRelayDiscovery,
 ) -> Result<(FetchReport, bool)> {
     let verbose = is_verbose();
     if verbose {
         let term = console::Term::stderr();
         term.write_line("Checking nostr relays...")?;
     }
+    let cached_repo_ref =
+        get_repo_ref_from_cache(Some(git_repo_path), selected_maintainer_coordinate)
+            .await
+            .ok();
+    if let PrivateGitRelayDiscovery::Unavailable(error) = private_discovery {
+        if cached_repo_ref.is_none() {
+            bail!("private Git relay discovery is unavailable: {error}");
+        }
+    }
+    let repository_relays_only = private_discovery.requires_repository_only_probe()
+        || cached_repo_ref.is_some_and(|repo_ref| repo_ref.private)
+        || matches!(private_discovery, PrivateGitRelayDiscovery::Unavailable(_));
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
             Some(selected_maintainer_coordinate),
             &HashSet::new(),
+            repository_relays_only,
         )
         .await?;
     let had_errors = relay_reports.iter().any(std::result::Result::is_err);
@@ -3283,7 +3643,17 @@ async fn send_events_with_cache_path(
     animate: bool,
     silent: bool,
 ) -> Result<Vec<(String, bool)>> {
-    let repo_relay_only = std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
+    let locally_private = config_repo_path.is_some_and(|path| {
+        git2::Repository::open(path)
+            .ok()
+            .and_then(|repo| repo.config().ok())
+            .and_then(|config| config.get_bool("nostr.private").ok())
+            .unwrap_or(false)
+    });
+    let private_repository =
+        private_for_publication(config_repo_path, &events, locally_private).await;
+    let repo_relay_only = private_repository
+        || std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
         || config_repo_path.is_some_and(|path| {
             git2::Repository::open(path)
                 .ok()
@@ -3293,7 +3663,7 @@ async fn send_events_with_cache_path(
         });
 
     if repo_relay_only && repo_read_relays.is_empty() {
-        bail!("--repo-relay-only requires the repository to declare at least one relay")
+        bail!("repository-only publication requires at least one repository relay")
     }
 
     let my_write_relays = if repo_relay_only {
@@ -3311,7 +3681,7 @@ async fn send_events_with_cache_path(
         } else {
             vec![]
         },
-        if events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
+        if !repo_relay_only && events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
             client.get_blaster_relays().clone()
         } else {
             vec![]
@@ -3319,6 +3689,18 @@ async fn send_events_with_cache_path(
     ]
     .concat();
     let mut relays: Vec<&str> = vec![];
+
+    if private_repository {
+        client.nip42_register_private_repo_relays(repo_read_relays.clone());
+    } else {
+        client.nip42_register_repo_relays(repo_read_relays.clone());
+    }
+    client.nip42_register_publish_relays(
+        my_write_relays
+            .iter()
+            .filter_map(|relay| RelayUrl::parse(relay).ok())
+            .collect(),
+    );
 
     let repo_read_relays = repo_read_relays
         .iter()
@@ -3671,6 +4053,123 @@ fn remove_trailing_slash(s: &str) -> String {
     .to_string()
 }
 
+fn events_repository_privacy(events: &[Event]) -> Option<bool> {
+    let announcements = events
+        .iter()
+        .filter(|event| event.kind == Kind::GitRepoAnnouncement)
+        .collect::<Vec<_>>();
+    (!announcements.is_empty()).then(|| {
+        announcements.iter().any(|event| {
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["private".to_string(), "true".to_string()])
+        })
+    })
+}
+
+async fn private_for_publication(
+    git_repo_path: Option<&Path>,
+    events: &[Event],
+    locally_private: bool,
+) -> bool {
+    let Some(identifier) = events
+        .iter()
+        .find(|event| event.kind == Kind::GitRepoAnnouncement)
+        .and_then(|event| event.tags.identifier())
+    else {
+        return locally_private;
+    };
+    let Some(path) = git_repo_path else {
+        return events_repository_privacy(events).unwrap_or(locally_private);
+    };
+
+    match publication_privacy_after_replacements(path, &identifier, events).await {
+        Ok(Some(private)) => private,
+        // Broadening publication is safe only after the complete recursive
+        // maintainer set has been evaluated. A cache/configuration failure must
+        // therefore preserve private routing.
+        Ok(None) | Err(_) => locally_private || events_repository_privacy(events) == Some(true),
+    }
+}
+
+async fn publication_privacy_after_replacements(
+    git_repo_path: &Path,
+    identifier: &str,
+    replacements: &[Event],
+) -> Result<Option<bool>> {
+    use nostr::nips::nip19::FromBech32;
+
+    let repository = git2::Repository::open(git_repo_path)?;
+    let selected = Nip19Coordinate::from_bech32(
+        &repository
+            .config()?
+            .get_string("nostr.repo")
+            .context("nostr.repo is not configured")?,
+    )?;
+    if selected.identifier != identifier {
+        return Ok(None);
+    }
+
+    let filter = nostr::prelude::Filter::default()
+        .kind(Kind::GitRepoAnnouncement)
+        .identifiers([identifier.to_string()]);
+    let mut announcements =
+        get_event_from_global_cache(Some(git_repo_path), vec![filter.clone()]).await?;
+    announcements.extend(get_events_from_local_cache(git_repo_path, vec![filter]).await?);
+    announcements.extend(replacements.iter().cloned());
+
+    Ok(Some(repository_privacy_from_effective_announcements(
+        selected.public_key,
+        identifier,
+        &announcements,
+    )))
+}
+
+fn repository_privacy_from_effective_announcements(
+    selected_maintainer: PublicKey,
+    identifier: &str,
+    announcements: &[Event],
+) -> bool {
+    let mut effective = HashMap::<PublicKey, &Event>::new();
+    for candidate in announcements.iter().filter(|event| {
+        event.kind == Kind::GitRepoAnnouncement
+            && event.tags.identifier().is_some_and(|id| id == identifier)
+    }) {
+        let replace = effective.get(&candidate.pubkey).is_none_or(|current| {
+            crate::event_ordering::latest_event([*current, candidate])
+                .is_some_and(|latest| latest.id == candidate.id)
+        });
+        if replace {
+            effective.insert(candidate.pubkey, candidate);
+        }
+    }
+
+    let mut pending = VecDeque::from([selected_maintainer]);
+    let mut visited = HashSet::new();
+    while let Some(maintainer) = pending.pop_front() {
+        if !visited.insert(maintainer) {
+            continue;
+        }
+        let Some(event) = effective.get(&maintainer) else {
+            if maintainer == selected_maintainer {
+                return true;
+            }
+            continue;
+        };
+        let Ok(repo_ref) = RepoRef::try_from(((*event).clone(), None)) else {
+            // An effective announcement that cannot be interpreted must never
+            // be allowed to broaden publication.
+            return true;
+        };
+        if repo_ref.private {
+            return true;
+        }
+        pending.extend(repo_ref.maintainers);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use nostr::prelude::event::{FinalizeUnsignedEvent, SignEvent};
@@ -3863,5 +4362,253 @@ mod tor_proxy_tests {
             std::net::TcpStream::connect_timeout(&candidate, TOR_PROXY_PROBE_TIMEOUT).is_ok()
         });
         assert_eq!(found, Some(listener_addr));
+    }
+}
+
+#[cfg(test)]
+mod private_repository_tests {
+    use nostr::prelude::{
+        EventBuilder, Keys, Tag,
+        event::{FinalizeUnsignedEvent, SignEvent},
+    };
+
+    use super::*;
+
+    fn signed(keys: &Keys, builder: EventBuilder) -> Event {
+        keys.sign_event(builder.finalize_unsigned(keys.public_key()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn private_publication_requires_an_exact_private_tag() {
+        fn announcement(tag: Option<&[&str]>) -> Event {
+            let keys = Keys::generate();
+            let mut tags = vec![Tag::identifier("repo")];
+            if let Some(tag) = tag {
+                tags.push(Tag::parse(tag.iter().copied()).unwrap());
+            }
+            signed(
+                &keys,
+                EventBuilder::new(Kind::GitRepoAnnouncement, "").tags(tags),
+            )
+        }
+
+        assert_eq!(
+            events_repository_privacy(&[announcement(Some(&["private", "true"]))]),
+            Some(true)
+        );
+        for tag in [
+            None,
+            Some(&["private", "false"][..]),
+            Some(&["private", "TRUE"][..]),
+            Some(&["private", "true", "extra"][..]),
+        ] {
+            assert_eq!(events_repository_privacy(&[announcement(tag)]), Some(false));
+        }
+        let keys = Keys::generate();
+        let related = signed(&keys, EventBuilder::new(Kind::TextNote, "related"));
+        assert_eq!(
+            events_repository_privacy(std::slice::from_ref(&related)),
+            None
+        );
+        assert!(
+            !private_for_publication(None, &[announcement(None)], true).await,
+            "a public replacement must override stale local private state"
+        );
+        assert!(
+            private_for_publication(None, &[related], true).await,
+            "related events must inherit current local private state"
+        );
+    }
+
+    #[test]
+    fn recursive_maintainer_events_are_private_when_any_announcement_is_private() {
+        fn announcement(keys: &Keys, private: bool) -> Event {
+            let mut tags = vec![Tag::identifier("repo")];
+            if private {
+                tags.push(Tag::parse(["private", "true"]).unwrap());
+            }
+            keys.sign_event(
+                EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                    .tags(tags)
+                    .finalize_unsigned(keys.public_key()),
+            )
+            .unwrap()
+        }
+
+        let maintainers = [Keys::generate(), Keys::generate(), Keys::generate()];
+        let public_events = maintainers
+            .iter()
+            .map(|keys| announcement(keys, false))
+            .collect::<Vec<_>>();
+        assert!(!repository_events_are_private(&public_events));
+
+        let mut recursive_events = public_events;
+        recursive_events[2] = announcement(&maintainers[2], true);
+        assert!(repository_events_are_private(&recursive_events));
+    }
+
+    #[test]
+    fn cached_private_repository_always_restricts_relay_discovery() {
+        assert!(restrict_repository_relays(false, true));
+        assert!(restrict_repository_relays(true, false));
+        assert!(!restrict_repository_relays(false, false));
+        assert!(!coordinate_hints_are_allowed(true));
+        assert!(coordinate_hints_are_allowed(false));
+    }
+
+    #[test]
+    fn repository_privacy_is_persisted_and_updated_in_git_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = git2::Repository::init(dir.path()).unwrap();
+        save_repository_privacy_to_git_config(dir.path(), true);
+        assert!(
+            repository
+                .config()
+                .unwrap()
+                .get_bool("nostr.private")
+                .unwrap()
+        );
+        save_repository_privacy_to_git_config(dir.path(), false);
+        assert!(
+            !repository
+                .config()
+                .unwrap()
+                .get_bool("nostr.private")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn repository_privacy_persistence_degrades_to_warning_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        save_repository_privacy_to_git_config(&dir.path().join("missing"), true);
+    }
+
+    /// An unchanged value must not open `.git/config` for writing: read-only
+    /// flows and concurrent remote-helper processes would otherwise contend
+    /// on `config.lock`, and a failed write must degrade to a warning.
+    #[test]
+    fn unchanged_repository_privacy_is_not_rewritten_and_write_failures_degrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = git2::Repository::init(dir.path()).unwrap();
+        save_repository_privacy_to_git_config(dir.path(), true);
+
+        let git_dir = repository.path().to_path_buf();
+        let config_lock = git_dir.join("config.lock");
+        std::fs::File::create(&config_lock).unwrap();
+
+        // same value: no write is attempted, so the existing lock is fine
+        save_repository_privacy_to_git_config(dir.path(), true);
+        // changed value: the failed write warns instead of failing the flow
+        save_repository_privacy_to_git_config(dir.path(), false);
+
+        std::fs::remove_file(config_lock).unwrap();
+        assert!(
+            repository
+                .config()
+                .unwrap()
+                .get_bool("nostr.private")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn successful_empty_private_probe_allows_public_fallback() {
+        let outcome =
+            consolidate_fetch_outcome(vec![Ok(FetchReport::default()), Ok(FetchReport::default())]);
+        assert!(!outcome.had_errors);
+        assert_eq!(
+            private_relay_probe_decision(None, outcome.all_required_relays_completed(2)),
+            PrivateRelayProbeDecision::RetryPublicDiscovery
+        );
+    }
+
+    #[test]
+    fn partial_and_complete_private_probe_failures_never_allow_public_fallback() {
+        for outcome in [
+            consolidate_fetch_outcome(vec![
+                Ok(FetchReport::default()),
+                Err(anyhow!("relay b unavailable")),
+            ]),
+            consolidate_fetch_outcome(vec![
+                Err(anyhow!("relay a unavailable")),
+                Err(anyhow!("relay b unavailable")),
+            ]),
+        ] {
+            assert!(outcome.had_errors);
+            assert_eq!(
+                private_relay_probe_decision(None, outcome.all_required_relays_completed(2)),
+                PrivateRelayProbeDecision::FailClosed
+            );
+        }
+        let skipped = consolidate_fetch_outcome(vec![]);
+        assert_eq!(
+            private_relay_probe_decision(None, skipped.all_required_relays_completed(1)),
+            PrivateRelayProbeDecision::FailClosed
+        );
+    }
+
+    #[test]
+    fn publication_privacy_uses_post_replacement_recursive_maintainers() {
+        fn announcement(
+            keys: &Keys,
+            maintainers: &[PublicKey],
+            private: bool,
+            created_at: u64,
+        ) -> Event {
+            let mut tags = vec![
+                Tag::identifier("repo"),
+                Tag::parse(
+                    [
+                        vec!["maintainers".to_string()],
+                        maintainers.iter().map(ToString::to_string).collect(),
+                    ]
+                    .concat(),
+                )
+                .unwrap(),
+            ];
+            if private {
+                tags.push(Tag::parse(["private", "true"]).unwrap());
+            }
+            signed(
+                keys,
+                EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                    .tags(tags)
+                    .custom_created_at(Timestamp::from_secs(created_at)),
+            )
+        }
+
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let current = vec![
+            announcement(&alice, &[alice.public_key(), bob.public_key()], true, 1),
+            announcement(&bob, &[alice.public_key(), bob.public_key()], true, 1),
+        ];
+        let alice_public_replacement =
+            announcement(&alice, &[alice.public_key(), bob.public_key()], false, 2);
+        assert!(
+            repository_privacy_from_effective_announcements(
+                alice.public_key(),
+                "repo",
+                &[current.clone(), vec![alice_public_replacement.clone()]].concat(),
+            ),
+            "one maintainer's public replacement must not leak while another current announcement remains private"
+        );
+
+        let bob_public_replacement =
+            announcement(&bob, &[alice.public_key(), bob.public_key()], false, 2);
+        assert!(
+            !repository_privacy_from_effective_announcements(
+                alice.public_key(),
+                "repo",
+                &[
+                    current,
+                    vec![alice_public_replacement, bob_public_replacement],
+                ]
+                .concat(),
+            ),
+            "publication may broaden only after every reachable current announcement is public"
+        );
     }
 }

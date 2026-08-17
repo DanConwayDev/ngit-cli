@@ -1,60 +1,21 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
-use nostr::prelude::{
-    Event, EventBuilder, EventId, Keys, PublicKey,
-    event::{AsyncSignEvent, FinalizeUnsignedEvent, SignEvent, UnsignedEvent},
-    key::AsyncGetPublicKey,
+use nostr::{
+    nips::nip44::{AsyncNip44, Nip44},
+    prelude::{
+        Event, EventBuilder, EventId, Keys, PublicKey,
+        event::{AsyncSignEvent, FinalizeUnsignedEvent, SignEvent, UnsignedEvent},
+        key::AsyncGetPublicKey,
+    },
 };
-use nostr_connect::{client::NostrConnect, error::Error as NostrConnectError};
-use nostr_sdk::{authenticator::SignerAuthenticator, client::ClientBuilder, relay::RelayLimits};
+use nostr_connect::client::NostrConnect;
 
 /// Signer abstraction covering both local keys and remote NIP-46 bunker.
 #[derive(Clone)]
 pub enum NgitSigner {
     Keys(Keys),
     Connect(Arc<NostrConnect>),
-}
-
-/// Authenticator-facing handle that shares a single bootstrapped
-/// [`NostrConnect`] instance via an [`Arc`].
-///
-/// The NIP-42 [`SignerAuthenticator`] takes its signer by value, so we can't
-/// hand it a borrow. Cloning the underlying `NostrConnect` would give the
-/// authenticator an independent, empty connect cache (`OnceCell`), forcing a
-/// second connect handshake to the bunker the first time it signs an AUTH
-/// event. Wrapping the shared `Arc` lets the authenticator reuse the
-/// already-bootstrapped instance (and its live relay connection) instead.
-#[derive(Debug, Clone)]
-struct SharedConnect(Arc<NostrConnect>);
-
-impl AsyncGetPublicKey for SharedConnect {
-    type Error = NostrConnectError;
-
-    #[inline]
-    fn get_public_key_async(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<PublicKey, Self::Error>> + Send + '_>> {
-        self.0.get_public_key_async()
-    }
-}
-
-impl AsyncSignEvent for SharedConnect {
-    type Error = NostrConnectError;
-
-    #[inline]
-    fn sign_event_async(
-        &self,
-        unsigned: UnsignedEvent,
-    ) -> Pin<Box<dyn Future<Output = Result<Event, Self::Error>> + Send + '_>> {
-        Box::pin(async move {
-            let expected_public_key = unsigned.pubkey;
-            let expected_event_id = unsigned.compute_id();
-            let event = self.0.sign_event_async(unsigned).await?;
-            validate_remote_signed_event(expected_public_key, expected_event_id, event)
-                .map_err(|error| NostrConnectError::other(std::io::Error::other(error.to_string())))
-        })
-    }
 }
 
 fn validate_remote_signed_event(
@@ -100,29 +61,34 @@ impl NgitSigner {
         self.sign_event(unsigned).await
     }
 
+    pub async fn nip44_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String> {
+        match self {
+            Self::Keys(keys) => keys
+                .nip44_encrypt(public_key, content)
+                .map_err(|error| anyhow!(error)),
+            Self::Connect(connect) => connect
+                .nip44_encrypt_async(public_key, content)
+                .await
+                .map_err(|error| anyhow!(error)),
+        }
+    }
+
+    pub async fn nip44_decrypt(&self, public_key: &PublicKey, payload: &str) -> Result<String> {
+        match self {
+            Self::Keys(keys) => keys
+                .nip44_decrypt(public_key, payload)
+                .map_err(|error| anyhow!(error)),
+            Self::Connect(connect) => connect
+                .nip44_decrypt_async(public_key, payload)
+                .await
+                .map_err(|error| anyhow!(error)),
+        }
+    }
+
     /// True when this is a remote (NIP-46) signer — used to show progress
     /// messages.
     pub fn is_remote(&self) -> bool {
         matches!(self, Self::Connect(_))
-    }
-
-    /// Build a nostr_sdk client with the appropriate NIP-42 authenticator.
-    pub fn build_client(&self) -> nostr_sdk::client::Client {
-        let builder = match self {
-            Self::Keys(k) => ClientBuilder::default()
-                .relay_limits(RelayLimits::disable())
-                .verify_subscriptions(true)
-                .authenticator(SignerAuthenticator::new(k.clone())),
-            Self::Connect(c) => ClientBuilder::default()
-                .relay_limits(RelayLimits::disable())
-                .verify_subscriptions(true)
-                .authenticator(SignerAuthenticator::new(SharedConnect(Arc::clone(c)))),
-        };
-        // Route `.onion` relays through the configured SOCKS5/Tor proxy.
-        match crate::client::tor_socks5_proxy_addr() {
-            Some(addr) => builder.proxy(nostr_sdk::proxy::Proxy::onion(addr)).build(),
-            None => builder.build(),
-        }
     }
 }
 

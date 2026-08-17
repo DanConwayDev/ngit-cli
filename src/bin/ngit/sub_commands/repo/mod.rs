@@ -21,7 +21,7 @@ use crate::{
     client::{Client, Connect},
     git::{Repo, RepoActions},
     repo_ref::{get_nostr_remote_for_resolved_coordinate, try_resolve_repo_coordinate},
-    sub_commands::init,
+    sub_commands::{init, repository_fetch::prepare_account_for_repo_fetch},
 };
 
 pub async fn launch(
@@ -119,10 +119,10 @@ fn maintainer_json_fields(repo_ref: &RepoRef) -> MaintainerJsonFields {
 async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
     // Attempt a silent login — don't prompt if not logged in.
-    let login = load_existing_login(
+    let active_login = load_existing_login(
         &Some(&git_repo),
         signer.info,
         signer.password,
@@ -133,11 +133,14 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
         false, // don't fetch profile updates
     )
     .await;
-    let my_pubkey: Option<PublicKey> = match login {
-        Ok((_, user_ref, _)) => Some(user_ref.public_key),
+    let active_login = match active_login {
+        Ok(login) => Some(login),
         Err(error) if signer.info.is_some() => return Err(error),
         Err(_) => None,
     };
+    let my_pubkey = active_login
+        .as_ref()
+        .map(|(_, user_ref, _)| user_ref.public_key);
 
     let Some(resolved_repo) = try_resolve_repo_coordinate(&git_repo).await? else {
         if json {
@@ -172,13 +175,19 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
     };
     let selected_remote =
         get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo).await?;
-    let repo_coordinate = resolved_repo.coordinate;
-
+    let mut repo_coordinate = resolved_repo.coordinate;
     // Fetch latest data from relays — suppress the summary line.
     // fetching_quietly writes a blank line to stderr after errors so there
     // is clear separation before the repo info below.
     if !offline {
-        let _ = fetching_quietly(git_repo_path, &client, &repo_coordinate).await;
+        let private_discovery = if let Some((signer, user_ref, _)) = active_login.as_ref() {
+            prepare_account_for_repo_fetch(&mut client, &mut repo_coordinate, signer, user_ref)
+                .await
+        } else {
+            ngit::login::user::PrivateGitRelayDiscovery::Absent
+        };
+        let _ =
+            fetching_quietly(git_repo_path, &client, &repo_coordinate, &private_discovery).await;
     }
 
     let Some(repo_ref) =

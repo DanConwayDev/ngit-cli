@@ -9,35 +9,47 @@ use ngit::{
         KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         get_pr_tip_event_or_most_recent_patch_with_ancestors, pr_event_clone_tag_urls, tag_value,
     },
+    git_http_auth::prepare_private_git_auth_for_repo,
     repo_ref::RepoRef,
 };
 
 use crate::{
-    client::{
-        Client, Connect, fetching_with_report, get_repo_ref_from_cache,
-        warn_if_invited_as_maintainer,
-    },
+    cli::SignerParams,
+    client::{Client, Connect, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions},
     repo_ref::get_repo_coordinates_when_remote_unknown,
-    sub_commands::id_resolver::{pr_description, resolve_pr_root_or_prefix},
+    sub_commands::{
+        id_resolver::{pr_description, resolve_pr_root_or_prefix},
+        repository_fetch::fetching_with_account,
+    },
 };
 
-pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
+pub async fn launch(id: &str, stdout: bool, offline: bool, auth: SignerParams<'_>) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
-    let client = Client::new(ngit::client::Params::with_git_config_relay_defaults(&Some(
+    let mut client = Client::new(ngit::client::Params::with_git_config_relay_defaults(&Some(
         &git_repo,
     )));
 
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let mut repo_coordinates =
+        get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
 
     if !offline {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        fetching_with_account(
+            &git_repo,
+            git_repo_path,
+            &mut client,
+            &mut repo_coordinates,
+            auth,
+        )
+        .await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
+    let private_signer =
+        prepare_private_git_auth_for_repo(&repo_ref, &git_repo, auth.info, auth.password).await?;
 
     let proposals_and_revisions: Vec<nostr::prelude::Event> =
         ngit::client::get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
@@ -63,7 +75,14 @@ pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
         let pr_event = patches
             .first()
             .context("patch chain should contain at least one event")?;
-        apply_pr(&git_repo, &repo_ref, pr_event, stdout)?;
+        apply_pr(
+            &git_repo,
+            &repo_ref,
+            pr_event,
+            stdout,
+            private_signer.as_ref(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -76,11 +95,12 @@ pub async fn launch(id: &str, stdout: bool, offline: bool) -> Result<()> {
     Ok(())
 }
 
-fn apply_pr(
+async fn apply_pr(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     pr_event: &nostr::prelude::Event,
     stdout: bool,
+    private_signer: Option<&std::sync::Arc<ngit::signer::NgitSigner>>,
 ) -> Result<()> {
     let tip_oid = tag_value(pr_event, "c").context("PR event is missing 'c' (tip commit) tag")?;
 
@@ -93,7 +113,9 @@ fn apply_pr(
         repo_ref,
         &extras,
         &console::Term::stderr(),
-    )?;
+        private_signer,
+    )
+    .await?;
 
     let tip = str_to_sha1(&tip_oid).context("invalid tip commit OID in PR event")?;
 

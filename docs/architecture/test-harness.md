@@ -9,8 +9,9 @@ flaky one, or extending the harness itself.
 `test_harness` drives ngit subcommands against real loopback
 infrastructure: vanilla `nostr-relay-builder` relays for non-repo
 events, an `ngit-grasp` subprocess for repo events plus git
-smart-http, and (where needed) an in-process vanilla git server. Each
-test gets its own ports, its own tempdirs, its own keys. Tests are
+smart-http, a Nix-built Buzz relay for its channel-gated Git profile,
+and (where needed) an in-process vanilla git server. Each test gets
+its own ports, its own tempdirs, its own keys. Tests are
 **parallel by default** — there is no `#[serial]`, no PTY, no
 `rexpect`, no exact-stdout assertion. Assertions target git state and
 the relay event store; CLI stdout is tertiary.
@@ -28,6 +29,10 @@ test process (tokio runtime)
  │
  ├── grasp subprocess A (in-memory mode, port :0)
  ├── grasp subprocess B (in-memory mode, port :0)
+ ├── Buzz relay subprocess (port :0)
+ │     ├── Postgres subprocess (port :0)
+ │     ├── Redis subprocess (port :0)
+ │     └── Garage S3-compatible subprocess (ports :0)
  ├── vanilla relay task(s) (in-process, port :0)
  │
  ├── ngit subprocess (Command, env={NGIT_RELAY_DEFAULT_SET=…, NGITTEST=TRUE, …})
@@ -85,9 +90,9 @@ Future renames or splits to the relay-set model are deliberately out
 of scope here. Refactor against the harness once the harness is
 stable, not the other way around.
 
-### Relay roles: vanilla relays vs GRASP
+### Relay roles: vanilla relays, GRASP, and Buzz
 
-Two relay primitives:
+Three relay primitives:
 
 - **Vanilla nostr relay** (`HarnessBuilder::with_relay`) —
   `nostr-relay-builder::LocalRelay` in-process on `127.0.0.1:0`.
@@ -99,17 +104,31 @@ Two relay primitives:
   kind 30617 announcements, NIP-34 patches, state events) **and**
   git smart-http for the actual git data. Vanilla nostr events like
   kind 0 are rejected.
+- **Buzz server** (`BuzzServer::start`) — the exact Nix-built relay
+  revision pinned in `flake.lock`, backed by isolated Postgres, Redis,
+  and Garage processes. Tests create channels and announcements over
+  authenticated Nostr, then exercise Buzz's `buzz-channel` ACL and
+  repository-scoped NIP-98 through ngit. The fixture is Linux-only and
+  requires `nix develop`, which supplies `BUZZ_RELAY_BIN` and the
+  service binaries.
 
 GRASP cannot stand in for a vanilla relay. Tests that publish user
 profiles, relay lists, or NIP-46 signer events need at least one
 `with_relay()` instance.
 
-A third primitive,
+The separate Git-only utility,
 `HarnessBuilder::with_vanilla_git_server` /
 `vanilla_git_server::VanillaGitServer`, provides a non-grasp git
 clone URL — needed to exercise the
 `is_grasp_server_clone_url == false` branches that GRASP cannot
 trigger.
+
+Buzz's production object-store conformance probe is explicitly off in
+the fixture. Garage 2.3 is suitable for deterministic, sequential test
+traffic but does not satisfy Buzz's concurrent conditional-write
+admission probe. The integration test still covers the real stored Git
+clone, fetch, and push paths; production deployments must leave the
+probe enabled against their supported object store.
 
 Role labels map onto the env-var schema:
 
@@ -119,6 +138,7 @@ Role labels map onto the env-var schema:
 | `with_relay("blaster")` | `NGIT_RELAY_BLASTER_SET` |
 | `with_relay("signer_fallback")` | `NGIT_RELAY_SIGNER_FALLBACK_SET` |
 | `with_grasp_server("repo")` | `NGIT_GRASP_DEFAULT_SET` + advertised in repo announcements |
+| `with_private_grasp_server("repo", member)` | GRASP-08 service with NIP-42/NIP-98 member authentication |
 | `with_vanilla_git_server("…")` | role-keyed lookup only — no env injection (ngit has no process-level git-server discovery) |
 
 A test can register multiple instances under the same role; the env
@@ -312,7 +332,8 @@ fallback (2) picks it up. Or set `NGIT_GRASP_BIN` in `.envrc`.
 root `flake.nix`. The dev shell builds it (`doCheck = false`),
 exposes the binary on `buildInputs`, and exports `NGIT_GRASP_BIN`
 from `shellHook`. CI runs `nix develop --command cargo test`.
-Bumping ngit-grasp is a one-line `nix flake update ngit-grasp`.
+Bumping ngit-grasp requires changing the immutable `rev` in `flake.nix`, then
+running `nix flake update ngit-grasp` to regenerate its lock entry.
 
 **Standalone vanilla relay (`with_relay`):** uses
 `nostr-relay-builder` in-process. Crates.io 0.44.x.

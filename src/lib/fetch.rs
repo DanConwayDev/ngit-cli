@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use auth_git2::GitAuthenticator;
 use git2::{Progress, Repository};
 
@@ -18,7 +18,9 @@ use crate::{
         remote_helper,
         utils::check_ssh_keys,
     },
+    git_http_auth::{authorization_for_url, prepare_private_git_auth},
     repo_ref::{RepoRef, is_grasp_server_in_list},
+    signer::NgitSigner,
     utils::{
         Direction, get_read_protocols_to_try, join_with_and, onion_proxy_options_for_url,
         set_protocol_preference,
@@ -39,12 +41,13 @@ use crate::{
 /// `extras_to_try_first` is the slot for caller-provided URLs such as the
 /// `clone` tag of a PR event. Callers that don't want to trust submitter-
 /// supplied URLs simply pass `&[]`.
-pub fn ensure_commit_local(
+pub async fn ensure_commit_local(
     oid: &str,
     git_repo: &Repo,
     repo_ref: &RepoRef,
     extras_to_try_first: &[String],
     term: &console::Term,
+    private_signer: Option<&Arc<NgitSigner>>,
 ) -> Result<()> {
     if git_repo.does_commit_exist(oid)? {
         return Ok(());
@@ -67,6 +70,14 @@ pub fn ensure_commit_local(
     }
 
     for git_server_url in ordered_servers {
+        if repo_ref.private {
+            prepare_private_git_auth(
+                std::slice::from_ref(git_server_url),
+                private_signer
+                    .context("private repository Git access requires a logged-in account")?,
+            )
+            .await?;
+        }
         if fetch_from_git_server(
             git_repo,
             &[oid.to_string()],
@@ -332,6 +343,10 @@ fn fetch_from_git_server_url(
         remote_callbacks.credentials(auth.credentials(&git_config));
     }
     fetch_options.remote_callbacks(remote_callbacks);
+    let authorization = authorization_for_url(git_server_url);
+    if let Some(header) = authorization.as_deref() {
+        fetch_options.custom_headers(&[header]);
+    }
 
     git_server_remote.download(refspecs, Some(&mut fetch_options))?;
 

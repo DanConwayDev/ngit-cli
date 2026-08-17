@@ -27,6 +27,7 @@ use crate::{
         oid_to_shorthand_string, remote_helper,
     },
     git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
+    git_http_auth::{authorization_for_url, prepare_private_git_auth},
     login::user::UserRef,
     repo_ref::{
         RepoRef, format_grasp_server_url_as_grasp06_prs_url, is_grasp_server_clone_url,
@@ -311,6 +312,10 @@ pub fn push_to_remote_url(
         }
     });
     push_options.remote_callbacks(remote_callbacks);
+    let authorization = authorization_for_url(git_server_url);
+    if let Some(header) = authorization.as_deref() {
+        push_options.custom_headers(&[header]);
+    }
     if !git_server_push_options.is_empty() {
         push_options.remote_push_options(git_server_push_options);
     }
@@ -735,6 +740,15 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
             .replace("<event-id>", &draft_pr_event.id().to_string());
 
         let refspec = format!("{tip}:{git_ref_used}");
+
+        // A proposal may target an explicit --git-server, a contributor
+        // fallback, or a GRASP-06 /prs endpoint which is not present in the
+        // repository announcement. Sign the exact repository root immediately
+        // before this Smart HTTP operation so those private endpoints receive
+        // a fresh, correctly scoped credential too.
+        if repo_ref.private {
+            prepare_private_git_auth(std::slice::from_ref(clone_url), signer).await?;
+        }
 
         let res = if is_grasp_server_clone_url(clone_url) {
             push_to_remote_url(

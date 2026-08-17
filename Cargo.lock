@@ -1774,6 +1774,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "auth-git2",
+ "base64",
  "bitcoin_hashes 1.2.0",
  "chacha20poly1305",
  "chrono",

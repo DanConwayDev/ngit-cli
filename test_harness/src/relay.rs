@@ -19,7 +19,7 @@ use std::{
 use anyhow::{Context, Result};
 use nostr_sdk::{
     error::{Error as SdkError, ErrorKind},
-    local_relay::LocalRelay,
+    local_relay::{LocalRelay, LocalRelayBuilderNip42},
     prelude::*,
 };
 
@@ -75,6 +75,7 @@ impl VanillaRelay {
     pub(crate) async fn start(
         role: impl Into<String>,
         mut reservation: PortReservation,
+        nip42: Option<LocalRelayBuilderNip42>,
     ) -> Result<Self> {
         let role = role.into();
         for attempt in 1..=MAX_BIND_ATTEMPTS {
@@ -85,10 +86,13 @@ impl VanillaRelay {
             // `reserve_port` calls in this process cannot have been handed
             // this port number while we held the reservation.
             let port = reservation.release();
-            let relay = LocalRelay::builder()
+            let mut builder = LocalRelay::builder()
                 .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
-                .port(port)
-                .build();
+                .port(port);
+            if let Some(nip42) = nip42.clone() {
+                builder = builder.nip42(nip42);
+            }
+            let relay = builder.build();
             match relay.run().await {
                 Ok(()) => {
                     let url = relay.url().await.to_string();

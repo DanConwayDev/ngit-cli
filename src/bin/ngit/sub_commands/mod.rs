@@ -17,6 +17,7 @@ pub mod merge;
 pub mod pr_merge;
 pub mod pr_status;
 pub mod repo;
+pub mod repository_fetch;
 pub mod send;
 pub mod set_cover_note;
 pub mod set_subject;

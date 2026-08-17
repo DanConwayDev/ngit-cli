@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use client::get_state_from_cache;
@@ -8,10 +11,12 @@ use ngit::{
     fetch::fetch_from_git_server,
     git::{self, Repo},
     git_events::{KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, event_to_cover_letter, tag_value},
+    git_http_auth::prepare_private_git_auth,
     list::list_from_remotes,
     login::get_curent_user,
     repo_ref::{self},
     repo_state::RepoState,
+    signer::NgitSigner,
     utils::{get_all_proposals, get_open_or_draft_proposals},
 };
 use repo_ref::RepoRef;
@@ -32,6 +37,7 @@ pub async fn run_list(
     repo_ref: &RepoRef,
     for_push: bool,
     fetch_report: &FetchReport,
+    signer: Option<&Arc<NgitSigner>>,
 ) -> Result<ListResult> {
     let nostr_state = (get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await).ok();
 
@@ -49,6 +55,7 @@ pub async fn run_list(
         &repo_ref.git_server,
         &nostr_git_url,
         nostr_state.as_ref(),
+        if repo_ref.private { signer } else { None },
     )
     .await;
 
@@ -129,6 +136,7 @@ pub async fn run_list(
             repo_ref,
             &remote_states,
             auto_pr_branches,
+            signer,
         )
         .await?,
     );
@@ -171,6 +179,7 @@ async fn get_open_and_draft_proposals_state(
     repo_ref: &RepoRef,
     remote_states: &HashMap<String, (HashMap<String, String>, bool)>,
     auto_pr_branches: bool,
+    signer: Option<&Arc<NgitSigner>>,
 ) -> Result<HashMap<String, String>> {
     let selected_local_branches = if auto_pr_branches {
         None
@@ -215,6 +224,13 @@ async fn get_open_and_draft_proposals_state(
     // the parent so we much do a fetch
 
     for (git_server_url, (oids_from_git_servers, is_grasp_server)) in remote_states {
+        if repo_ref.private {
+            prepare_private_git_auth(
+                std::slice::from_ref(git_server_url),
+                signer.context("private repository Git access requires a logged-in account")?,
+            )
+            .await?;
+        }
         if fetch_from_git_server(
             git_repo,
             &oids_from_git_servers
@@ -272,6 +288,13 @@ async fn get_open_and_draft_proposals_state(
                 .collect();
             if batch.is_empty() {
                 continue;
+            }
+            if repo_ref.private {
+                prepare_private_git_auth(
+                    std::slice::from_ref(server_url),
+                    signer.context("private repository Git access requires a logged-in account")?,
+                )
+                .await?;
             }
             let _ = fetch_from_git_server(
                 git_repo,

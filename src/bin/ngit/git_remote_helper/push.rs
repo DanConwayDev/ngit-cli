@@ -70,6 +70,7 @@ pub(super) async fn run_push(
     git_server: Option<String>,
     proposal_options: super::ProposalOptions,
     force_with_lease: &HashMap<String, Option<String>>,
+    private_signer: Option<&Arc<NgitSigner>>,
     command_signer: Option<&SignerInfo>,
 ) -> Result<()> {
     let refspecs = get_refspecs_from_push_batch(stdin, initial_refspec)?;
@@ -98,6 +99,11 @@ pub(super) async fn run_push(
                 &repo_ref.git_server,
                 &repo_ref.to_nostr_git_url(&None),
                 None,
+                if repo_ref.private {
+                    private_signer
+                } else {
+                    None
+                },
             )
             .await,
             HashMap::new(),
@@ -586,12 +592,12 @@ async fn create_events_and_proposals(
 
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
-    let repo_relay_only =
-        if let Ok(Some(v)) = git_repo.get_git_config_item("nostr.repo-relay-only", None) {
-            v == "true"
-        } else {
-            false
-        };
+    let repo_relay_only = repo_ref.private
+        || git_repo
+            .get_git_config_item("nostr.repo-relay-only", None)
+            .ok()
+            .flatten()
+            .is_some_and(|value| value == "true");
 
     let my_write_relays = if repo_relay_only {
         vec![]

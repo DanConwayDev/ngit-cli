@@ -11,6 +11,7 @@ use ngit::{
         is_event_proposal_root_for_branch, pr_event_clone_tag_urls, process_cover_note,
         process_subject, tag_value,
     },
+    git_http_auth::prepare_private_git_auth_for_repo,
     login::{get_curent_user, user::extract_user_metadata},
     proposal_base::resolve_target_branch_tip_with_known_tip,
     utils::get_open_or_draft_proposals,
@@ -18,18 +19,27 @@ use ngit::{
 use nostr::prelude::{EventId, PublicKey, RelayUrl, ToBech32, nip19::Nip19Event};
 
 use crate::{
+    cli::SignerParams,
     client::{
-        Client, Connect, fetching_with_report, get_events_from_local_cache,
-        get_repo_ref_from_cache, warn_if_invited_as_maintainer,
+        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
+        warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::{RepoRef, get_repo_coordinates_when_remote_unknown},
-    sub_commands::id_resolver::{pr_description, proposal_roots, resolve_pr_root_id_or_prefix},
+    sub_commands::{
+        id_resolver::{pr_description, proposal_roots, resolve_pr_root_id_or_prefix},
+        repository_fetch::fetching_with_account,
+    },
 };
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) -> Result<()> {
+pub async fn launch(
+    id: Option<&str>,
+    offline: bool,
+    exclude_description: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -43,15 +53,25 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
         );
     }
 
-    let client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let repo_coordinates = get_repo_coordinates_when_remote_unknown(&git_repo, &client).await?;
+    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut repo_coordinates =
+        get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
 
     if !offline {
-        fetching_with_report(git_repo_path, &client, &repo_coordinates).await?;
+        fetching_with_account(
+            &git_repo,
+            git_repo_path,
+            &mut client,
+            &mut repo_coordinates,
+            auth,
+        )
+        .await?;
     }
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
+    let private_signer =
+        prepare_private_git_auth_for_repo(&repo_ref, &git_repo, auth.info, auth.password).await?;
 
     let proposals_and_revisions =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
@@ -146,7 +166,9 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
                 &repo_ref,
                 &pr_event_clone_tag_urls(tip_event),
                 &console::Term::stderr(),
-            );
+                private_signer.as_ref(),
+            )
+            .await;
         }
         if !git_repo.does_commit_exist(&tip_commit_str)? {
             bail!(
@@ -198,7 +220,9 @@ pub async fn launch(id: Option<&str>, offline: bool, exclude_description: bool) 
                 &repo_ref,
                 &[],
                 &console::Term::stderr(),
+                private_signer.as_ref(),
             )
+            .await
             .with_context(|| {
                 format!("failed to fetch target branch '{target_branch}' tip {state_target}")
             })?;

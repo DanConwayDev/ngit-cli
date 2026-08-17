@@ -17,17 +17,22 @@ use urlencoding::encode as pct_encode;
 
 #[cfg(not(test))]
 use crate::client::Client;
+#[cfg(not(test))]
+use crate::login::{existing::load_existing_login, user::discover_private_git_relay_list};
 use crate::{
     UrlWithoutSlash,
     cli_interactor::{
         Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
     },
-    client::{Connect, consolidate_fetch_reports, get_repo_ref_from_cache},
+    client::{
+        Connect, PrivateRelayProbeDecision, consolidate_fetch_outcome, get_repo_ref_from_cache,
+        private_relay_probe_decision,
+    },
     git::{
         Repo, RepoActions,
         nostr_url::{NostrUrlDecoded, use_nip05_git_config_cache_to_find_nip05_from_public_key},
     },
-    login::user::get_user_details,
+    login::user::{PrivateGitRelayDiscovery, get_user_details},
 };
 
 #[derive(Clone)]
@@ -45,6 +50,11 @@ pub struct RepoRef {
     pub relays: Vec<RelayUrl>,
     pub blossoms: Vec<Url>,
     pub hashtags: Vec<String>,
+    /// Whether this announcement marks the repository as private.
+    ///
+    /// A consolidated [`RepoRef`] is private when any announcement in its
+    /// recursive maintainer set carries `["private", "true"]`.
+    pub private: bool,
     pub maintainers: Vec<PublicKey>,
     pub selected_maintainer: PublicKey,
     // set to None if not known
@@ -105,6 +115,7 @@ pub fn is_known_tag_name(name: &str) -> bool {
             | "t"
             | "blossoms"
             | "maintainers"
+            | "private"
             | "alt"
     )
 }
@@ -136,6 +147,7 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             relays: Vec::new(),
             blossoms: Vec::new(),
             hashtags: Vec::new(),
+            private: false,
             maintainers: Vec::new(),
             selected_maintainer: selected_maintainer.unwrap_or(event.pubkey),
             maintainers_without_annoucnement: None,
@@ -188,6 +200,16 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
                     }
                 }
                 [t, hashtag, ..] if t == "t" => r.hashtags.push(hashtag.clone()),
+                [t, value] if t == "private" && value == "true" => r.private = true,
+                [t, ..] if t == "buzz-channel" => {
+                    // Buzz uses this foreign tag as the repository ACL: every
+                    // Smart HTTP operation requires channel membership and a
+                    // repository-scoped NIP-98 credential. Preserve the tag
+                    // verbatim while applying ngit's private transport and
+                    // relay-routing policy.
+                    r.private = true;
+                    r.extra_tags.push(tag.clone());
+                }
                 [t, blossoms @ ..] if t == "blossoms" => {
                     for b in blossoms {
                         if let Ok(b) = Url::parse(b) {
@@ -312,6 +334,11 @@ impl RepoRef {
                             Tag::parse([vec!["u".to_string()], upstream.clone()].concat()).unwrap()
                         })
                         .collect(),
+                    if self.private {
+                        vec![Tag::parse(["private", "true"]).unwrap()]
+                    } else {
+                        vec![]
+                    },
                     if self.blossoms.is_empty() {
                         vec![]
                     } else {
@@ -941,14 +968,50 @@ async fn get_nostr_git_remote_selection_labels_ordered(
 
 pub async fn get_resolved_repo_coordinate_when_remote_unknown(
     git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
+    #[cfg(test)] client: &mut crate::client::MockConnect,
+    #[cfg(not(test))] client: &mut Client,
 ) -> Result<ResolvedRepoCoordinate> {
     let options = RepoCoordinateResolutionOptions::from_env();
     match try_resolve_repo_coordinate_with_options(git_repo, &options).await? {
         Some(resolved) => Ok(resolved),
         None if options.interactive => {
-            let c = get_repo_coordinate_from_user_prompt(git_repo, client).await?;
+            let private_discovery = {
+                #[cfg(test)]
+                {
+                    PrivateGitRelayDiscovery::Absent
+                }
+                #[cfg(not(test))]
+                {
+                    if let Ok((signer, user_ref, _)) = load_existing_login(
+                        &Some(git_repo),
+                        &None,
+                        &None,
+                        &None,
+                        None,
+                        true,
+                        false,
+                        false,
+                    )
+                    .await
+                    {
+                        client.set_signer(signer.clone()).await;
+                        let mut discovery_relays = user_ref.relays.read();
+                        for relay in user_ref.relays.write() {
+                            if !discovery_relays.contains(&relay) {
+                                discovery_relays.push(relay);
+                            }
+                        }
+                        if discovery_relays.is_empty() {
+                            discovery_relays.extend(client.get_relay_default_set().iter().cloned());
+                        }
+                        discover_private_git_relay_list(client, discovery_relays, &signer).await
+                    } else {
+                        PrivateGitRelayDiscovery::Absent
+                    }
+                }
+            };
+            let c =
+                get_repo_coordinate_from_user_prompt(git_repo, client, &private_discovery).await?;
             Ok(ResolvedRepoCoordinate {
                 coordinate: c.clone(),
                 source: RepoCoordinateSource::UserPrompt,
@@ -961,8 +1024,8 @@ pub async fn get_resolved_repo_coordinate_when_remote_unknown(
 
 pub async fn get_repo_coordinates_when_remote_unknown(
     git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
+    #[cfg(test)] client: &mut crate::client::MockConnect,
+    #[cfg(not(test))] client: &mut Client,
 ) -> Result<Nip19Coordinate> {
     get_resolved_repo_coordinate_when_remote_unknown(git_repo, client)
         .await
@@ -971,8 +1034,8 @@ pub async fn get_repo_coordinates_when_remote_unknown(
 
 pub async fn get_repo_coordinates_for_publishing(
     git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
+    #[cfg(test)] client: &mut crate::client::MockConnect,
+    #[cfg(not(test))] client: &mut Client,
 ) -> Result<Nip19Coordinate> {
     get_resolved_repo_coordinate_for_publishing(git_repo, client)
         .await
@@ -981,8 +1044,8 @@ pub async fn get_repo_coordinates_for_publishing(
 
 pub async fn get_resolved_repo_coordinate_for_publishing(
     git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
+    #[cfg(test)] client: &mut crate::client::MockConnect,
+    #[cfg(not(test))] client: &mut Client,
 ) -> Result<ResolvedRepoCoordinate> {
     let resolved = get_resolved_repo_coordinate_when_remote_unknown(git_repo, client).await?;
     print_selected_repo(&resolved);
@@ -1097,8 +1160,9 @@ async fn get_repo_coordinates_from_maintainers_yaml(git_repo: &Repo) -> Result<N
 
 async fn get_repo_coordinate_from_user_prompt(
     git_repo: &Repo,
-    #[cfg(test)] client: &crate::client::MockConnect,
-    #[cfg(not(test))] client: &Client,
+    #[cfg(test)] client: &mut crate::client::MockConnect,
+    #[cfg(not(test))] client: &mut Client,
+    private_discovery: &PrivateGitRelayDiscovery,
 ) -> Result<Nip19Coordinate> {
     // TODO: present list of events filter by root_commit
     // TODO: fallback to search based on identifier
@@ -1126,18 +1190,54 @@ async fn get_repo_coordinate_from_user_prompt(
             };
             let term = console::Term::stderr();
             term.write_line("searching for repository...")?;
-            let (relay_reports, progress_reporter) = client
-                .fetch_all(
-                    Some(git_repo_path),
-                    Some(&coordinate),
-                    &HashSet::from_iter(vec![coordinate.public_key]),
-                )
-                .await?;
-            let relay_errs = relay_reports.iter().any(std::result::Result::is_err);
-            let report = consolidate_fetch_reports(relay_reports);
-            if !relay_errs && !report.to_string().is_empty() {
-                let _ = progress_reporter.clear();
+            if let PrivateGitRelayDiscovery::Unavailable(error) = private_discovery {
+                bail!("private Git relay discovery is unavailable: {error}");
             }
+            let mut repository_relays_only = private_discovery.requires_repository_only_probe();
+            let report = loop {
+                let mut private_coordinate = coordinate.clone();
+                private_coordinate.relays = private_discovery.relays().to_vec();
+                let fetch_coordinate = if repository_relays_only {
+                    &private_coordinate
+                } else {
+                    &coordinate
+                };
+                let (relay_reports, progress_reporter) = client
+                    .fetch_all(
+                        Some(git_repo_path),
+                        Some(fetch_coordinate),
+                        &HashSet::from_iter(vec![coordinate.public_key]),
+                        repository_relays_only,
+                    )
+                    .await?;
+                let outcome = consolidate_fetch_outcome(relay_reports);
+                if !outcome.had_errors && !outcome.report.to_string().is_empty() {
+                    let _ = progress_reporter.clear();
+                }
+                if repository_relays_only {
+                    let discovered_privacy =
+                        get_repo_ref_from_cache(Some(git_repo_path), &coordinate)
+                            .await
+                            .ok()
+                            .map(|repo_ref| repo_ref.private);
+                    let private_probe_completed =
+                        outcome.all_required_relays_completed(private_discovery.relays().len());
+                    match private_relay_probe_decision(discovered_privacy, private_probe_completed)
+                    {
+                        PrivateRelayProbeDecision::UsePrivateResult => {}
+                        PrivateRelayProbeDecision::RetryPublicDiscovery => {
+                            repository_relays_only = false;
+                            continue;
+                        }
+                        PrivateRelayProbeDecision::FailClosed => {
+                            bail!(
+                                "private repository relay probe failed; refusing to query public discovery relays"
+                            );
+                        }
+                    }
+                }
+                break outcome.report;
+            };
             if report.to_string().is_empty() {
                 eprintln!("couldn't find repository");
                 continue;
@@ -1609,6 +1709,7 @@ mod tests {
             ],
             blossoms: vec![],
             hashtags: vec![],
+            private: false,
             selected_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers_without_annoucnement: None,
             maintainers: vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
@@ -1636,6 +1737,7 @@ mod tests {
             relays: vec![],
             blossoms: vec![],
             hashtags: vec![],
+            private: false,
             selected_maintainer: TEST_KEY_1_KEYS.public_key(),
             maintainers_without_annoucnement: Some(requested),
             maintainers,
@@ -1763,9 +1865,28 @@ mod tests {
     }
 
     mod try_from {
-        use nostr::event::FinalizeEvent;
+        use nostr::prelude::{Event, EventBuilder, event::FinalizeEvent};
 
         use super::*;
+
+        async fn create_with_private_tag(values: &[&str]) -> Event {
+            let base = create().await;
+            let mut tags: Vec<Tag> = base.tags.iter().cloned().collect();
+            tags.push(
+                Tag::parse(
+                    [
+                        vec!["private".to_string()],
+                        values.iter().map(ToString::to_string).collect(),
+                    ]
+                    .concat(),
+                )
+                .unwrap(),
+            );
+            EventBuilder::new(base.kind, base.content)
+                .tags(tags)
+                .finalize(&*TEST_KEY_1_KEYS)
+                .unwrap()
+        }
 
         #[tokio::test]
         async fn identifier() {
@@ -1922,6 +2043,25 @@ mod tests {
                 vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
             )
         }
+
+        #[tokio::test]
+        async fn private_requires_exact_true_tag() {
+            assert!(
+                RepoRef::try_from((create_with_private_tag(&["true"]).await, None))
+                    .unwrap()
+                    .private
+            );
+
+            for values in [&["false"][..], &["TRUE"][..], &["true", "extra"][..]] {
+                let parsed =
+                    RepoRef::try_from((create_with_private_tag(values).await, None)).unwrap();
+                assert!(!parsed.private);
+                assert!(
+                    parsed.extra_tags.is_empty(),
+                    "malformed known private tag must not leak into extra_tags"
+                );
+            }
+        }
     }
 
     mod to_event {
@@ -2062,6 +2202,33 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn private_is_emitted_only_when_enabled() {
+                let mut repo_ref = RepoRef::try_from((create().await, None)).unwrap();
+                assert!(
+                    !repo_ref
+                        .to_event(&TEST_KEY_1_SIGNER)
+                        .await
+                        .unwrap()
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_slice().first().is_some_and(|name| name == "private"))
+                );
+
+                repo_ref.private = true;
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+                let private_tags: Vec<&[String]> = event
+                    .tags
+                    .iter()
+                    .map(Tag::as_slice)
+                    .filter(|tag| tag.first().is_some_and(|name| name == "private"))
+                    .collect();
+                assert_eq!(
+                    private_tags,
+                    vec![&["private".to_string(), "true".to_string()][..]]
+                );
+            }
+
+            #[tokio::test]
             async fn no_other_tags() {
                 assert_eq!(create().await.tags.len(), 9)
             }
@@ -2159,6 +2326,28 @@ mod tests {
             assert_eq!(
                 matching[0],
                 &["multi".to_string(), "v1".to_string(), "v2".to_string()][..],
+            );
+        }
+
+        #[tokio::test]
+        async fn buzz_channel_acl_requires_private_transport_and_round_trips() {
+            let buzz_channel =
+                Tag::parse(["buzz-channel", "11111111-1111-4111-8111-111111111111"]).unwrap();
+            let event = create_with_extra_tags(vec![buzz_channel.clone()]).await;
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(parsed.private);
+            assert!(parsed.extra_tags.contains(&buzz_channel));
+
+            let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+            assert_eq!(
+                re_emitted
+                    .tags
+                    .iter()
+                    .filter(|tag| {
+                        tag.as_slice().first().map(String::as_str) == Some("buzz-channel")
+                    })
+                    .count(),
+                1,
             );
         }
 
