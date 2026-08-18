@@ -29,8 +29,17 @@ client/app nsec. The one-time `secret=` pairing parameter is removed before
 the record is saved. Entries written by pre-release versions as
 `<npub>/<8-char-suffix>` are still read.
 
-Git config remains the index, because platform keyrings cannot be
-enumerated:
+Platform keyrings cannot be enumerated portably, so ngit records the public
+npub and alias of each successful credential write in
+`<ngit-data-dir>/accounts.json`. This index never contains an nsec, bunker URI,
+or app key. `ngit account whoami` revalidates every indexed identity through the
+normal signer resolver before displaying it, and also scans `credentials.json`
+and Git config so pre-index file-store, configured, and Git-config-only accounts
+remain visible. A pre-index OS-keyring entry that is no longer referenced by
+Git config is added to the index the next time it is selected by npub or alias;
+the keyring itself still cannot reveal unknown entry names.
+
+Git config remains the portable active-login selector:
 
 | git config key         | value                                                        |
 | ---------------------- | ------------------------------------------------------------ |
@@ -71,10 +80,11 @@ their account logs in), and two or more matches fail closed listing each
 candidate's name and npub. A broken or unavailable credential entry for a
 matching account fails the selection rather than being skipped. Because
 profile names are mutable and non-unique they are never persisted:
-`ngit account login --signer <name>` resolves the name once and writes the
-resolved npub to `nostr.signer`, exactly like npub reactivation, while a
+`ngit account login <name>` resolves the name once and writes the resolved
+npub to `nostr.signer`, exactly like npub reactivation, while a
 one-shot `--signer <name>` re-resolves on every invocation and writes
-nothing.
+nothing. The older `ngit account login --signer <name>` spelling remains
+available.
 
 For a credential-store-backed selection, the selected Git-config scope contains
 `nostr.signer` and `nostr.npub`, plus `nostr.signer-alias.<alias>` when an alias
@@ -104,6 +114,16 @@ selections fail instead of falling back to a different identity.
 When `--signer` is omitted, existing flat local/global/system login selection
 continues to work. A configured `nostr.signer` opts that scope into the new
 selection model.
+
+`ngit account whoami` groups all usable signers by npub, shows their effective
+aliases, and marks local/global/system login scopes plus the account selected
+by Git's normal scope precedence. `ngit account list` is an alias for the same
+inventory. The human footer defines `ACCOUNT` once and shows how to use
+it for a single ngit or Git command, make it the local or global default, add
+an alias, or remove a local override. An `ACCOUNT` may be a full npub, a
+listed alias, or the exact cached Nostr profile name. Profile names shadowed by
+an alias or shared by multiple credentialed accounts are marked unusable;
+every account always retains its unambiguous full-npub selector.
 
 ## Choosing where secrets live
 

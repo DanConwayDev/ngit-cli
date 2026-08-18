@@ -112,6 +112,9 @@ async fn main() {
     let result = if let Some(command) = &cli.command {
         match command {
             Commands::Account(args) => match &args.account_command {
+                AccountCommands::Whoami(sub_args) => {
+                    sub_commands::whoami::launch(sub_args, cli.json).await
+                }
                 AccountCommands::Login(sub_args) => {
                     sub_commands::login::launch(sub_args, signer_params).await
                 }
@@ -129,9 +132,6 @@ async fn main() {
                 }
                 AccountCommands::Create(sub_args) => {
                     sub_commands::create::launch(&cli, sub_args).await
-                }
-                AccountCommands::Whoami(sub_args) => {
-                    sub_commands::whoami::launch(sub_args, cli.json).await
                 }
             },
             Commands::Init(args) => sub_commands::init::launch(&cli, args, signer_params).await,

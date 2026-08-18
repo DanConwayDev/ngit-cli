@@ -1,17 +1,22 @@
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
 use anyhow::{Context, Result};
 use ngit::{
     client::Params,
     login::{
-        SignerInfoSource,
-        existing::{get_signer_info, load_existing_login},
+        SignerInfoSource, credential_store,
+        existing::{
+            configured_alias_names, configured_signer_npub, resolve_selection, signer_is_available,
+        },
+        user::get_user_details,
     },
 };
-use nostr::prelude::ToBech32;
+use nostr::prelude::{PublicKey, ToBech32};
 use serde::Serialize;
 
 use crate::{
     client::{Client, Connect},
-    git::Repo,
+    git::{Repo, RepoActions},
 };
 
 #[derive(clap::Args)]
@@ -21,175 +26,336 @@ pub struct SubCommandArgs {
     pub offline: bool,
 }
 
-#[derive(Serialize)]
-struct UserJson {
+#[derive(Debug, Serialize)]
+struct WhoamiJson {
+    accounts: Vec<AccountJson>,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountJson {
     name: String,
     npub: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     nip05: Option<String>,
-    scope: String,
+    aliases: Vec<String>,
+    scopes: Vec<String>,
+    active: bool,
+    selectors: Vec<SelectorJson>,
 }
 
-#[derive(Serialize)]
-struct WhoamiJson {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    local: Option<UserJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    global: Option<UserJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<UserJson>,
-    /// The account that would be used for operations in the current context
-    /// (local > global > system, matching git's priority order).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active: Option<UserJson>,
+#[derive(Debug, Serialize)]
+struct SelectorJson {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    value: String,
+}
+
+struct Account {
+    name: String,
+    npub: String,
+    nip05: Option<String>,
+    aliases: Vec<String>,
+    scopes: Vec<String>,
+    active: bool,
+    selectors: Vec<SelectorJson>,
+}
+
+struct LoginScopes {
+    local: Option<String>,
+    global: Option<String>,
+    system: Option<String>,
+}
+
+impl LoginScopes {
+    fn active(&self) -> Option<&str> {
+        self.local
+            .as_deref()
+            .or(self.global.as_deref())
+            .or(self.system.as_deref())
+    }
+
+    fn labels_for(&self, npub: &str) -> Vec<String> {
+        [
+            ("local", self.local.as_deref()),
+            ("global", self.global.as_deref()),
+            ("system", self.system.as_deref()),
+        ]
+        .into_iter()
+        .filter(|(_, configured)| *configured == Some(npub))
+        .map(|(label, _)| label.to_string())
+        .collect()
+    }
 }
 
 pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     let git_repo = Repo::discover()
         .context("failed to find a git repository")
         .ok();
+    let git_repo_ref = git_repo.as_ref();
 
+    let scopes = LoginScopes {
+        local: configured_signer_npub(&git_repo_ref, SignerInfoSource::GitLocal).await?,
+        global: if std::env::var("NGITTEST").is_err() {
+            configured_signer_npub(&git_repo_ref, SignerInfoSource::GitGlobal).await?
+        } else {
+            None
+        },
+        system: if std::env::var("NGITTEST").is_err() {
+            configured_signer_npub(&git_repo_ref, SignerInfoSource::GitSystem).await?
+        } else {
+            None
+        },
+    };
+
+    let credential_inventory = credential_store::inventory()?;
+    let mut candidate_npubs = credential_inventory.accounts;
+    candidate_npubs.extend(scopes.local.iter().cloned());
+    candidate_npubs.extend(scopes.global.iter().cloned());
+    candidate_npubs.extend(scopes.system.iter().cloned());
+
+    // Resolve each known alias through the ordinary selector path. This both
+    // applies normal OS/file/local/global/system precedence and prevents a
+    // shadowed lower-priority mapping from being advertised for the wrong
+    // account.
+    let mut aliases_by_npub: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for alias in configured_alias_names(&git_repo_ref)? {
+        let Ok(resolved) = resolve_selection(&git_repo_ref, &alias, &None, false).await else {
+            continue;
+        };
+        candidate_npubs.insert(resolved.npub.clone());
+        aliases_by_npub
+            .entry(resolved.npub.clone())
+            .or_default()
+            .insert(alias.clone());
+    }
+
+    let mut available_npubs = Vec::new();
+    for npub in candidate_npubs {
+        if signer_is_available(&git_repo_ref, &npub)? {
+            available_npubs.push(npub);
+        }
+    }
+
+    let mut accounts = load_accounts(
+        command_args,
+        git_repo_ref,
+        available_npubs,
+        aliases_by_npub,
+        &scopes,
+    )
+    .await?;
+
+    add_selectors(&mut accounts, git_repo_ref).await;
+    accounts.sort_by(|a, b| {
+        (
+            !a.active,
+            !a.scopes.iter().any(|scope| scope == "local"),
+            &a.name,
+            &a.npub,
+        )
+            .cmp(&(
+                !b.active,
+                !b.scopes.iter().any(|scope| scope == "local"),
+                &b.name,
+                &b.npub,
+            ))
+    });
+
+    if json {
+        crate::output::set(WhoamiJson {
+            accounts: accounts.into_iter().map(Account::into_json).collect(),
+        })?;
+    } else {
+        print_human(&accounts);
+    }
+    Ok(())
+}
+
+async fn load_accounts(
+    command_args: &SubCommandArgs,
+    git_repo: Option<&Repo>,
+    available_npubs: Vec<String>,
+    mut aliases_by_npub: BTreeMap<String, BTreeSet<String>>,
+    scopes: &LoginScopes,
+) -> Result<Vec<Account>> {
     let client = if command_args.offline {
         None
     } else {
         Some(Client::new(Params::with_git_config_relay_defaults(
-            &git_repo.as_ref(),
+            &git_repo,
         )))
     };
-
-    // Try to load login from each config level (silent, no prompts)
-    let local = load_user_for_scope(
-        git_repo.as_ref(),
-        client.as_ref(),
-        SignerInfoSource::GitLocal,
-    )
-    .await;
-
-    let global = load_user_for_scope(
-        git_repo.as_ref(),
-        client.as_ref(),
-        SignerInfoSource::GitGlobal,
-    )
-    .await;
-
-    let system = load_user_for_scope(
-        git_repo.as_ref(),
-        client.as_ref(),
-        SignerInfoSource::GitSystem,
-    )
-    .await;
+    let git_repo_path = git_repo.and_then(|repo| repo.get_path().ok());
+    if let Some(client) = client.as_ref() {
+        let public_keys = available_npubs
+            .iter()
+            .map(|npub| PublicKey::parse(npub))
+            .collect::<std::result::Result<HashSet<_>, _>>()
+            .context("account inventory contains an invalid npub")?;
+        if !public_keys.is_empty() {
+            if let Ok((reports, progress_reporter)) = client
+                .fetch_all(git_repo_path, None, &public_keys, false)
+                .await
+            {
+                if reports.iter().all(Result::is_ok) {
+                    progress_reporter.clear()?;
+                }
+                drop(progress_reporter);
+            }
+        }
+    }
+    let mut accounts = Vec::with_capacity(available_npubs.len());
+    for npub in available_npubs {
+        let public_key =
+            PublicKey::parse(&npub).context("account inventory contains an invalid npub")?;
+        // Profile refresh happens once for the whole inventory above. Cache
+        // misses still produce an npub display fallback.
+        let user = get_user_details(&public_key, None, git_repo_path, true, false).await?;
+        let canonical_npub = user.public_key.to_bech32()?;
+        accounts.push(Account {
+            name: user.metadata.name,
+            npub: canonical_npub.clone(),
+            nip05: user.metadata.nip05,
+            aliases: aliases_by_npub
+                .remove(&canonical_npub)
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            scopes: scopes.labels_for(&canonical_npub),
+            active: scopes.active() == Some(canonical_npub.as_str()),
+            selectors: Vec::new(),
+        });
+    }
 
     if let Some(client) = client {
         client.disconnect().await?;
     }
+    Ok(accounts)
+}
 
-    // Active account follows git's priority order: local > global > system
-    let active_scope = if local.is_some() {
-        Some("local")
-    } else if global.is_some() {
-        Some("global")
-    } else if system.is_some() {
-        Some("system")
-    } else {
-        None
-    };
-
-    if json {
-        let active = active_scope.and_then(|scope| match scope {
-            "local" => local.as_ref().map(|u| make_user_json(u, scope)),
-            "global" => global.as_ref().map(|u| make_user_json(u, scope)),
-            "system" => system.as_ref().map(|u| make_user_json(u, scope)),
-            _ => None,
-        });
-
-        let output = WhoamiJson {
-            local: local.as_ref().map(|u| make_user_json(u, "local")),
-            global: global.as_ref().map(|u| make_user_json(u, "global")),
-            system: system.as_ref().map(|u| make_user_json(u, "system")),
-            active,
-        };
-        crate::output::set(output)?;
-    } else if local.is_none() && global.is_none() && system.is_none() {
-        println!("not logged in");
-        println!();
-        println!("use `ngit account login` to log in");
-    } else {
-        type UserEntry = Option<(String, String, Option<String>)>;
-        let entries: &[(&str, &UserEntry)] =
-            &[("local", &local), ("global", &global), ("system", &system)];
-        let mut first = true;
-        for (scope, user) in entries {
-            if let Some(u) = user {
-                if !first {
-                    println!();
-                }
-                first = false;
-                let is_active = active_scope == Some(scope);
-                if is_active {
-                    println!("{scope} (active):");
-                } else {
-                    println!("{scope}:");
-                }
-                print_user_human(u);
+async fn add_selectors(accounts: &mut [Account], git_repo: Option<&Repo>) {
+    for account in accounts {
+        // Ask the selector itself before advertising a mutable profile name.
+        // This applies NIP-01 profile ordering, ambiguity checks, alias
+        // precedence, and credential validation exactly as the copied command
+        // will.
+        let profile_is_unique = account.name != account.npub
+            && resolve_selection(&git_repo, &account.name, &None, true)
+                .await
+                .is_ok_and(|resolved| resolved.npub == account.npub);
+        if profile_is_unique {
+            account.selectors.push(selector("profile", &account.name));
+        }
+        for alias in &account.aliases {
+            if !account
+                .selectors
+                .iter()
+                .any(|selector| selector.value.eq_ignore_ascii_case(alias))
+            {
+                account.selectors.push(selector("alias", alias));
             }
         }
-    }
-
-    Ok(())
-}
-
-fn make_user_json(u: &(String, String, Option<String>), scope: &str) -> UserJson {
-    UserJson {
-        name: u.0.clone(),
-        npub: u.1.clone(),
-        nip05: u.2.clone(),
-        scope: scope.to_string(),
+        account.selectors.push(selector("npub", &account.npub));
     }
 }
 
-fn print_user_human(u: &(String, String, Option<String>)) {
-    let (name, npub, nip05) = u;
-    println!("  name: {name}");
-    println!("  npub: {npub}");
-    if let Some(nip05) = nip05 {
-        println!("  nip05: {nip05}");
+fn selector(kind: &'static str, value: &str) -> SelectorJson {
+    SelectorJson {
+        kind,
+        value: value.to_string(),
     }
 }
 
-/// Attempt to silently load a user from a specific config scope.
-/// Returns `Some((name, npub, nip05))` on success, `None` if not logged in
-/// via that scope or if the scope requires a password prompt (ncryptsec).
-async fn load_user_for_scope(
-    git_repo: Option<&Repo>,
-    client: Option<&Client>,
-    source: SignerInfoSource,
-) -> Option<(String, String, Option<String>)> {
-    // First verify signer info exists for this scope without building a full
-    // signer — avoids triggering password prompts for ncryptsec.
-    if get_signer_info(&git_repo, &None, &None, &Some(source.clone()))
-        .await
-        .is_err()
-    {
-        return None;
+fn print_human(accounts: &[Account]) {
+    if accounts.is_empty() {
+        println!("no accounts available");
+        println!();
+        println!("use `ngit account login` to log in");
+        return;
     }
 
-    let result = load_existing_login(
-        &git_repo,
-        &None,
-        &None,
-        &Some(source),
-        client,
-        true,  // silent — don't print "logged in as"
-        false, // don't prompt for password (ncryptsec users get None here)
-        false, // don't force a relay fetch if already cached
-    )
-    .await;
-
-    match result {
-        Ok((_, user_ref, _)) => {
-            let npub = user_ref.public_key.to_bech32().ok()?;
-            Some((user_ref.metadata.name, npub, user_ref.metadata.nip05))
+    println!("available accounts:");
+    for (index, account) in accounts.iter().enumerate() {
+        if index > 0 {
+            println!();
         }
-        Err(_) => None,
+        let mut badges = account.scopes.clone();
+        if account.active {
+            badges.push("active".to_string());
+        }
+        if badges.is_empty() {
+            println!("{}", account.name);
+        } else {
+            println!("{} [{}]", account.name, badges.join(", "));
+        }
+        println!("  npub: {}", account.npub);
+        if let Some(nip05) = &account.nip05 {
+            println!("  nip05: {nip05}");
+        }
+        if account.aliases.is_empty() {
+            println!("  aliases: none");
+        } else {
+            println!("  aliases: {}", account.aliases.join(", "));
+        }
+        if account.name != account.npub
+            && !account
+                .selectors
+                .iter()
+                .any(|selector| selector.kind == "profile")
+        {
+            println!("  account name is ambiguous; use the npub or an alias as ACCOUNT");
+        }
+    }
+
+    println!();
+    println!("ACCOUNT can be any full npub or listed alias above, or your exact Nostr");
+    println!("profile name.");
+    println!();
+    println!("commands:");
+    println!("  ngit --signer ACCOUNT <command>        one ngit command");
+    println!("  git -c nostr.signer=ACCOUNT <command>  one Git command");
+    println!("  ngit account login ACCOUNT             set global default");
+    println!("  ngit account login --local ACCOUNT     set repository default");
+    println!("  ngit account login ACCOUNT --alias ALIAS  add alias; set global default");
+    print_logout_guidance(accounts);
+}
+
+fn print_logout_guidance(accounts: &[Account]) {
+    if !accounts
+        .iter()
+        .any(|account| account.scopes.iter().any(|scope| scope == "local"))
+    {
+        return;
+    }
+
+    let fallback = accounts.iter().find_map(|account| {
+        account
+            .scopes
+            .iter()
+            .find(|scope| matches!(scope.as_str(), "global" | "system"))
+            .map(|scope| (account.name.as_str(), scope.as_str()))
+    });
+    match fallback {
+        Some((name, scope)) => {
+            println!("  ngit account logout                    remove local default");
+            println!("                                         activate {scope} {name}");
+        }
+        None => {
+            println!("  ngit account logout                    remove local; no active account");
+        }
+    }
+}
+
+impl Account {
+    fn into_json(self) -> AccountJson {
+        AccountJson {
+            name: self.name,
+            npub: self.npub,
+            nip05: self.nip05,
+            aliases: self.aliases,
+            scopes: self.scopes,
+            active: self.active,
+            selectors: self.selectors,
+        }
     }
 }
