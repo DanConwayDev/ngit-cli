@@ -890,12 +890,22 @@ impl Harness {
         Ok(())
     }
 
-    /// Internal shared driver for [`Harness::publish_pr`] and
+    /// Shared driver for [`Harness::publish_pr`] and
     /// [`Harness::publish_three_open_proposals`]. `clone` is assumed to be
     /// a `clone_published_repo(_, AsContributor { .. })` result — i.e. a
     /// fresh clone with `nostr.nsec` already populated for the publishing
     /// identity.
-    async fn publish_pr_in_clone(
+    ///
+    /// Public so a test needing several proposals from one identity — a
+    /// listing with a row per CI state, say — pays for one clone and one
+    /// account rather than one per proposal. `main` is checked out again
+    /// before returning, so calls compose.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the commits, the send, or the read-back of the
+    /// published event fails.
+    pub async fn publish_pr_in_clone(
         &self,
         clone: &Repo,
         repo: &PublishedRepo,

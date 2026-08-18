@@ -21,6 +21,9 @@ use ngit::{
 mod git_remote_helper;
 #[macro_use]
 mod output;
+// Declared after `output` so the stdout-guarding `println!` macro is in
+// scope for it.
+mod ci_projection;
 mod push_bookkeeping;
 mod state_transaction;
 mod sub_commands;

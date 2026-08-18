@@ -1,7 +1,8 @@
 # CI Status and Trust Context
 
 **Status:** WP1 (`src/lib/ci/` core), WP2 (`provenance`, `domain`,
-`resolve`) and WP3 (`ngit ci status`) implemented; WP4 onwards are design.
+`resolve`), WP3 (`ngit ci status`) and WP4 (`pr view` Checks, `pr list` CI
+column) implemented; WP5 onwards are design.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
 
@@ -387,6 +388,94 @@ reference left open:
   the fetch would have made — and asserts on what ngit reads back. Every
   other CI fixture is published to a relay listed on the announcement.
 
+### WP4 implementation decisions
+
+- **One projection module, three surfaces.** The target types, the run
+  selection, the state machine, the integrity check, the cache reads and the
+  JSON/human rendering moved out of `ci_status.rs` into
+  `src/bin/ngit/ci_projection.rs`. `ci status`, `pr view` and (WP5) `pr merge`
+  differ only in the `ProjectionRequest` they pass: which `Tier`, whether
+  earlier revisions are collected, and the caller's own coverage. The module
+  is bin-local because it renders (`crate::output`, the stdout-guarding
+  `println!`) and reads the `--require-ci-trust` floor; nothing in it belongs
+  in `ngit::ci`.
+- **`Target::select` splits rather than filters.** It now returns the
+  current runs, the runs of superseded revisions, and `revision_matched`,
+  computed from *this target's* runs rather than the whole query result.
+  That is what lets `pr list` group one batched `#E` query for every listed
+  PR without a per-PR query, and it is why `revision_matched` stays correct
+  when the run set describes several PRs.
+- **Outdated attempts are collapsed within a revision, never across.**
+  `latest_attempts` keys on `(coordinator, workflow)` alone, so collapsing
+  the whole outdated set would hide one revision's result behind another's.
+  They are grouped by supplying event, collapsed inside each group, and
+  ordered newest superseded revision first.
+- **Evidence assembly sees every run known for the target; state,
+  conclusion and the rollup never do.** `CiInputs::runs` is the current
+  attempts *plus* the latest attempt of every superseded revision, on all
+  three surfaces, whether or not the surface reports the outdated ones. A
+  run for an earlier revision is legitimate identity-level evidence about
+  its signer — gitworkshop's `classifyCICoordinatorRelationships` is
+  likewise given every known run — and a coordinator whose only maintainer
+  direction is an earlier revision's manual trigger is
+  `previously-requested` no matter which command is asking. Feeding only
+  the current runs, as the first cut of `ci status` did, made the same
+  signer `no-known-context` in `ci status` and `operationally-associated`
+  in `pr view`. Display, `state`, `conclusion` and the trust rollup are
+  computed from the current runs alone, so an earlier result never becomes
+  the PR's outcome. WP5's `--require-ci-trust` gate inherits both halves:
+  it reads the rollup, which is current-only, over classifications that saw
+  the target's whole history.
+- **`outdated` is a JSON array, present only where the surface groups by
+  revision.** `ngit ci status` describes one revision and emits no `outdated`
+  key at all; `ngit pr view` always emits the array, empty when the PR has
+  one revision. Each entry is a run object plus `revision`, the `nevent` of
+  the event that supplied it (`null` when the run named no supplying event),
+  so an earlier result cannot be read as current even by a consumer that
+  flattens the document.
+- **`pr list` costs three cache reads for the whole table, not three per
+  row.** The anchors of every listed PR go into a single `#E` query; the
+  service controls and the quoted requests are one read each; one
+  `resolve_cache_tier` labels every run; and each row's cell is that
+  context's rollup over its own current runs. Resolving a PR's anchor still
+  costs the per-thread cache read `get_open_or_draft_proposals` already
+  performs on every `git fetch`, and a thread that cannot be read shows no
+  CI rather than failing the listing.
+- **"No CI" has one encoding.** A row with no current run reports
+  `classification: null` and `coverage: null` — there is no signer to
+  classify and nothing was left unchecked — which is exactly what a PR
+  whose thread could not be read reports. Rolling up an empty set would
+  instead have claimed `no-known-context` about a signer that does not
+  exist.
+- **`cancelled` is not a pass.** The glyph table names `✓` passing and `✗`
+  failing without placing `cancelled`; nothing ran to completion, so it is
+  grouped with the outcomes that ask for a look. `neutral` and `skipped`
+  stay passes, consistent with the rollup that already refuses to let them
+  displace a real outcome.
+- **The column and its footer appear only when a listed PR has CI.** A
+  repository with no CI gets no column of dashes and no legend. The footer
+  is one line: it reads the glyphs and says what `?` means — the *weakest*
+  signer behind a passing result has no known context, which is what the
+  conservative rollup surfaces — and points at `ngit pr view` for the
+  evidence. It is ngit's own wording, not one of the canonical
+  gitworkshop strings.
+- **The list path expresses no coverage caveat in human output.**
+  Cache-tier coverage is partial for every row that has a signer at all
+  (WP2), so a `Context incomplete` line would appear beside every row and
+  distinguish nothing. Coverage is reported per row in JSON, and the
+  detail surfaces — where the domain ladder actually runs, and where the
+  caveat therefore means something — print it.
+- **The list JSON carries fields, not the glyph.** Every row has a `ci`
+  object — `state`, `conclusion`, `classification`, `trust_floor_met`,
+  `coverage`, `revision_matched` — including rows with no CI, so a consumer
+  never branches on a missing key and never parses a symbol. The glyph is
+  derived from those fields and is unit-tested against them.
+- **`pr view` prints no empty section.** The `ci` object is always in the
+  JSON document; the human "Checks" section is printed only when the PR has
+  a current or an outdated run. The section is otherwise `ci status`'s own
+  rendering, including the integrity line and the `Context incomplete`
+  caveat.
+
 Fetching: the consumed CI kinds (9840–9844, 39842) are one further repository
 `#a` filter in `client::get_filter_ci_events`, added to the repository-scope
 set built by `client::get_fetch_filters`, so CI events land in the normal
@@ -436,9 +525,11 @@ non-zero when the rolled-up current result does not meet the floor or is not
 
 ### `ngit pr view <id>`
 
-Add a "Checks" section: current-revision runs as in `ci status` (full tier),
-older revisions collapsed as outdated, delegated jobs listed with their
-per-job resolution.
+Add a "Checks" section: current-revision runs as in `ci status` (full tier,
+cache tier under `--offline`), older revisions collapsed as outdated,
+delegated jobs listed with their per-job resolution. The JSON document
+carries the same `ci` object as `ci status`, with the superseded revisions
+under `outdated`.
 
 ### `ngit pr list`
 
@@ -451,8 +542,11 @@ Add a `CI` column computed from the cache tier:
 …   running    ~ stale    -   none
 ```
 
-One footer line explains `?` and points at `ngit pr view`. No network beyond
-the shared fetch; no NIP-05 lookups from the list path.
+`cancelled` is not a pass: nothing ran to completion, so it renders `✗`.
+`neutral` and `skipped` are passes, as in the rollup. One footer line
+explains `?` and points at `ngit pr view`; column and footer appear only when
+a listed PR has CI. No network beyond the shared fetch; no NIP-05 lookups
+from the list path.
 
 ### `ngit pr merge <id>`
 
@@ -486,10 +580,28 @@ other ngit JSON surface. Commit ids stay hex: they are Git object ids.
     "jobs": [{ "job": "build", "conclusion": "success",
                "provider": "<npub>", "classification": "..." }]
   }],
+  // Only where the surface groups by revision (`pr view`): the runs of
+  // superseded revisions, each a run object plus the `nevent` that supplied
+  // it. Never counted in `state`, `conclusion` or the trust rollup.
+  "outdated": [{ "revision": "<nevent>", "workflow": "...", "...": "..." }],
   // Only when an event was skipped: its id, kind and the shape rule it broke.
   "skipped": ["skipped kind-9842 event <id>: ..."]
 }
 ```
+
+`ngit pr view` embeds that object as `ci` in its own document. `ngit pr list`
+does not — one row is a cell, not a report — and carries per-row fields
+instead:
+
+```jsonc
+"ci": { "state": "concluded", "conclusion": "success",
+        "classification": "maintainer-directed", "trust_floor_met": true,
+        "coverage": "partial", "revision_matched": true }
+```
+
+A row with no current run reports `state: "none"` with `conclusion`,
+`classification` and `coverage` all `null`: no signer to classify, nothing
+left unchecked.
 
 `ngit ci status` wraps that object in the document every ngit command emits —
 `status`, `entity: "ci"`, and a `target` describing what was resolved:
@@ -528,8 +640,14 @@ on WP1.
   (`tests/ci_status.rs`, fixtures from `test_harness::ci`): JSON and exit
   codes for commit-ish, `#prefix`, nevent, and full-hex targets, including
   the ambiguity error.
-- **WP4 — `pr view` Checks section + `pr list` CI column**: cache-tier
-  projection, revision matching, outdated grouping. Integration tests via JSON.
+- **WP4 — `pr view` Checks section + `pr list` CI column** *(done)*: the
+  shared projection in `src/bin/ngit/ci_projection.rs`, full-tier Checks with
+  outdated grouping and per-job delegation labels, a cache-tier column with
+  one footer line. Integration tests (`tests/pr_view_checks.rs`,
+  `tests/pr_list_ci.rs`): the current/outdated split, a delegated job and a
+  signer with no context, the cache tier under `--offline`, one signer
+  classified identically by `pr view` and `ci status`, and a row per glyph
+  state.
 - **WP5 — `pr merge` gating**: summary, warning, `--require-ci-trust` exit
   behavior. Integration tests: merge blocked/allowed matrices.
 - **WP6 (later) — maintainer controls**: `ngit ci request|stop|trigger`

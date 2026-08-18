@@ -1,7 +1,12 @@
-use std::{collections::HashSet, io::Write, ops::Add};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+    ops::Add,
+};
 
 use anyhow::{Context, Result, bail};
 use ngit::{
+    ci::trust::Coverage,
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache,
@@ -19,6 +24,10 @@ use ngit::{
 use nostr::prelude::{Kind, RelayUrl, ToBech32, filter::SingleLetterTag, nip19::Nip19Event};
 
 use crate::{
+    ci_projection::{
+        CiReport, CiState, ListCiRow, ProjectionRequest, Target, Tier, build_report, list_ci_rows,
+        pull_request_target, relay_coverage,
+    },
     cli::SignerParams,
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::{
@@ -63,19 +72,29 @@ pub async fn launch(
     let mut repo_coordinates =
         get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
 
-    if !offline {
-        fetching_with_account(
-            &git_repo,
-            git_repo_path,
-            &mut client,
-            &mut repo_coordinates,
-            auth,
+    let fetch_report = if offline {
+        None
+    } else {
+        Some(
+            fetching_with_account(
+                &git_repo,
+                git_repo_path,
+                &mut client,
+                &mut repo_coordinates,
+                auth,
+            )
+            .await?,
         )
-        .await?;
-    }
+    };
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
+
+    // A repository relay that did not answer leaves the CI view incomplete
+    // whatever the trust layer finds locally.
+    let ci_input_coverage = fetch_report.as_ref().map_or(Coverage::Complete, |report| {
+        relay_coverage(&repo_ref.relays, &report.state_per_relay)
+    });
 
     let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
@@ -212,6 +231,23 @@ pub async fn launch(
             ],
         )
         .await?;
+        // The Checks section: the same projection `ngit ci status` renders,
+        // at the full tier unless the caller asked to stay local, with the
+        // superseded revisions grouped separately.
+        let target = pull_request_target(git_repo_path, &repo_ref, target_id).await?;
+        let ci = build_report(
+            &git_repo,
+            git_repo_path,
+            &repo_ref,
+            &client,
+            &ProjectionRequest {
+                target: &target,
+                tier: if offline { Tier::Cache } else { Tier::Full },
+                include_outdated: true,
+                input_coverage: ci_input_coverage,
+            },
+        )
+        .await?;
         let relay_hint = repo_ref.relays.first();
         return show_proposal_details(
             &filtered_proposals,
@@ -223,17 +259,44 @@ pub async fn launch(
             &cover_note_events,
             &repo_ref,
             relay_hint,
+            &ci,
         );
     }
 
+    let ci_rows = list_ci_rows(
+        git_repo_path,
+        &repo_ref,
+        &list_targets(git_repo_path, &repo_ref, &filtered_proposals).await,
+        ci_input_coverage,
+    )
+    .await?;
+
     let relay_hint = repo_ref.relays.first();
     if json {
-        output_json(&filtered_proposals, relay_hint)?;
+        output_json(&filtered_proposals, relay_hint, &ci_rows)?;
     } else {
-        output_table(&filtered_proposals, &status, &label_filter);
+        output_table(&filtered_proposals, &status, &label_filter, &ci_rows);
     }
 
     Ok(())
+}
+
+/// The CI anchor and current revision of every listed PR.
+///
+/// A thread whose events cannot be read contributes no target and so shows no
+/// CI: one unreadable thread must not fail the listing it is a row of.
+async fn list_targets(
+    git_repo_path: &std::path::Path,
+    repo_ref: &RepoRef,
+    proposals: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
+) -> Vec<(nostr::prelude::EventId, Target)> {
+    let mut targets = Vec::with_capacity(proposals.len());
+    for (proposal, _, _, _) in proposals {
+        if let Ok(target) = pull_request_target(git_repo_path, repo_ref, proposal.id).await {
+            targets.push((proposal.id, target));
+        }
+    }
+    targets
 }
 
 /// Fetch NIP-22 kind-1111 comments whose root `#E` tag matches `proposal_id`,
@@ -321,13 +384,25 @@ fn output_table(
     proposals: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
     status_filter: &str,
     label_filter: &HashSet<String>,
+    ci_rows: &HashMap<nostr::prelude::EventId, ListCiRow>,
 ) {
     if proposals.is_empty() {
         println!("No proposals found matching status: {status_filter}");
         return;
     }
 
-    println!("{:<66} {:<8} TITLE  LABELS", "ID", "STATUS");
+    // A repository with no CI at all gets no column of dashes and no legend.
+    let show_ci = proposals.iter().any(|(proposal, _, _, _)| {
+        ci_rows
+            .get(&proposal.id)
+            .is_some_and(|row| row.state != CiState::None)
+    });
+
+    if show_ci {
+        println!("{:<66} {:<8} {:<3} TITLE  LABELS", "ID", "STATUS", "CI");
+    } else {
+        println!("{:<66} {:<8} TITLE  LABELS", "ID", "STATUS");
+    }
     for (proposal, status_kind, proposal_labels, subject_override) in proposals {
         let id = proposal.id.to_string();
         let status = status_kind_to_str(*status_kind);
@@ -337,11 +412,28 @@ fn output_table(
             .map(|l| format!("#{l}"))
             .collect::<Vec<_>>()
             .join(" ");
-        if labels_str.is_empty() {
-            println!("{id:<66} {status:<8} {title}");
+        let prefix = if show_ci {
+            let glyph = ci_rows
+                .get(&proposal.id)
+                .map_or_else(|| ListCiRow::default().glyph(), ListCiRow::glyph);
+            format!("{id:<66} {status:<8} {glyph:<3}")
         } else {
-            println!("{id:<66} {status:<8} {title}  {labels_str}");
+            format!("{id:<66} {status:<8}")
+        };
+        if labels_str.is_empty() {
+            println!("{prefix} {title}");
+        } else {
+            println!("{prefix} {title}  {labels_str}");
         }
+    }
+
+    if show_ci {
+        println!();
+        println!(
+            "CI: ✓ passing  ✓? passing, but the weakest signer has no known \
+             context — see `ngit pr view <id>`  ✗ failing  … running  \
+             ~ stale  - none"
+        );
     }
 
     println!();
@@ -383,6 +475,7 @@ fn event_id_to_nevent(event_id: nostr::prelude::EventId, relay: Option<&RelayUrl
 fn output_json(
     proposals: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
     relay_hint: Option<&RelayUrl>,
+    ci_rows: &HashMap<nostr::prelude::EventId, ListCiRow>,
 ) -> Result<()> {
     let json_output: Vec<serde_json::Value> = proposals
         .iter()
@@ -418,6 +511,11 @@ fn output_json(
                     "branch": branch,
                     "labels": proposal_labels,
                     "target_branch": tag_value(proposal, "b").ok(),
+                    // Structured, never the glyph alone: a consumer reads the
+                    // state and whether the trust floor was met.
+                    "ci": ci_rows
+                        .get(&proposal.id)
+                        .map_or_else(|| ListCiRow::default().to_json(), ListCiRow::to_json),
                 })
             },
         )
@@ -464,6 +562,7 @@ fn show_proposal_details(
     cover_note_events: &[nostr::prelude::Event],
     repo_ref: &RepoRef,
     relay_hint: Option<&RelayUrl>,
+    ci: &CiReport,
 ) -> Result<()> {
     use nostr::prelude::ToBech32;
 
@@ -508,6 +607,9 @@ fn show_proposal_details(
             "comment_count": comment_count,
             "description": cover_letter.description,
             "target_branch": tag_value(proposal, "b").ok(),
+            // The same `ci` object `ngit ci status` emits, with the runs of
+            // superseded revisions under `outdated`.
+            "ci": ci.to_ci_value(relay_hint),
         });
         if let Some(cn) = cover_note_json {
             json_obj["cover_note"] = cn;
@@ -581,6 +683,11 @@ fn show_proposal_details(
         for line in cover_letter.description.lines() {
             println!("  {line}");
         }
+    }
+
+    // A repository with no CI for this PR gets no empty section.
+    if ci.has_results() {
+        ci.print_checks();
     }
 
     if show_comments {
