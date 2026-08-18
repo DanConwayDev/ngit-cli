@@ -54,6 +54,13 @@ use serde_json::{Value, json};
 
 use crate::cli::CiTrustFloor;
 
+/// The trust floor a surface applies when the caller demanded none.
+///
+/// `pr list`'s `✓` and `ngit pr merge`'s non-blocking warning both need a
+/// floor without one being named on the command line. They share this one so
+/// a row that renders `✓` is never a merge that warns.
+pub const DEFAULT_TRUST_FLOOR: CiTrustFloor = CiTrustFloor::OperationallyAssociated;
+
 /// How much work a surface is willing to do to settle its evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
@@ -347,33 +354,72 @@ impl CiReport {
                 .is_some_and(|outdated| !outdated.is_empty())
     }
 
-    /// Why `--require-ci-trust` refuses, or `None` when the gate passes.
+    /// How the current result falls short of `floor`, or `None` when it does
+    /// not.
+    ///
+    /// The rollup this reads is computed from the current runs alone, over
+    /// classifications that saw every run known for the target. Every surface
+    /// that acts on a trust floor — the `--require-ci-trust` gate and
+    /// `pr merge`'s warning — goes through here, so they cannot disagree
+    /// about what "below the floor" means.
     #[must_use]
-    pub fn gate_failure(&self, floor: CiTrustFloor) -> Option<String> {
+    pub fn shortfall(&self, floor: CiTrustFloor) -> Option<String> {
         if self.state != CiState::Concluded {
             return Some(format!(
-                "--require-ci-trust={}: CI has not concluded for this target (state: {})",
-                floor.as_str(),
+                "CI has not concluded for this target (state: {})",
                 self.state.as_str(),
             ));
         }
         if self.conclusion != Some(Conclusion::Success) {
             return Some(format!(
-                "--require-ci-trust={}: CI concluded {}",
-                floor.as_str(),
+                "CI concluded {}",
                 self.conclusion.map_or("unknown", Conclusion::as_str),
             ));
         }
         // Both tiers always settle, so a classification is always present.
-        let classification = self.rollup.classification()?;
+        // An unsettled one would be a caller rendering `CiTrustContext::
+        // loading()`, and a floor is a claim about evidence: with none
+        // assembled there is nothing to meet it.
+        let Some(classification) = self.rollup.classification() else {
+            return Some("the CI trust context did not settle".to_owned());
+        };
         if meets_floor(classification, floor) {
             return None;
         }
         Some(format!(
-            "--require-ci-trust={}: the weakest current run is {}",
-            floor.as_str(),
+            "the weakest current run is {}",
             classification.label(),
         ))
+    }
+
+    /// Why `--require-ci-trust` refuses, or `None` when the gate passes.
+    #[must_use]
+    pub fn gate_failure(&self, floor: CiTrustFloor) -> Option<String> {
+        self.shortfall(floor)
+            .map(|reason| format!("--require-ci-trust={}: {reason}", floor.as_str()))
+    }
+
+    /// The non-blocking caveat `ngit pr merge` prints when no floor was
+    /// demanded, or `None` when there is nothing to say.
+    ///
+    /// The same shortfall the gate refuses on, measured against
+    /// [`DEFAULT_TRUST_FLOOR`], with one exception: a target CI was never
+    /// asked about is not a failing, unfinished or weakly-signed result, and
+    /// warning there would fire on every merge in every repository without
+    /// CI.
+    ///
+    /// "Never asked about" is `state: "none"` *and* `revision_matched`. CI
+    /// that ran only for a superseded revision is also `none` — an earlier
+    /// revision's result is never presented as current — but it is precisely
+    /// the case a merging maintainer must not be left to infer from silence.
+    #[must_use]
+    pub fn merge_warning(&self) -> Option<String> {
+        if self.state == CiState::None {
+            return (!self.revision_matched).then(|| {
+                "CI results exist for this PR but not for the revision being merged".to_owned()
+            });
+        }
+        self.shortfall(DEFAULT_TRUST_FLOOR)
     }
 
     /// The `ci` object every surface embeds.
@@ -910,7 +956,7 @@ pub async fn list_ci_rows(
                     },
                     classification,
                     trust_floor_met: classification.is_some_and(|classification| {
-                        meets_floor(classification, CiTrustFloor::OperationallyAssociated)
+                        meets_floor(classification, DEFAULT_TRUST_FLOOR)
                     }),
                     coverage: Some(
                         rollup
@@ -1620,5 +1666,114 @@ mod tests {
             "a run with no supplying event names no revision, rather than \
              borrowing the current one"
         );
+    }
+
+    /// A report with no runs of its own: only the fields the gate and the
+    /// warning read are meaningful.
+    fn rolled_up(
+        state: CiState,
+        conclusion: Option<Conclusion>,
+        classification: TrustClassification,
+    ) -> CiReport {
+        CiReport {
+            state,
+            conclusion,
+            revision_matched: true,
+            coverage: Coverage::Complete,
+            rollup: TrustResolution::Settled {
+                classification,
+                evidence: Vec::new(),
+                coverage: Coverage::Complete,
+            },
+            runs: Vec::new(),
+            outdated: None,
+            skipped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_merge_warning_is_the_gate_shortfall_at_the_default_floor() {
+        let failing = rolled_up(
+            CiState::Concluded,
+            Some(Conclusion::Failure),
+            TrustClassification::MaintainerDirected,
+        );
+        let stale = rolled_up(
+            CiState::Stale,
+            None,
+            TrustClassification::MaintainerDirected,
+        );
+        let weak = rolled_up(
+            CiState::Concluded,
+            Some(Conclusion::Success),
+            TrustClassification::NoKnownContext,
+        );
+        for report in [&failing, &stale, &weak] {
+            assert_eq!(
+                report.merge_warning(),
+                report.shortfall(DEFAULT_TRUST_FLOOR),
+                "the warning is the gate's own shortfall, so a merge that \
+                 warns is a merge `--require-ci-trust` would refuse"
+            );
+            assert!(report.merge_warning().is_some());
+        }
+
+        let passing = rolled_up(
+            CiState::Concluded,
+            Some(Conclusion::Success),
+            TrustClassification::OperationallyAssociated,
+        );
+        assert_eq!(passing.merge_warning(), None);
+        assert!(
+            passing
+                .gate_failure(CiTrustFloor::MaintainerDirected)
+                .is_some(),
+            "the default floor is not the strictest one: a stricter floor \
+             still refuses what the warning is silent about"
+        );
+    }
+
+    #[test]
+    fn a_target_with_no_ci_at_all_does_not_warn_on_merge() {
+        let none = rolled_up(CiState::None, None, TrustClassification::NoKnownContext);
+        assert_eq!(
+            none.merge_warning(),
+            None,
+            "no CI is not a failing, unfinished or weakly-signed result"
+        );
+        assert!(
+            none.gate_failure(DEFAULT_TRUST_FLOOR).is_some(),
+            "a caller that demanded a floor is still refused: there is no \
+             result to meet it"
+        );
+    }
+
+    #[test]
+    fn ci_for_a_superseded_revision_only_warns_on_merge() {
+        let mut superseded = rolled_up(CiState::None, None, TrustClassification::NoKnownContext);
+        superseded.revision_matched = false;
+        assert!(
+            superseded.merge_warning().is_some(),
+            "a PR whose only CI describes an earlier revision must not be \
+             merged in silence"
+        );
+    }
+
+    #[test]
+    fn an_unsettled_trust_context_fails_the_floor_rather_than_passing_it() {
+        let unsettled = CiReport {
+            rollup: TrustResolution::Loading,
+            ..rolled_up(
+                CiState::Concluded,
+                Some(Conclusion::Success),
+                TrustClassification::MaintainerDirected,
+            )
+        };
+        assert!(
+            unsettled.shortfall(DEFAULT_TRUST_FLOOR).is_some(),
+            "an absent classification is evidence that has not settled, not \
+             evidence that met the floor"
+        );
+        assert!(unsettled.merge_warning().is_some());
     }
 }

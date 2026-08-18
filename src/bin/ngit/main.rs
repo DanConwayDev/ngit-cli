@@ -266,8 +266,18 @@ async fn main() {
                 PrCommands::Merge {
                     id,
                     squash,
+                    require_ci_trust,
                     offline,
-                } => sub_commands::pr_merge::launch(id, *squash, *offline, signer_params).await,
+                } => {
+                    sub_commands::pr_merge::launch(
+                        id,
+                        *squash,
+                        *require_ci_trust,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::Label {
                     id,
                     labels,

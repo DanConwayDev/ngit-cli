@@ -593,7 +593,7 @@ pub enum PrCommands {
     },
     /// merge a PR into the current branch (maintainer only)
     #[command(
-        long_about = "merge a PR into the current branch (maintainer only)\n\nperforms a git merge of the PR branch; push afterwards to update the nostr state"
+        long_about = "merge a PR into the current branch (maintainer only)\n\nperforms a git merge of the PR branch; push afterwards to update the nostr state\n\nthe PR's CI results and the trust context of every signer behind them are printed before the merge. Without --require-ci-trust a result that is failing, unfinished, or signed only by signers with no known context is a warning, not a refusal."
     )]
     Merge {
         /// Proposal event-id (hex) or nevent (bech32)
@@ -602,6 +602,10 @@ pub enum PrCommands {
         /// Use squash merge
         #[arg(long)]
         squash: bool,
+        /// Refuse to merge unless the current CI result is a success whose
+        /// weakest run meets this trust floor
+        #[arg(long, value_name = "LEVEL", value_enum)]
+        require_ci_trust: Option<CiTrustFloor>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

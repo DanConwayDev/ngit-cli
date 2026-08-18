@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use ngit::{
+    ci::trust::Coverage,
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache, send_events,
@@ -15,9 +16,13 @@ use nostr::prelude::{
     nip01::Nip01Tag,
     nip10::{Marker, Nip10Tag},
 };
+use serde_json::{Value, json};
 
 use crate::{
-    cli::SignerParams,
+    ci_projection::{
+        CiReport, ProjectionRequest, Tier, build_report, pull_request_target, relay_coverage,
+    },
+    cli::{CiTrustFloor, SignerParams},
     client::{
         Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
         warn_if_invited_as_maintainer,
@@ -33,23 +38,33 @@ use crate::{
 };
 
 #[allow(clippy::too_many_lines)]
-pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_>) -> Result<()> {
+pub async fn launch(
+    id: &str,
+    squash: bool,
+    require_ci_trust: Option<CiTrustFloor>,
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
     let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
 
-    if !offline {
-        fetching_with_account(
-            &git_repo,
-            git_repo_path,
-            &mut client,
-            &mut repo_coordinates,
-            auth,
+    let fetch_report = if offline {
+        None
+    } else {
+        Some(
+            fetching_with_account(
+                &git_repo,
+                git_repo_path,
+                &mut client,
+                &mut repo_coordinates,
+                auth,
+            )
+            .await?,
         )
-        .await?;
-    }
+    };
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
@@ -108,6 +123,61 @@ pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_
     }
     if current_status == Kind::GitStatusClosed {
         bail!("PR is closed; reopen it before merging");
+    }
+
+    // The Checks summary comes before anything this command changes, so a
+    // refused `--require-ci-trust` leaves neither a branch nor a merge behind.
+    // It is `ngit ci status`'s own projection, at the same full tier: the
+    // maintainer deciding to merge is the reader the evidence is for.
+    let ci_input_coverage = fetch_report.as_ref().map_or(Coverage::Complete, |report| {
+        relay_coverage(&repo_ref.relays, &report.state_per_relay)
+    });
+    let ci_target = pull_request_target(git_repo_path, &repo_ref, proposal.id).await?;
+    let ci = build_report(
+        &git_repo,
+        git_repo_path,
+        &repo_ref,
+        &client,
+        &ProjectionRequest {
+            target: &ci_target,
+            tier: if offline { Tier::Cache } else { Tier::Full },
+            // A merge is a decision about the current revision; earlier ones
+            // are `ngit pr view`'s business.
+            include_outdated: false,
+            input_coverage: ci_input_coverage,
+        },
+    )
+    .await?;
+    if ci.has_results() {
+        ci.print_checks();
+    }
+
+    if let Some(reason) = require_ci_trust.and_then(|floor| ci.gate_failure(floor)) {
+        if crate::output::is_json() {
+            crate::output::set_value(merge_json(
+                proposal.id,
+                repo_ref.relays.first(),
+                None,
+                &ci,
+                None,
+                Some(&reason),
+            ));
+        }
+        println!("{}", console::style(&reason).red());
+        // The refusal is this command's output, not a failure to produce it:
+        // `main`'s error path would discard the runs that explain it.
+        crate::output::finish_and_exit(1);
+    }
+
+    // No floor was demanded, so a result that would not have met the default
+    // one is a prompt to look rather than a refusal.
+    let ci_warning = if require_ci_trust.is_some() {
+        None
+    } else {
+        ci.merge_warning()
+    };
+    if let Some(warning) = &ci_warning {
+        println!("{}", console::style(format!("warning: {warning}")).yellow());
     }
 
     let cover_letter = event_to_cover_letter(&proposal).context("failed to extract PR details")?;
@@ -220,6 +290,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_
         "mark PR as applied".to_string(),
     )
     .await?;
+    let applied_event_id = applied_event.id;
 
     let mut client = client;
     client.set_signer(signer).await;
@@ -235,6 +306,17 @@ pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_
     )
     .await?;
 
+    if crate::output::is_json() {
+        crate::output::set_value(merge_json(
+            proposal.id,
+            repo_ref.relays.first(),
+            Some(applied_event_id),
+            &ci,
+            ci_warning.as_deref(),
+            None,
+        ));
+    }
+
     println!("PR '{}' merged and marked as applied", cover_letter.title);
     println!(
         "{}",
@@ -242,4 +324,40 @@ pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_
     );
 
     Ok(())
+}
+
+/// The document `ngit pr merge --json` emits, merged or refused.
+///
+/// It carries the `ci` object every CI surface shares, plus `ci_warning`: the
+/// non-blocking caveat the human output prints, as a field rather than as
+/// prose. The key is always present — `null` when the result gave no cause
+/// for one — so a consumer never branches on a missing key. It is always
+/// `null` when `--require-ci-trust` was passed: there the shortfall is either
+/// absent or the refusal in `error`.
+///
+/// A refusal is the one outcome with an `error` and no `event`, so `status`
+/// and `action` are derived from it rather than passed in beside it.
+fn merge_json(
+    proposal_id: nostr::prelude::EventId,
+    relay: Option<&nostr::prelude::RelayUrl>,
+    applied_event: Option<nostr::prelude::EventId>,
+    ci: &CiReport,
+    ci_warning: Option<&str>,
+    error: Option<&str>,
+) -> Value {
+    let mut document = json!({
+        "status": if error.is_some() { "error" } else { "ok" },
+        "action": if error.is_some() { "refused" } else { "merged" },
+        "entity": "pr",
+        "id": crate::output::event_id_to_nevent(proposal_id, relay),
+        "ci": ci.to_ci_value(relay),
+        "ci_warning": ci_warning,
+    });
+    if let Some(applied_event) = applied_event {
+        document["event"] = json!(crate::output::event_id_to_nevent(applied_event, relay));
+    }
+    if let Some(error) = error {
+        document["error"] = json!(error);
+    }
+    document
 }

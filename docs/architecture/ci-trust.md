@@ -1,8 +1,8 @@
 # CI Status and Trust Context
 
 **Status:** WP1 (`src/lib/ci/` core), WP2 (`provenance`, `domain`,
-`resolve`), WP3 (`ngit ci status`) and WP4 (`pr view` Checks, `pr list` CI
-column) implemented; WP5 onwards are design.
+`resolve`), WP3 (`ngit ci status`), WP4 (`pr view` Checks, `pr list` CI
+column) and WP5 (`pr merge` gating) implemented; WP6 onwards are design.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
 
@@ -476,6 +476,64 @@ reference left open:
   rendering, including the integrity line and the `Context incomplete`
   caveat.
 
+### WP5 implementation decisions
+
+- **One shortfall, two consequences.** `CiReport::gate_failure` was split:
+  `shortfall(floor)` returns the bare reason a current result does not meet a
+  floor — not concluded, not `success`, or a weakest run below it — and the
+  gate is that reason prefixed with the flag that demanded it. `pr merge`'s
+  warning is the same call at the default floor. The two surfaces therefore
+  cannot drift into disagreeing about what "below the floor" means, and the
+  refusal wording `ci status` already emits is unchanged.
+- **The unnamed floor is `operationally-associated`.** The design fixed the
+  floor only for an explicit `--require-ci-trust`; the warning needs one
+  without a flag. It shares `pr list`'s, as `DEFAULT_TRUST_FLOOR`, so a row
+  that renders `✓` is never a merge that warns and `✓?` is never a merge that
+  is silent. Both call sites read the constant.
+- **A target CI was never asked about does not warn; one whose CI describes
+  another revision does.** `state: "none"` covers both, and only the first is
+  an absence of interest: warning there would fire on every merge in every
+  repository without CI. The second is `revision_matched: false` — CI ran for
+  this PR, just not for what is being merged — which is exactly what a
+  maintainer must not have to infer from silence, so it warns in its own
+  words. An explicit `--require-ci-trust` refuses either: a caller that
+  demanded a floor asked for a result, and there is none. A *running* target
+  also warns: it is the same "has not concluded" shortfall as `stale`, and
+  merging while CI is in flight is the case the warning exists for.
+- **An unsettled trust context fails the floor.** `shortfall` used to return
+  the "meets the floor" answer when the rollup had no classification, so a
+  `TrustResolution::Loading` would have passed the gate silently. Both tiers
+  always settle today, and `loading` is a caller-side state (WP2), so this is
+  unreachable rather than latent — but a floor is a claim about evidence, and
+  the absence of a classification is evidence that has not settled, never
+  evidence that met it.
+- **The gate runs before anything the command changes.** It is evaluated
+  immediately after the open/draft status check, ahead of the branch creation
+  and the `git merge`, so a refusal leaves no local branch, no merge commit
+  and no status event. Like `ci status`, the refusal is emitted as the
+  command's document through `output::finish_and_exit(1)` rather than
+  `main`'s error path, which would replace the runs that explain it with
+  `{"status":"error"}`.
+- **`ci_warning` is a field, always present.** The human output prints the
+  caveat; the JSON document carries it as `ci_warning`, `null` when there is
+  nothing to say, so a consumer never branches on a missing key — the same
+  rule the `pr list` row follows. It is always `null` when
+  `--require-ci-trust` was passed: there a shortfall is the refusal in
+  `error`, never a warning. `status`/`action` are derived from the presence of
+  `error` (`ok`/`merged` against `error`/`refused`), since a refusal is the
+  one outcome with an error and no published `event`.
+- **The summary is the current revision only.** `include_outdated` is false,
+  as in `ci status`: a merge is a decision about the revision being merged,
+  and earlier revisions are `pr view`'s business. The document therefore
+  carries no `outdated` key, consistent with WP4's rule that it appears only
+  where the surface groups by revision. The section itself is printed only
+  when the PR has a result, as in `pr view`; a refusal prints its reason
+  regardless.
+- **No new `--offline`.** `pr merge` already has one, and the tier falls
+  straight out of it: `Tier::Cache` offline, `Tier::Full` otherwise, with the
+  caller-side coverage taken from the fetch report exactly as `ci status`
+  takes it.
+
 Fetching: the consumed CI kinds (9840–9844, 39842) are one further repository
 `#a` filter in `client::get_filter_ci_events`, added to the repository-scope
 set built by `client::get_fetch_filters`, so CI events land in the normal
@@ -551,8 +609,12 @@ from the list path.
 ### `ngit pr merge <id>`
 
 Print the Checks summary before merging. `--require-ci-trust` as above;
-without it, warn (non-blocking) when the current result is failing, stale, or
-below the floor.
+without it, warn (non-blocking) when the current result is failing,
+unfinished (running or stale), below the floor, or describes only a
+superseded revision. Both read the same shortfall, so a merge that warns is
+exactly a merge `--require-ci-trust=operationally-associated` would have
+refused. The JSON document carries the shared `ci` object and a `ci_warning`
+field.
 
 ### JSON shape (all surfaces)
 
@@ -618,6 +680,17 @@ only for a patch thread later upgraded to a PR. A refused
 `--require-ci-trust` sets `status: "error"` and adds `error`, keeping the `ci`
 object that explains the refusal.
 
+`ngit pr merge` embeds the same object in its own document, beside
+`ci_warning` — the non-blocking caveat as a field, `null` when there is none:
+
+```jsonc
+{ "status": "ok", "action": "merged", "entity": "pr", "id": "<nevent>",
+  "event": "<nevent>", "ci": { "...": "..." }, "ci_warning": null }
+```
+
+A refusal is `status: "error"`, `action: "refused"`, an `error`, no `event`,
+and `ci_warning: null`.
+
 Integration tests assert on this JSON and exit codes, never on table text.
 
 ## Work packages
@@ -648,8 +721,16 @@ on WP1.
   signer with no context, the cache tier under `--offline`, one signer
   classified identically by `pr view` and `ci status`, and a row per glyph
   state.
-- **WP5 — `pr merge` gating**: summary, warning, `--require-ci-trust` exit
-  behavior. Integration tests: merge blocked/allowed matrices.
+- **WP5 — `pr merge` gating** *(done)*: the Checks summary before the merge,
+  the non-blocking warning at the default floor, and `--require-ci-trust`
+  refusing before anything is changed. Integration tests
+  (`tests/pr_merge_ci.rs`): the blocked matrix (failing, no known context,
+  stale, no CI) each with the unflagged merge as a control and the refusal
+  keeping the runs that explain it, the allowed matrix (control-history
+  coverage and a validated manual trigger, each isolated from the other's
+  route, plus the cache tier under `--offline`), and the warning path —
+  failing, running, a superseded revision, and a PR with no CI that must not
+  warn.
 - **WP6 (later) — maintainer controls**: `ngit ci request|stop|trigger`
   publishing 9843/9844/9840 (trigger computes `w` hash from the local blob and
   peel-verifies `c` tags). These create the Level 1 evidence WP1 consumes.
