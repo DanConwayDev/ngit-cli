@@ -1,5 +1,6 @@
 pub mod accept_maintainership;
 pub mod agent_guidance;
+pub mod ci;
 pub mod cli_interactor;
 pub mod client;
 pub mod content_tags;

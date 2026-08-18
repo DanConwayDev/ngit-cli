@@ -1,7 +1,8 @@
 # CI Status and Trust Context
 
-**Status:** design — not yet implemented. Written as a build plan: each work
-package below is independently buildable and reviewable.
+**Status:** WP1 (`src/lib/ci/` core) implemented; WP2 onwards are design.
+Written as a build plan: each work package below is independently buildable
+and reviewable.
 
 ## Purpose
 
@@ -123,6 +124,81 @@ source integrity.
   - *full tier*: additionally fetch missing quoted events and perform NIP-05
     domain verification. Used by `pr view`, `pr merge`, `ci status`.
 
+### WP1 implementation decisions
+
+Recorded where the build resolved something this design or the TypeScript
+reference left open:
+
+- **A frozen quote is only evidence once validated.** Rule 4 is enforced at
+  this layer by construction: `run_maintainer_link` and
+  `run_trust_resolution` take a caller-supplied `validated_provenance` set of
+  quote ids that WP2 has fetched and checked, and report maintainer direction
+  only for a quote in that set whose requester is a confirmed maintainer.
+  With an empty set — every caller until WP2 lands — an unvalidated quote
+  contributes nothing, and only the control-history reduction can establish
+  maintainer direction.
+- **Strict shapes, skipped with a reason.** `kinds.rs` rejects an event that
+  breaks a NIP MUST rather than reinterpreting it: a Job Result quoting a
+  Service Request; a *queued* Progress carrying the `service-request` quote
+  that is only frozen at runner handoff; a provenance quote without its
+  required requester pubkey hint; a Workflow Result without the non-`refs/`
+  workflow-run `r`; a Job Result without exactly one quoted Workflow
+  Progress address; empty-content and cardinality MUSTs (9843/9844 `a`/`p`,
+  Progress `d`/`status`/`expiration`, `conclusion` only when concluded).
+  `events.rs` reports each rejection with its reason instead of dropping it
+  silently. Two of these bounds are ngit's, not the NIP's, and are noted as
+  such: the Progress `expiration` must be *after* `created_at` (the NIP only
+  caps it at 30 minutes, and a marker expiring before it was signed is
+  meaningless), and repeated `a` tags must share one repository identifier.
+  Everything the NIP does not forbid is tolerated: unmarked or unrecognised
+  `q` entries, extra `p` tags on result-like events (the first NIP-22 `p` is
+  the parent author), and a non-`refs/` `r` on a Progress marker are ignored,
+  not rejected. The exception is a non-PR Manual Trigger with more than one
+  `p`: the NIP has coordinators require exactly one `p` for themselves, and
+  the trigger's coordinator is later checked by membership, so tolerating a
+  second `p` would let a coordinator the maintainer never addressed pass
+  provenance validation.
+- **Run identity is the workflow-run id.** Grouping keys on
+  `(coordinator, run id)` only. gitworkshop's `queued_at`-plus-context
+  fallback for publishers that predate the `r` run id is not carried over;
+  ngit requires the run id.
+- **Job Results are grouped by their quoted 39842 address**, which is the
+  provider's own statement of the run. A job whose run has no Result or
+  Progress marker is skipped as orphaned. This is *not* the NIP's "clients
+  MUST NOT require a quoted Workflow Progress event to remain available after
+  its expiration in order to accept a Job Result": an expired Progress marker
+  is irrelevant here, because a run is retained as soon as either container
+  was seen, and the coordinator's Result outlives the marker. The skip only
+  covers a Job Result whose run ngit has never seen a container for, where
+  the repository association would rest on the provider's own `a` tags alone.
+  If a real deployment loses containers often enough for that to hide
+  results, surfacing provider-only runs — clearly labelled — is the intended
+  follow-up.
+- **A coordinator's acceptance decides which job claim represents a job.**
+  Where the Workflow Result quotes a Job Result for a job id, only accepted
+  results represent that job, so an unaccepted 9841 from any signer cannot
+  displace it. Where nothing was accepted, every signer's latest claim for
+  that job id is surfaced rather than one silently winning; Job Results are
+  keyed by `(job id, signer)`, never by job id alone.
+- **Control reduction is per perspective.** Each `a` coordinate is reduced
+  separately and the results OR'd, so a Stop on one maintainer's coordinate
+  never closes a Request made on another's. The OR is the permissive
+  direction — a Request standing on any perspective the caller passes counts
+  as coverage — which is why callers pass the perspectives explicitly rather
+  than letting the coordinator-authored `a` tags on the run widen the set.
+- **Only a confirmed maintainer's Request is accepted.**
+  `wasCIServiceRequestedWhenRunStarted` takes the latest control regardless of
+  author; ngit treats the confirmed-maintainer list as the acceptance policy,
+  so a stranger's Request never yields coverage while their Stop still closes
+  their own Requests. An operator may accept other requester pubkeys for
+  running work; that is not maintainer direction.
+- **Delegation requires the accepting quote.** `getCIJobTrustResolution` only
+  checks that *a* Workflow Result exists; ngit additionally requires that
+  result to quote the exact Job Result, which is what rule 5 actually says.
+- **Evidence classification is a separate type** from the trust
+  classification, so `NoKnownContext` — an absence — is not representable on
+  an evidence item (the TypeScript `Exclude<>`, enforced by the compiler).
+
 Fetching: add the consumed CI kinds (9840–9844, 9841/9842, 39842) to the
 repo-wide filters in `fetching_with_account`
 (`src/bin/ngit/sub_commands/repository_fetch.rs` path), so CI events land in
@@ -222,10 +298,11 @@ Integration tests assert on this JSON and exit codes, never on table text.
 Each WP is one reviewable unit with its own tests. Build in order; WP2+ depend
 on WP1.
 
-- **WP1 — `src/lib/ci/` core** (`kinds`, `events`, `controls`, `trust`):
-  parsing, run grouping, control reduction, classification, rollups, temporal
-  rules. Pure unit tests ported from the semantics above (total-order
-  tie-break, retroactivity, stop scoping, weakest rollup, progress expiry).
+- **WP1 — `src/lib/ci/` core** (`kinds`, `events`, `controls`, `trust`)
+  *(done)*: parsing, run grouping, control reduction, classification,
+  rollups, temporal rules. Pure unit tests ported from the semantics above
+  (total-order tie-break, retroactivity, stop scoping, weakest rollup,
+  progress expiry).
 - **WP2 — provenance + domain + resolve tiers**: quote validation, NIP-05
   domain ladder with TTL cache, cache/full tiers, coverage states. Unit tests
   for the domain ladder (label boundaries, ports, trailing dots) and coverage.
