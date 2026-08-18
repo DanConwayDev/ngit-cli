@@ -456,6 +456,37 @@ async fn main() {
                     )
                     .await
                 }
+                CiCommands::Request {
+                    coordinator,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_request(coordinator, *offline, signer_params)
+                        .await
+                }
+                CiCommands::Stop {
+                    coordinator,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
+                        .await
+                }
+                CiCommands::Trigger {
+                    coordinator,
+                    commit_ish,
+                    workflow,
+                    git_ref,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_trigger(
+                        coordinator,
+                        commit_ish.as_deref(),
+                        workflow,
+                        git_ref.as_deref(),
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,
             Commands::Skill(args) => {

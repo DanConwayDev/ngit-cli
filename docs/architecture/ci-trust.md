@@ -1,8 +1,9 @@
 # CI Status and Trust Context
 
-**Status:** WP1 (`src/lib/ci/` core), WP2 (`provenance`, `domain`,
-`resolve`), WP3 (`ngit ci status`), WP4 (`pr view` Checks, `pr list` CI
-column) and WP5 (`pr merge` gating) implemented; WP6 onwards are design.
+**Status:** all six work packages implemented — WP1 (`src/lib/ci/` core),
+WP2 (`provenance`, `domain`, `resolve`), WP3 (`ngit ci status`), WP4
+(`pr view` Checks, `pr list` CI column), WP5 (`pr merge` gating) and WP6
+(`ngit ci request|stop|trigger`). The deferred list below still stands.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
 
@@ -543,6 +544,114 @@ nostr remote carries the CI filter too. That is intended — it is how a
 repository's CI history stays current for `pr list` without a command of its
 own — and its cost is one extra filter per repository relay.
 
+### WP6 implementation decisions
+
+- **The perspective is the signer's own announcement when they have one.**
+  The NIP has a requester ask "for one repository perspective", so a
+  co-maintainer's control names the coordinate they are a maintainer of by
+  construction: `30617:<signer>:<identifier>` whenever ngit holds an
+  announcement from the signer for this repository, and the resolved
+  selected maintainer's coordinate otherwise (which is also what a
+  contributor with no announcement asks about). The relay hint is the
+  repository's first relay. All three commands share the choice, so
+  `ngit ci stop` normally closes what `ngit ci request` opened — but the
+  choice reads live state, so it is not a promise that a stop always
+  lands where its request did: a signer who publishes their own announcement
+  between the two, or a repository whose selected maintainer changes, gets a
+  stop on a different coordinate — and the reduction is per coordinate, so it
+  closes nothing. Naming the perspective explicitly is the fix if that ever
+  bites; today the ambiguity is not worth a flag.
+- **One `a` on a control, several on a trigger — and a relay hint only on the
+  control.** 9843/9844 carry exactly one `a`, which the NIP lets carry one
+  relay hint. A Manual Trigger emits the perspective first and then every
+  *other* announcement ngit holds for the repository, in
+  `maintainers_for_announcement_tags` order — the same ordering ngit's PR and
+  issue events already use — and **no** hint on any of them: the NIP grants
+  the hint to the Service Request's `a`, not to the common tags, and the
+  reference coordinator rejects a common `a` tag with a third element and
+  drops the request. The extra coordinates are candidates, never
+  authorization: the coordinator resolves each independently, and WP2's
+  provenance validation needs only one of them to be in the maintainer
+  closure. The integration tests pin the arity of every published tag
+  (`a`/`c`/`p`/`r` two elements, `w` three, no `o`) directly rather than
+  through `ci::kinds`, because ngit's own reader is deliberately more
+  tolerant than a coordinator's parser and cannot catch this class.
+- **ngit validates what it is about to publish.** Every event is
+  round-tripped through `kinds::validate_service_control` /
+  `validate_manual_trigger` before it is sent, and a failure is an error
+  naming the shape rule rather than a published event. The writing side
+  therefore cannot drift from the reading side: an event this ngit would skip
+  as malformed is one it refuses to sign off.
+- **The git facts are resolved before anything touches the network.**
+  `ngit ci trigger` resolves the commit-ish and hashes the workflow blob
+  before the repository fetch and the login, so a typo in either fails
+  immediately, without a fetch and without a signature. It is the same
+  publishes-nothing contract seen from the user's side.
+- **The `w` hash comes from the blob, and `--workflow` is a path at the
+  commit.** Identical to WP3's integrity check and for the same reason:
+  `core.autocrlf` and clean/smudge filters make the checkout differ from the
+  object, and the object is what the coordinator hashes. A path that does not
+  exist at the resolved commit — or names a tree — is an error naming the
+  commit, and nothing is published.
+- **Peel verification is performed on the values being published, not on how
+  they were derived.** An annotated tag contributes two `c` values, peeled
+  commit first; each is then re-read from the object database and peeled, and
+  a disagreement is refused. Deriving both from one `revparse_single` already
+  makes them consistent, so this is a check of the event rather than of the
+  derivation — which is what a coordinator will repeat.
+- **`--ref` is explicit and must be a full `refs/...` ref.** ngit does not
+  infer the checked-out branch: the `r` tag is context a workflow may read,
+  and inferring it would put a ref on a maintainer-signed event that the
+  maintainer never named. A value without the `refs/` prefix is rejected with
+  the full spelling suggested, because the reading side treats a non-`refs/`
+  `r` as something else entirely.
+- **PR-context Manual Triggers are deferred.** A `pr_root`-carrying 9840
+  needs the anchor's and the supplying revision's authors and kinds, and a
+  commit ngit may not hold locally to hash the workflow at — neither falls
+  out of the WP3/WP4 target machinery, which resolves ids rather than the
+  NIP-22 tag set. Push/ref-context triggers are the whole of WP6; the PR
+  variant is listed with the other deferred work.
+- **Relay targets: repository relays, plus the coordinator's NIP-65 read
+  relays when ngit already knows them.** The NIP-guidance names both paths.
+  The second reuses `login::user::get_user_details`, the profile machinery
+  ngit already has — no new discovery — and yields the read *and* unmarked
+  entries, which is exactly what "not write-only" means there. Those relays
+  are passed in the same bucket as the signer's own write relays rather than
+  with the repository set, so `nostr.repo-relay-only` and the private-
+  repository suppression cover them: a private repository must hand its
+  coordinator a repository relay rather than have ngit announce its
+  coordinate on public inboxes.
+- **A commit the repository state does not contain is warned about, not
+  refused.** The NIP makes a non-PR trigger eligible only for a repository
+  whose resolved state contains the requested commit, so a coordinator
+  discards a trigger for a commit that was never pushed — silently, from the
+  maintainer's side. ngit therefore checks reachability locally: every ref in
+  the cached kind-30618 state is peeled to a commit and tested with
+  `graph_descendant_of` against the resolved commit. A state ngit cannot
+  read, or one whose tips are all absent from the local object database,
+  produces no warning at all: for an advisory check a false alarm is worse
+  than silence.
+- **A control that reached no relay is an error.** `send_events` reports
+  per-relay outcomes and returns `Ok` even when every one failed, which the
+  older publishing subcommands accept. A CI control exists solely to be read
+  by a coordinator, so publishing it nowhere is not a partial success worth
+  reporting as `status: "ok"`; these commands bail, naming the relays tried.
+- **A non-maintainer is warned, never refused.** The default acceptance
+  policy is maintainer-only, but the NIP lets an operator accept other
+  requester pubkeys, so refusing would make ngit stricter than the protocol.
+  The caveat says the event may be ignored and that only the operator can
+  accept another key. It is a `warning` field — always present, `null` when
+  there is nothing to say, and carrying every caveat joined by newlines when
+  there is more than one — following the rule `pr merge`'s `ci_warning` and
+  the `pr list` row already follow.
+- **JSON is `entity: "ci"` with the action naming the control**:
+  `service-requested`, `service-stopped`, `triggered`. The published event is
+  an `nevent`, the coordinator an `npub` and the perspective an `naddr`, as
+  everywhere else in ngit's JSON; a trigger adds `commit` and `commits` as
+  hex object ids, `workflow`, `workflow_hash` and `ref`. There is no `id`
+  field: the entity these commands act on is the repository, which
+  `repository` already names.
+
 ## Per-PR CI state machine
 
 For the PR's **latest revision** (root 1618 or newest 1619 tip):
@@ -580,6 +689,22 @@ one-line evidence summary — plus integrity marker and a trailing
 `--require-ci-trust=<maintainer-directed|operationally-associated>` exit
 non-zero when the rolled-up current result does not meet the floor or is not
 `success`. Supports `--offline` (cache tier only) and JSON output.
+
+### `ngit ci request|stop|trigger <coordinator>` (new commands)
+
+The maintainer controls, all non-interactive and driven by flags alone:
+
+```
+ngit ci request <COORDINATOR> [--offline]
+ngit ci stop    <COORDINATOR> [--offline]
+ngit ci trigger <COORDINATOR> [<COMMIT-ISH>] --workflow <PATH>
+                [--ref <GIT-REF>] [--offline]
+```
+
+`<COORDINATOR>` is an npub or hex pubkey. `<COMMIT-ISH>` defaults to HEAD.
+`--offline` skips the pre-publish repository fetch and the coordinator's
+relay-list lookup; it never skips the publish itself. All three require login
+through the existing signer machinery and emit the usual JSON document.
 
 ### `ngit pr view <id>`
 
@@ -731,13 +856,20 @@ on WP1.
   route, plus the cache tier under `--offline`), and the warning path —
   failing, running, a superseded revision, and a PR with no CI that must not
   warn.
-- **WP6 (later) — maintainer controls**: `ngit ci request|stop|trigger`
+- **WP6 — maintainer controls** *(done)*: `ngit ci request|stop|trigger`
   publishing 9843/9844/9840 (trigger computes `w` hash from the local blob and
   peel-verifies `c` tags). These create the Level 1 evidence WP1 consumes.
+  Integration tests (`tests/ci_control.rs`): the exact published shape of each
+  kind, round-tripped through `ci::kinds`; the annotated-tag `c` order; a
+  workflow absent at the commit publishing nothing; the non-maintainer
+  warning; and both Level-1 loops end to end through ngit's own published
+  event — a Service Request covering a later run through the control history,
+  and a run quoting a Manual Trigger through validated provenance.
 
 Deferred beyond WP6: social corroboration (Level 3) for logged-in users,
 secrets provisioning (29846), NIP-11 strengthening, courtesy CI lines in
-`pr checkout`/`pr apply`.
+`pr checkout`/`pr apply`, and PR-context Manual Triggers (see the WP6
+decisions).
 
 ## Test-harness constraints (mandatory)
 

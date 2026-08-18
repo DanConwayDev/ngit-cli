@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod checkout;
+pub mod ci_control;
 pub mod ci_status;
 pub mod comment;
 pub mod create;

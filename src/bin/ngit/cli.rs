@@ -711,6 +711,58 @@ pub enum CiCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// ask a coordinator to run CI for this repository
+    #[command(
+        long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci stop`. It never covers runs that started before it.\n\n\
+        <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
+        The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
+    )]
+    Request {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// ask a coordinator to stop running CI for this repository
+    #[command(
+        long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
+        Published for the same repository perspective as `ngit ci request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+    )]
+    Stop {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// ask a coordinator to run one workflow once
+    #[command(
+        long_about = "ask a coordinator to run one workflow once (kind-9840 Manual Trigger)\n\n\
+        A Manual Trigger is a one-shot authorization for exactly the workflow file identified by its content hash at the resolved commit, so it can replay a push or pull-request workflow that does not declare `manual`. It needs no standing Service Request.\n\n\
+        <COMMIT-ISH> defaults to HEAD. An annotated tag is published as both the commit it peels to (first) and the tag object id, so a single `#c` query finds the run either way; ngit refuses to publish `c` values that do not all peel to the same commit.\n\n\
+        --workflow is a path in the repository, and its SHA-256 is taken from the blob at the resolved commit — never from the working tree, whose line endings and clean/smudge filters can differ from the object the coordinator hashes."
+    )]
+    Trigger {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Commit-ish to run; defaults to HEAD
+        #[arg(value_name = "COMMIT-ISH")]
+        commit_ish: Option<String>,
+        /// Path of the workflow file, as it exists at the resolved commit
+        #[arg(long, value_name = "PATH")]
+        workflow: String,
+        /// Git ref published as the run's context, e.g. refs/heads/main
+        #[arg(long = "ref", value_name = "GIT-REF")]
+        git_ref: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
