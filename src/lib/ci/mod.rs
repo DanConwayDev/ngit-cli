@@ -10,6 +10,9 @@
 //!   tiers.
 //! - [`trust`] — evidence types, classification, run/job resolution, rollups
 //!   and the canonical wording shared with gitworkshop.
+//! - [`provenance`] — validation of a run's frozen request quote.
+//! - [`domain`] — verified NIP-05 identities and the repository-domain ladder.
+//! - [`resolve`] — cache-tier and full-tier assembly of the trust context.
 //!
 //! Every time-dependent function takes an explicit `now`/`at` [`Timestamp`]
 //! rather than reading the system clock, so the semantics are unit testable.
@@ -17,8 +20,11 @@
 //! See `docs/architecture/ci-trust.md`.
 
 pub mod controls;
+pub mod domain;
 pub mod events;
 pub mod kinds;
+pub mod provenance;
+pub mod resolve;
 pub mod trust;
 
 use std::cmp::Reverse;

@@ -1,6 +1,7 @@
 # CI Status and Trust Context
 
-**Status:** WP1 (`src/lib/ci/` core) implemented; WP2 onwards are design.
+**Status:** WP1 (`src/lib/ci/` core) and WP2 (`provenance`, `domain`,
+`resolve`) implemented; WP3 onwards are design.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
 
@@ -65,8 +66,8 @@ Port the gitworkshop model 1:1 unless noted. The load-bearing rules:
    lower event id is later. A Stop from a confirmed maintainer closes the whole
    perspective; any other author's Stop closes only their own requests.
 4. **Quote validation.** A coordinator-authored `q` tag is not evidence. The
-   quoted 9843/9840 must be fetched and checked: event id, kind, author is a
-   confirmed maintainer, `a` repository coordinates intersect the resolved
+   quoted 9843/9840 must be fetched and checked: event id, kind, a valid
+   signature, author is a confirmed maintainer, `a` repository coordinates intersect the resolved
    maintainer closure, `p` names the coordinator, and (for manual triggers) the
    run context matches. Only then does it yield `MaintainerDirected` evidence
    with `scope: run`.
@@ -199,6 +200,100 @@ reference left open:
   classification, so `NoKnownContext` — an absence — is not representable on
   an evidence item (the TypeScript `Exclude<>`, enforced by the compiler).
 
+### WP2 implementation decisions
+
+- **Domain normalization strips the port before the root dot.** The
+  TypeScript `normalizedDomain` lowercases, removes one trailing dot and
+  *then* splits on `:`, so `grasp.example.:443` normalizes to
+  `grasp.example.` and never matches `grasp.example`. ngit drops the port
+  first. Both spellings name the same DNS host, so the reference order only
+  ever loses a true match; the reversal cannot make two distinct hosts equal.
+  Everything else about the ladder is a verbatim port, including that an
+  exact match beats a subdomain in either direction, that the label boundary
+  comes from the leading `.` in the comparison, and that siblings are
+  nothing. gitworkshop should be aligned with this ordering.
+- **A Manual Trigger's pull-request context must match the run's exactly.**
+  Rule 4 only says PR-context triggers must match the run's PR root; ngit
+  compares the two `Option<EventId>`s, so a PR trigger never covers a
+  push-context run and a push/ref trigger never covers a PR run. The NIP has
+  a PR run's trigger carry the PR tags, so the stricter reading costs
+  nothing, and a rejection is never a negative claim — the run simply keeps
+  no run-scoped maintainer direction.
+- **The quoted event's signature is verified here, not at the fetch.**
+  Everything after the kind check reads the quoted event's tags as the
+  requester's statement, so `validate_run_provenance` requires
+  `Event::verify` first. Without it a coordinator could supply a doctored
+  copy of a real maintainer request — same event id, `p` rewritten to address
+  itself — and pass every remaining check. Verifying at this layer rather
+  than in `QuotedEventFetcher` means the guarantee holds whatever the
+  caller's source is, so a fetcher may return unverified and even unrequested
+  events.
+- **A standing Service Request has no run context to match.** Its validation
+  checks the id, kind, shape, author, repository closure, coordinator and the
+  requester hint only. Temporal coverage of a *particular* run remains the
+  control-history reduction's job, which is where WP1 already enforces
+  non-retroactivity.
+- **An unavailable quote is not a rejected quote.** `ProvenanceOutcome`
+  separates `validated`, `rejected` and `unavailable`. An unavailable quote —
+  one nothing could retrieve — yields no evidence *and* makes coverage
+  partial, so it surfaces as **Context incomplete** rather than as a
+  finding against the run.
+- **A NIP-05 lookup error is unsettled, not falsified.** ngit reuses
+  `client::nip05_query` (the path that resolves `nostr://` URLs) behind the
+  `Nip05Lookup` trait. That call cannot distinguish a reachable document that
+  omits the name from a transport failure, so every error settles as `failed`
+  → partial coverage. A document that resolves the local part to *another*
+  pubkey is a settled non-match: no evidence, no partial.
+- **Every lookup is bounded.** `nip05_query` has no deadline of its own, so
+  `NetworkNip05Lookup` wraps it in a five-second timeout —
+  gitworkshop's `IDENTITY_TIMEOUT_MS` — and an elapsed lookup becomes a
+  failed one. That is what makes the trust doc's "a bounded
+  identity-resolution failure counts as settled" true here. Candidates are
+  resolved one at a time, so the wait is bounded by the number of distinct
+  candidates, and successes are cached across commands.
+- **Identity candidates use every GRASP clone URL.** `RepoRef::grasp_servers`
+  additionally requires a matching relay entry, which is the right test for
+  publishing infrastructure but too narrow for evidence. `domain::
+  repository_grasp_domains` keeps the host (with port) of every clone URL
+  `is_grasp_server_clone_url` accepts, matching gitworkshop's
+  `graspServerDomains`.
+- **NIP-05 TTLs: one hour for a success, five minutes for a failure.** The
+  cache is one JSON file per address, named by the hex of the address, under
+  `<ngit cache dir>/ci-nip05`. A missing, unreadable, malformed, foreign,
+  expired or future-stamped entry is treated as absent, so a corrupt cache
+  costs a lookup and never a wrong answer. The cache is optional at every
+  call site (`Option<&Nip05Cache>`) and its directory and TTLs are
+  injectable, so tests never touch the user's cache or the clock.
+- **Cache-tier coverage is partial whenever there is a signer to describe.**
+  The domain ladder is skipped there by definition. A view with no signers
+  has nothing to leave unchecked, so it stays complete rather than
+  displaying a caveat about evidence that does not exist.
+- **Control history is filtered to the maintainer closure once.**
+  `resolve` reduces `CiInputs::controls` to the controls naming a coordinate
+  in the closure before anything reads them, so a Service Request for a
+  *different* repository — even one a maintainer of this repository signed —
+  introduces no coordinator, no relationship entry and no requester
+  attribution here. The filtered history is what the context stores and what
+  every per-run reduction later reads.
+- **Provenance verdicts are read-only.** `validated_provenance`,
+  `rejected_provenance` and `unavailable_provenance` are private with
+  accessors, like the repository facts beside them: an id enters the
+  validated set only by passing `validate_run_provenance`, so no caller can
+  manufacture maintainer direction for a run.
+- **Callers declare their own coverage.** `CiInputs::input_coverage` carries
+  the settlement of the caller's relay queries into the context, so a failed
+  relay makes the whole context partial even when every check this layer
+  performs succeeds.
+- **Loading is a caller-side state.** Both tiers are called with the inputs
+  they need and always return a settled context;
+  `CiTrustContext::loading()` is what a caller renders while its own queries
+  are outstanding. That is how rule 8 is kept structurally: nothing can
+  settle a signer as "No known context" while a query it depends on is
+  unresolved.
+- **Level 3 is a seam, not a stub.** Social evidence would be appended per
+  signer in `resolve::assemble` and its inputs added to `CiInputs`; nothing
+  else in the model changes. No placeholder types were added for it.
+
 Fetching: add the consumed CI kinds (9840–9844, 9841/9842, 39842) to the
 repo-wide filters in `fetching_with_account`
 (`src/bin/ngit/sub_commands/repository_fetch.rs` path), so CI events land in
@@ -303,9 +398,10 @@ on WP1.
   rollups, temporal rules. Pure unit tests ported from the semantics above
   (total-order tie-break, retroactivity, stop scoping, weakest rollup,
   progress expiry).
-- **WP2 — provenance + domain + resolve tiers**: quote validation, NIP-05
-  domain ladder with TTL cache, cache/full tiers, coverage states. Unit tests
-  for the domain ladder (label boundaries, ports, trailing dots) and coverage.
+- **WP2 — provenance + domain + resolve tiers** *(done)*: quote validation,
+  NIP-05 domain ladder with TTL cache, cache/full tiers, coverage states. Unit
+  tests for the domain ladder (label boundaries, ports, trailing dots) and
+  coverage.
 - **WP3 — `ngit ci status`**: target resolution (order above), fetch-filter
   extension in `fetching_with_account`, human + JSON output, integrity check,
   `--require-ci-trust`, `--offline`. Integration tests: publish fixture CI
