@@ -356,6 +356,8 @@ pub enum Commands {
     Merge(MergeSubCommandArgs),
     /// work with issues
     Issue(IssueSubCommandArgs),
+    /// inspect CI results and the trust context behind them
+    Ci(CiSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
@@ -642,6 +644,66 @@ pub enum PrCommands {
         #[arg(long)]
         body: String,
         /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// CI subcommand group
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+pub struct CiSubCommandArgs {
+    #[command(subcommand)]
+    pub ci_command: CiCommands,
+}
+
+/// The trust floor `--require-ci-trust` enforces. The values are the
+/// classification names shared with gitworkshop.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CiTrustFloor {
+    #[value(name = "maintainer-directed")]
+    MaintainerDirected,
+    #[value(name = "operationally-associated")]
+    OperationallyAssociated,
+}
+
+impl CiTrustFloor {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaintainerDirected => "maintainer-directed",
+            Self::OperationallyAssociated => "operationally-associated",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum CiCommands {
+    /// show CI results, with the trust context of every signer behind them
+    #[command(
+        long_about = "show CI results, with the trust context of every signer behind them\n\n\
+        <TARGET> is resolved in this order:\n  \
+        1. `#<hex-prefix>` is always a PR/event-id prefix\n  \
+        2. an nevent, note, or full 64-character event id is always an event id, and must name a cached PR or one of its revisions\n  \
+        3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
+        4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
+        5. with no target, the HEAD commit\n\n\
+        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current.\n\n\
+        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
+    )]
+    Status {
+        /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
+        /// HEAD
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+        /// Exit non-zero unless the current result is a success whose weakest
+        /// run meets this trust floor
+        #[arg(long, value_name = "LEVEL", value_enum)]
+        require_ci_trust: Option<CiTrustFloor>,
+        /// Skip the relay fetch and NIP-05 trust verification, reading CI
+        /// from the local cache
         #[arg(long)]
         offline: bool,
     },

@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 
 use clap::Parser;
 use cli::{
-    AccountCommands, Cli, Commands, IssueCommands, PrCommands, SignerParams, customise_template,
-    extract_signer_cli_arguments,
+    AccountCommands, CiCommands, Cli, Commands, IssueCommands, PrCommands, SignerParams,
+    customise_template, extract_signer_cli_arguments,
 };
 
 mod cli;
@@ -423,6 +423,22 @@ async fn main() {
                         id,
                         body,
                         *offline,
+                        signer_params,
+                    )
+                    .await
+                }
+            },
+            Commands::Ci(args) => match &args.ci_command {
+                CiCommands::Status {
+                    target,
+                    require_ci_trust,
+                    offline,
+                } => {
+                    sub_commands::ci_status::launch(
+                        target.as_deref(),
+                        *offline,
+                        *require_ci_trust,
+                        cli.json,
                         signer_params,
                     )
                     .await

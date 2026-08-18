@@ -2901,6 +2901,7 @@ pub fn get_fetch_filters(
                             .map(|c| c.coordinate.to_string())
                             .collect::<Vec<String>>(),
                     ),
+                get_filter_ci_events(repo_coordinates),
             ]
         },
         if proposal_ids.is_empty() {
@@ -3068,6 +3069,25 @@ pub fn get_filter_repo_ann_events(
     } else {
         filter
     }
+}
+
+/// Every CI event the repository's announcements are named on.
+///
+/// The consumed CI kinds all carry the repository `a` tag, so one
+/// repository-wide filter brings Workflow Results, Progress markers, Job
+/// Results, Service Requests/Stops and Manual Triggers into the local cache
+/// during the fetch every PR command already performs. `ngit ci status`,
+/// and later the `pr` surfaces, then read them from the cache.
+pub fn get_filter_ci_events(repo_coordinates: &HashSet<Nip19Coordinate>) -> nostr::prelude::Filter {
+    nostr::prelude::Filter::default()
+        .kinds(crate::ci::kinds::CONSUMED_CI_KINDS.to_vec())
+        .custom_tags(
+            SingleLetterTag::LOWERCASE_A,
+            repo_coordinates
+                .iter()
+                .map(|c| c.coordinate.to_string())
+                .collect::<Vec<String>>(),
+        )
 }
 
 pub static STATE_KIND: nostr::prelude::Kind = Kind::Custom(30618);

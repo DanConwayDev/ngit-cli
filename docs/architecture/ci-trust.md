@@ -1,7 +1,7 @@
 # CI Status and Trust Context
 
-**Status:** WP1 (`src/lib/ci/` core) and WP2 (`provenance`, `domain`,
-`resolve`) implemented; WP3 onwards are design.
+**Status:** WP1 (`src/lib/ci/` core), WP2 (`provenance`, `domain`,
+`resolve`) and WP3 (`ngit ci status`) implemented; WP4 onwards are design.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
 
@@ -294,10 +294,107 @@ reference left open:
   signer in `resolve::assemble` and its inputs added to `CiInputs`; nothing
   else in the model changes. No placeholder types were added for it.
 
-Fetching: add the consumed CI kinds (9840–9844, 9841/9842, 39842) to the
-repo-wide filters in `fetching_with_account`
-(`src/bin/ngit/sub_commands/repository_fetch.rs` path), so CI events land in
-the normal local cache during the fetch every PR command already performs.
+### WP3 implementation decisions
+
+- **The fetch filter lives where the filters are built.** The design pointed
+  at `fetching_with_account`; the repo-wide filters it ultimately sends are
+  assembled in `client::get_fetch_filters`, so the consumed CI kinds are one
+  further `#a` filter there (`client::get_filter_ci_events`). That places
+  them in the `RelayFetchScope::Repository` set only, so CI events are
+  requested from repository relays and never from announcement indexers or
+  user relays, and `process_fetched_events` caches them like every other
+  repository event.
+- **A refused `--require-ci-trust` is output, not a failure to produce
+  output.** `main`'s JSON error path replaces the document with
+  `{"status":"error"}`, which would discard the runs that explain the
+  refusal. `ci status` therefore emits its full document — the `ci` object,
+  plus `status: "error"` and the reason — and exits non-zero through
+  `output::finish_and_exit`. The gate is evaluated on the rolled-up current
+  result: not `concluded`, not `success`, or a weakest run below the floor.
+- **A PR's `#E` anchor is not always the event ngit threads from.** When a
+  patch thread is upgraded to a PR, ngit keeps the patch root as the thread's
+  identity while every later PR update — and every CI event — references the
+  kind-1618 upgrade root. `ci status` therefore resolves the anchor through
+  the same `utils::pr_upgrade_root` rule the push path uses, rather than
+  reimplementing it, and reports it as `target.anchor` beside `target.pr`.
+  For the same reason, an exact event id that names a revision root (a patch
+  revision, or that upgrade root) maps to the thread it revises rather than
+  being taken for a thread root. Without both, an upgraded thread's `#E`
+  query would silently find nothing and report `state: "none"`.
+- **`revision_matched` distinguishes "no CI" from "CI for something else".**
+  It is true when the target has no CI events at all, or at least one run
+  describes the current revision; it is false only when CI exists for the PR
+  but every run supplied a different revision. A run with no `e` supplying
+  event matches only when the PR's current revision is its root.
+- **A live marker wins the target state.** Any current run that is running
+  makes the target `running`, even beside a workflow that already concluded;
+  `concluded` then rolls up the worst of the concluded runs, where
+  `neutral`/`skipped` rank below `success` so they neither fail the rollup
+  nor displace a real outcome. `stale` is the state where every current run
+  has only an expired marker.
+- **`attempt_of` is the attempt count for the run's `(coordinator,
+  workflow)` on this target**, which is the position of the current attempt.
+  The design's JSON shape named the field without defining it.
+- **The integrity marker is never an error.** A commit ngit does not hold
+  reports `commit_present: false` and leaves `workflow_hash_matches` null; a
+  commit it holds without the workflow file at that path leaves the hash
+  null as well. Only a blob that hashes to something other than the `w`
+  value is `false`. It is printed on its own line, below the trust label, so
+  it cannot be read as a trust level. Every `c` value is tried and peeled, so
+  a publisher that ordered an annotated tag object before the commit is still
+  resolved. The hash is taken over the **blob** at that commit, never over
+  the working-tree file: `core.autocrlf` and clean/smudge filters make the
+  checkout differ from the object, and the object is what the NIP signs.
+- **Runs are read per target, controls repository-wide.** A run query is a
+  `#E` (PR) or `#c` (commit) filter, but Service Requests/Stops carry
+  neither, so they are read by the repository's own `a` coordinates and
+  handed to `resolve`, which filters them to the maintainer closure.
+- **The full tier fetches missing quotes from the repository relays plus the
+  quote's own relay hint**, and verifies NIP-05 through the WP2 machinery
+  and its TTL cache. Coverage is routinely `partial` in practice — a GRASP
+  host that serves no NIP-05 document is an unsettled lookup, not a negative
+  claim — so the caveat is expected rather than exceptional.
+- **CI signers' kind-0 profiles are fetched by this command.** A coordinator
+  or compute provider is not a repository contributor, so the repository
+  fetch never asks for its profile and the signer-declared `nip05` route
+  would be dead evidence. The full tier therefore issues one targeted
+  kind-0 query for the run and control signers over the repository relays
+  plus the user's default relay set, caches what it gets, and reads the
+  declared `nip05` back from the cache. It is best effort: an unreachable
+  profile is an absence of evidence, so a failure is not surfaced. The
+  synthetic `_@<grasp-domain>` route needs no profile and is unaffected.
+- **Caller-side coverage comes from the fetch report.** `FetchReport::
+  state_per_relay` records every repository relay the fetch reached; a relay
+  whose query errored never reaches the consolidated report. Any announced
+  relay missing from it makes `CiInputs::input_coverage` partial, which is
+  how rule 8's "failed relays settle as partial" holds for this command
+  rather than the trust layer's local checks being mistaken for the whole
+  picture.
+- **JSON ids and pubkeys are bech32.** The design's `<pubkey>` placeholder
+  left the encoding open; every other ngit `--json` surface emits `nevent`
+  and `npub`, and consistency across ngit's own output beats matching the
+  wire encoding of a tag value. Commit ids stay hex.
+- **`--offline` is "no relay fetch and no NIP-05", not "no network".**
+  Resolving a repository coordinate from a `nostr://` remote in nip05 form
+  can still perform the NIP-05 HTTP lookup that names the maintainer, before
+  the offline guard is reached. The flag's help says what it actually
+  skips.
+- **The stale state is seeded into the local cache in tests.** A relay
+  refuses an already-expired event (NIP-40), and waiting for a live marker
+  to expire would be the wall-clock sleep the harness forbids. `stale` is by
+  definition a marker ngit fetched while it was live and still holds, so the
+  test writes it with `client::save_event_in_local_cache` — the same call
+  the fetch would have made — and asserts on what ngit reads back. Every
+  other CI fixture is published to a relay listed on the announcement.
+
+Fetching: the consumed CI kinds (9840–9844, 39842) are one further repository
+`#a` filter in `client::get_filter_ci_events`, added to the repository-scope
+set built by `client::get_fetch_filters`, so CI events land in the normal
+local cache during the fetch every PR command already performs. That set is
+also what the `git-remote-nostr` fetch sends, so a `git fetch` against a
+nostr remote carries the CI filter too. That is intended — it is how a
+repository's CI history stays current for `pr list` without a command of its
+own — and its cost is one extra filter per repository relay.
 
 ## Per-PR CI state machine
 
@@ -365,6 +462,9 @@ below the floor.
 
 ### JSON shape (all surfaces)
 
+Event ids are bech32 `nevent`s and pubkeys are bech32 `npub`s, as on every
+other ngit JSON surface. Commit ids stay hex: they are Git object ids.
+
 ```jsonc
 "ci": {
   "state": "running|concluded|stale|none",
@@ -373,18 +473,38 @@ below the floor.
   "coverage": "complete|partial",
   "runs": [{
     "workflow": ".ngit/act/workflows/ci.yml",
+    "state": "running|concluded|stale",       // this run, not the rollup
     "conclusion": "success",
     "attempt_of": 1,
-    "coordinator": "<pubkey>",
+    "run_id": "<workflow-run-id>",
+    "commit": "<commit-id>",
+    "coordinator": "<npub>",
     "classification": "maintainer-directed",
     "evidence": [{ "kind": "maintainer-request", "classification": "...",
-                    "summary": "...", "authors": ["<pubkey>"], "scope": "run" }],
+                    "summary": "...", "authors": ["<npub>"], "scope": "run" }],
     "integrity": { "commit_present": true, "workflow_hash_matches": true },
     "jobs": [{ "job": "build", "conclusion": "success",
-               "provider": "<pubkey>", "classification": "..." }]
-  }]
+               "provider": "<npub>", "classification": "..." }]
+  }],
+  // Only when an event was skipped: its id, kind and the shape rule it broke.
+  "skipped": ["skipped kind-9842 event <id>: ..."]
 }
 ```
+
+`ngit ci status` wraps that object in the document every ngit command emits —
+`status`, `entity: "ci"`, and a `target` describing what was resolved:
+
+```jsonc
+"target": { "kind": "pr", "pr": "<nevent>", "anchor": "<nevent>",
+            "revision": "<nevent>" }
+"target": { "kind": "commit", "commit": "<commit-id>",
+            "commit_ish": "HEAD", "queried": ["<commit-id>", "<tag-object-id>"] }
+```
+
+`anchor` is the kind-1618 event CI references in `E`, which differs from `pr`
+only for a patch thread later upgraded to a PR. A refused
+`--require-ci-trust` sets `status: "error"` and adds `error`, keeping the `ci`
+object that explains the refusal.
 
 Integration tests assert on this JSON and exit codes, never on table text.
 
@@ -402,11 +522,12 @@ on WP1.
   NIP-05 domain ladder with TTL cache, cache/full tiers, coverage states. Unit
   tests for the domain ladder (label boundaries, ports, trailing dots) and
   coverage.
-- **WP3 — `ngit ci status`**: target resolution (order above), fetch-filter
-  extension in `fetching_with_account`, human + JSON output, integrity check,
-  `--require-ci-trust`, `--offline`. Integration tests: publish fixture CI
-  events via the test harness, assert JSON/exit codes for commit-ish, `#prefix`,
-  nevent, and full-hex targets, including the ambiguity error.
+- **WP3 — `ngit ci status`** *(done)*: target resolution (order above),
+  fetch-filter extension in `get_fetch_filters`, human + JSON output,
+  integrity check, `--require-ci-trust`, `--offline`. Integration tests
+  (`tests/ci_status.rs`, fixtures from `test_harness::ci`): JSON and exit
+  codes for commit-ish, `#prefix`, nevent, and full-hex targets, including
+  the ambiguity error.
 - **WP4 — `pr view` Checks section + `pr list` CI column**: cache-tier
   projection, revision matching, outdated grouping. Integration tests via JSON.
 - **WP5 — `pr merge` gating**: summary, warning, `--require-ci-trust` exit

@@ -2969,6 +2969,7 @@ name = "test_harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitcoin_hashes 1.2.0",
  "git2",
  "http-body-util",
  "hyper",

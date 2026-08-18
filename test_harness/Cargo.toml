@@ -7,6 +7,10 @@ description = "Integration test harness for ngit."
 
 [dependencies]
 anyhow = "1.0.98"
+# Kept in step with the root crate: the CI fixture builder hashes workflow
+# file content for the `w` tag with the same SHA-256 implementation ngit
+# verifies it against.
+bitcoin_hashes = "1.1"
 git2 = "0.21.0"
 http-body-util = "0.1"
 hyper = { version = "1.4", features = ["full"] }
