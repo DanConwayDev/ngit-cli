@@ -1,4 +1,9 @@
-use std::{fmt, path::PathBuf, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::PathBuf,
+    sync::OnceLock,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use keyring::Error as KeyringError;
@@ -40,6 +45,14 @@ pub enum Backend {
 const SIGNER_RECORD_VERSION: u8 = 1;
 const ALIAS_PREFIX: &str = "alias:";
 const SIGNER_PREFIX: &str = "signer:";
+
+/// Public identities and aliases known to the credential backends. No secret
+/// material is exposed through this inventory.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CredentialInventory {
+    pub accounts: BTreeSet<String>,
+    pub aliases: BTreeMap<String, String>,
+}
 
 /// A complete credential-store record for a NIP-46 signer. The client key is
 /// an application key used to communicate with the bunker, never the user's
@@ -258,7 +271,10 @@ pub fn store(keys: &Keys, policy: SecretStorage) -> Result<(String, Backend)> {
         None
     } else {
         match store_os(&name, keys) {
-            Ok(()) => return Ok((name, Backend::Os)),
+            Ok(()) => {
+                remember_account_for_listing(&name);
+                return Ok((name, Backend::Os));
+            }
             Err(error) => Some(anyhow!(error)),
         }
     };
@@ -268,6 +284,7 @@ pub fn store(keys: &Keys, policy: SecretStorage) -> Result<(String, Backend)> {
         ),
         None => "failed to write ngit's file store".to_string(),
     })?;
+    remember_account_for_listing(&name);
     Ok((name, Backend::File))
 }
 
@@ -293,7 +310,9 @@ pub fn store_bunker_signer(
         serde_json::to_string(&record).context("failed to serialize bunker signer record")?,
     );
     let name = signer_entry_name(&npub)?;
-    store_value(&name, serialized.as_str(), policy)
+    let stored = store_value(&name, serialized.as_str(), policy)?;
+    remember_account_for_listing(&npub);
+    Ok(stored)
 }
 
 pub fn retrieve_bunker_signer(npub: &str) -> std::result::Result<BunkerSigner, LookupError> {
@@ -314,14 +333,20 @@ pub fn retrieve_bunker_signer_from(
     let name = signer_entry_name(&expected_npub)
         .map_err(|error| LookupError::Invalid(error.to_string()))?;
     let serialized = retrieve_value_from(&name, backend)?;
-    parse_bunker_signer(&name, &expected_npub, &serialized)
+    let signer = parse_bunker_signer(&name, &expected_npub, &serialized)?;
+    if backend == Backend::Os {
+        remember_account_for_listing(&expected_npub);
+    }
+    Ok(signer)
 }
 
 pub fn store_alias(alias: &str, npub: &str, policy: SecretStorage) -> Result<(String, Backend)> {
     ensure_alias_available(alias, npub)?;
     let name = alias_entry_name(alias)?;
     let npub = canonical_npub(npub)?;
-    store_value(&name, &npub, policy)
+    let stored = store_value(&name, &npub, policy)?;
+    remember_alias_for_listing(alias, &npub);
+    Ok(stored)
 }
 
 /// Credential-store aliases are machine-wide because they take precedence
@@ -365,7 +390,12 @@ pub fn retrieve_alias_from(
     let name = alias_entry_name(alias)
         .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
     let npub = retrieve_value_from(&name, backend)?;
-    canonical_alias_npub(&name, &npub)
+    let npub = canonical_alias_npub(&name, &npub)?;
+    if backend == Backend::Os {
+        remember_account_for_listing(&npub);
+        remember_alias_for_listing(alias, &npub);
+    }
+    Ok(npub)
 }
 
 fn canonical_alias_npub(name: &str, npub: &str) -> std::result::Result<String, LookupError> {
@@ -570,6 +600,35 @@ pub fn file_store_path() -> Result<PathBuf> {
     file_store::path()
 }
 
+/// Enumerate public account identifiers and aliases known to ngit's
+/// credential backends. Platform keyrings do not provide a portable listing
+/// API, so successful writes are mirrored into a non-secret registry; the
+/// file store is scanned as well to cover entries created before that
+/// registry existed.
+pub fn inventory() -> Result<CredentialInventory> {
+    let mut inventory = account_registry::read()?;
+    let file_inventory = file_store::inventory()?;
+    inventory.accounts.extend(file_inventory.accounts);
+    inventory.aliases.extend(file_inventory.aliases);
+    Ok(inventory)
+}
+
+fn remember_account_for_listing(npub: &str) {
+    if let Err(error) = account_registry::remember_account(npub) {
+        eprintln!(
+            "warning: the signer was stored, but its public identity could not be added to the account-list index: {error:#}"
+        );
+    }
+}
+
+fn remember_alias_for_listing(alias: &str, npub: &str) {
+    if let Err(error) = account_registry::remember_alias(alias, npub) {
+        eprintln!(
+            "warning: the signer alias was stored, but it could not be added to the account-list index: {error:#}"
+        );
+    }
+}
+
 pub fn retrieve(name: &str) -> std::result::Result<Keys, LookupError> {
     let os_error = match retrieve_from(name, Backend::Os) {
         Ok(keys) => return Ok(keys),
@@ -598,7 +657,10 @@ pub fn retrieve_from(name: &str, backend: Backend) -> std::result::Result<Keys, 
     match backend {
         Backend::Os if os_store_disabled() => Err(LookupError::Missing(name.to_string())),
         Backend::Os => match os_store::get(name) {
-            Ok(keys) if key_matches_npub(&keys, expected) => Ok(keys),
+            Ok(keys) if key_matches_npub(&keys, expected) => {
+                remember_account_for_listing(expected);
+                Ok(keys)
+            }
             Ok(_) | Err(OsError::Corrupt) => Err(LookupError::Invalid(format!(
                 "OS credential '{name}' does not match its npub"
             ))),
@@ -650,6 +712,13 @@ pub fn forget(name: &str) -> Result<bool> {
     }
     if file_store::delete(name)? {
         deleted = true;
+    }
+    if let Some(alias) = name.strip_prefix(ALIAS_PREFIX) {
+        if let Err(error) = account_registry::forget_alias(alias) {
+            eprintln!(
+                "warning: the signer alias was removed, but its account-list index entry could not be updated: {error:#}"
+            );
+        }
     }
     Ok(deleted)
 }
@@ -757,6 +826,154 @@ impl std::error::Error for OsError {
     }
 }
 
+/// Non-secret index for credential-store identities. Platform keyrings expose
+/// entry lookup but no portable enumeration API, so this file records only
+/// canonical npubs and alias mappings after successful writes.
+mod account_registry {
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        io::Write,
+        path::{Path, PathBuf},
+    };
+
+    use anyhow::{Context, Result};
+    use serde::{Deserialize, Serialize};
+    use tempfile::NamedTempFile;
+
+    use super::{CredentialInventory, FILE_ENV, canonical_npub, normalize_alias};
+
+    #[derive(Default, Serialize, Deserialize)]
+    struct Registry {
+        accounts: BTreeSet<String>,
+        aliases: BTreeMap<String, String>,
+    }
+
+    fn path() -> Result<PathBuf> {
+        // Keep all test writes beside the debug-only redirected credential
+        // file so tests can never touch the real user data directory.
+        #[cfg(debug_assertions)]
+        if let Ok(credentials) = std::env::var(FILE_ENV) {
+            let mut indexed = PathBuf::from(credentials).into_os_string();
+            indexed.push(".accounts");
+            return Ok(PathBuf::from(indexed));
+        }
+        Ok(crate::get_dirs()?.data_dir().join("accounts.json"))
+    }
+
+    pub(super) fn read() -> Result<CredentialInventory> {
+        let registry = read_at(&path()?)?;
+        let accounts = registry
+            .accounts
+            .into_iter()
+            .map(|npub| canonical_npub(&npub))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let aliases = registry
+            .aliases
+            .into_iter()
+            .map(|(alias, npub)| Ok((normalize_alias(&alias)?, canonical_npub(&npub)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        Ok(CredentialInventory { accounts, aliases })
+    }
+
+    pub(super) fn remember_account(npub: &str) -> Result<()> {
+        update(|registry| Ok(registry.accounts.insert(canonical_npub(npub)?)))
+    }
+
+    pub(super) fn remember_alias(alias: &str, npub: &str) -> Result<()> {
+        update(|registry| {
+            let alias = normalize_alias(alias)?;
+            let npub = canonical_npub(npub)?;
+            if registry.aliases.get(&alias) == Some(&npub) {
+                Ok(false)
+            } else {
+                registry.aliases.insert(alias, npub);
+                Ok(true)
+            }
+        })
+    }
+
+    pub(super) fn forget_alias(alias: &str) -> Result<()> {
+        let alias = normalize_alias(alias)?;
+        update(|registry| Ok(registry.aliases.remove(&alias).is_some()))
+    }
+
+    fn update(mut change: impl FnMut(&mut Registry) -> Result<bool>) -> Result<()> {
+        let path = path()?;
+        let mut registry = read_at(&path)?;
+        if change(&mut registry)? {
+            write_at(&path, &registry)?;
+        }
+        Ok(())
+    }
+
+    fn read_at(path: &Path) -> Result<Registry> {
+        if !path.exists() {
+            return Ok(Registry::default());
+        }
+        let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        if data.is_empty() {
+            return Ok(Registry::default());
+        }
+        serde_json::from_slice(&data).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    fn write_at(path: &Path, registry: &Registry) -> Result<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder
+                .create(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let data = serde_json::to_vec_pretty(registry)
+            .context("failed to serialize the account registry")?;
+        let mut temp = NamedTempFile::new_in(parent).with_context(|| {
+            format!("failed to create a temporary file in {}", parent.display())
+        })?;
+        temp.write_all(&data)
+            .and_then(|()| temp.as_file().sync_all())
+            .with_context(|| format!("failed to write a replacement for {}", path.display()))?;
+        temp.persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("failed to sync {}", parent.display()))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn inventory_at(path: &Path) -> Result<CredentialInventory> {
+        let registry = read_at(path)?;
+        Ok(CredentialInventory {
+            accounts: registry.accounts,
+            aliases: registry.aliases,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_inventory_at(path: &Path, inventory: &CredentialInventory) -> Result<()> {
+        write_at(
+            path,
+            &Registry {
+                accounts: inventory.accounts.clone(),
+                aliases: inventory.aliases.clone(),
+            },
+        )
+    }
+}
+
 /// OS credential store access.
 ///
 /// Inlined from `nostr-keyring`, which upstream discontinued as too thin a
@@ -835,7 +1052,7 @@ mod os_store {
 /// directory, 0600 file.
 mod file_store {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         fs,
         io::Write,
         path::{Path, PathBuf},
@@ -844,6 +1061,11 @@ mod file_store {
     use anyhow::{Context, Result};
     use nostr::prelude::Keys;
     use tempfile::NamedTempFile;
+
+    use super::{
+        ALIAS_PREFIX, CredentialInventory, SERVICE, SIGNER_PREFIX, canonical_npub, normalize_alias,
+        parse_pointer,
+    };
 
     pub fn path() -> Result<PathBuf> {
         // Compiled out of release builds so an environment variable can never
@@ -877,6 +1099,29 @@ mod file_store {
 
     pub fn get_value(name: &str) -> Result<Option<String>> {
         get_value_at(&path()?, name)
+    }
+
+    pub(super) fn inventory() -> Result<CredentialInventory> {
+        inventory_at(&path()?)
+    }
+
+    pub(super) fn inventory_at(path: &Path) -> Result<CredentialInventory> {
+        let mut accounts = BTreeSet::new();
+        let mut aliases = BTreeMap::new();
+        let prefix = format!("{SERVICE}/");
+        for (key, value) in read(path)? {
+            let Some(name) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            if let Some(npub) = parse_pointer(name) {
+                accounts.insert(canonical_npub(npub)?);
+            } else if let Some(npub) = name.strip_prefix(SIGNER_PREFIX) {
+                accounts.insert(canonical_npub(npub)?);
+            } else if let Some(alias) = name.strip_prefix(ALIAS_PREFIX) {
+                aliases.insert(normalize_alias(alias)?, canonical_npub(&value)?);
+            }
+        }
+        Ok(CredentialInventory { accounts, aliases })
     }
 
     pub(super) fn set_at(path: &Path, name: &str, keys: &Keys) -> Result<()> {
@@ -1141,6 +1386,43 @@ mod tests {
             file_store::get_value_at(&path, "alias:fred")?.as_deref(),
             Some(npub.as_str())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn file_store_inventory_recovers_accounts_and_aliases_without_an_index() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("credentials.json");
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32()?;
+        file_store::set_at(&path, &npub, &keys)?;
+        file_store::set_value_at(&path, "alias:dcdev", &npub)?;
+
+        let inventory = file_store::inventory_at(&path)?;
+        assert_eq!(inventory.accounts, BTreeSet::from([npub.clone()]));
+        assert_eq!(
+            inventory.aliases,
+            BTreeMap::from([("dcdev".to_string(), npub)])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_registry_contains_only_public_identity_data() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("accounts.json");
+        let npub = Keys::generate().public_key().to_bech32()?;
+        let inventory = CredentialInventory {
+            accounts: BTreeSet::from([npub.clone()]),
+            aliases: BTreeMap::from([("dcdev".to_string(), npub.clone())]),
+        };
+
+        account_registry::write_inventory_at(&path, &inventory)?;
+        assert_eq!(account_registry::inventory_at(&path)?, inventory);
+        let contents = std::fs::read_to_string(path)?;
+        assert!(contents.contains(&npub));
+        assert!(contents.contains("dcdev"));
+        assert!(!contents.contains("nsec1"));
         Ok(())
     }
 

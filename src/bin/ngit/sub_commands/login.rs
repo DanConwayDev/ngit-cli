@@ -21,6 +21,21 @@ use crate::{
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
+    /// stored account to activate (full npub, alias, or exact Nostr profile
+    /// name)
+    #[arg(
+        value_name = "ACCOUNT",
+        conflicts_with_all = [
+            "nsec",
+            "nsec_file",
+            "signer",
+            "bunker_uri",
+            "bunker_app_key",
+            "bunker_url"
+        ]
+    )]
+    account: Option<String>,
+
     /// login to the local git repository only
     #[arg(long, action)]
     local: bool,
@@ -36,7 +51,14 @@ pub struct SubCommandArgs {
     /// bunker:// URL from signer app for non-interactive remote signer login
     #[arg(
         long = "bunker-url",
-        conflicts_with_all = ["nsec", "nsec_file", "signer", "bunker_uri", "bunker_app_key"]
+        conflicts_with_all = [
+            "account",
+            "nsec",
+            "nsec_file",
+            "signer",
+            "bunker_uri",
+            "bunker_app_key"
+        ]
     )]
     bunker_url: Option<String>,
 
@@ -62,10 +84,12 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         .as_deref()
         .map(credential_store::normalize_alias)
         .transpose()?;
+    let account_selection = positional_account_selection(command_args);
+    let signer_info = account_selection.as_ref().or(signer.info.as_ref());
     // Early validation: check if we have required parameters in non-interactive
     // mode
     if Interactor::is_non_interactive()
-        && signer.info.is_none()
+        && signer_info.is_none()
         && command_args.bunker_url.is_none()
         && alias.is_none()
     {
@@ -73,6 +97,10 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         return Err(cli_error(
             "requires a new secret, a stored signer, or interactive login",
             &[
+                (
+                    "ACCOUNT",
+                    "reactivate by full npub, alias, or exact Nostr profile name",
+                ),
                 ("--nsec <key>", "provide secret key (nsec or hex)"),
                 ("--bunker-url <url>", "bunker:// URL from signer app"),
                 (
@@ -83,6 +111,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
                 ("--interactive", "for interactive nostr connect login"),
             ],
             &[
+                "ngit account login <account>",
                 "ngit account login --nsec <your-nsec>",
                 "ngit account login --bunker-url <bunker-url>",
                 "ngit account login --local --alias <stored-alias>",
@@ -95,7 +124,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
 
     let (signer_for_login, selected_by, selected_alias) = resolve_login_selection(
         git_repo.as_ref(),
-        signer.info.as_ref(),
+        signer_info,
         signer.password.as_ref(),
         alias.as_deref(),
         command_args.bunker_url.is_some(),
@@ -150,6 +179,15 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         client.disconnect().await?;
     }
     Ok(())
+}
+
+fn positional_account_selection(command_args: &SubCommandArgs) -> Option<SignerInfo> {
+    command_args
+        .account
+        .as_ref()
+        .map(|selector| SignerInfo::Selection {
+            selector: selector.clone(),
+        })
 }
 
 fn discover_login_repo(local: bool) -> Result<Option<Repo>> {
@@ -252,9 +290,9 @@ async fn resolve_login_selection(
     alias: Option<&str>,
     has_bunker_url: bool,
 ) -> Result<(Option<SignerInfo>, Option<String>, Option<String>)> {
-    // --signer selectors may fall back to cached profile names; --alias is
-    // strictly the alias namespace.
-    let from_signer_flag = matches!(signer_info, Some(SignerInfo::Selection { .. }));
+    // Positional and --signer selectors may fall back to cached profile names;
+    // --alias is strictly the alias namespace.
+    let from_explicit_selector = matches!(signer_info, Some(SignerInfo::Selection { .. }));
     let mut requested = signer_info.cloned().or_else(|| {
         (!has_bunker_url).then(|| {
             alias.map(|alias| SignerInfo::Selection {
@@ -278,8 +316,13 @@ async fn resolve_login_selection(
     // be in the Git-config scope that account switching is about to clear.
     // Mutable profile names are resolved once, here: only the canonical npub
     // (or a matched alias) is handed on for persistence.
-    let resolved =
-        resolve_selection(&git_repo, selector, &password.cloned(), from_signer_flag).await?;
+    let resolved = resolve_selection(
+        &git_repo,
+        selector,
+        &password.cloned(),
+        from_explicit_selector,
+    )
+    .await?;
     Ok((
         Some(resolved.signer_info),
         Some(resolved.npub),

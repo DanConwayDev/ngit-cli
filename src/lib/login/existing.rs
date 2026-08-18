@@ -1,7 +1,14 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
-use nostr::prelude::{Event, Filter, Kind, Metadata, PublicKey, ToBech32, nip46::NostrConnectUri};
+use nostr::prelude::{
+    Event, Filter, Keys, Kind, Metadata, PublicKey, ToBech32, nip46::NostrConnectUri,
+};
 use nostr_connect::client::NostrConnect;
 
 use super::{
@@ -356,6 +363,125 @@ fn selection_scopes(git_repo: &Option<&Repo>) -> Vec<ConfigScope> {
         scopes.extend([ConfigScope::Global, ConfigScope::System]);
     }
     scopes
+}
+
+/// Alias names that can participate in `--signer` resolution in the current
+/// repository context. Credential-store aliases are machine-wide; Git aliases
+/// follow local, global, then system scope precedence.
+pub fn configured_alias_names(git_repo: &Option<&Repo>) -> Result<BTreeSet<String>> {
+    let mut aliases = credential_store::inventory()?
+        .aliases
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    for scope in selection_scopes(git_repo) {
+        aliases.extend(config_alias_names(git_repo, scope)?);
+    }
+    Ok(aliases)
+}
+
+fn config_alias_names(git_repo: &Option<&Repo>, scope: ConfigScope) -> Result<BTreeSet<String>> {
+    let config = match scope {
+        ConfigScope::Local => git_repo
+            .context("cannot read local signer aliases without a repository")?
+            .git_repo
+            .config()
+            .context("failed to open local Git config")?
+            .open_level(git2::ConfigLevel::Local)
+            .context("failed to isolate local Git config")?,
+        ConfigScope::Global => git2::Config::open_default()
+            .context("failed to open Git config")?
+            .open_global()
+            .context("failed to open global Git config")?,
+        ConfigScope::System => {
+            let config = git2::Config::open_default().context("failed to open Git config")?;
+            let mut aliases = BTreeSet::new();
+            for level in [git2::ConfigLevel::System, git2::ConfigLevel::ProgramData] {
+                if let Ok(config) = config.open_level(level) {
+                    aliases.extend(alias_names_in_config(&config)?);
+                }
+            }
+            return Ok(aliases);
+        }
+    };
+    alias_names_in_config(&config)
+}
+
+fn alias_names_in_config(config: &git2::Config) -> Result<BTreeSet<String>> {
+    let mut aliases = BTreeSet::new();
+    let mut entries = config
+        .entries(None)
+        .context("failed to enumerate signer aliases in Git config")?;
+    while let Some(entry) = entries.next() {
+        let entry = entry.context("failed to read a signer alias from Git config")?;
+        let name = entry
+            .name()
+            .context("signer alias Git-config key is not valid UTF-8")?;
+        let Some(alias) = name.strip_prefix("nostr.signer-alias.") else {
+            continue;
+        };
+        aliases.insert(credential_store::normalize_alias(alias)?);
+    }
+    Ok(aliases)
+}
+
+/// Resolve the configured signer at one Git scope to its canonical npub.
+/// `None` means that scope has no login configuration.
+pub async fn configured_signer_npub(
+    git_repo: &Option<&Repo>,
+    source: SignerInfoSource,
+) -> Result<Option<String>> {
+    let has_login = match source {
+        SignerInfoSource::GitLocal => git_repo.is_some_and(|repo| {
+            ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
+                .iter()
+                .any(|key| get_git_config_item(&Some(repo), key).is_ok_and(|value| value.is_some()))
+        }),
+        SignerInfoSource::GitGlobal => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
+            .iter()
+            .any(|key| get_git_config_item(&None, key).is_ok_and(|value| value.is_some())),
+        SignerInfoSource::GitSystem => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
+            .iter()
+            .any(|key| get_git_config_item_system(key).is_ok_and(|value| value.is_some())),
+        SignerInfoSource::CommandLineArguments => false,
+    };
+    if !has_login {
+        return Ok(None);
+    }
+
+    let (signer_info, _, _) = get_signer_info(git_repo, &None, &None, &Some(source)).await?;
+    signer_info_npub(&signer_info).map(Some)
+}
+
+fn signer_info_npub(signer_info: &SignerInfo) -> Result<String> {
+    let expected = match signer_info {
+        SignerInfo::Nsec { nsec, npub, .. } => {
+            if let Some(npub) = npub {
+                return PublicKey::parse(npub)
+                    .context("configured signer has an invalid npub")?
+                    .to_bech32()
+                    .map_err(Into::into);
+            }
+            if nsec.starts_with("ncryptsec1") {
+                bail!("configured encrypted signer has no npub");
+            }
+            Keys::parse(nsec)
+                .context("configured signer has an invalid nsec")?
+                .public_key()
+        }
+        SignerInfo::Bunker { npub, .. } => PublicKey::parse(
+            npub.as_deref()
+                .context("configured remote signer has no npub")?,
+        )
+        .context("configured remote signer has an invalid npub")?,
+        SignerInfo::Selection { .. } => bail!("configured signer selection was not resolved"),
+    };
+    expected.to_bech32().map_err(Into::into)
+}
+
+/// Whether the current credential stores or Git-config scopes can construct a
+/// signer for `npub` using the same precedence as `--signer <npub>`.
+pub fn signer_is_available(git_repo: &Option<&Repo>, npub: &str) -> Result<bool> {
+    Ok(resolve_signer_for_npub(git_repo, npub, &None)?.is_some())
 }
 
 fn config_value(git_repo: &Option<&Repo>, scope: ConfigScope, key: &str) -> Result<Option<String>> {

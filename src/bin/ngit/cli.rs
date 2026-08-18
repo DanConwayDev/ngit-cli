@@ -361,7 +361,7 @@ pub enum Commands {
     Sync(sub_commands::sync::SubCommandArgs),
     /// install and update ngit's repository skill for coding agents
     Skill(SkillArgs),
-    /// create account, login, logout or export keys
+    /// list accounts, create an account, login, logout or export keys
     Account(AccountSubCommandArgs),
 }
 
@@ -396,6 +396,9 @@ pub struct SkillOptOutArgs {
 
 #[derive(Subcommand)]
 pub enum AccountCommands {
+    /// show logged-in and other accounts available for direct use
+    #[command(visible_alias = "list")]
+    Whoami(sub_commands::whoami::SubCommandArgs),
     /// login with nsec or nostr connect
     Login(sub_commands::login::SubCommandArgs),
     /// connect interactively (alias for `login -i`)
@@ -410,8 +413,6 @@ pub enum AccountCommands {
     ForgetKeys(sub_commands::forget_keys::SubCommandArgs),
     /// create a new nostr account
     Create(sub_commands::create::SubCommandArgs),
-    /// show currently logged-in account(s)
-    Whoami(sub_commands::whoami::SubCommandArgs),
 }
 
 #[derive(clap::Parser)]
@@ -825,7 +826,7 @@ mod tests {
     use clap::{Command, CommandFactory, Parser};
     use tempfile::tempdir;
 
-    use super::{Cli, extract_signer_cli_arguments, read_nsec_file};
+    use super::{AccountCommands, Cli, Commands, extract_signer_cli_arguments, read_nsec_file};
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {
         if command.has_subcommands() {
@@ -937,6 +938,51 @@ mod tests {
                 "--bunker-url accepted conflicting source {}",
                 conflicting[0]
             );
+        }
+    }
+
+    #[test]
+    fn account_login_accepts_a_positional_selector() {
+        let cli = Cli::try_parse_from([
+            "ngit",
+            "account",
+            "login",
+            "DanConwayDev",
+            "--alias",
+            "dcdev",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Account(args))
+                if matches!(args.account_command, AccountCommands::Login(_))
+        ));
+
+        for conflicting in ["--signer", "--nsec", "--bunker-url"] {
+            assert!(
+                Cli::try_parse_from([
+                    "ngit",
+                    "account",
+                    "login",
+                    "DanConwayDev",
+                    conflicting,
+                    "value",
+                ])
+                .is_err(),
+                "positional account accepted conflicting source {conflicting}"
+            );
+        }
+    }
+
+    #[test]
+    fn account_list_is_an_alias_for_whoami() {
+        for command in ["whoami", "list"] {
+            let cli = Cli::try_parse_from(["ngit", "account", command, "--offline"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Commands::Account(args))
+                    if matches!(args.account_command, AccountCommands::Whoami(_))
+            ));
         }
     }
 
