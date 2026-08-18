@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Basic Buzz support**: clone Buzz repositories, view pull requests and their
+  lifecycle status, and push new or updated pull requests and status changes
+  through authenticated Buzz relay and Git transport. Normal branch and tag
+  pushes are not supported, and Buzz pull-request comments cannot be viewed or
+  published because Buzz uses kind 1 while ngit uses NIP-22 kind 1111.
 - Pull requests can target a non-default branch with `git push -o target-branch=<branch>` or `ngit send --target-branch <branch>`. Root PR events expose the target as an indexed `b` tag, and listing, viewing, merging, and applied-status detection honor it; omitting the option retains default-branch behavior. `ngit merge` resolves an explicit target against the latest Nostr repository state, fetching the target commit without mutating tracking refs, so a stale local clone cannot merge onto old target history.
 - Pull requests automatically select the unique most-advanced tip of the author's other open or draft PRs when it is in the new proposal's history and ahead of the target branch. Existing children follow later authorized parent updates after they are rebased, while stale children and ambiguous unrelated parents fail closed. `git push -o base=<commit|branch|event>` and `ngit send --base <commit|branch|event>` override inference for that publication; PR roots select their latest authorized update, specific PR-update events select their historical commit, and unique event-ID prefixes are accepted. Repeat an explicit historical base on later child updates to keep that deliberate pin instead of following the open parent lineage.
 - Add a multi-stage `Containerfile` for building a minimal Alpine-based ngit image, plus a CI smoke test that builds the image and runs `ngit --version`.
