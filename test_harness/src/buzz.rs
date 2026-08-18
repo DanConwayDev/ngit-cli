@@ -8,6 +8,8 @@
 //! requires; the integration test still exercises the real sequential clone,
 //! fetch, and push object-store paths.
 
+#[cfg(target_os = "linux")]
+use std::os::unix::{fs::MetadataExt, fs::chown, process::CommandExt};
 use std::{
     env, fs,
     fs::File,
@@ -45,10 +47,17 @@ const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// early exit and retries on freshly reserved ports instead of failing the
 /// test. Matches the cap in `grasp.rs` and `relay.rs`.
 const MAX_BIND_ATTEMPTS: usize = 5;
+const POSTGRES_SUPERUSER: &str = "postgres";
 const GARAGE_ACCESS_KEY: &str = "GK0123456789abcdef01234567";
 const GARAGE_SECRET_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const S3_BUCKET: &str = "buzz-ngit-test";
 const GIT_HOOK_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessIdentity {
+    uid: u32,
+    gid: u32,
+}
 
 struct ManagedProcess {
     name: &'static str,
@@ -114,6 +123,7 @@ pub struct BuzzServer {
     _garage: ManagedProcess,
     _redis: ManagedProcess,
     _postgres: ManagedProcess,
+    _postgres_temp_dir: Option<TempDir>,
     _temp_dir: TempDir,
 }
 
@@ -132,8 +142,23 @@ impl BuzzServer {
         let temp_dir = TempDir::new().context("failed to allocate Buzz fixture tempdir")?;
         let root = temp_dir.path();
 
-        let postgres_data = root.join("postgres-data");
-        let postgres_socket = root.join("postgres-socket");
+        let postgres_identity = postgres_process_identity()?;
+        // Nix shells commonly set TMPDIR to a caller-only directory. A
+        // PostgreSQL child running under a different UID cannot traverse that
+        // parent even when its own fixture directory is chowned. Root jobs
+        // therefore give PostgreSQL a private directory directly below the
+        // system /tmp, while all other fixture state remains in `temp_dir`.
+        let postgres_temp_dir = if postgres_identity.is_some() {
+            Some(
+                TempDir::new_in("/tmp")
+                    .context("failed to allocate unprivileged PostgreSQL fixture tempdir")?,
+            )
+        } else {
+            None
+        };
+        let postgres_root = postgres_temp_dir.as_ref().map_or(root, TempDir::path);
+        let postgres_data = postgres_root.join("postgres-data");
+        let postgres_socket = postgres_root.join("postgres-socket");
         let redis_data = root.join("redis");
         let garage_meta = root.join("garage-meta");
         let garage_data = root.join("garage-data");
@@ -141,10 +166,22 @@ impl BuzzServer {
         let git_pack_cache = root.join("git-pack-cache");
         // garage_meta and garage_data are (re)created per spawn attempt below
         // so a lost bind race cannot leave stale metadata behind.
-        for path in [&postgres_socket, &redis_data, &git_data, &git_pack_cache] {
+        for path in [
+            &postgres_data,
+            &postgres_socket,
+            &redis_data,
+            &git_data,
+            &git_pack_cache,
+        ] {
             fs::create_dir_all(path)
                 .with_context(|| format!("failed to create {}", path.display()))?;
         }
+        prepare_postgres_directories(
+            postgres_root,
+            &postgres_data,
+            &postgres_socket,
+            postgres_identity,
+        )?;
 
         // Reserve every port up front: while a reservation is live no other
         // `reserve_port` call in this process can be handed the same number,
@@ -159,17 +196,19 @@ impl BuzzServer {
             port::reserve_port()?,
         ];
 
-        run_checked(
-            "initdb",
-            Command::new("initdb").arg("-D").arg(&postgres_data).args([
-                "-A",
-                "trust",
-                "--no-locale",
-                "--encoding=UTF8",
-                // Test-only database: don't fsync the fresh cluster files.
-                "--no-sync",
-            ]),
-        )?;
+        let mut initdb = Command::new("initdb");
+        initdb.arg("-D").arg(&postgres_data).args([
+            "-A",
+            "trust",
+            "--no-locale",
+            "--encoding=UTF8",
+            "--username",
+            POSTGRES_SUPERUSER,
+            // Test-only database: don't fsync the fresh cluster files.
+            "--no-sync",
+        ]);
+        set_process_identity(&mut initdb, postgres_identity);
+        run_checked("initdb", &mut initdb)?;
 
         let (mut postgres, postgres_ports) = spawn_with_bind_retry(
             "Postgres",
@@ -190,6 +229,7 @@ impl BuzzServer {
                     .args(["-c", "fsync=off"])
                     .args(["-c", "synchronous_commit=off"])
                     .args(["-c", "full_page_writes=off"]);
+                set_process_identity(&mut command, postgres_identity);
                 Ok(command)
             },
         )
@@ -199,6 +239,7 @@ impl BuzzServer {
             Command::new("pg_isready")
                 .args(["-h", "127.0.0.1", "-p"])
                 .arg(postgres_port_number.to_string())
+                .args(["-U", POSTGRES_SUPERUSER])
                 .output()
         })
         .await?;
@@ -207,6 +248,7 @@ impl BuzzServer {
             Command::new("createuser")
                 .args(["-h", "127.0.0.1", "-p"])
                 .arg(postgres_port_number.to_string())
+                .args(["-U", POSTGRES_SUPERUSER])
                 .arg("buzz"),
         )?;
         run_checked(
@@ -214,6 +256,7 @@ impl BuzzServer {
             Command::new("createdb")
                 .args(["-h", "127.0.0.1", "-p"])
                 .arg(postgres_port_number.to_string())
+                .args(["-U", POSTGRES_SUPERUSER])
                 .args(["-O", "buzz"])
                 .arg("buzz"),
         )?;
@@ -395,6 +438,7 @@ root_domain = ".s3.garage"
             _garage: garage,
             _redis: redis,
             _postgres: postgres,
+            _postgres_temp_dir: postgres_temp_dir,
             _temp_dir: temp_dir,
         }))
     }
@@ -505,6 +549,101 @@ fn binary_from_env(name: &str) -> Result<Option<PathBuf>> {
         path.display()
     );
     Ok(None)
+}
+
+/// PostgreSQL refuses to initialize or serve a cluster as root. act's default
+/// Linux job image runs commands as root even inside the microVM sandbox, so
+/// use an existing unprivileged system account for only the PostgreSQL server
+/// processes. Other fixture processes retain the caller's identity.
+fn postgres_process_identity() -> Result<Option<ProcessIdentity>> {
+    #[cfg(target_os = "linux")]
+    {
+        let effective_uid = fs::metadata("/proc/self")
+            .context("failed to inspect the Buzz fixture process identity")?
+            .uid();
+        if effective_uid != 0 {
+            return Ok(None);
+        }
+
+        let passwd = fs::read_to_string("/etc/passwd")
+            .context("failed to read /etc/passwd for an unprivileged PostgreSQL identity")?;
+        let identity = select_unprivileged_identity(&passwd).context(
+            "the root Buzz fixture requires a non-root account in /etc/passwd to run PostgreSQL",
+        )?;
+        Ok(Some(identity))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    Ok(None)
+}
+
+fn prepare_postgres_directories(
+    root: &Path,
+    data_dir: &Path,
+    socket_dir: &Path,
+    identity: Option<ProcessIdentity>,
+) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(identity) = identity {
+        for path in [root, data_dir, socket_dir] {
+            chown(path, Some(identity.uid), Some(identity.gid)).with_context(|| {
+                format!(
+                    "failed to give PostgreSQL fixture identity {}:{} ownership of {}",
+                    identity.uid,
+                    identity.gid,
+                    path.display()
+                )
+            })?;
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = (root, data_dir, socket_dir, identity);
+
+    Ok(())
+}
+
+/// Prefer the conventional PostgreSQL or nobody accounts, then accept the
+/// first non-root account so minimal CI images are not tied to one username.
+fn select_unprivileged_identity(passwd: &str) -> Option<ProcessIdentity> {
+    let mut nobody = None;
+    let mut fallback = None;
+    for line in passwd.lines() {
+        let Some((name, identity)) = parse_passwd_identity(line) else {
+            continue;
+        };
+        if identity.uid == 0 {
+            continue;
+        }
+        if name == "postgres" {
+            return Some(identity);
+        }
+        if name == "nobody" {
+            nobody = Some(identity);
+        } else if fallback.is_none() {
+            fallback = Some(identity);
+        }
+    }
+    nobody.or(fallback)
+}
+
+fn parse_passwd_identity(line: &str) -> Option<(&str, ProcessIdentity)> {
+    let mut fields = line.split(':');
+    let name = fields.next()?;
+    fields.next()?; // password placeholder
+    let uid = fields.next()?.parse::<u32>().ok()?;
+    let gid = fields.next()?.parse::<u32>().ok()?;
+    Some((name, ProcessIdentity { uid, gid }))
+}
+
+fn set_process_identity(command: &mut Command, identity: Option<ProcessIdentity>) {
+    #[cfg(target_os = "linux")]
+    if let Some(identity) = identity {
+        command.gid(identity.gid).uid(identity.uid);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = (command, identity);
 }
 
 fn run_checked(label: &str, command: &mut Command) -> Result<Output> {
@@ -720,5 +859,46 @@ async fn wait_for_http_ready(
             )));
         }
         sleep(READY_POLL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_identity_is_preferred() {
+        let passwd = "root:x:0:0:root:/root:/bin/sh\n\
+                      nobody:x:65534:65534:nobody:/:/sbin/nologin\n\
+                      postgres:x:71:71:postgres:/:/sbin/nologin\n";
+
+        assert_eq!(
+            select_unprivileged_identity(passwd),
+            Some(ProcessIdentity { uid: 71, gid: 71 })
+        );
+    }
+
+    #[test]
+    fn nobody_is_preferred_to_an_arbitrary_non_root_account() {
+        let passwd = "malformed\n\
+                      root:x:0:0:root:/root:/bin/sh\n\
+                      runner:x:1000:1000:runner:/home/runner:/bin/sh\n\
+                      nobody:x:65534:65534:nobody:/:/sbin/nologin\n";
+
+        assert_eq!(
+            select_unprivileged_identity(passwd),
+            Some(ProcessIdentity {
+                uid: 65534,
+                gid: 65534
+            })
+        );
+    }
+
+    #[test]
+    fn root_is_never_selected() {
+        assert_eq!(
+            select_unprivileged_identity("root:x:0:0:root:/root:/bin/sh\n"),
+            None
+        );
     }
 }
