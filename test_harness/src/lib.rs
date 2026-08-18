@@ -20,6 +20,9 @@
 //! - [`grasp::GraspServer`] — `ngit-grasp` subprocess on a loopback port,
 //!   speaking NIP-01 + git smart-http. Required for any test that publishes a
 //!   kind-30617 repo announcement or pushes git data through a GRASP server.
+//!   [`HarnessBuilder::with_grasp_server_at_base_path`] and
+//!   [`HarnessBuilder::with_grasp_server_grasp06_at_base_path`] mount both
+//!   protocol surfaces below a non-root public path.
 //! - [`buzz::BuzzServer`] — the Nix-built Buzz relay plus isolated Postgres,
 //!   Redis, and Garage subprocesses. It provisions channels and repository
 //!   announcements through their Nostr protocol events, then exposes the relay

@@ -73,10 +73,14 @@ const MAX_BIND_ATTEMPTS: usize = 5;
 #[derive(Debug)]
 pub struct GraspServer {
     role: String,
-    /// `http://127.0.0.1:<port>` — the form `Params::default()`'s
-    /// `grasp_default_set` and `--grasp-server` flag both accept after
-    /// passing through `normalize_grasp_server_url`.
+    /// `http://127.0.0.1:<port><base-path>` — the form
+    /// `Params::default()`'s `grasp_default_set` and `--grasp-server` flag
+    /// both accept after passing through `normalize_grasp_server_url`.
     url: String,
+    /// Public mount point passed to ngit-grasp as `NGIT_BASE_PATH`.
+    /// Root-mounted fixtures store `/`; path-mounted fixtures store the
+    /// normalized prefix, for example `/services/grasp`.
+    base_path: String,
     port: u16,
     process: Child,
     /// Held purely to keep the tempdir alive — `git_data_path` shares its
@@ -106,7 +110,16 @@ impl GraspServer {
         role: impl Into<String>,
         reservation: PortReservation,
     ) -> Result<Self> {
-        Self::start_inner(role.into(), reservation, false, None).await
+        Self::start_inner(role.into(), reservation, false, None, "/".to_string()).await
+    }
+
+    /// Spawn ngit-grasp beneath a non-root public URL path.
+    pub(crate) async fn start_at_base_path(
+        role: impl Into<String>,
+        reservation: PortReservation,
+        base_path: String,
+    ) -> Result<Self> {
+        Self::start_inner(role.into(), reservation, false, None, base_path).await
     }
 
     /// Spawn ngit-grasp with GRASP-06 `/prs/` endpoint enabled
@@ -122,7 +135,17 @@ impl GraspServer {
         role: impl Into<String>,
         reservation: PortReservation,
     ) -> Result<Self> {
-        Self::start_inner(role.into(), reservation, true, None).await
+        Self::start_inner(role.into(), reservation, true, None, "/".to_string()).await
+    }
+
+    /// Spawn a path-mounted ngit-grasp with the GRASP-06 `/prs/` endpoint
+    /// enabled beneath the same public prefix.
+    pub(crate) async fn start_grasp06_at_base_path(
+        role: impl Into<String>,
+        reservation: PortReservation,
+        base_path: String,
+    ) -> Result<Self> {
+        Self::start_inner(role.into(), reservation, true, None, base_path).await
     }
 
     /// Spawn a GRASP-08 private service whose static membership contains the
@@ -132,7 +155,14 @@ impl GraspServer {
         reservation: PortReservation,
         member: String,
     ) -> Result<Self> {
-        Self::start_inner(role.into(), reservation, false, Some(member)).await
+        Self::start_inner(
+            role.into(),
+            reservation,
+            false,
+            Some(member),
+            "/".to_string(),
+        )
+        .await
     }
 
     /// Common implementation for [`start`][Self::start] and
@@ -143,6 +173,7 @@ impl GraspServer {
         reservation: PortReservation,
         grasp06: bool,
         private_member: Option<String>,
+        base_path: String,
     ) -> Result<Self> {
         let binary = locate_binary()?;
 
@@ -155,8 +186,15 @@ impl GraspServer {
             let r = reservation
                 .take()
                 .expect("reservation always present on attempt entry");
-            match Self::try_start_once(role.clone(), &binary, r, grasp06, private_member.as_deref())
-                .await
+            match Self::try_start_once(
+                role.clone(),
+                &binary,
+                r,
+                grasp06,
+                private_member.as_deref(),
+                &base_path,
+            )
+            .await
             {
                 Ok(server) => return Ok(server),
                 Err(StartFailure::EarlyExit { status }) if attempt < MAX_BIND_ATTEMPTS => {
@@ -196,10 +234,12 @@ impl GraspServer {
         reservation: PortReservation,
         grasp06: bool,
         private_member: Option<&str>,
+        base_path: &str,
     ) -> std::result::Result<Self, StartFailure> {
         let port = reservation.port();
         let bind_address = format!("127.0.0.1:{port}");
-        let url = format!("http://127.0.0.1:{port}");
+        let service_suffix = if base_path == "/" { "" } else { base_path };
+        let url = format!("http://127.0.0.1:{port}{service_suffix}");
 
         let git_data_dir = TempDir::new()
             .context("failed to allocate tempdir for ngit-grasp git data")
@@ -218,6 +258,7 @@ impl GraspServer {
             .current_dir(&git_data_path)
             .env("NGIT_BIND_ADDRESS", &bind_address)
             .env("NGIT_DOMAIN", &bind_address)
+            .env("NGIT_BASE_PATH", base_path)
             .env("NGIT_GIT_DATA_PATH", &git_data_path)
             .env("NGIT_DATABASE_BACKEND", "memory")
             .env("NGIT_TEST", "1")
@@ -257,6 +298,7 @@ impl GraspServer {
         let mut server = Self {
             role,
             url,
+            base_path: base_path.to_string(),
             port,
             process,
             _git_data_dir: git_data_dir,
@@ -320,8 +362,8 @@ impl GraspServer {
             // this verifies the accept loop and Hyper service are both live,
             // which is what the immediately-following websocket tests need.
             let request = format!(
-                "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-                self.port
+                "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                self.base_path, self.port
             );
             stream.write_all(request.as_bytes()).await?;
 
@@ -360,17 +402,22 @@ impl GraspServer {
         &self.role
     }
 
-    /// `http://127.0.0.1:<port>` — accepted directly by ngit's
+    /// `http://127.0.0.1:<port><base-path>` — accepted directly by ngit's
     /// `--grasp-server` flag and by `NGIT_GRASP_DEFAULT_SET`.
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// `ws://127.0.0.1:<port>` — the relay endpoint of the grasp service.
-    /// Useful for tests that publish a vanilla event directly (rare; usually
-    /// you want [`events`] instead).
+    /// `ws://127.0.0.1:<port><base-path>` — the relay endpoint of the grasp
+    /// service. Useful for tests that publish a vanilla event directly (rare;
+    /// usually you want [`events`] instead).
     pub fn relay_url(&self) -> String {
-        format!("ws://127.0.0.1:{}", self.port)
+        let service_suffix = if self.base_path == "/" {
+            ""
+        } else {
+            &self.base_path
+        };
+        format!("ws://127.0.0.1:{}{service_suffix}", self.port)
     }
 
     /// Root path under which ngit-grasp creates bare repositories on receipt
