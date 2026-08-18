@@ -55,8 +55,10 @@ Three observations underpin this:
 3. **GRASP instances are filesystem-backed** (tempdir, bare repos
    under it) but the data path is hidden behind the protocol surface.
    From the test's perspective GRASP is a black-box server-plus-relay
-   reachable over `ws://127.0.0.1:port` for nostr and
-   `http://127.0.0.1:port` for git smart-http.
+   reachable over `ws://127.0.0.1:port<base-path>` for nostr and
+   `http://127.0.0.1:port<base-path>` for git smart-http. Most fixtures use
+   the domain root; path-mount coverage supplies a non-root
+   `NGIT_BASE_PATH` through the builder.
 
 ### Per-test isolation
 
@@ -99,7 +101,8 @@ Three relay primitives:
   Accepts any nostr event. Used for kind 0 metadata, kind 10002 relay
   lists, NIP-46 signer events — anything that isn't a repo-specific
   GRASP event.
-- **GRASP server** (`HarnessBuilder::with_grasp_server`) — full
+- **GRASP server** (`HarnessBuilder::with_grasp_server` or
+  `HarnessBuilder::with_grasp_server_at_base_path`) — full
   `ngit-grasp` subprocess speaking NIP-01 (only repo-related events:
   kind 30617 announcements, NIP-34 patches, state events) **and**
   git smart-http for the actual git data. Vanilla nostr events like
@@ -138,6 +141,8 @@ Role labels map onto the env-var schema:
 | `with_relay("blaster")` | `NGIT_RELAY_BLASTER_SET` |
 | `with_relay("signer_fallback")` | `NGIT_RELAY_SIGNER_FALLBACK_SET` |
 | `with_grasp_server("repo")` | `NGIT_GRASP_DEFAULT_SET` + advertised in repo announcements |
+| `with_grasp_server_at_base_path("repo", "/services/grasp")` | Same as above, with HTTP, WebSocket, and generated repository URLs below the configured path |
+| `with_grasp_server_grasp06_at_base_path("repo", "/services/grasp")` | Path-mounted service with the GRASP-06 `/prs/` endpoint enabled below the same prefix |
 | `with_private_grasp_server("repo", member)` | GRASP-08 service with NIP-42/NIP-98 member authentication |
 | `with_vanilla_git_server("…")` | role-keyed lookup only — no env injection (ngit has no process-level git-server discovery) |
 
@@ -332,8 +337,8 @@ fallback (2) picks it up. Or set `NGIT_GRASP_BIN` in `.envrc`.
 root `flake.nix`. The dev shell builds it (`doCheck = false`),
 exposes the binary on `buildInputs`, and exports `NGIT_GRASP_BIN`
 from `shellHook`. CI runs `nix develop --command cargo test`.
-Bumping ngit-grasp requires changing the immutable `rev` in `flake.nix`, then
-running `nix flake update ngit-grasp` to regenerate its lock entry.
+Bumping ngit-grasp requires changing the immutable `rev` and `fetchgit` hash
+in `flake.nix`; it is deliberately not a flake input and has no lock entry.
 
 **Standalone vanilla relay (`with_relay`):** uses
 `nostr-relay-builder` in-process. Crates.io 0.44.x.

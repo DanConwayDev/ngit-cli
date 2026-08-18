@@ -266,11 +266,11 @@ pub struct HarnessBuilder {
     /// Each entry is `(role_label, nip42_options)`. Standard relays have no
     /// NIP-42 gate; auth-policy tests provide read/write requirements.
     relay_roles: Vec<(String, Option<LocalRelayBuilderNip42>)>,
-    /// Each entry is `(role_label, grasp06_enabled, private_member)`.
-    /// `grasp06_enabled` is `true` when registered via
+    /// Each entry is `(role_label, grasp06_enabled, private_member,
+    /// base_path)`. `grasp06_enabled` is `true` when registered via
     /// [`with_grasp_server_grasp06`][Self::with_grasp_server_grasp06];
     /// `false` for the standard [`with_grasp_server`][Self::with_grasp_server].
-    grasp_roles: Vec<(String, bool, Option<String>)>,
+    grasp_roles: Vec<(String, bool, Option<String>, String)>,
     vanilla_git_server_roles: Vec<String>,
     ngit_bin: PathBuf,
     git_remote_nostr_bin: PathBuf,
@@ -313,7 +313,24 @@ impl HarnessBuilder {
     /// regardless of role — the role label is purely for the test's own
     /// look-ups via `Harness::grasp(role)`.
     pub fn with_grasp_server(mut self, role: impl Into<String>) -> Self {
-        self.grasp_roles.push((role.into(), false, None));
+        self.grasp_roles
+            .push((role.into(), false, None, "/".to_string()));
+        self
+    }
+
+    /// Register a real `ngit-grasp` subprocess mounted beneath `base_path`.
+    ///
+    /// The path is passed to ngit-grasp as `NGIT_BASE_PATH` and retained in
+    /// every URL exposed by the harness. For example, `/services/grasp`
+    /// produces `http://127.0.0.1:<port>/services/grasp` in
+    /// `NGIT_GRASP_DEFAULT_SET` and a matching WebSocket relay URL.
+    pub fn with_grasp_server_at_base_path(
+        mut self,
+        role: impl Into<String>,
+        base_path: impl Into<String>,
+    ) -> Self {
+        self.grasp_roles
+            .push((role.into(), false, None, base_path.into()));
         self
     }
 
@@ -329,7 +346,19 @@ impl HarnessBuilder {
     /// surface (kind-30617 announcements, NIP-34 patches, state events) is
     /// still present on the same port.
     pub fn with_grasp_server_grasp06(mut self, role: impl Into<String>) -> Self {
-        self.grasp_roles.push((role.into(), true, None));
+        self.grasp_roles
+            .push((role.into(), true, None, "/".to_string()));
+        self
+    }
+
+    /// Register a path-mounted GRASP-06-enabled `ngit-grasp` subprocess.
+    pub fn with_grasp_server_grasp06_at_base_path(
+        mut self,
+        role: impl Into<String>,
+        base_path: impl Into<String>,
+    ) -> Self {
+        self.grasp_roles
+            .push((role.into(), true, None, base_path.into()));
         self
     }
 
@@ -349,6 +378,7 @@ impl HarnessBuilder {
                     .to_bech32()
                     .expect("nostr public keys always bech32-encode"),
             ),
+            "/".to_string(),
         ));
         self
     }
@@ -401,7 +431,7 @@ impl HarnessBuilder {
         }
 
         let mut grasps: BTreeMap<String, Vec<GraspServer>> = BTreeMap::new();
-        for (role, grasp06, private_member) in self.grasp_roles {
+        for (role, grasp06, private_member, base_path) in self.grasp_roles {
             let reservation = port::reserve_port()
                 .with_context(|| format!("failed to reserve port for grasp role {role:?}"))?;
             let server = if let Some(member) = private_member {
@@ -411,10 +441,30 @@ impl HarnessBuilder {
                         format!("failed to start ngit-grasp (GRASP-08) for role {role:?}")
                     })?
             } else if grasp06 {
-                GraspServer::start_grasp06(role.clone(), reservation)
+                if base_path == "/" {
+                    GraspServer::start_grasp06(role.clone(), reservation)
+                        .await
+                        .with_context(|| {
+                            format!("failed to start ngit-grasp (GRASP-06) for role {role:?}")
+                        })?
+                } else {
+                    GraspServer::start_grasp06_at_base_path(
+                        role.clone(),
+                        reservation,
+                        base_path,
+                    )
                     .await
                     .with_context(|| {
-                        format!("failed to start ngit-grasp (GRASP-06) for role {role:?}")
+                        format!(
+                            "failed to start path-mounted ngit-grasp (GRASP-06) for role {role:?}"
+                        )
+                    })?
+                }
+            } else if base_path != "/" {
+                GraspServer::start_at_base_path(role.clone(), reservation, base_path)
+                    .await
+                    .with_context(|| {
+                        format!("failed to start path-mounted ngit-grasp for role {role:?}")
                     })?
             } else {
                 GraspServer::start(role.clone(), reservation)
