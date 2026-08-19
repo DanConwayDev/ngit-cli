@@ -153,6 +153,28 @@ fn close_role_entry(entry: &mut Vec<String>, now: u64) {
     entry.push(now.to_string());
 }
 
+/// Pubkeys named by currently-active role entries on `event`, paired with
+/// their role tag letter (`M`, `m` or `o`), in tag order.
+fn active_role_entries(event: &nostr::prelude::Event) -> Vec<(String, PublicKey)> {
+    let mut entries = Vec::new();
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        let Some(name) = slice.first().filter(|name| is_role_tag_name(name)) else {
+            continue;
+        };
+        if !role_entry_is_active(slice) {
+            continue;
+        }
+        if let Some(pk) = slice
+            .get(1)
+            .and_then(|value| PublicKey::from_str(value).ok())
+        {
+            entries.push((name.clone(), pk));
+        }
+    }
+    entries
+}
+
 /// Whether `event`'s author does not assert maintainership: at least one
 /// role tag names the author but none of them is an active maintainer
 /// (`M`/`m`) entry — the author left by ending their self-role, or their
@@ -928,6 +950,120 @@ impl RepoRef {
             .copied()
             .filter(|maintainer| !confirmed.contains(maintainer))
             .collect()
+    }
+
+    /// This announcement's coordinate for `public_key`, without relay hints.
+    fn announcement_coordinate(&self, public_key: &PublicKey) -> Nip19Coordinate {
+        Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: *public_key,
+                identifier: self.identifier.clone(),
+            },
+            relays: vec![],
+        }
+    }
+
+    /// Moderators assigned by the confirmed maintainer group: pubkeys with an
+    /// active `o` entry in a confirmed maintainer's announcement, in listing
+    /// order.
+    ///
+    /// Per NIP-34 "An `o` role can only be assigned by an `M` or `m` member;
+    /// the moderator's matching self-tag acknowledges rather than assigns
+    /// it", so `o` entries in a moderator-only, invited-maintainer or
+    /// outsider announcement assign nothing here.
+    ///
+    /// Assignment alone is an invitation, mirroring
+    /// [`RepoRef::invited_maintainers`]: see
+    /// [`RepoRef::confirmed_moderators`] for the acknowledged subset whose
+    /// member actions are authorized. Self-leave precedence (an announcement
+    /// recording only ended `o` self-entries) is applied by the consolidation
+    /// in `get_repo_ref_from_cache`, which consults fetched announcements
+    /// beyond this event map.
+    pub fn assigned_moderators(&self) -> Vec<PublicKey> {
+        let mut assigned = Vec::new();
+        for maintainer in self.confirmed_maintainers() {
+            let Some(event) = self.events.get(&self.announcement_coordinate(&maintainer)) else {
+                continue;
+            };
+            for (letter, pk) in active_role_entries(event) {
+                if letter == "o" && !assigned.contains(&pk) {
+                    assigned.push(pk);
+                }
+            }
+        }
+        assigned
+    }
+
+    /// Moderators in the selected maintainer's reciprocally connected group:
+    /// assigned an active `o` role by a confirmed maintainer *and*
+    /// acknowledged by their own announcement.
+    ///
+    /// Per NIP-34 a pubkey is invited until their own announcement
+    /// acknowledges the role and assigns a role to an existing member, so
+    /// confirmation requires the moderator's announcement to carry an active
+    /// `o` self-entry and an active role entry naming an already-confirmed
+    /// member. That entry is read only as their acknowledgement of the
+    /// group — a moderator's assignments assign nothing to others.
+    /// Membership grows as a fixpoint so an acknowledgement toward another
+    /// confirmed moderator also confirms.
+    pub fn confirmed_moderators(&self) -> Vec<PublicKey> {
+        let assigned = self.assigned_moderators();
+        let mut members: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
+        let mut confirmed: Vec<PublicKey> = Vec::new();
+        loop {
+            let mut changed = false;
+            for candidate in &assigned {
+                if confirmed.contains(candidate) {
+                    continue;
+                }
+                let Some(event) = self.events.get(&self.announcement_coordinate(candidate)) else {
+                    continue;
+                };
+                let entries = active_role_entries(event);
+                let acknowledges_role = entries
+                    .iter()
+                    .any(|(letter, pk)| letter == "o" && pk == candidate);
+                let acknowledges_member = entries
+                    .iter()
+                    .any(|(_, pk)| pk != candidate && members.contains(pk));
+                if acknowledges_role && acknowledges_member {
+                    confirmed.push(*candidate);
+                    members.insert(*candidate);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        confirmed
+    }
+
+    /// All current members: confirmed maintainers followed by confirmed
+    /// moderators.
+    ///
+    /// Per NIP-34 all members can perform "other maintainer actions" —
+    /// status (kinds 1630-1633), label, subject and cover-note events — but
+    /// only maintainers may publish authoritative repository state, so
+    /// state authority keeps using [`RepoRef::confirmed_maintainers`].
+    pub fn confirmed_members(&self) -> Vec<PublicKey> {
+        let mut members = self.confirmed_maintainers();
+        for moderator in self.confirmed_moderators() {
+            if !members.contains(&moderator) {
+                members.push(moderator);
+            }
+        }
+        members
+    }
+
+    /// Whether `pubkey` may author member actions: status (kinds 1630-1633),
+    /// label, subject and cover-note events. True for confirmed maintainers
+    /// and confirmed moderators alike. Authoritative repository state (kind
+    /// 30618) and maintainer-only actions such as merging remain gated by
+    /// [`RepoRef::is_authorized_maintainer`].
+    pub fn is_authorized_member(&self, pubkey: &PublicKey) -> bool {
+        self.confirmed_members().contains(pubkey)
     }
 
     /// The repository's lead, read directly from `M` role tags: the unique
@@ -3102,6 +3238,205 @@ mod tests {
             );
             let repo_ref = RepoRef::try_from((event, None)).unwrap();
             assert!(repo_ref.is_authorized_maintainer(&owner));
+            assert!(!repo_ref.is_authorized_maintainer(&moderator));
+        }
+
+        fn insert_announcement(repo_ref: &mut RepoRef, event: nostr::prelude::Event) {
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: event.pubkey,
+                        identifier: "test-repo".to_string(),
+                    },
+                    relays: vec![],
+                },
+                event,
+            );
+        }
+
+        #[test]
+        fn o_assignment_by_a_moderator_or_invited_maintainer_assigns_nothing() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+            let invited_keys = nostr::prelude::Keys::generate();
+            let invited = invited_keys.public_key();
+            let assigned_by_moderator = nostr::prelude::Keys::generate().public_key();
+            let assigned_by_invited = nostr::prelude::Keys::generate().public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &invited.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            // the moderator acknowledges their role but also tries to assign
+            // `o` to a third pubkey: only `M`/`m` members can assign `o`
+            let moderator_event = role_event(
+                &moderator_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                    tag(&["o", &assigned_by_moderator.to_string()]),
+                ],
+            );
+            // the invited maintainer never acknowledged a member, so their
+            // announcement is not authoritative and assigns nothing either
+            let invited_event = role_event(
+                &invited_keys,
+                vec![
+                    tag(&["m", &invited.to_string()]),
+                    tag(&["o", &assigned_by_invited.to_string()]),
+                ],
+            );
+
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(&mut repo_ref, moderator_event);
+            insert_announcement(&mut repo_ref, invited_event);
+            repo_ref.maintainers = vec![owner, invited];
+
+            assert_eq!(repo_ref.assigned_moderators(), vec![moderator]);
+            assert_eq!(repo_ref.confirmed_moderators(), vec![moderator]);
+        }
+
+        #[test]
+        fn moderator_confirmation_requires_acknowledgement_toward_a_member() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let silent = nostr::prelude::Keys::generate().public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &silent.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+
+            // `silent` has no announcement and `moderator`'s self-`o` names
+            // no member: both are assigned (invited) but unconfirmed
+            insert_announcement(
+                &mut repo_ref,
+                role_event(&moderator_keys, vec![tag(&["o", &moderator.to_string()])]),
+            );
+            assert_eq!(repo_ref.assigned_moderators(), vec![silent, moderator]);
+            assert!(repo_ref.confirmed_moderators().is_empty());
+
+            // acknowledging the role and an existing member confirms
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            assert_eq!(repo_ref.confirmed_moderators(), vec![moderator]);
+
+            // an ended self-`o` records leaving, never an acknowledgement
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string(), "0", "100"]),
+                    ],
+                ),
+            );
+            assert!(repo_ref.confirmed_moderators().is_empty());
+        }
+
+        #[test]
+        fn moderator_confirmation_grows_through_acknowledged_moderators() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let first_keys = nostr::prelude::Keys::generate();
+            let first = first_keys.public_key();
+            let second_keys = nostr::prelude::Keys::generate();
+            let second = second_keys.public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &first.to_string()]),
+                    tag(&["o", &second.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &first_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &first.to_string()]),
+                    ],
+                ),
+            );
+            // the second moderator acknowledges toward the first — an
+            // existing member once the fixpoint confirms the first
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &second_keys,
+                    vec![
+                        tag(&["o", &second.to_string()]),
+                        tag(&["o", &first.to_string()]),
+                    ],
+                ),
+            );
+
+            assert_eq!(repo_ref.confirmed_moderators(), vec![first, second]);
+        }
+
+        #[test]
+        fn confirmed_moderators_are_authorized_members_but_not_maintainers() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+            let outsider = nostr::prelude::Keys::generate().public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+
+            // assigned but unacknowledged: an invited moderator has no
+            // member authority
+            assert!(!repo_ref.is_authorized_member(&moderator));
+
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            assert_eq!(repo_ref.confirmed_members(), vec![owner, moderator]);
+            assert!(repo_ref.is_authorized_member(&owner));
+            assert!(repo_ref.is_authorized_member(&moderator));
+            assert!(!repo_ref.is_authorized_member(&outsider));
+            // members are not maintainers: repository state stays barred
             assert!(!repo_ref.is_authorized_maintainer(&moderator));
         }
 
