@@ -312,7 +312,7 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
             })?;
         } else {
             println!(
-                "subcommands: init, edit, accept  (run `ngit repo --help` for details)"
+                "subcommands: init, edit, accept, leave  (run `ngit repo --help` for details)"
             );
             println!();
             println!("no nostr repository found");
@@ -374,7 +374,7 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
             })?;
         } else {
             println!(
-                "subcommands: init, edit, accept  (run `ngit repo --help` for details)"
+                "subcommands: init, edit, accept, leave  (run `ngit repo --help` for details)"
             );
             println!();
             println!(
@@ -397,7 +397,7 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
     if json {
         print_repo_info_json(&repo_ref, &repo_coordinate, &git_repo)?;
     } else {
-        println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
+        println!("subcommands: init, edit, accept, leave  (run `ngit repo --help` for details)");
         println!();
         print_repo_info(
             &repo_ref,
