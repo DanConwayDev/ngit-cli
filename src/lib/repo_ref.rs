@@ -101,6 +101,26 @@ pub struct MaintainerEdge {
     pub to: PublicKey,
 }
 
+/// How a member's listing is recorded across the announcements ngit
+/// consulted. Informational provenance for UIs (`ngit repo`): authorization
+/// stays with the confirmed sets regardless of which mechanism listed a
+/// member. See [`RepoRef::member_role_source`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoleSource {
+    /// Named in a currently-active NIP-34 indexed role tag (`M`/`m`/`o`).
+    RoleTag,
+    /// Listed via the deprecated `maintainers` tag on an announcement
+    /// without indexed role tags (the fallback NIP-34 keeps for graceful
+    /// degradation; a `maintainers` tag on a role-tag-bearing announcement
+    /// is dead and never counts).
+    MaintainersTag,
+    /// Named in no tag at all: membership is implied by authoring an
+    /// announcement — per NIP-34 an author absent from every role tag is
+    /// implicitly a maintainer, and an announcement without role tags
+    /// implies its author regardless of the deprecated tag.
+    Implicit,
+}
+
 /// Names of tags ngit itself parses on `kind:30617` (`GitRepoAnnouncement`)
 /// events. Used by [`RepoRef::try_from`] to decide whether a tag is "ours"
 /// (consumed by a typed field, with duplicates collapsed on re-emission) or
@@ -1135,6 +1155,48 @@ impl RepoRef {
             }
         }
         if leads.len() == 1 { leads.pop() } else { None }
+    }
+
+    /// How `pubkey`'s membership is recorded across the announcements in
+    /// `events`. An active indexed role tag naming the pubkey takes
+    /// precedence; failing that, a `maintainers` listing on a role-tag-free
+    /// announcement counts as the deprecated fallback (per NIP-34 the
+    /// deprecated tag is ignored when role tags are present, so such a
+    /// listing never sources membership); otherwise the membership is
+    /// implicit — the pubkey authored an announcement that names them in no
+    /// tag. Provenance is informational and grants nothing: authorization
+    /// stays with [`RepoRef::confirmed_maintainers`] and
+    /// [`RepoRef::confirmed_members`].
+    pub fn member_role_source(&self, pubkey: &PublicKey) -> RoleSource {
+        let hex = pubkey.to_string();
+        let mut listed_in_deprecated_tag = false;
+        for event in self.events.values() {
+            let mut event_has_role_tags = false;
+            let mut in_maintainers_tag = false;
+            for tag in event.tags.iter() {
+                let slice = tag.as_slice();
+                match slice.first().map(String::as_str) {
+                    Some(name) if is_role_tag_name(name) => {
+                        event_has_role_tags = true;
+                        if slice.get(1) == Some(&hex) && role_entry_is_active(slice) {
+                            return RoleSource::RoleTag;
+                        }
+                    }
+                    Some("maintainers") if slice.iter().skip(1).any(|value| value == &hex) => {
+                        in_maintainers_tag = true;
+                    }
+                    _ => {}
+                }
+            }
+            if in_maintainers_tag && !event_has_role_tags {
+                listed_in_deprecated_tag = true;
+            }
+        }
+        if listed_in_deprecated_tag {
+            RoleSource::MaintainersTag
+        } else {
+            RoleSource::Implicit
+        }
     }
 
     /// coordinates without relay hints
@@ -4138,6 +4200,188 @@ mod tests {
                 assert!(!parsed.end_self_role(&author, NOW));
                 assert_eq!(parsed.maintainers, vec![other]);
             }
+        }
+    }
+
+    mod member_role_source {
+        use nostr::prelude::{EventBuilder, Keys, event::FinalizeEvent};
+
+        use super::*;
+
+        fn tag(parts: &[&str]) -> Vec<String> {
+            parts.iter().map(ToString::to_string).collect()
+        }
+
+        fn announcement(keys: &Keys, tags: Vec<Vec<String>>) -> nostr::prelude::Event {
+            let mut event_tags = vec![Tag::identifier("test-repo")];
+            for t in tags {
+                event_tags.push(Tag::parse(t).unwrap());
+            }
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(event_tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        /// Consolidate `events` into one `RepoRef` view rooted on the first
+        /// event's author, mirroring the events map the cache consolidation
+        /// builds.
+        fn view_of(events: Vec<nostr::prelude::Event>) -> RepoRef {
+            let mut iter = events.into_iter();
+            let mut repo_ref = RepoRef::try_from((iter.next().unwrap(), None)).unwrap();
+            for event in iter {
+                let author = event.pubkey;
+                repo_ref
+                    .events
+                    .insert(repo_ref.announcement_coordinate(&author), event);
+            }
+            repo_ref
+        }
+
+        #[test]
+        fn active_role_entry_names_the_member() {
+            let keys = Keys::generate();
+            let owner = keys.public_key();
+            let co = Keys::generate().public_key();
+            let moderator = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![announcement(
+                &keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &co.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            )]);
+
+            assert_eq!(repo_ref.member_role_source(&owner), RoleSource::RoleTag);
+            assert_eq!(repo_ref.member_role_source(&co), RoleSource::RoleTag);
+            assert_eq!(repo_ref.member_role_source(&moderator), RoleSource::RoleTag);
+        }
+
+        #[test]
+        fn deprecated_listing_sources_membership_only_without_role_tags() {
+            let keys = Keys::generate();
+            let owner = keys.public_key();
+            let listed = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![announcement(
+                &keys,
+                vec![tag(&[
+                    "maintainers",
+                    &owner.to_string(),
+                    &listed.to_string(),
+                ])],
+            )]);
+
+            assert_eq!(
+                repo_ref.member_role_source(&owner),
+                RoleSource::MaintainersTag
+            );
+            assert_eq!(
+                repo_ref.member_role_source(&listed),
+                RoleSource::MaintainersTag
+            );
+        }
+
+        #[test]
+        fn author_named_in_no_tag_is_implicit() {
+            let keys = Keys::generate();
+            let author = keys.public_key();
+            let other = Keys::generate().public_key();
+
+            // role-tag announcement that names only someone else
+            let with_role_tags = view_of(vec![announcement(
+                &keys,
+                vec![tag(&["m", &other.to_string()])],
+            )]);
+            assert_eq!(
+                with_role_tags.member_role_source(&author),
+                RoleSource::Implicit
+            );
+
+            // announcement without any membership tag at all
+            let bare = view_of(vec![announcement(&keys, vec![])]);
+            assert_eq!(bare.member_role_source(&author), RoleSource::Implicit);
+        }
+
+        #[test]
+        fn role_tag_in_any_announcement_takes_precedence() {
+            let legacy_keys = Keys::generate();
+            let indexed_keys = Keys::generate();
+            let member = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![
+                announcement(
+                    &legacy_keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &legacy_keys.public_key().to_string(),
+                        &member.to_string(),
+                    ])],
+                ),
+                announcement(
+                    &indexed_keys,
+                    vec![
+                        tag(&["m", &indexed_keys.public_key().to_string()]),
+                        tag(&["m", &member.to_string()]),
+                    ],
+                ),
+            ]);
+
+            assert_eq!(repo_ref.member_role_source(&member), RoleSource::RoleTag);
+        }
+
+        #[test]
+        fn ended_role_entry_does_not_count_as_a_role_tag_listing() {
+            let indexed_keys = Keys::generate();
+            let legacy_keys = Keys::generate();
+            let member = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![
+                announcement(
+                    &indexed_keys,
+                    vec![
+                        tag(&["m", &indexed_keys.public_key().to_string()]),
+                        tag(&["m", &member.to_string(), "0", "1700000000"]),
+                    ],
+                ),
+                announcement(
+                    &legacy_keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &legacy_keys.public_key().to_string(),
+                        &member.to_string(),
+                    ])],
+                ),
+            ]);
+
+            assert_eq!(
+                repo_ref.member_role_source(&member),
+                RoleSource::MaintainersTag
+            );
+        }
+
+        #[test]
+        fn dead_maintainers_tag_on_a_role_tag_announcement_sources_nothing() {
+            let keys = Keys::generate();
+            let owner = keys.public_key();
+            let listed = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![announcement(
+                &keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["maintainers", &listed.to_string()]),
+                ],
+            )]);
+
+            assert_eq!(
+                repo_ref.member_role_source(&listed),
+                RoleSource::Implicit,
+                "a maintainers tag next to role tags is dead per NIP-34 and \
+                 must not be reported as the listing's source"
+            );
         }
     }
 
