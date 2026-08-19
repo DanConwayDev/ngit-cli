@@ -1930,17 +1930,23 @@ pub async fn get_repo_ref_from_cache(
     git_repo_path: Option<&Path>,
     repo_coordinate: &Nip19Coordinate,
 ) -> Result<RepoRef> {
+    // pubkeys whose announcements are fetched: per NIP-34 clients SHOULD
+    // recursively fetch announcements from each pubkey assigned a role, so
+    // `o`-assigned moderators are fetched alongside the maintainer listing —
+    // their announcement carries their acknowledgement or leave self-entries
+    let mut discovered = HashSet::new();
     let mut maintainers = HashSet::new();
     let mut ordered_maintainers = Vec::new();
-    let mut new_coordinate: bool;
+    let mut new_discovery: bool;
 
+    discovered.insert(repo_coordinate.public_key);
     maintainers.insert(repo_coordinate.public_key);
     ordered_maintainers.push(repo_coordinate.public_key);
     let mut repo_events = vec![];
     loop {
-        new_coordinate = false;
+        new_discovery = false;
         let repo_events_filter = get_filter_repo_ann_events(
-            &HashSet::from_iter(maintainers.iter().map(|m| Nip19Coordinate {
+            &HashSet::from_iter(discovered.iter().map(|m| Nip19Coordinate {
                 coordinate: Coordinate {
                     kind: Kind::GitRepoAnnouncement,
                     public_key: *m,
@@ -1962,16 +1968,28 @@ pub async fn get_repo_ref_from_cache(
         .concat();
         for e in events {
             if let Ok(repo_ref) = RepoRef::try_from((e.clone(), None)) {
-                for m in repo_ref.maintainers {
-                    if maintainers.insert(m) {
-                        ordered_maintainers.push(m);
-                        new_coordinate = true;
+                // only a maintainer-listed author's listings expand the sets:
+                // a moderator's (or any other role-fetched pubkey's)
+                // assignments assign nothing, so their announcement is
+                // consulted solely for their own self-entries
+                if maintainers.contains(&e.pubkey) {
+                    for m in repo_ref.maintainers {
+                        if maintainers.insert(m) {
+                            ordered_maintainers.push(m);
+                            new_discovery = true;
+                        }
+                        discovered.insert(m);
+                    }
+                    for moderator in repo_ref.moderators {
+                        if discovered.insert(moderator) {
+                            new_discovery = true;
+                        }
                     }
                 }
                 repo_events.push(e);
             }
         }
-        if !new_coordinate {
+        if !new_discovery {
             break;
         }
     }
@@ -1987,7 +2005,16 @@ pub async fn get_repo_ref_from_cache(
         .collect();
     ordered_maintainers.retain(|m| !declined_maintainers.contains(m));
     repo_events.sort_by_key(|e| e.created_at);
-    let private = repository_events_are_private(&repo_events);
+    // moderator (and other role-fetched) announcements are consulted for
+    // their authors' self-entries only: privacy classification and the
+    // shared-metadata cascade keep reading the maintainer-listed
+    // announcements, as before their discovery
+    let maintainer_authored: Vec<nostr::prelude::Event> = repo_events
+        .iter()
+        .filter(|e| maintainers.contains(&e.pubkey))
+        .cloned()
+        .collect();
+    let private = repository_events_are_private(&maintainer_authored);
     let repo_ref = RepoRef::try_from((
         repo_events
             .iter()
@@ -1999,7 +2026,7 @@ pub async fn get_repo_ref_from_cache(
 
     // Use name/description/web/hashtags/upstream from the latest event across
     // all maintainers.
-    let latest_metadata = repo_events
+    let latest_metadata = maintainer_authored
         .last()
         .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
 
@@ -2035,11 +2062,6 @@ pub async fn get_repo_ref_from_cache(
     // also set maintainers_without_annoucnement
     let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
 
-    // moderators (`o` role tags) unioned across the members' announcements;
-    // kept separate from maintainers because they are never authoritative for
-    // repository state events
-    let mut moderators: Vec<PublicKey> = vec![];
-
     for m in &ordered_maintainers {
         if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
             if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
@@ -2058,30 +2080,11 @@ pub async fn get_repo_ref_from_cache(
                         blossoms.push(blossom);
                     }
                 }
-                for moderator in m_repo_ref.moderators {
-                    if !moderators.contains(&moderator) {
-                        moderators.push(moderator);
-                    }
-                }
             }
         } else {
             maintainers_without_annoucnement.push(*m);
         }
     }
-
-    // A member's own announcement takes precedence over `o` assignments in
-    // other members' announcements: an author whose fetched announcement
-    // records only ended `o` self-entries left moderatorship (e.g. via
-    // `ngit repo leave`), so drop them from the union. Discovery still
-    // follows maintainer listings only, so this covers authors fetched via
-    // an active maintainer listing; following `o` assignments in discovery
-    // is deferred with the rest of the moderator wiring.
-    let declined_moderators: HashSet<PublicKey> = repo_events
-        .iter()
-        .filter(|e| announcement_author_declines_moderatorship(e))
-        .map(|e| e.pubkey)
-        .collect();
-    moderators.retain(|m| !declined_moderators.contains(m));
 
     let mut ordered_accepted_maintainers = Vec::new();
     let mut ordered_requested_maintainers = Vec::new();
@@ -2097,11 +2100,11 @@ pub async fn get_repo_ref_from_cache(
     let ordered_maintainers =
         [ordered_accepted_maintainers, ordered_requested_maintainers].concat();
 
-    let repo_ref = RepoRef {
+    let mut repo_ref = RepoRef {
         // use all maintainers from all events found, not just maintainers in the most
         // recent event
         maintainers: ordered_maintainers,
-        moderators,
+        moderators: vec![],
         relays,
         git_server,
         events,
@@ -2124,6 +2127,43 @@ pub async fn get_repo_ref_from_cache(
         private,
         ..repo_ref
     };
+
+    // `o` role assignments only carry authority from `M`/`m` members
+    // (RepoRef::assigned_moderators), which needs the consolidated events
+    // map, so the moderator set is computed last. A member's own
+    // announcement takes precedence over `o` assignments in others': an
+    // author whose fetched announcement records only ended `o` self-entries
+    // left moderatorship (e.g. via `ngit repo leave`). Their announcement —
+    // discovered by following the `o` assignment — sits outside the
+    // membership graph's events map, so the fetched events are consulted
+    // directly.
+    let declined_moderators: HashSet<PublicKey> = repo_events
+        .iter()
+        .filter(|e| announcement_author_declines_moderatorship(e))
+        .map(|e| e.pubkey)
+        .collect();
+    repo_ref.moderators = repo_ref
+        .assigned_moderators()
+        .into_iter()
+        .filter(|m| !declined_moderators.contains(m))
+        .collect();
+    // moderators' own announcements join the events map so their
+    // acknowledgement can be evaluated (RepoRef::confirmed_moderators)
+    for moderator in repo_ref.moderators.clone() {
+        if let Some(e) = repo_events.iter().find(|e| e.pubkey == moderator) {
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: e.kind,
+                        identifier: e.tags.identifier().unwrap().to_string(),
+                        public_key: e.pubkey,
+                    },
+                    relays: vec![],
+                },
+                e.clone(),
+            );
+        }
+    }
 
     Ok(repo_ref)
 }
@@ -2615,7 +2655,17 @@ async fn process_fetched_events(
                 }
                 // if contains announcement
                 if let Ok(repo_ref) = &RepoRef::try_from((event.clone(), None)) {
-                    for m in &repo_ref.maintainers {
+                    // per NIP-34 clients SHOULD recursively fetch
+                    // announcements from each pubkey assigned a role:
+                    // moderators' announcements carry their acknowledgement
+                    // or leave self-entries. Fetching grants nothing — which
+                    // assignments carry authority is decided when the cache
+                    // is consolidated (get_repo_ref_from_cache).
+                    for m in repo_ref
+                        .maintainers
+                        .iter()
+                        .chain(repo_ref.moderators.iter())
+                    {
                         if !request
                             .repo_coordinates_without_relays // prexisting maintainers
                             .iter()
@@ -4895,5 +4945,140 @@ mod private_repository_tests {
             ),
             "publication may broaden only after every reachable current announcement is public"
         );
+    }
+}
+
+#[cfg(test)]
+mod moderator_discovery_tests {
+    use nostr::prelude::{EventBuilder, Keys, Tag, event::FinalizeEvent};
+
+    use super::*;
+
+    fn announcement(keys: &Keys, role_tags: &[Vec<String>]) -> Event {
+        let mut tags = vec![Tag::identifier("repo")];
+        for tag in role_tags {
+            tags.push(Tag::parse(tag.clone()).unwrap());
+        }
+        EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags(tags)
+            .finalize(keys)
+            .unwrap()
+    }
+
+    fn coordinate(public_key: PublicKey) -> Nip19Coordinate {
+        Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key,
+                identifier: "repo".to_string(),
+            },
+            relays: vec![],
+        }
+    }
+
+    async fn consolidated_with_moderator_announcement(
+        moderator_role_tags: impl FnOnce(&str, &str) -> Vec<Vec<String>>,
+    ) -> (RepoRef, PublicKey, PublicKey) {
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let moderator_keys = Keys::generate();
+        let moderator = moderator_keys.public_key();
+        let owner_hex = owner.to_string();
+        let moderator_hex = moderator.to_string();
+
+        save_event_in_local_cache(
+            dir.path(),
+            &announcement(
+                &owner_keys,
+                &[
+                    vec!["M".to_string(), owner_hex.clone()],
+                    vec!["o".to_string(), moderator_hex.clone()],
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        save_event_in_local_cache(
+            dir.path(),
+            &announcement(
+                &moderator_keys,
+                &moderator_role_tags(&owner_hex, &moderator_hex),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let repo_ref = get_repo_ref_from_cache(Some(dir.path()), &coordinate(owner))
+            .await
+            .unwrap();
+        (repo_ref, owner, moderator)
+    }
+
+    /// The moderator never appears in a maintainer listing, so their
+    /// acknowledgement announcement is only found by following the `o`
+    /// assignment in the owner's announcement.
+    #[tokio::test]
+    async fn moderator_announcements_are_discovered_from_o_assignments() {
+        let (repo_ref, _, moderator) = consolidated_with_moderator_announcement(|owner, this| {
+            vec![
+                vec!["M".to_string(), owner.to_string()],
+                vec!["o".to_string(), this.to_string()],
+            ]
+        })
+        .await;
+
+        assert_eq!(repo_ref.moderators, vec![moderator]);
+        assert_eq!(repo_ref.confirmed_moderators(), vec![moderator]);
+        assert!(repo_ref.is_authorized_member(&moderator));
+        // moderators never join the maintainer set or gain state authority
+        assert!(!repo_ref.maintainers.contains(&moderator));
+        assert!(!repo_ref.is_authorized_maintainer(&moderator));
+    }
+
+    /// A leave (ended self-`o`) takes precedence over the still-active
+    /// assignment even though the leaver's announcement sits outside the
+    /// maintainer listings.
+    #[tokio::test]
+    async fn moderator_leave_is_discovered_without_a_maintainer_listing() {
+        let (repo_ref, _, _) = consolidated_with_moderator_announcement(|owner, this| {
+            vec![
+                vec!["M".to_string(), owner.to_string()],
+                vec![
+                    "o".to_string(),
+                    this.to_string(),
+                    "0".to_string(),
+                    "100".to_string(),
+                ],
+            ]
+        })
+        .await;
+
+        assert!(repo_ref.moderators.is_empty());
+        assert!(repo_ref.confirmed_moderators().is_empty());
+    }
+
+    /// Role assignments in the moderator's own announcement assign nothing:
+    /// neither their `m` listing nor their `o` assignment confers anything
+    /// on other pubkeys.
+    #[tokio::test]
+    async fn moderator_assignments_confer_nothing_on_consolidation() {
+        let crony = Keys::generate().public_key();
+        let (repo_ref, owner, moderator) =
+            consolidated_with_moderator_announcement(move |owner, this| {
+                vec![
+                    vec!["M".to_string(), owner.to_string()],
+                    vec!["o".to_string(), this.to_string()],
+                    vec!["m".to_string(), crony.to_string()],
+                    vec!["o".to_string(), crony.to_string()],
+                ]
+            })
+            .await;
+
+        assert_eq!(repo_ref.maintainers, vec![owner]);
+        assert_eq!(repo_ref.moderators, vec![moderator]);
+        assert!(!repo_ref.is_authorized_member(&crony));
     }
 }
