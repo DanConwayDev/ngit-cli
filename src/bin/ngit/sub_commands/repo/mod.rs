@@ -1,7 +1,7 @@
 pub mod accept;
 pub mod leave;
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use console::Style;
@@ -9,8 +9,8 @@ use ngit::{
     client::{Params, fetching_quietly, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
     login::{existing::load_existing_login, user::get_user_ref_from_cache},
     repo_ref::{
-        RepoRef, extract_npub, format_grasp_server_url_as_relay_url, is_grasp_server_clone_url,
-        normalize_grasp_server_url,
+        RepoRef, RoleSource, extract_npub, format_grasp_server_url_as_relay_url,
+        is_grasp_server_clone_url, normalize_grasp_server_url,
     },
     utils::get_short_git_server_name,
 };
@@ -70,6 +70,9 @@ struct RepoInfoJson {
     invited_maintainers: Option<Vec<String>>,
     lead_maintainer: Option<String>,
     maintainer_edges: Option<Vec<MaintainerEdgeJson>>,
+    moderators: Option<Vec<String>>,
+    confirmed_moderators: Option<Vec<String>>,
+    members: Option<Vec<MemberJson>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     grasp_servers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +87,122 @@ struct RepoInfoJson {
 struct MaintainerEdgeJson {
     from: String,
     to: String,
+}
+
+/// One member in `ngit repo --json`: stable string values documented in
+/// `docs/architecture/maintainer-model.md`. `role` is `"lead"`,
+/// `"co-maintainer"` or `"moderator"`; `status` is `"confirmed"` or
+/// `"invited"` (an assigned-but-unacknowledged moderator is invited, like an
+/// unaccepted maintainer); `source` is `"role_tag"`, `"maintainers_tag"` or
+/// `"implicit"`.
+#[derive(Serialize)]
+struct MemberJson {
+    pubkey: String,
+    role: &'static str,
+    status: &'static str,
+    source: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemberRole {
+    Lead,
+    CoMaintainer,
+    Moderator,
+}
+
+impl MemberRole {
+    fn label(self) -> &'static str {
+        match self {
+            MemberRole::Lead => "lead",
+            MemberRole::CoMaintainer => "co-maintainer",
+            MemberRole::Moderator => "moderator",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemberStatus {
+    Confirmed,
+    Invited,
+}
+
+impl MemberStatus {
+    fn label(self) -> &'static str {
+        match self {
+            MemberStatus::Confirmed => "confirmed",
+            MemberStatus::Invited => "invited",
+        }
+    }
+}
+
+fn source_label(source: RoleSource) -> &'static str {
+    match source {
+        RoleSource::RoleTag => "role_tag",
+        RoleSource::MaintainersTag => "maintainers_tag",
+        RoleSource::Implicit => "implicit",
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MemberEntry {
+    pubkey: PublicKey,
+    role: MemberRole,
+    status: MemberStatus,
+    source: RoleSource,
+}
+
+/// One entry per member, purely re-arranging what `RepoRef` already
+/// computes: confirmed maintainers, then invited maintainers, then
+/// moderators (confirmed before assigned-but-unacknowledged), each group in
+/// listing order. The unique wire-asserted lead gets the `lead` role — it
+/// may be an invited maintainer, since a freshly designated lead who has not
+/// accepted is still the lead. A pubkey holding both a maintainer listing
+/// and a moderator assignment appears once, as a maintainer, mirroring
+/// `RepoRef::members_for_announcement_tags`.
+fn member_entries(repo_ref: &RepoRef) -> Vec<MemberEntry> {
+    let lead = repo_ref.lead_maintainer();
+    let confirmed_maintainers: HashSet<PublicKey> =
+        repo_ref.confirmed_maintainers().into_iter().collect();
+    let confirmed_moderators: HashSet<PublicKey> =
+        repo_ref.confirmed_moderators().into_iter().collect();
+    let maintainer_role = |pk: &PublicKey| {
+        if Some(*pk) == lead {
+            MemberRole::Lead
+        } else {
+            MemberRole::CoMaintainer
+        }
+    };
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    for status in [MemberStatus::Confirmed, MemberStatus::Invited] {
+        for pk in &repo_ref.maintainers {
+            if (confirmed_maintainers.contains(pk) == (status == MemberStatus::Confirmed))
+                && seen.insert(*pk)
+            {
+                entries.push(MemberEntry {
+                    pubkey: *pk,
+                    role: maintainer_role(pk),
+                    status,
+                    source: repo_ref.member_role_source(pk),
+                });
+            }
+        }
+    }
+    for status in [MemberStatus::Confirmed, MemberStatus::Invited] {
+        for pk in &repo_ref.moderators {
+            if (confirmed_moderators.contains(pk) == (status == MemberStatus::Confirmed))
+                && seen.insert(*pk)
+            {
+                entries.push(MemberEntry {
+                    pubkey: *pk,
+                    role: MemberRole::Moderator,
+                    status,
+                    source: repo_ref.member_role_source(pk),
+                });
+            }
+        }
+    }
+    entries
 }
 
 type MaintainerJsonFields = (
@@ -111,6 +230,28 @@ fn maintainer_json_fields(repo_ref: &RepoRef) -> MaintainerJsonFields {
         })
         .collect();
     (confirmed, invited, lead, edges)
+}
+
+/// The moderator lists and per-member `members` entries for
+/// `ngit repo --json`, encoded for output.
+fn membership_json_fields(repo_ref: &RepoRef) -> (Vec<String>, Vec<String>, Vec<MemberJson>) {
+    let encode = |pk: &PublicKey| pk.to_bech32().unwrap_or_else(|_| pk.to_hex());
+    let moderators = repo_ref.moderators.iter().map(&encode).collect();
+    let confirmed_moderators = repo_ref
+        .confirmed_moderators()
+        .iter()
+        .map(&encode)
+        .collect();
+    let members = member_entries(repo_ref)
+        .iter()
+        .map(|entry| MemberJson {
+            pubkey: encode(&entry.pubkey),
+            role: entry.role.label(),
+            status: entry.status.label(),
+            source: source_label(entry.source),
+        })
+        .collect();
+    (moderators, confirmed_moderators, members)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +302,9 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
                 invited_maintainers: None,
                 lead_maintainer: None,
                 maintainer_edges: None,
+                moderators: None,
+                confirmed_moderators: None,
+                members: None,
                 grasp_servers: None,
                 git_servers: None,
                 relays: None,
@@ -218,6 +362,9 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
                 invited_maintainers: None,
                 lead_maintainer: None,
                 maintainer_edges: None,
+                moderators: None,
+                confirmed_moderators: None,
+                members: None,
                 grasp_servers: None,
                 git_servers: None,
                 relays: None,
@@ -312,6 +459,7 @@ fn print_repo_info_json(
     let encode = |pk: &PublicKey| pk.to_bech32().unwrap_or_else(|_| pk.to_hex());
     let (confirmed_maintainers, invited_maintainers, lead_maintainer, maintainer_edges) =
         maintainer_json_fields(repo_ref);
+    let (moderators, confirmed_moderators, members) = membership_json_fields(repo_ref);
 
     let info = RepoInfoJson {
         is_nostr_repo: true,
@@ -340,6 +488,9 @@ fn print_repo_info_json(
         invited_maintainers: Some(invited_maintainers),
         lead_maintainer,
         maintainer_edges: Some(maintainer_edges),
+        moderators: Some(moderators),
+        confirmed_moderators: Some(confirmed_moderators),
+        members: Some(members),
         grasp_servers: if grasp_servers.is_empty() {
             None
         } else {
@@ -429,6 +580,14 @@ async fn print_repo_info(
     let confirmed = repo_ref.confirmed_maintainers();
     let edges = repo_ref.maintainer_edges();
     let lead = repo_ref.lead_maintainer();
+    // a lone maintainer without a lead assertion needs no role badge; once
+    // there is a second member or a lead the roles disambiguate
+    let show_role_badges = lead.is_some()
+        || repo_ref.maintainers.len() + repo_ref.moderators.len() > 1
+        || repo_ref
+            .maintainers_without_annoucnement
+            .as_ref()
+            .is_some_and(|v| !v.is_empty());
     for maintainer in &confirmed {
         let name = if maintainer == selected {
             selected_name.clone()
@@ -439,8 +598,12 @@ async fn print_repo_info(
         if maintainer == selected && confirmed.len() > 1 {
             roles.push("selected");
         }
-        if Some(*maintainer) == lead {
-            roles.push("lead");
+        if show_role_badges {
+            roles.push(if Some(*maintainer) == lead {
+                "lead"
+            } else {
+                "co-maintainer"
+            });
         }
         let role_suffix = (!roles.is_empty()).then(|| format!(" [{}]", roles.join(", ")));
         let listed = related_maintainers(*maintainer, &confirmed, &edges, EdgeDirection::Outgoing);
@@ -453,10 +616,14 @@ async fn print_repo_info(
             }
             format!("lists {}", names.join(", "))
         };
+        let annotation = match role_source_note(repo_ref, maintainer) {
+            Some(note) => format!("· {listing} · {note}"),
+            None => format!("· {listing}"),
+        };
         println!(
             "  {name}{} {}",
             role_suffix.unwrap_or_default(),
-            dim.apply_to(format!("· {listing}"))
+            dim.apply_to(annotation)
         );
     }
 
@@ -465,18 +632,28 @@ async fn print_repo_info(
         println!("  {}", dim.apply_to("Invited maintainers"));
         for pk in invited {
             let name = display_name_for(&pk, my_pubkey, git_repo_path).await;
+            // a freshly designated lead who has not accepted is still the lead
+            let role_suffix = (Some(pk) == lead).then_some(" [lead]");
             let inviters = related_maintainers(pk, &confirmed, &edges, EdgeDirection::Incoming);
+            let mut notes = Vec::new();
             if !inviters.is_empty() && inviters.len() < confirmed.len() {
                 let mut inviter_names = Vec::new();
                 for inviter in inviters {
                     inviter_names.push(display_name_for(&inviter, my_pubkey, git_repo_path).await);
                 }
-                println!(
-                    "  {name} {}",
-                    dim.apply_to(format!("· invited by {}", inviter_names.join(", ")))
-                );
+                notes.push(format!("invited by {}", inviter_names.join(", ")));
+            }
+            if let Some(note) = role_source_note(repo_ref, &pk) {
+                notes.push(note.to_string());
+            }
+            if notes.is_empty() {
+                println!("  {name}{}", role_suffix.unwrap_or_default());
             } else {
-                println!("  {name}");
+                println!(
+                    "  {name}{} {}",
+                    role_suffix.unwrap_or_default(),
+                    dim.apply_to(format!("· {}", notes.join(" · ")))
+                );
             }
         }
         println!(
@@ -487,6 +664,28 @@ async fn print_repo_info(
         );
     }
     println!();
+
+    // --- Moderators ---
+    if !repo_ref.moderators.is_empty() {
+        println!("{}", heading.apply_to("Moderators"));
+        let confirmed_moderators = repo_ref.confirmed_moderators();
+        for moderator in &repo_ref.moderators {
+            let name = display_name_for(moderator, my_pubkey, git_repo_path).await;
+            if confirmed_moderators.contains(moderator) {
+                println!("  {name} [moderator]");
+            } else {
+                println!(
+                    "  {name} [moderator] {}",
+                    dim.apply_to("· assigned, not yet acknowledged")
+                );
+            }
+        }
+        println!(
+            "  {}",
+            dim.apply_to("moderators can manage issues and PRs but never publish repository state")
+        );
+        println!();
+    }
 
     // --- Infrastructure ---
     // Split into three groups:
@@ -638,6 +837,16 @@ async fn print_repo_info(
     }
 }
 
+/// A provenance note for listings that predate NIP-34 indexed role tags.
+/// `None` for role-tag listings — the new normal needs no callout.
+fn role_source_note(repo_ref: &RepoRef, pk: &PublicKey) -> Option<&'static str> {
+    match repo_ref.member_role_source(pk) {
+        RoleSource::RoleTag => None,
+        RoleSource::MaintainersTag => Some("listed via deprecated maintainers tag"),
+        RoleSource::Implicit => Some("implicit listing (no role tag)"),
+    }
+}
+
 /// Resolve a display name for a public key from the local metadata cache.
 /// Appends " (you)" when `pk` matches `my_pubkey`.
 /// Falls back to a short npub if no metadata is cached.
@@ -740,9 +949,198 @@ fn short_npub(npub: &str) -> String {
 #[cfg(test)]
 mod tests {
     use ngit::repo_ref::MaintainerEdge;
-    use nostr::prelude::Keys;
+    use nostr::prelude::{Coordinate, Event, EventBuilder, Keys, Kind, Tag, event::FinalizeEvent};
 
     use super::*;
+
+    fn tag(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(ToString::to_string).collect()
+    }
+
+    fn announcement(keys: &Keys, tags: Vec<Vec<String>>) -> Event {
+        let mut event_tags = vec![Tag::identifier("test-repo")];
+        for t in tags {
+            event_tags.push(Tag::parse(t).unwrap());
+        }
+        EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags(event_tags)
+            .finalize(keys)
+            .unwrap()
+    }
+
+    /// Consolidate announcements the way `get_repo_ref_from_cache` does for
+    /// the pieces `member_entries` reads: the first event's author is the
+    /// selected maintainer, maintainer listings are unioned, further events
+    /// join the events map and moderators are the confirmed group's active
+    /// `o` assignments.
+    fn consolidated(events: Vec<Event>) -> RepoRef {
+        let mut iter = events.into_iter();
+        let mut repo_ref = RepoRef::try_from((iter.next().unwrap(), None)).unwrap();
+        for event in iter {
+            let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
+            for pk in parsed.maintainers {
+                if !repo_ref.maintainers.contains(&pk) {
+                    repo_ref.maintainers.push(pk);
+                }
+            }
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: event.pubkey,
+                        identifier: "test-repo".to_string(),
+                    },
+                    relays: vec![],
+                },
+                event,
+            );
+        }
+        repo_ref.moderators = repo_ref.assigned_moderators();
+        repo_ref
+    }
+
+    #[test]
+    fn member_entries_report_role_status_and_source_per_member() {
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let co_keys = Keys::generate();
+        let co = co_keys.public_key();
+        let invited = Keys::generate().public_key();
+        let moderator_keys = Keys::generate();
+        let moderator = moderator_keys.public_key();
+        let assigned = Keys::generate().public_key();
+
+        let repo_ref = consolidated(vec![
+            announcement(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &co.to_string()]),
+                    tag(&["m", &invited.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                    tag(&["o", &assigned.to_string()]),
+                ],
+            ),
+            // reciprocal acceptance confirms the co-maintainer
+            announcement(
+                &co_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &co.to_string()]),
+                ],
+            ),
+            // the moderator acknowledges the role and a confirmed member
+            announcement(
+                &moderator_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            ),
+        ]);
+
+        assert_eq!(
+            member_entries(&repo_ref),
+            vec![
+                MemberEntry {
+                    pubkey: owner,
+                    role: MemberRole::Lead,
+                    status: MemberStatus::Confirmed,
+                    source: RoleSource::RoleTag,
+                },
+                MemberEntry {
+                    pubkey: co,
+                    role: MemberRole::CoMaintainer,
+                    status: MemberStatus::Confirmed,
+                    source: RoleSource::RoleTag,
+                },
+                MemberEntry {
+                    pubkey: invited,
+                    role: MemberRole::CoMaintainer,
+                    status: MemberStatus::Invited,
+                    source: RoleSource::RoleTag,
+                },
+                MemberEntry {
+                    pubkey: moderator,
+                    role: MemberRole::Moderator,
+                    status: MemberStatus::Confirmed,
+                    source: RoleSource::RoleTag,
+                },
+                MemberEntry {
+                    pubkey: assigned,
+                    role: MemberRole::Moderator,
+                    status: MemberStatus::Invited,
+                    source: RoleSource::RoleTag,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn member_entries_report_the_deprecated_fallback_without_a_lead() {
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let other_keys = Keys::generate();
+        let other = other_keys.public_key();
+
+        let listing = vec![tag(&[
+            "maintainers",
+            &owner.to_string(),
+            &other.to_string(),
+        ])];
+        let repo_ref = consolidated(vec![
+            announcement(&owner_keys, listing.clone()),
+            announcement(&other_keys, listing),
+        ]);
+
+        assert_eq!(
+            member_entries(&repo_ref),
+            vec![
+                MemberEntry {
+                    pubkey: owner,
+                    role: MemberRole::CoMaintainer,
+                    status: MemberStatus::Confirmed,
+                    source: RoleSource::MaintainersTag,
+                },
+                MemberEntry {
+                    pubkey: other,
+                    role: MemberRole::CoMaintainer,
+                    status: MemberStatus::Confirmed,
+                    source: RoleSource::MaintainersTag,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn member_entries_list_a_dual_role_pubkey_once_as_a_maintainer() {
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let dual = Keys::generate().public_key();
+
+        let repo_ref = consolidated(vec![announcement(
+            &owner_keys,
+            vec![
+                tag(&["M", &owner.to_string()]),
+                tag(&["m", &dual.to_string()]),
+                tag(&["o", &dual.to_string()]),
+            ],
+        )]);
+
+        let entries = member_entries(&repo_ref);
+        assert_eq!(
+            entries.iter().filter(|e| e.pubkey == dual).count(),
+            1,
+            "a pubkey listed as maintainer and moderator must appear once"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|e| e.pubkey == dual)
+                .map(|e| (e.role, e.status)),
+            Some((MemberRole::CoMaintainer, MemberStatus::Invited)),
+        );
+    }
 
     #[test]
     fn related_maintainers_preserves_display_order_in_both_directions() {

@@ -216,6 +216,27 @@ async fn accept_and_assert_resolution_untouched(clone: &Repo, extra_args: &[&str
     assert_eq!(json["maintainer_edges"].as_array().map(Vec::len), Some(2));
     assert!(json["selected_maintainer"].is_string());
     assert!(json.get("lead_maintainer").is_some());
+    assert_eq!(json["moderators"], serde_json::json!([]));
+    assert_eq!(json["confirmed_moderators"], serde_json::json!([]));
+    let members = json["members"]
+        .as_array()
+        .context("members missing from ngit repo --json")?;
+    assert_eq!(members.len(), 2, "one member entry per maintainer: {json}");
+    for member in members {
+        assert!(member["pubkey"].is_string());
+        assert_eq!(
+            member["role"], "co-maintainer",
+            "no announcement asserts an M lead here: {json}",
+        );
+        assert_eq!(
+            member["status"], "confirmed",
+            "reciprocal acceptance should confirm both members: {json}",
+        );
+        assert_eq!(
+            member["source"], "role_tag",
+            "both announcements were published with indexed role tags: {json}",
+        );
+    }
 
     Ok(())
 }
