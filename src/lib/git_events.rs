@@ -273,7 +273,7 @@ async fn generate_patch_event_at(
     let patch_tags = crate::content_tags::dedup_tags(
         [
             repo_ref
-                .maintainers_for_announcement_tags()
+                .members_for_announcement_tags()
                 .iter()
                 .map(|m| {
                     Tag::from(Nip01Tag::Coordinate {
@@ -358,7 +358,7 @@ async fn generate_patch_event_at(
             // repo reference. maintainers of large repos will not
             // be interested in every patch.
             repo_ref
-                .maintainers_for_announcement_tags()
+                .members_for_announcement_tags()
                 .iter()
                 .map(|pk| Tag::public_key(*pk))
                 .collect(),
@@ -622,7 +622,7 @@ pub async fn generate_unsigned_pr_or_update_event(
     let all_tags = crate::content_tags::dedup_tags(
         [
             repo_ref
-                .maintainers_for_announcement_tags()
+                .members_for_announcement_tags()
                 .iter()
                 .map(|m| {
                     Tag::from(Nip01Tag::Coordinate {
@@ -663,7 +663,7 @@ pub async fn generate_unsigned_pr_or_update_event(
             merge_base_tag,
             proposal_metadata_tags,
             repo_ref
-                .maintainers_for_announcement_tags()
+                .members_for_announcement_tags()
                 .iter()
                 .map(|pk| Tag::public_key(*pk))
                 .collect(),

@@ -814,17 +814,33 @@ impl RepoRef {
                 relays: vec![],
             });
         }
+        // moderators are members: proposals and status events tag their
+        // announcements too (NIP-34's "include all current members'
+        // repository announcements"), so cache lookups and fetch filters
+        // must cover their coordinates
+        for m in &self.moderators {
+            res.insert(self.announcement_coordinate(m));
+        }
         res
     }
 
-    /// Maintainers in announcement-tag order.
+    /// Members in announcement-tag order.
     ///
     /// The maintainer selected by the `nostr://` URL or explicit repo
-    /// coordinate is always first. Confirmed maintainers come before invited
-    /// maintainers. This keeps PR/issue repository `a` tags anchored to the
-    /// reciprocal group while still tagging every authorized maintainer.
-    pub fn maintainers_for_announcement_tags(&self) -> Vec<PublicKey> {
-        let confirmed: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
+    /// coordinate is always first, followed by the other confirmed
+    /// maintainers and then confirmed moderators — per NIP-34, repository
+    /// tags SHOULD include all current members' announcements. Invited
+    /// (unaccepted) maintainers and assigned-but-unacknowledged moderators
+    /// come last: their announcements may not exist yet and their events are
+    /// not authoritative, but tagging them means in-flight PRs and issues
+    /// already tag the new member during transitions. This keeps PR/issue
+    /// repository `a` tags anchored to the reciprocal group while still
+    /// tagging every listed member.
+    pub fn members_for_announcement_tags(&self) -> Vec<PublicKey> {
+        let confirmed_maintainers: HashSet<PublicKey> =
+            self.confirmed_maintainers().into_iter().collect();
+        let confirmed_moderators: HashSet<PublicKey> =
+            self.confirmed_moderators().into_iter().collect();
 
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
@@ -834,14 +850,26 @@ impl RepoRef {
         }
 
         for maintainer in &self.maintainers {
-            if confirmed.contains(maintainer) && seen.insert(*maintainer) {
+            if confirmed_maintainers.contains(maintainer) && seen.insert(*maintainer) {
                 ordered.push(*maintainer);
             }
         }
 
+        for moderator in &self.moderators {
+            if confirmed_moderators.contains(moderator) && seen.insert(*moderator) {
+                ordered.push(*moderator);
+            }
+        }
+
         for maintainer in &self.maintainers {
-            if !confirmed.contains(maintainer) && seen.insert(*maintainer) {
+            if seen.insert(*maintainer) {
                 ordered.push(*maintainer);
+            }
+        }
+
+        for moderator in &self.moderators {
+            if seen.insert(*moderator) {
+                ordered.push(*moderator);
             }
         }
 
@@ -2377,7 +2405,7 @@ mod tests {
             );
 
             assert_eq!(
-                repo_ref.maintainers_for_announcement_tags(),
+                repo_ref.members_for_announcement_tags(),
                 vec![selected, accepted, requested]
             );
         }
@@ -3402,6 +3430,56 @@ mod tests {
             );
 
             assert_eq!(repo_ref.confirmed_moderators(), vec![first, second]);
+        }
+
+        #[test]
+        fn announcement_tags_and_coordinates_cover_members_and_invitees() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let invited = nostr::prelude::Keys::generate().public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+            let unacknowledged = nostr::prelude::Keys::generate().public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &invited.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                    tag(&["o", &unacknowledged.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+
+            // members first (selected maintainer, then the confirmed
+            // moderator), invitees last (unaccepted maintainer, then the
+            // unacknowledged moderator)
+            assert_eq!(
+                repo_ref.members_for_announcement_tags(),
+                vec![owner, moderator, invited, unacknowledged]
+            );
+
+            // coordinate sets used for cache lookups and fetch filters
+            // cover the moderators' announcements too
+            for pk in [owner, invited, moderator, unacknowledged] {
+                assert!(
+                    repo_ref
+                        .coordinates()
+                        .iter()
+                        .any(|c| c.public_key == pk && c.identifier == "test-repo")
+                );
+            }
         }
 
         #[test]
