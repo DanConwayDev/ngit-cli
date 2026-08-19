@@ -184,6 +184,32 @@ pub fn announcement_author_declines_maintainership(event: &nostr::prelude::Event
     author_has_entry && !author_has_active_maintainer_entry
 }
 
+/// Whether `event`'s author does not hold moderatorship by their own
+/// account: at least one `o` tag names the author but none of those entries
+/// is active — they left by ending their self-role. Per NIP-34 the
+/// self-declaration takes precedence over an active `o` assignment in
+/// another member's announcement, so such an author must not appear in the
+/// consolidated moderator set. An author with no `o` self-entry makes no
+/// statement about moderatorship and never declines it here (an
+/// unacknowledged assignment is an invitation, which the moderator union
+/// currently surfaces).
+pub fn announcement_author_declines_moderatorship(event: &nostr::prelude::Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut author_has_o_entry = false;
+    let mut author_has_active_o_entry = false;
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        if slice.first().map(String::as_str) != Some("o") || slice.get(1) != Some(&author) {
+            continue;
+        }
+        author_has_o_entry = true;
+        if role_entry_is_active(slice) {
+            author_has_active_o_entry = true;
+        }
+    }
+    author_has_o_entry && !author_has_active_o_entry
+}
+
 impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
     type Error = anyhow::Error;
 
@@ -2937,6 +2963,80 @@ mod tests {
             // an `o` self-entry acknowledges only moderatorship, which takes
             // precedence over maintainer assignments in other announcements
             assert!(announcement_author_declines_maintainership(&event));
+        }
+
+        #[test]
+        fn author_with_only_ended_o_entries_declines_moderatorship() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            // an ended `o` self-entry records leaving moderatorship, which
+            // takes precedence over another member's active assignment
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["o", &author.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(announcement_author_declines_moderatorship(&event));
+
+            // an active `o` self-entry acknowledges the role
+            let active = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["o", &author.to_string()]),
+                ],
+            );
+            assert!(!announcement_author_declines_moderatorship(&active));
+
+            // no `o` self-entry makes no statement about moderatorship,
+            // even when the announcement ends the author's maintainer role
+            let maintainer_only = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["m", &author.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(!announcement_author_declines_moderatorship(
+                &maintainer_only
+            ));
+
+            // an `o` entry naming someone else is an assignment, not a
+            // statement about the author's own moderatorship
+            let other = nostr::prelude::Keys::generate().public_key();
+            let assigns_other = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["o", &other.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(!announcement_author_declines_moderatorship(&assigns_other));
+        }
+
+        #[test]
+        fn leave_produced_announcement_declines_both_roles() {
+            // `end_self_role` closes every active self-entry, so the
+            // republished announcement of a maintainer-and-moderator who
+            // left declines maintainership and moderatorship alike
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["m", &author.to_string(), "0", "100"]),
+                    tag(&["o", &author.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(announcement_author_declines_maintainership(&event));
+            assert!(announcement_author_declines_moderatorship(&event));
         }
 
         #[test]

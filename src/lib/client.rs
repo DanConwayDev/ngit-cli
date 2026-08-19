@@ -65,7 +65,10 @@ use crate::{
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
     relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
-    repo_ref::{RepoRef, announcement_author_declines_maintainership, normalize_grasp_server_url},
+    repo_ref::{
+        RepoRef, announcement_author_declines_maintainership,
+        announcement_author_declines_moderatorship, normalize_grasp_server_url,
+    },
     repo_state::RepoState,
     signer::NgitSigner,
     version_check,
@@ -2065,6 +2068,20 @@ pub async fn get_repo_ref_from_cache(
             maintainers_without_annoucnement.push(*m);
         }
     }
+
+    // A member's own announcement takes precedence over `o` assignments in
+    // other members' announcements: an author whose fetched announcement
+    // records only ended `o` self-entries left moderatorship (e.g. via
+    // `ngit repo leave`), so drop them from the union. Discovery still
+    // follows maintainer listings only, so this covers authors fetched via
+    // an active maintainer listing; following `o` assignments in discovery
+    // is deferred with the rest of the moderator wiring.
+    let declined_moderators: HashSet<PublicKey> = repo_events
+        .iter()
+        .filter(|e| announcement_author_declines_moderatorship(e))
+        .map(|e| e.pubkey)
+        .collect();
+    moderators.retain(|m| !declined_moderators.contains(m));
 
     let mut ordered_accepted_maintainers = Vec::new();
     let mut ordered_requested_maintainers = Vec::new();
