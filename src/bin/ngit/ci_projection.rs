@@ -52,7 +52,7 @@ use nostr::prelude::{
 };
 use serde_json::{Value, json};
 
-use crate::cli::CiTrustFloor;
+use crate::{ci_commit::first_local_commit, cli::CiTrustFloor};
 
 /// The trust floor a surface applies when the caller demanded none.
 ///
@@ -1172,16 +1172,7 @@ pub fn meets_floor(classification: TrustClassification, floor: CiTrustFloor) -> 
 /// does the workflow blob at that commit hash to what the coordinator
 /// claimed?
 fn check_integrity(git_repo: &Repo, run: &WorkflowRun) -> Integrity {
-    // Every `c` value is tried and peeled: the NIP puts the commit first, but
-    // an annotated-tag run also names the tag object, and a publisher that
-    // ordered them the other way round still describes the same commit.
-    let Some(commit) = run
-        .commits
-        .iter()
-        .filter_map(|candidate| git2::Oid::from_str(candidate).ok())
-        .filter_map(|oid| git_repo.git_repo.find_object(oid, None).ok())
-        .find_map(|object| object.peel_to_commit().ok())
-    else {
+    let Some(commit) = first_local_commit(git_repo, &run.commits) else {
         return Integrity {
             commit_present: false,
             workflow_hash_matches: None,

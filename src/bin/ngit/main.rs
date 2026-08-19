@@ -18,6 +18,7 @@ use ngit::{
     git_events, login, repo_ref,
 };
 
+mod ci_commit;
 mod git_remote_helper;
 #[macro_use]
 mod output;

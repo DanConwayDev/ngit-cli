@@ -22,6 +22,7 @@ use ngit::{
 use nostr::prelude::{Event, EventId, Filter};
 
 use crate::{
+    ci_commit::resolve_commit_ish_tolerant,
     ci_projection::{
         ProjectionRequest, Target, Tier, build_report, pull_request_target, relay_coverage, short,
     },
@@ -231,16 +232,10 @@ fn root_reference(event: &Event) -> Option<EventId> {
 /// Resolve `raw` as a commit-ish, peeling an annotated tag to its commit
 /// while keeping the tag object id as a second `#c` candidate.
 fn commit_ish_target(git_repo: &Repo, raw: &str) -> Option<Target> {
-    let object = git_repo.git_repo.revparse_single(raw).ok()?;
-    let commit = object.peel_to_commit().ok()?;
-    let mut ids = vec![commit.id().to_string()];
-    let object_id = object.id().to_string();
-    if object_id != ids[0] {
-        ids.push(object_id);
-    }
+    let resolved = resolve_commit_ish_tolerant(git_repo, raw)?;
     Some(Target::Commit {
-        described: format!("{raw} ({})", short(&ids[0])),
-        ids,
+        described: format!("{raw} ({})", short(&resolved.commit)),
+        ids: resolved.ids,
     })
 }
 

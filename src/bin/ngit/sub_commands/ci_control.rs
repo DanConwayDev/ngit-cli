@@ -33,6 +33,7 @@ use nostr::prelude::{
 };
 
 use crate::{
+    ci_commit::{ResolvedCommit, resolve_commit_ish_strict},
     cli::SignerParams,
     client::{Client, Connect},
     git::{Repo, RepoActions},
@@ -168,7 +169,7 @@ pub async fn launch_trigger(
     // fetch, a login, or a published event.
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let commit_ish = commit_ish.unwrap_or("HEAD");
-    let resolved = resolve_commit(&git_repo, commit_ish)?;
+    let resolved = resolve_commit_ish_strict(&git_repo, commit_ish)?;
     let workflow_hash = workflow_blob_sha256(&git_repo, &resolved, workflow)?;
 
     let mut prepared = Prepared::new(git_repo, offline, auth).await?;
@@ -488,57 +489,6 @@ impl Prepared {
 // ---------------------------------------------------------------------------
 // Git resolution
 // ---------------------------------------------------------------------------
-
-/// The `c` tag values for a commit-ish.
-struct ResolvedCommit {
-    /// The peeled commit id.
-    commit: String,
-    /// Every published `c` value: the peeled commit first, then the annotated
-    /// tag object id when the commit-ish was one.
-    ids: Vec<String>,
-}
-
-/// Resolve `commit_ish`, peel-verifying every `c` value it produces.
-fn resolve_commit(git_repo: &Repo, commit_ish: &str) -> Result<ResolvedCommit> {
-    let object = git_repo
-        .git_repo
-        .revparse_single(commit_ish)
-        .with_context(|| format!("`{commit_ish}` is not a commit-ish in this repository"))?;
-    let commit = object
-        .peel_to_commit()
-        .with_context(|| format!("`{commit_ish}` does not resolve to a commit"))?;
-
-    let mut ids = vec![commit.id().to_string()];
-    if object.id() != commit.id() {
-        // An annotated tag: the NIP has the tag object published as a further
-        // `c` so one `#c` query finds the run from either spelling.
-        ids.push(object.id().to_string());
-    }
-
-    // A coordinator ignores a request whose `c` objects do not all peel to
-    // one commit, so ngit checks what it is about to publish rather than
-    // relying on how the ids were derived.
-    for id in &ids {
-        let peeled = git_repo
-            .git_repo
-            .find_object(git2::Oid::from_str(id)?, None)
-            .with_context(|| format!("object {id} is not in this repository"))?
-            .peel_to_commit()
-            .with_context(|| format!("object {id} does not peel to a commit"))?;
-        if peeled.id() != commit.id() {
-            bail!(
-                "object {id} peels to commit {} but {commit_ish} resolves to {}; every `c` tag must name the same commit",
-                peeled.id(),
-                commit.id(),
-            );
-        }
-    }
-
-    Ok(ResolvedCommit {
-        commit: commit.id().to_string(),
-        ids,
-    })
-}
 
 /// The SHA-256 of the workflow file's **blob** at the resolved commit.
 ///
