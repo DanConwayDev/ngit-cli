@@ -132,6 +132,15 @@ pub struct PublishRepoOpts {
     /// Requires one `with_grasp_server(role)` call per entry on the harness
     /// builder; panics at lookup time if any role has not been registered.
     pub additional_grasp_roles: Vec<String>,
+    /// Pass `--lead-maintainer <own npub>` to `ngit init` so the published
+    /// announcement asserts the publisher as the NIP-34 lead: an `M` role
+    /// tag instead of the plain `m` a lead-less init emits. Self-lead keeps
+    /// the full maintainer listing, so this composes with
+    /// [`PublishRepoOpts::additional_maintainer_count`] (a non-self lead
+    /// would reject `--other-maintainers`).
+    ///
+    /// Defaults to `false` (no lead assertion — every maintainer is `m`).
+    pub assert_self_as_lead: bool,
 }
 
 /// Metadata about a repository that has been published to the grasp via
@@ -322,6 +331,10 @@ impl Harness {
             grasp_url,
             "-d".into(),
         ];
+        if opts.assert_self_as_lead {
+            init_args.push("--lead-maintainer".into());
+            init_args.push(npub.clone());
+        }
         if !additional_maintainer_npubs.is_empty() {
             init_args.push("--other-maintainers".into());
             for npub in &additional_maintainer_npubs {

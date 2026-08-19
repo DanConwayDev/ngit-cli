@@ -48,6 +48,11 @@
 //!   ([`Harness::publish_repo`], [`Harness::clone_published_repo`]). Use these
 //!   when your test starts "maintainer publishes a repo; contributor clones it;
 //!   ...".
+//! - [`roles`] — NIP-34 role-tag announcement fixtures
+//!   ([`Harness::publish_fabricated_announcement`],
+//!   [`Harness::publish_repo_with_role_graph`]) for member graphs ngit's own
+//!   emission cannot produce: moderator assignments, acknowledgements, role
+//!   history boundaries, deprecated `maintainers`-only listings.
 //! - [`snapshot::RepoSnapshot`] — `HEAD` + refs only for now; grows as migrated
 //!   tests demand.
 
@@ -59,6 +64,7 @@ pub mod port;
 mod query;
 pub mod relay;
 pub mod repo;
+pub mod roles;
 pub mod scenarios;
 pub mod snapshot;
 pub mod vanilla_git_server;
@@ -74,6 +80,7 @@ pub use nostr_sdk::local_relay::LocalRelayBuilderNip42;
 pub use port::UnavailableTcpEndpoint;
 pub use relay::VanillaRelay;
 pub use repo::Repo;
+pub use roles::{FabricateAnnouncementOpts, RoleEntry, RoleGraph, RoleLetter};
 pub use scenarios::{
     ArrangedInitStateA, ArrangedInitStateB, ArrangedInitStateC, CloneLogin, PublishPatchSeriesOpts,
     PublishPrOpts, PublishRepoOpts, PublishStateEventOpts, PublishStateEventTarget,
