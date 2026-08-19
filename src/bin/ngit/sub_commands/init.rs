@@ -163,10 +163,81 @@ struct ResolvedFields {
     /// ngit-known tags, and dropping them would silently discard
     /// moderators and restart every member's role history.
     role_tags: Vec<nostr::prelude::Tag>,
-    /// The lead maintainer to assert with the NIP-34 `M` role: my own
-    /// announcement's existing assertion, carried forward while the lead
-    /// remains in `maintainers`. `None` emits only `m` tags.
+    /// The lead maintainer to assert with the NIP-34 `M` role:
+    /// `--lead-maintainer`, or my own announcement's existing assertion
+    /// while the lead remains in `maintainers`. `None` emits only `m` tags.
     lead: Option<PublicKey>,
+}
+
+/// Apply the resolved lead (`M` role) to the maintainer listing.
+///
+/// Without `--lead-maintainer` the author's own announcement's lead
+/// assertion is carried forward while that pubkey remains in the listing.
+/// Specifying yourself keeps the full listing and emits you as `M`.
+/// Specifying someone else follows NIP-34's SHOULD — the announcement then
+/// lists only the author and the lead. When that collapse would drop a
+/// pubkey the author's current announcement lists and the lead's own
+/// announcement does not keep listed, the pubkey would lose
+/// authorized-maintainer status, so `--force` is required.
+fn apply_lead_to_maintainers(
+    lead_arg: Option<PublicKey>,
+    force: bool,
+    my_pubkey: &PublicKey,
+    maintainers: Vec<PublicKey>,
+    my_ref: Option<&RepoRef>,
+    consolidated: Option<&RepoRef>,
+) -> Result<(Vec<PublicKey>, Option<PublicKey>)> {
+    let Some(lead) = lead_arg else {
+        let inherited = my_ref
+            .and_then(|mr| mr.lead)
+            .filter(|lead| maintainers.contains(lead));
+        return Ok((maintainers, inherited));
+    };
+    if lead == *my_pubkey {
+        return Ok((maintainers, Some(lead)));
+    }
+    let listing = vec![*my_pubkey, lead];
+    if !force {
+        let dropped: Vec<String> =
+            drops_losing_authorized_status(&listing, &lead, my_ref, consolidated)
+                .iter()
+                .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
+                .collect();
+        if !dropped.is_empty() {
+            let lead_npub = lead.to_bech32().unwrap_or_else(|_| lead.to_hex());
+            let dropped = dropped.join(", ");
+            return Err(cli_error(
+                &format!(
+                    "listing {lead_npub} as lead removes the other maintainers from your announcement (per NIP-34 only the lead lists the full membership), and the lead's announcement doesn't list: {dropped}. they would lose authorized-maintainer status"
+                ),
+                &[],
+                &[&format!("ngit init --lead-maintainer {lead_npub} --force")],
+            ));
+        }
+    }
+    Ok((listing, Some(lead)))
+}
+
+/// Pubkeys my current announcement lists that collapsing the listing to
+/// `[me, lead]` would drop, excluding those the lead's own announcement
+/// keeps listed (and therefore authorized).
+fn drops_losing_authorized_status(
+    listing: &[PublicKey],
+    lead: &PublicKey,
+    my_ref: Option<&RepoRef>,
+    consolidated: Option<&RepoRef>,
+) -> Vec<PublicKey> {
+    let lead_lists: Vec<PublicKey> = consolidated
+        .and_then(|rr| rr.events.values().find(|e| e.pubkey == *lead))
+        .and_then(|e| RepoRef::try_from((e.clone(), None)).ok())
+        .map(|lr| lr.maintainers)
+        .unwrap_or_default();
+    my_ref
+        .map(|mr| mr.maintainers.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pk| !listing.contains(pk) && !lead_lists.contains(pk))
+        .collect()
 }
 
 /// Extract my own announcement's `RepoRef` from the events map.
@@ -481,7 +552,10 @@ pub struct SubCommandArgs {
     #[clap(long, value_parser, num_args = 1..)]
     /// npubs of other maintainers
     other_maintainers: Vec<String>,
-
+    #[clap(long)]
+    /// npub of the lead maintainer, emitted as the NIP-34 `M` role; when the
+    /// lead is not you, your announcement lists only you and the lead
+    lead_maintainer: Option<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// hashtags for repository discovery
     hashtag: Vec<String>,
@@ -513,6 +587,7 @@ impl SubCommandArgs {
             || !self.web.is_empty()
             || !self.upstream.is_empty()
             || !self.other_maintainers.is_empty()
+            || self.lead_maintainer.is_some()
             || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
             || repo_relay_only
@@ -1003,12 +1078,39 @@ fn resolve_fields(
     };
 
     // --- Lead maintainer (NIP-34 `M` role) ---
-    // carry my own announcement's assertion forward while the lead remains
-    // in the listing
-    let lead = my_ref
-        .as_ref()
-        .and_then(|mr| mr.lead)
-        .filter(|lead| maintainers.contains(lead));
+    let lead_arg = args
+        .lead_maintainer
+        .as_deref()
+        .map(|input| {
+            PublicKey::parse(input).with_context(|| {
+                format!("--lead-maintainer '{input}' is not a valid npub or hex public key")
+            })
+        })
+        .transpose()?;
+    if let Some(lead) = lead_arg {
+        // per NIP-34, listing maintainers beyond the lead is the lead's
+        // prerogative: a non-lead author's announcement lists only
+        // themselves and the lead
+        if lead != *my_pubkey
+            && args.other_maintainers.iter().any(|npub| {
+                PublicKey::from_bech32(npub).is_ok_and(|pk| pk != lead && pk != *my_pubkey)
+            })
+        {
+            return Err(cli_error(
+                "--other-maintainers conflicts with a --lead-maintainer who is not you: per NIP-34 your announcement then lists only you and the lead",
+                &[],
+                &["ask the lead to list the other maintainers in their announcement"],
+            ));
+        }
+    }
+    let (maintainers, lead) = apply_lead_to_maintainers(
+        lead_arg,
+        cli.force,
+        my_pubkey,
+        maintainers,
+        my_ref.as_ref(),
+        state.repo_ref(),
+    )?;
 
     // --- Interactive: github/codeberg warning ---
     if interactive
@@ -2508,6 +2610,174 @@ fn object_exists_locally(git_repo: &Repo, oid: &str) -> bool {
         return true;
     };
     git_repo.git_repo.find_object(parsed, None).is_ok()
+}
+
+#[cfg(test)]
+mod apply_lead_to_maintainers_tests {
+    use nostr::prelude::{Keys, Tag, event::FinalizeEvent};
+
+    use super::*;
+
+    fn test_repo_ref(maintainers: Vec<PublicKey>, lead: Option<PublicKey>) -> RepoRef {
+        RepoRef {
+            name: "test".to_string(),
+            description: String::new(),
+            identifier: "test-repo".to_string(),
+            root_commit: "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2".to_string(),
+            git_server: vec![],
+            web: vec![],
+            upstream: vec![],
+            relays: vec![],
+            blossoms: vec![],
+            hashtags: vec![],
+            private: false,
+            selected_maintainer: maintainers[0],
+            maintainers,
+            maintainers_without_annoucnement: None,
+            events: HashMap::new(),
+            nostr_git_url: None,
+            extra_tags: vec![],
+            role_tags: vec![],
+            moderators: vec![],
+            lead,
+        }
+    }
+
+    /// A consolidated `RepoRef` carrying `announcer`'s announcement, whose
+    /// `maintainers` tag lists `listed`.
+    fn consolidated_with_announcement(announcer: &Keys, listed: &[PublicKey]) -> RepoRef {
+        let mut maintainers_tag = vec!["maintainers".to_string()];
+        maintainers_tag.extend(listed.iter().map(ToString::to_string));
+        let event = nostr::prelude::EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags(vec![
+                Tag::identifier("test-repo"),
+                Tag::parse(maintainers_tag).unwrap(),
+            ])
+            .finalize(announcer)
+            .unwrap();
+        let mut repo_ref = test_repo_ref(vec![announcer.public_key()], None);
+        repo_ref.events.insert(
+            Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: event.pubkey,
+                    identifier: "test-repo".to_string(),
+                },
+                relays: vec![],
+            },
+            event,
+        );
+        repo_ref
+    }
+
+    #[test]
+    fn without_the_flag_my_own_assertion_is_carried_while_the_lead_stays_listed() {
+        let me = Keys::generate().public_key();
+        let lead = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, lead], Some(lead));
+
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(None, false, &me, vec![me, lead], Some(&my_ref), None)
+                .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+
+        // the lead was removed from the resolved listing: the assertion is
+        // not carried forward
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(None, false, &me, vec![me], Some(&my_ref), None).unwrap();
+        assert_eq!(maintainers, vec![me]);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn specifying_yourself_keeps_the_full_listing() {
+        let me = Keys::generate().public_key();
+        let other = Keys::generate().public_key();
+
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(Some(me), false, &me, vec![me, other], None, None).unwrap();
+        assert_eq!(maintainers, vec![me, other]);
+        assert_eq!(resolved, Some(me));
+    }
+
+    #[test]
+    fn specifying_another_lead_collapses_the_listing() {
+        let me = Keys::generate().public_key();
+        let lead = Keys::generate().public_key();
+        let default_listed = Keys::generate().public_key();
+
+        // no existing announcement of mine: nothing loses authorized
+        // status, so no --force needed even though the resolved listing
+        // shrinks
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(Some(lead), false, &me, vec![me, default_listed], None, None)
+                .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+    }
+
+    #[test]
+    fn uncovered_drop_of_a_currently_listed_maintainer_requires_force() {
+        let me = Keys::generate().public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, dropped], None);
+        let consolidated = consolidated_with_announcement(&lead_keys, &[]);
+
+        // the pubkey losing authorized-maintainer status is identified
+        // (and named in the cli_error printed to stderr)
+        assert_eq!(
+            drops_losing_authorized_status(&[me, lead], &lead, Some(&my_ref), Some(&consolidated)),
+            vec![dropped]
+        );
+        assert!(
+            apply_lead_to_maintainers(
+                Some(lead),
+                false,
+                &me,
+                vec![me, dropped],
+                Some(&my_ref),
+                Some(&consolidated),
+            )
+            .is_err()
+        );
+
+        let (maintainers, resolved) = apply_lead_to_maintainers(
+            Some(lead),
+            true,
+            &me,
+            vec![me, dropped],
+            Some(&my_ref),
+            Some(&consolidated),
+        )
+        .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+    }
+
+    #[test]
+    fn drop_kept_authorized_by_the_leads_announcement_needs_no_force() {
+        let me = Keys::generate().public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, dropped], None);
+        let consolidated = consolidated_with_announcement(&lead_keys, &[dropped]);
+
+        let (maintainers, resolved) = apply_lead_to_maintainers(
+            Some(lead),
+            false,
+            &me,
+            vec![me, dropped],
+            Some(&my_ref),
+            Some(&consolidated),
+        )
+        .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+    }
 }
 
 #[cfg(test)]
