@@ -86,11 +86,11 @@ async fn publish_set_cover_note_event(
 
     let user_pubkey = signer.get_public_key().await?;
 
-    // Permission check: only the author or a confirmed maintainer may set a
-    // cover note.
-    if target.pubkey != user_pubkey && !repo_ref.is_authorized_maintainer(&user_pubkey) {
+    // Permission check: only the author or a confirmed member (maintainer or
+    // moderator) may set a cover note.
+    if target.pubkey != user_pubkey && !repo_ref.is_authorized_member(&user_pubkey) {
         bail!(
-            "only the {target_kind} author or a repository maintainer can set the cover note of a {target_kind}"
+            "only the {target_kind} author or a repository member (maintainer or moderator) can set the cover note of a {target_kind}"
         );
     }
 

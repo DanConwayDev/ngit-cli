@@ -1082,14 +1082,15 @@ pub fn is_event_proposal_root_for_branch(
 ///    "#t"]` tags.
 ///
 /// A label is only applied when the author of the source event is either the
-/// author of `event` itself or a confirmed repository maintainer.
+/// author of `event` itself or a confirmed repository member (maintainer or
+/// moderator).
 ///
 /// Labels are additive — all valid label events contribute; there is no
 /// "latest wins" replacement semantics.
 pub fn process_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> Vec<String> {
-    let authorized_maintainers = repo_ref.confirmed_maintainers();
+    let authorized_members = repo_ref.confirmed_members();
     let is_permitted = |pubkey: &PublicKey| -> bool {
-        pubkey.eq(&event.pubkey) || authorized_maintainers.contains(pubkey)
+        pubkey.eq(&event.pubkey) || authorized_members.contains(pubkey)
     };
 
     // 1. Inline `t` tags on the event itself.
@@ -1164,16 +1165,17 @@ pub fn process_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event])
 /// latest authorised event wins, with tiebreak by lexicographically lower
 /// event ID as required by NIP-01.
 ///
-/// Only the author of `event` or a confirmed repository maintainer may set
-/// the subject. Returns `None` when no valid subject override exists.
+/// Only the author of `event` or a confirmed repository member (maintainer
+/// or moderator) may set the subject. Returns `None` when no valid subject
+/// override exists.
 pub fn process_subject(
     event: &Event,
     repo_ref: &RepoRef,
     label_events: &[Event],
 ) -> Option<String> {
-    let authorized_maintainers = repo_ref.confirmed_maintainers();
+    let authorized_members = repo_ref.confirmed_members();
     let is_permitted = |pubkey: &PublicKey| -> bool {
-        pubkey.eq(&event.pubkey) || authorized_maintainers.contains(pubkey)
+        pubkey.eq(&event.pubkey) || authorized_members.contains(pubkey)
     };
 
     let event_id_str = event.id.to_string();
@@ -1251,8 +1253,8 @@ pub fn get_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> 
 /// kind-1624 events.
 ///
 /// A cover note is a markdown body attached to a PR, patch or issue by its
-/// author or a confirmed repository maintainer.  Only the latest authorised
-/// event wins
+/// author or a confirmed repository member (maintainer or moderator). Only
+/// the latest authorised event wins
 /// (replaceable semantics: newest `created_at`, tiebreak by lexicographically
 /// lower event ID). Events authored by other pubkeys are ignored.
 ///
@@ -1262,9 +1264,9 @@ pub fn process_cover_note(
     repo_ref: &RepoRef,
     cover_note_events: &[Event],
 ) -> Option<(Event, bool)> {
-    let authorized_maintainers = repo_ref.confirmed_maintainers();
+    let authorized_members = repo_ref.confirmed_members();
     let is_permitted = |pubkey: &PublicKey| -> bool {
-        pubkey.eq(&event.pubkey) || authorized_maintainers.contains(pubkey)
+        pubkey.eq(&event.pubkey) || authorized_members.contains(pubkey)
     };
 
     let event_id_str = event.id.to_string();
@@ -1296,7 +1298,10 @@ pub fn get_status(
     all_status_in_repo: &[Event],
     all_pr_roots_in_repo: &[Event],
 ) -> Kind {
-    let authorized_maintainers = repo_ref.confirmed_maintainers();
+    // per NIP-34 a status is valid from the root event's author or an
+    // authorized repository member: confirmed moderators count alongside
+    // confirmed maintainers
+    let authorized_members = repo_ref.confirmed_members();
     let get_direct_status = |proposal: &Event| {
         if let Some(e) =
             crate::event_ordering::latest_event(all_status_in_repo.iter().filter(|e| {
@@ -1304,7 +1309,7 @@ pub fn get_status(
                     && e.tags.iter().any(|t| {
                         t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
                     })
-                    && (proposal.pubkey.eq(&e.pubkey) || authorized_maintainers.contains(&e.pubkey))
+                    && (proposal.pubkey.eq(&e.pubkey) || authorized_members.contains(&e.pubkey))
             }))
         {
             e.kind
@@ -1547,6 +1552,131 @@ mod tests {
                 );
                 Ok(())
             }
+        }
+    }
+
+    mod member_action_authorization {
+        use nostr::prelude::{Keys, event::FinalizeEvent, nip19::Nip19Coordinate};
+
+        use super::*;
+
+        fn role_announcement(keys: &Keys, role_tags: &[Vec<String>]) -> Event {
+            let mut tags = vec![Tag::identifier("test-repo")];
+            for tag in role_tags {
+                tags.push(Tag::parse(tag.clone()).unwrap());
+            }
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        /// A repository whose owner assigns the `o` role to a moderator;
+        /// `acknowledged` controls whether the moderator's own announcement
+        /// confirms the role.
+        fn repo_with_moderator(acknowledged: bool) -> (RepoRef, Keys) {
+            let owner_keys = Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator_keys = Keys::generate();
+            let moderator = moderator_keys.public_key();
+
+            let owner_event = role_announcement(
+                &owner_keys,
+                &[
+                    vec!["M".to_string(), owner.to_string()],
+                    vec!["o".to_string(), moderator.to_string()],
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            if acknowledged {
+                let moderator_event = role_announcement(
+                    &moderator_keys,
+                    &[
+                        vec!["M".to_string(), owner.to_string()],
+                        vec!["o".to_string(), moderator.to_string()],
+                    ],
+                );
+                repo_ref.events.insert(
+                    Nip19Coordinate {
+                        coordinate: Coordinate {
+                            kind: Kind::GitRepoAnnouncement,
+                            public_key: moderator,
+                            identifier: "test-repo".to_string(),
+                        },
+                        relays: vec![],
+                    },
+                    moderator_event,
+                );
+            }
+            (repo_ref, moderator_keys)
+        }
+
+        fn proposal() -> Event {
+            EventBuilder::new(KIND_PULL_REQUEST, "PR description")
+                .finalize(&Keys::generate())
+                .unwrap()
+        }
+
+        fn status_closed_by(keys: &Keys, target: &Event) -> Event {
+            EventBuilder::new(Kind::GitStatusClosed, "")
+                .tags([Tag::parse(["e", &target.id.to_string(), "", "root"]).unwrap()])
+                .finalize(keys)
+                .unwrap()
+        }
+
+        #[test]
+        fn status_from_a_confirmed_moderator_is_valid() {
+            let (repo_ref, moderator_keys) = repo_with_moderator(true);
+            let proposal = proposal();
+            let status = status_closed_by(&moderator_keys, &proposal);
+
+            assert_eq!(
+                get_status(&proposal, &repo_ref, &[status], &[]),
+                Kind::GitStatusClosed
+            );
+        }
+
+        #[test]
+        fn status_from_an_unacknowledged_moderator_is_ignored() {
+            let (repo_ref, moderator_keys) = repo_with_moderator(false);
+            let proposal = proposal();
+            let status = status_closed_by(&moderator_keys, &proposal);
+
+            assert_eq!(
+                get_status(&proposal, &repo_ref, &[status], &[]),
+                Kind::GitStatusOpen
+            );
+        }
+
+        #[test]
+        fn labels_from_a_confirmed_moderator_are_applied() {
+            let (repo_ref, moderator_keys) = repo_with_moderator(true);
+            let proposal = proposal();
+            let label_event = EventBuilder::new(KIND_LABEL, "")
+                .tags([
+                    Tag::parse(["e", &proposal.id.to_string()]).unwrap(),
+                    Tag::parse(["L", "#t"]).unwrap(),
+                    Tag::parse(["l", "bug", "#t"]).unwrap(),
+                ])
+                .finalize(&moderator_keys)
+                .unwrap();
+
+            assert_eq!(
+                process_labels(&proposal, &repo_ref, std::slice::from_ref(&label_event)),
+                vec!["bug".to_string()]
+            );
+
+            // the same event from an unacknowledged moderator is ignored
+            let (repo_ref, moderator_keys) = repo_with_moderator(false);
+            let label_event = EventBuilder::new(KIND_LABEL, "")
+                .tags([
+                    Tag::parse(["e", &proposal.id.to_string()]).unwrap(),
+                    Tag::parse(["L", "#t"]).unwrap(),
+                    Tag::parse(["l", "bug", "#t"]).unwrap(),
+                ])
+                .finalize(&moderator_keys)
+                .unwrap();
+            assert!(process_labels(&proposal, &repo_ref, &[label_event]).is_empty());
         }
     }
 

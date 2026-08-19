@@ -927,15 +927,18 @@ impl RepoRef {
             .collect()
     }
 
-    /// Whether `pubkey`'s repository events are authoritative.
+    /// Whether `pubkey` holds maintainer authority.
     ///
-    /// True only for confirmed maintainers. Invited maintainers' state events
-    /// (kind 30618), status events (kinds 1630-1633) and label, subject and
-    /// cover-note overrides are ignored until they publish an announcement
-    /// that makes the relationship reciprocal. Moderators (`o` role tags,
-    /// [`RepoRef::moderators`]) never qualify: per NIP-34 they cannot publish
-    /// authoritative repository state, so a moderator-only pubkey is excluded
-    /// from the maintainer set this check is built on.
+    /// True only for confirmed maintainers: authoritative repository state
+    /// (kind 30618) and maintainer-only actions such as merging are gated
+    /// here. Invited maintainers do not qualify until they publish an
+    /// announcement that makes the relationship reciprocal, and moderators
+    /// (`o` role tags, [`RepoRef::moderators`]) never do: per NIP-34 they
+    /// cannot publish authoritative repository state, so a moderator-only
+    /// pubkey is excluded from the maintainer set this check is built on.
+    /// Member actions — status (kinds 1630-1633), label, subject and
+    /// cover-note events — are gated by [`RepoRef::is_authorized_member`]
+    /// instead, which also counts confirmed moderators.
     pub fn is_authorized_maintainer(&self, pubkey: &PublicKey) -> bool {
         self.confirmed_maintainers().contains(pubkey)
     }
