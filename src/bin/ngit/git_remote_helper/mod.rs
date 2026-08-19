@@ -28,7 +28,10 @@ use ngit::{
     login::{
         SignerInfo,
         existing::load_existing_login,
-        user::{PrivateGitRelayDiscovery, discover_private_git_relay_list, get_user_details},
+        user::{
+            PrivateGitRelayDiscovery, discover_private_git_relay_list,
+            refresh_user_and_private_git_relays,
+        },
     },
     relay_information::discover_private_repository_relays,
     signer::NgitSigner,
@@ -281,20 +284,33 @@ pub async fn run(args: &[String]) -> Result<()> {
     {
         Ok((signer, cached_user_ref, _)) => {
             client.set_signer(signer.clone()).await;
-            // A fresh clone has no repository-local profile cache. Refresh the
-            // selected account's public NIP-65 data before looking for its
-            // encrypted kind-10318 relay list; relay challenges during this
-            // bootstrap still cannot trigger signer acquisition or AUTH.
-            let user_ref = get_user_details(
-                &cached_user_ref.public_key,
-                Some(&client),
-                Some(git_repo_path),
-                false,
-                true,
-            )
-            .await
-            .unwrap_or(cached_user_ref);
-            Some((signer, user_ref))
+            // A cached NIP-65 list lets the steady-state path refresh public
+            // account data and kind 10318 in one REQ on each mailbox relay.
+            // If setup of that combined fetch fails, retain the old direct
+            // lookup as a degraded fallback.
+            let private_discovery = if let Ok((_, private_discovery)) =
+                refresh_user_and_private_git_relays(
+                    &cached_user_ref.public_key,
+                    &client,
+                    Some(git_repo_path),
+                    &signer,
+                )
+                .await
+            {
+                private_discovery
+            } else {
+                let mut discovery_relays = cached_user_ref.relays.read();
+                for relay in cached_user_ref.relays.write() {
+                    if !discovery_relays.contains(&relay) {
+                        discovery_relays.push(relay);
+                    }
+                }
+                if discovery_relays.is_empty() {
+                    discovery_relays.extend(client.get_relay_default_set().iter().cloned());
+                }
+                discover_private_git_relay_list(&client, discovery_relays, &signer).await
+            };
+            Some((signer, private_discovery))
         }
         // an explicit `-c nostr.signer=` selection must fail closed rather
         // than silently degrading to anonymous relay access
@@ -315,20 +331,10 @@ pub async fn run(args: &[String]) -> Result<()> {
     let signer = login.as_ref().map(|(signer, _)| signer.clone());
 
     let mut discovery_coordinate = decoded_nostr_url.coordinate.clone();
-    let mut private_discovery = if let Some((signer, user_ref)) = login.as_ref() {
-        let mut discovery_relays = user_ref.relays.read();
-        for relay in user_ref.relays.write() {
-            if !discovery_relays.contains(&relay) {
-                discovery_relays.push(relay);
-            }
-        }
-        if discovery_relays.is_empty() {
-            discovery_relays.extend(client.get_relay_default_set().iter().cloned());
-        }
-        discover_private_git_relay_list(&client, discovery_relays, signer).await
-    } else {
-        PrivateGitRelayDiscovery::Absent
-    };
+    let mut private_discovery = login.as_ref().map_or(
+        PrivateGitRelayDiscovery::Absent,
+        |(_, private_discovery)| private_discovery.clone(),
+    );
     if !nip11_private_relays.is_empty() {
         match &mut private_discovery {
             PrivateGitRelayDiscovery::Available(relays) => {
@@ -571,6 +577,7 @@ async fn fetching_with_report_for_helper(
             .fetch_all(
                 Some(git_repo_path),
                 Some(fetch_coordinate),
+                &HashSet::new(),
                 &HashSet::new(),
                 repository_relays_only,
             )

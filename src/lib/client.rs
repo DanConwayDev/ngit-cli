@@ -55,9 +55,10 @@ use crate::{
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
-        KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
-        KIND_USER_GRASP_LIST, event_is_cover_letter, event_is_patch_set_root,
-        event_is_revision_root, event_is_valid_pr_or_pr_update, status_kinds,
+        KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PRIVATE_GIT_RELAY_LIST, KIND_PULL_REQUEST,
+        KIND_PULL_REQUEST_UPDATE, KIND_USER_GRASP_LIST, event_is_cover_letter,
+        event_is_patch_set_root, event_is_revision_root, event_is_valid_pr_or_pr_update,
+        status_kinds,
     },
     login::{
         get_likely_logged_in_user,
@@ -181,6 +182,20 @@ struct BarRevealState {
     deferred: Mutex<Vec<DeferredFinish>>,
 }
 
+/// Complete a direct relay event fetch before its caller emits more output.
+/// Successful per-relay details are transient; failed relay details remain
+/// visible so callers do not lose useful outage diagnostics.
+fn finish_direct_event_fetch(
+    relay_results: &[Result<Vec<Event>>],
+    progress_reporter: MultiProgress,
+) -> Result<()> {
+    if !relay_results.iter().any(Result::is_err) {
+        progress_reporter.clear()?;
+    }
+    drop(progress_reporter);
+    Ok(())
+}
+
 /// Finish a progress bar, deferring the operation if the detail view has not
 /// yet been revealed. When `reveal_state` is `None` (verbose or test mode),
 /// the bar is finished immediately.
@@ -288,6 +303,7 @@ pub trait Connect {
         git_repo_path: Option<&'a Path>,
         repo_coordinates: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
+        private_relay_list_authors: &HashSet<PublicKey>,
         repository_relays_only: bool,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)>;
     async fn fetch_all_from_relay<'a>(
@@ -455,9 +471,10 @@ impl Connect for Client {
                 }
             })
             .collect::<Vec<RelayUrl>>();
-        let (relay_results, _) = self
+        let (relay_results, progress_reporter) = self
             .get_events_per_relay(relay_urls, filters, MultiProgress::new())
             .await?;
+        finish_direct_event_fetch(&relay_results, progress_reporter)?;
         // relay outages degrade to an empty result; callers that must not
         // mistake an outage for absent events consult their own caches or
         // use get_events_per_relay directly
@@ -572,6 +589,7 @@ impl Connect for Client {
         git_repo_path: Option<&'a Path>,
         selected_maintainer_coordinate: Option<&'a Nip19Coordinate>,
         user_profiles: &HashSet<PublicKey>,
+        private_relay_list_authors: &HashSet<PublicKey>,
         repository_relays_only: bool,
     ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
         let relay_default_set = &self
@@ -589,6 +607,7 @@ impl Connect for Client {
             git_repo_path,
             selected_maintainer_coordinate,
             user_profiles,
+            private_relay_list_authors,
             relay_default_set.clone(),
             announcement_indexer_relays.clone(),
             repository_relays_only,
@@ -711,7 +730,11 @@ impl Connect for Client {
                 .filter(|&r| !r.as_str().contains("nostr.mutinywallet.com"))
                 .filter_map(|relay| {
                     let scoped = request.scoped_to_relay(relay);
-                    let key = (relay.clone(), scoped.scope);
+                    let key = (
+                        relay.clone(),
+                        scoped.scope,
+                        scoped.fetches_private_relay_lists(),
+                    );
                     (!processed_relay_scopes.contains(&key)).then_some(scoped)
                 })
                 .collect::<Vec<_>>();
@@ -734,7 +757,7 @@ impl Connect for Client {
                     request
                         .selected_relay
                         .clone()
-                        .map(|relay| (relay, request.scope))
+                        .map(|relay| (relay, request.scope, request.fetches_private_relay_lists()))
                 })
                 .collect::<Vec<_>>();
 
@@ -1013,6 +1036,7 @@ impl Connect for Client {
                     profiles,
                 ),
             };
+            request.add_private_relay_list_filter(&mut filters);
             if version_check::is_version_check_relay(&relay_url)
                 && !VERSION_CHECK_STATE_REQUESTED.swap(true, Ordering::AcqRel)
             {
@@ -1267,23 +1291,21 @@ async fn get_events_of(
         pb.set_message("connected");
     }
 
-    let events_res = join_all(filters.into_iter().map(|filter| async {
-        relay
-            .fetch_events(filter)
-            // Use a very long timeout; actual timeout is controlled by outer tokio::select!
-            .timeout(std::time::Duration::from_secs(long_timeout()))
-            .policy(ReqExitPolicy::ExitOnEOSE)
-            .await
-    }))
-    .await;
+    if filters.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fetched_events = relay
+        .fetch_events(filters)
+        // Use a very long timeout; actual timeout is controlled by outer tokio::select!
+        .timeout(std::time::Duration::from_secs(long_timeout()))
+        .policy(ReqExitPolicy::ExitOnEOSE)
+        .await?;
 
     // no Event is being mutated, just new items added to the set
     #[allow(clippy::mutable_key_type)]
     let mut events: HashSet<Event> = HashSet::new();
-
-    for res in events_res {
-        events.extend(res?);
-    }
+    events.extend(fetched_events);
     Ok(events.into_iter().collect())
 }
 
@@ -2026,6 +2048,7 @@ async fn create_relays_request(
     git_repo_path: Option<&Path>,
     selected_maintainer_coordinate: Option<&Nip19Coordinate>,
     user_profiles: &HashSet<PublicKey>,
+    private_relay_list_authors: &HashSet<PublicKey>,
     fallback_relays: HashSet<RelayUrl>,
     announcement_indexer_relays: HashSet<RelayUrl>,
     repository_relays_only: bool,
@@ -2145,6 +2168,7 @@ async fn create_relays_request(
 
     let profiles_to_fetch_from_user_relays = {
         let mut user_profiles = user_profiles.clone();
+        user_profiles.extend(private_relay_list_authors.iter().copied());
         if let Some(git_repo_path) = git_repo_path {
             if let Ok(Some(current_user)) = get_likely_logged_in_user(git_repo_path).await {
                 user_profiles.insert(current_user);
@@ -2350,6 +2374,7 @@ async fn create_relays_request(
         existing_events,
         profiles_to_fetch_from_user_relays,
         user_relays_for_profiles,
+        private_relay_list_authors: private_relay_list_authors.clone(),
     })
 }
 
@@ -2377,12 +2402,16 @@ async fn process_fetched_events(
             let is_version_check_state_for_background_fetch =
                 version_check::is_ngit_repo_state_event(event)
                     && !request_includes_ngit_repo(request);
-            if !is_version_check_state_for_background_fetch {
+            if !is_version_check_state_for_background_fetch
+                && event.kind != KIND_PRIVATE_GIT_RELAY_LIST
+            {
                 if let Some(git_repo_path) = git_repo_path {
                     save_event_in_local_cache(git_repo_path, event).await?;
                 }
             }
-            if event.kind.eq(&Kind::GitRepoAnnouncement) {
+            if event.kind == KIND_PRIVATE_GIT_RELAY_LIST {
+                save_event_in_global_cache(git_repo_path, event).await?;
+            } else if event.kind.eq(&Kind::GitRepoAnnouncement) {
                 save_event_in_global_cache(git_repo_path, event).await?;
                 let new_coordinate = !request
                     .repo_coordinates_without_relays
@@ -3136,9 +3165,28 @@ pub struct FetchRequest {
     existing_events: HashSet<EventId>,
     profiles_to_fetch_from_user_relays: HashMap<PublicKey, (Timestamp, Timestamp, Timestamp)>,
     user_relays_for_profiles: HashSet<RelayUrl>,
+    private_relay_list_authors: HashSet<PublicKey>,
 }
 
 impl FetchRequest {
+    fn fetches_private_relay_lists(&self) -> bool {
+        self.selected_relay.as_ref().is_some_and(|relay| {
+            self.user_relays_for_profiles.contains(relay)
+                && !self.private_relay_list_authors.is_empty()
+        })
+    }
+
+    fn add_private_relay_list_filter(&self, filters: &mut Vec<nostr::prelude::Filter>) {
+        if self.fetches_private_relay_lists() {
+            filters.push(
+                nostr::prelude::Filter::new()
+                    .kind(KIND_PRIVATE_GIT_RELAY_LIST)
+                    .authors(self.private_relay_list_authors.clone())
+                    .limit(10),
+            );
+        }
+    }
+
     /// Restrict a request to the data this relay is authoritative for.
     ///
     /// Repository relays receive the complete request. Other relays may be
@@ -3333,6 +3381,7 @@ async fn fetching_with_report_policy_outcome(
             Some(git_repo_path),
             Some(selected_maintainer_coordinate),
             &HashSet::new(),
+            &HashSet::new(),
             repository_relays_only,
         )
         .await?;
@@ -3385,6 +3434,7 @@ pub async fn fetching_quietly(
         .fetch_all(
             Some(git_repo_path),
             Some(selected_maintainer_coordinate),
+            &HashSet::new(),
             &HashSet::new(),
             repository_relays_only,
         )
@@ -4172,9 +4222,80 @@ fn repository_privacy_from_effective_announcements(
 
 #[cfg(test)]
 mod tests {
+    use std::{io, sync::atomic::AtomicUsize};
+
+    use indicatif::{ProgressDrawTarget, TermLike};
     use nostr::prelude::event::{FinalizeUnsignedEvent, SignEvent};
 
     use super::*;
+
+    #[derive(Debug)]
+    struct ClearTrackingTerm {
+        clears: Arc<AtomicUsize>,
+    }
+
+    impl TermLike for ClearTrackingTerm {
+        fn width(&self) -> u16 {
+            80
+        }
+
+        fn move_cursor_up(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _n: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, _s: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_str(&self, _s: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clear_line(&self) -> io::Result<()> {
+            self.clears.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn flush(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn successful_direct_event_fetch_clears_per_relay_progress() {
+        let clears = Arc::new(AtomicUsize::new(0));
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
+            ClearTrackingTerm {
+                clears: clears.clone(),
+            },
+        )));
+        let bar = progress.add(
+            ProgressBar::new(1)
+                .with_style(ProgressStyle::with_template("{msg}").expect("valid style")),
+        );
+        bar.finish_with_message("0 events from mailbox relay");
+        let clears_before_finish = clears.load(Ordering::Relaxed);
+
+        finish_direct_event_fetch(&[Ok(Vec::new())], progress)
+            .expect("successful direct fetch cleanup");
+
+        assert!(
+            clears.load(Ordering::Relaxed) > clears_before_finish,
+            "successful direct relay reads must clear their transient detail lines"
+        );
+    }
 
     #[test]
     fn announcement_only_filters_request_only_repo_announcements_from_maintainers() {
@@ -4249,6 +4370,69 @@ mod tests {
             filters[1].authors,
             Some(std::collections::BTreeSet::from_iter([profile]))
         );
+    }
+
+    #[test]
+    fn mailbox_request_combines_profile_and_private_relay_list_filters() {
+        let public_key =
+            PublicKey::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let mailbox = RelayUrl::parse("wss://mailbox.example").unwrap();
+        let request = FetchRequest {
+            selected_relay: Some(mailbox.clone()),
+            user_relays_for_profiles: HashSet::from_iter([mailbox]),
+            private_relay_list_authors: HashSet::from_iter([public_key]),
+            ..FetchRequest::default()
+        };
+        let mut filters = get_auxiliary_fetch_filters(
+            &HashSet::new(),
+            &HashSet::from_iter([public_key]),
+            false,
+            true,
+        );
+
+        request.add_private_relay_list_filter(&mut filters);
+
+        assert_eq!(filters.len(), 2);
+        assert_eq!(
+            filters[0].kinds,
+            Some(std::collections::BTreeSet::from_iter([
+                Kind::Metadata,
+                Kind::RelayList,
+                KIND_USER_GRASP_LIST,
+            ]))
+        );
+        assert_eq!(
+            filters[1].kinds,
+            Some(std::collections::BTreeSet::from_iter([
+                KIND_PRIVATE_GIT_RELAY_LIST,
+            ]))
+        );
+        assert_eq!(
+            filters[1].authors,
+            Some(std::collections::BTreeSet::from_iter([public_key]))
+        );
+    }
+
+    #[test]
+    fn private_relay_list_filter_is_not_sent_to_non_mailbox_relays() {
+        let public_key =
+            PublicKey::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let request = FetchRequest {
+            selected_relay: Some(RelayUrl::parse("wss://indexer.example").unwrap()),
+            user_relays_for_profiles: HashSet::from_iter([RelayUrl::parse(
+                "wss://mailbox.example",
+            )
+            .unwrap()]),
+            private_relay_list_authors: HashSet::from_iter([public_key]),
+            ..FetchRequest::default()
+        };
+        let mut filters = Vec::new();
+
+        request.add_private_relay_list_filter(&mut filters);
+
+        assert!(filters.is_empty());
     }
 
     #[tokio::test]

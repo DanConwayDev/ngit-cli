@@ -511,39 +511,64 @@ pub async fn discover_private_git_relay_list<C: Connect + Sync>(
     let discovery = match fetch_private_git_relay_list(client, relays, signer).await {
         Ok(Some(list)) if list.relays.is_empty() => PrivateGitRelayDiscovery::Absent,
         Ok(Some(list)) => PrivateGitRelayDiscovery::Available(list.relays),
-        Ok(None) => match cached_private_git_relay_list(signer).await {
+        Ok(None) => match cached_private_git_relay_list(signer, None).await {
             Ok(Some(list)) if list.relays.is_empty() => PrivateGitRelayDiscovery::Absent,
             Ok(Some(list)) => PrivateGitRelayDiscovery::Available(list.relays),
             Ok(None) | Err(_) => PrivateGitRelayDiscovery::Absent,
         },
-        Err(error) => match cached_private_git_relay_list(signer).await {
+        Err(error) => match cached_private_git_relay_list(signer, None).await {
             Ok(Some(list)) if list.relays.is_empty() => PrivateGitRelayDiscovery::Absent,
             Ok(Some(list)) => PrivateGitRelayDiscovery::Available(list.relays),
             Ok(None) | Err(_) => PrivateGitRelayDiscovery::Unavailable(error.to_string()),
         },
     };
-    if let PrivateGitRelayDiscovery::Available(relays) = &discovery {
+    register_private_git_relay_discovery(client, &discovery);
+    discovery
+}
+
+/// Resolve private Git relay discovery after a combined account fetch has
+/// already populated the encrypted kind-10318 event cache.
+async fn discover_private_git_relay_list_from_cache<C: Connect + Sync>(
+    client: &C,
+    signer: &Arc<crate::NgitSigner>,
+    git_repo_path: Option<&Path>,
+) -> PrivateGitRelayDiscovery {
+    let discovery = match cached_private_git_relay_list(signer, git_repo_path).await {
+        Ok(Some(list)) if list.relays.is_empty() => PrivateGitRelayDiscovery::Absent,
+        Ok(Some(list)) => PrivateGitRelayDiscovery::Available(list.relays),
+        Ok(None) => PrivateGitRelayDiscovery::Absent,
+        Err(error) => PrivateGitRelayDiscovery::Unavailable(error.to_string()),
+    };
+    register_private_git_relay_discovery(client, &discovery);
+    discovery
+}
+
+fn register_private_git_relay_discovery<C: Connect + Sync>(
+    client: &C,
+    discovery: &PrivateGitRelayDiscovery,
+) {
+    if let PrivateGitRelayDiscovery::Available(relays) = discovery {
         // Decrypting kind 10318 is the trusted signal that these URLs are
         // account-private repository relays. The caller acquired `signer` to
         // decrypt the event before this classification is installed.
         client.nip42_register_private_repo_relays(relays.clone());
     }
-    discovery
 }
 
 async fn cached_private_git_relay_list(
     signer: &Arc<crate::NgitSigner>,
+    git_repo_path: Option<&Path>,
 ) -> Result<Option<PrivateGitRelayList>> {
     #[cfg(test)]
     {
-        let _ = signer;
+        let _ = (signer, git_repo_path);
         Ok(None)
     }
     #[cfg(not(test))]
     {
         let public_key = signer.get_public_key().await?;
         let events = get_event_from_global_cache(
-            None,
+            git_repo_path,
             vec![
                 nostr::prelude::Filter::new()
                     .kind(KIND_PRIVATE_GIT_RELAY_LIST)
@@ -831,6 +856,25 @@ pub async fn get_user_details(
     cache_only: bool,
     fetch_profile_updates: bool,
 ) -> Result<UserRef> {
+    get_user_details_with_private_relay_lists(
+        public_key,
+        client,
+        git_repo_path,
+        cache_only,
+        fetch_profile_updates,
+        &HashSet::new(),
+    )
+    .await
+}
+
+async fn get_user_details_with_private_relay_lists<C: Connect + Sync>(
+    public_key: &PublicKey,
+    client: Option<&C>,
+    git_repo_path: Option<&Path>,
+    cache_only: bool,
+    fetch_profile_updates: bool,
+    private_relay_list_authors: &HashSet<PublicKey>,
+) -> Result<UserRef> {
     if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
         if fetch_profile_updates {
             if let Some(client) = client {
@@ -843,6 +887,7 @@ pub async fn get_user_details(
                         git_repo_path,
                         None,
                         &HashSet::from_iter(vec![*public_key]),
+                        private_relay_list_authors,
                         false,
                     )
                     .await?;
@@ -875,6 +920,7 @@ pub async fn get_user_details(
                     git_repo_path,
                     None,
                     &HashSet::from_iter(vec![*public_key]),
+                    private_relay_list_authors,
                     false,
                 )
                 .await?;
@@ -888,6 +934,30 @@ pub async fn get_user_details(
             Ok(empty)
         }
     }
+}
+
+/// Refresh an account's public profile data and encrypted private Git relay
+/// list in the same relay subscriptions, then resolve the private list from
+/// the freshly populated cache.
+pub async fn refresh_user_and_private_git_relays<C: Connect + Sync>(
+    public_key: &PublicKey,
+    client: &C,
+    git_repo_path: Option<&Path>,
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<(UserRef, PrivateGitRelayDiscovery)> {
+    let private_relay_list_authors = HashSet::from_iter([*public_key]);
+    let user_ref = get_user_details_with_private_relay_lists(
+        public_key,
+        Some(client),
+        git_repo_path,
+        false,
+        true,
+        &private_relay_list_authors,
+    )
+    .await?;
+    let private_discovery =
+        discover_private_git_relay_list_from_cache(client, signer, git_repo_path).await;
+    Ok((user_ref, private_discovery))
 }
 
 /// Complete a profile fetch before its caller prints ordinary status text.

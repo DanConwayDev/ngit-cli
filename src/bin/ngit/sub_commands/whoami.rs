@@ -194,7 +194,7 @@ async fn load_accounts(
             .context("account inventory contains an invalid npub")?;
         if !public_keys.is_empty() {
             if let Ok((reports, progress_reporter)) = client
-                .fetch_all(git_repo_path, None, &public_keys, false)
+                .fetch_all(git_repo_path, None, &public_keys, &HashSet::new(), false)
                 .await
             {
                 if reports.iter().all(Result::is_ok) {

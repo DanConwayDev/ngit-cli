@@ -1207,6 +1207,7 @@ async fn get_repo_coordinate_from_user_prompt(
                         Some(git_repo_path),
                         Some(fetch_coordinate),
                         &HashSet::from_iter(vec![coordinate.public_key]),
+                        &HashSet::new(),
                         repository_relays_only,
                     )
                     .await?;
