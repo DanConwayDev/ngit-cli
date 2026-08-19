@@ -25,6 +25,13 @@
 //!   on the captured `Snapshot`. Same discipline as `tests/send_patch.rs` and
 //!   `tests/git_push_state/fresh_repo.rs` — see those files' module-level docs
 //!   for the rationale.
+//! - **Success — self-lead** (1 standalone test —
+//!   `lead_maintainer_self_emits_uppercase_m_role_tag`): `ngit init
+//!   --lead-maintainer <own npub>` end-to-end — clap flag through
+//!   `resolve_fields` to `RepoRef::to_event` — asserting the announcement
+//!   carries the publisher as an untimed `M` role tag. The collapse and
+//!   `--force` semantics for a non-self lead are pinned by the
+//!   `apply_lead_to_maintainers` unit tests in init.rs.
 //! - **Success — non-grasp clone path** (1 standalone test —
 //!   `vanilla_clone_url_passes_through_to_announcement`): drives `ngit init
 //!   --name --clone <vanilla_url> --relay <ws>` against a harness-managed
@@ -907,6 +914,91 @@ async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_t
         "expected refs/remotes/origin/main to match the pushed main tip",
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Success — self-lead (standalone, own init invocation)
+// ---------------------------------------------------------------------------
+
+/// `--lead-maintainer` with the publisher's own npub keeps the listing
+/// intact and asserts the publisher as lead: the announcement carries a
+/// single untimed `M` role tag (no `m` tags) alongside the deprecated
+/// `maintainers` tag with the same sole member. Exercises the flag's
+/// wiring end-to-end; non-self-lead collapse and `--force` gating are
+/// pinned by the `apply_lead_to_maintainers` unit tests in init.rs.
+#[tokio::test]
+async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (repo, state) = harness.arrange_init_state_a_fresh().await?;
+    let grasp_http_url = harness.grasp("repo").url().to_string();
+
+    let init_out = repo
+        .ngit([
+            "init",
+            "--name",
+            DISPLAY_NAME,
+            "--grasp-server",
+            &grasp_http_url,
+            "--lead-maintainer",
+            &state.npub,
+        ])
+        .output()
+        .await
+        .context("failed to spawn ngit init --lead-maintainer")?;
+    if !init_out.status.success() {
+        bail!(
+            "ngit init --lead-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            init_out.status,
+            String::from_utf8_lossy(&init_out.stdout),
+            String::from_utf8_lossy(&init_out.stderr),
+        );
+    }
+
+    // same relay-selection rationale as `capture_snapshot`: the default
+    // relay always materialises the kind-30617
+    let announcements = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(state.keys.public_key())
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    let announcement = announcements
+        .into_iter()
+        .find(|e| tag_value(e, "d").as_deref() == Some(EXPECTED_IDENTIFIER))
+        .with_context(|| {
+            format!(
+                "no kind-30617 with `d` = {EXPECTED_IDENTIFIER:?} on the default \
+                 relay after `ngit init --lead-maintainer`"
+            )
+        })?;
+
+    let role_tags: Vec<Vec<String>> = announcement
+        .tags
+        .iter()
+        .map(|t| t.as_slice().to_vec())
+        .filter(|t| t.first().is_some_and(|name| name == "M" || name == "m"))
+        .collect();
+    assert_eq!(
+        role_tags,
+        vec![vec!["M".to_string(), state.keys.public_key().to_string()]],
+        "expected a single untimed `M` role tag for the self-designated lead",
+    );
+    assert_eq!(
+        tag_values(&announcement, "maintainers"),
+        vec![state.keys.public_key().to_string()],
+        "deprecated `maintainers` tag should carry the same sole member",
+    );
     Ok(())
 }
 
