@@ -277,9 +277,13 @@ pub async fn pull_request_target(
 /// Whether the target's current runs are executing, finished, or abandoned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CiState {
+    /// At least one current run has a live progress marker.
     Running,
+    /// *Every* current run concluded. Anything less has not finished.
     Concluded,
+    /// Nothing is running and at least one current run never concluded.
     Stale,
+    /// No current run at all.
     None,
 }
 
@@ -1077,6 +1081,14 @@ fn outdated_attempts(runs: &[WorkflowRun]) -> Vec<Attempt> {
 }
 
 /// The state machine over a target's current runs.
+///
+/// `Concluded` requires *every* current run to have concluded. One workflow
+/// that succeeded beside another that was abandoned mid-flight is not a
+/// finished target: reporting it as concluded would roll the survivors up
+/// into a `success` and let `--require-ci-trust` pass a target whose CI never
+/// completed. An unfinished run with no live marker anywhere leaves the
+/// target `Stale`, which is the same "has not concluded" shortfall a
+/// wholly-abandoned target reports.
 fn ci_state(states: &[RunState]) -> CiState {
     if states.is_empty() {
         return CiState::None;
@@ -1086,7 +1098,7 @@ fn ci_state(states: &[RunState]) -> CiState {
     }
     if states
         .iter()
-        .any(|state| matches!(state, RunState::Concluded(_)))
+        .all(|state| matches!(state, RunState::Concluded(_)))
     {
         return CiState::Concluded;
     }
@@ -1395,6 +1407,33 @@ mod tests {
     fn only_expired_progress_is_stale_and_no_runs_is_none() {
         assert_eq!(ci_state(&[RunState::Stale]), CiState::Stale);
         assert_eq!(ci_state(&[]), CiState::None);
+    }
+
+    #[test]
+    fn a_current_run_that_never_concluded_keeps_the_target_from_concluding() {
+        let mixed = [RunState::Concluded(Conclusion::Success), RunState::Stale];
+        assert_eq!(
+            ci_state(&mixed),
+            CiState::Stale,
+            "a workflow that was abandoned mid-flight leaves the target \
+             unfinished, whatever the workflows beside it reported"
+        );
+        // What that costs the gate: the surviving success is never rolled up
+        // into a conclusion, so the strongest possible trust cannot carry it
+        // over any floor.
+        let report = rolled_up(
+            ci_state(&mixed),
+            None,
+            TrustClassification::MaintainerDirected,
+        );
+        assert!(
+            report
+                .gate_failure(CiTrustFloor::OperationallyAssociated)
+                .is_some(),
+            "`--require-ci-trust` blocks until CI is green, and a target one \
+             of whose workflows never completed is not green"
+        );
+        assert!(report.merge_warning().is_some());
     }
 
     #[test]

@@ -423,6 +423,133 @@ async fn require_ci_trust_blocks_a_merge_the_current_result_cannot_support() -> 
     Ok(())
 }
 
+#[tokio::test]
+async fn a_workflow_that_never_concluded_blocks_the_merge_beside_a_successful_one() -> Result<()> {
+    let arranged = arrange("merge-mixed").await?;
+    // Both runs below are the same coordinator's, covered by this standing
+    // request: the target's trust is the strongest there is, so the only
+    // thing the gate can be refusing on is the unfinished workflow.
+    arranged.service_request().await?;
+
+    let pr = arranged.open_pr("mixed").await?;
+    arranged
+        .publish_run(
+            &arranged.coordinator,
+            &arranged.run_spec(&pr, "run-passed", "success"),
+        )
+        .await?;
+
+    // A second workflow of the *same* revision that stopped renewing its
+    // marker and never published a result. Seeded into the local cache for
+    // the reason the module comment gives: a relay refuses an expired event.
+    let abandoned = build_ci_run(
+        &arranged.coordinator,
+        &arranged
+            .run_spec(&pr, "run-abandoned", "success")
+            .workflow("lint.yml", workflow_hash(WORKFLOW))
+            .conclusion(None)
+            .progress(CiProgress::expired(arranged.now)),
+    )?;
+    for event in abandoned.all() {
+        ngit::client::save_event_in_local_cache(arranged.publisher.dir(), &event)
+            .await
+            .context("failed to seed the expired progress marker into the local cache")?;
+    }
+
+    arranged
+        .publisher
+        .git_ok(["fetch", "origin"], "git fetch origin")
+        .await?;
+
+    let id = pr.event_id.to_hex();
+    let main_before = arranged.publisher.rev_parse("main").await?;
+    let (out, json) = pr_merge(
+        &arranged.publisher,
+        &id,
+        &["--require-ci-trust", "operationally-associated"],
+    )
+    .await?;
+
+    assert!(
+        !out.status.success(),
+        "one workflow that never completed is not a green target, whatever \
+         the workflow beside it reported: {json}",
+    );
+    assert_eq!(json["status"], "error", "{json}");
+    assert_eq!(
+        json["ci"]["state"], "stale",
+        "the target has not concluded while one of its current runs never \
+         did: {json}"
+    );
+    assert_eq!(
+        json["ci"]["conclusion"],
+        Value::Null,
+        "the surviving success must not be rolled up into the target's \
+         conclusion: {json}"
+    );
+    let runs = json["ci"]["runs"]
+        .as_array()
+        .context("the refusal document carries the runs that explain it")?;
+    assert_eq!(runs.len(), 2, "{json}");
+    assert!(
+        runs.iter()
+            .any(|run| run["state"] == "concluded" && run["conclusion"] == "success"),
+        "the successful run is still reported, per run: {json}"
+    );
+    assert!(
+        runs.iter().any(|run| run["state"] == "stale"),
+        "so is the one that never concluded: {json}"
+    );
+    assert!(
+        runs.iter()
+            .all(|run| run["classification"] == "maintainer-directed"),
+        "the refusal is about the unfinished run, not about trust: {json}"
+    );
+    assert_not_merged(&arranged, &pr, &main_before).await?;
+
+    // `ngit ci status` reads the same state machine, so it refuses the same
+    // target rather than reporting a concluded success.
+    let out = arranged
+        .publisher
+        .ngit(vec![
+            "ci",
+            "status",
+            id.as_str(),
+            "--require-ci-trust",
+            "operationally-associated",
+            "--json",
+        ])
+        .output()
+        .await
+        .context("failed to spawn `ngit ci status`")?;
+    let status: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .context("`ngit ci status` stdout is not valid JSON")?;
+    assert!(
+        !out.status.success(),
+        "the surfaces must not disagree about what has concluded: {status}"
+    );
+    assert_eq!(status["ci"]["state"], "stale", "{status}");
+
+    // The control: with no floor demanded the merge goes through, warned
+    // about — so the refusal above is the gate's doing and not a merge that
+    // could never have run.
+    let (out, json) = pr_merge(&arranged.publisher, &id, &[]).await?;
+    assert!(
+        out.status.success(),
+        "the warning is non-blocking: {json}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        json["ci_warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("stale")),
+        "merging past a workflow that never finished is not silent: {json}"
+    );
+    assert_merged(&arranged, &pr, &main_before).await?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Allowed: maintainer direction the gate accepts, by either route.
 // ---------------------------------------------------------------------------

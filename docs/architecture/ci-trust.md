@@ -337,12 +337,19 @@ reference left open:
   describes the current revision; it is false only when CI exists for the PR
   but every run supplied a different revision. A run with no `e` supplying
   event matches only when the PR's current revision is its root.
-- **A live marker wins the target state.** Any current run that is running
-  makes the target `running`, even beside a workflow that already concluded;
-  `concluded` then rolls up the worst of the concluded runs, where
-  `neutral`/`skipped` rank below `success` so they neither fail the rollup
-  nor displace a real outcome. `stale` is the state where every current run
-  has only an expired marker.
+- **A live marker wins the target state, and an unfinished run withholds
+  `concluded`.** Any current run that is running makes the target `running`,
+  even beside a workflow that already concluded. `concluded` requires *every*
+  current run to have concluded; it then rolls up the worst of them, where
+  `neutral`/`skipped` rank below `success` so they neither fail the rollup nor
+  displace a real outcome. `stale` is the state where nothing is running and
+  at least one current run never concluded — a wholly abandoned target, and
+  equally one workflow that succeeded beside another that stopped renewing its
+  marker. Reporting the latter as `concluded` would roll the survivors up into
+  a `success` and let `--require-ci-trust` pass a target whose CI never
+  completed, which is not "block until CI is green"; the mixed case is
+  therefore the same "has not concluded" shortfall as the wholly abandoned
+  one, on every surface that reads the state.
 - **`attempt_of` is the attempt count for the run's `(coordinator,
   workflow)` on this target**, which is the position of the current attempt.
   The design's JSON shape named the field without defining it.
@@ -665,11 +672,13 @@ own — and its cost is one extra filter per repository relay.
 
 For the PR's **latest revision** (root 1618 or newest 1619 tip):
 
-- `running` — unexpired 39842 with status queued/in_progress.
-- `concluded` — 9842 present; conclusion rolls up worst-of across workflows
-  (`failure`/`timed_out`/`startup_failure` beat `cancelled` beat `success`;
-  `neutral`/`skipped` do not fail the rollup).
-- `stale` — only expired progress, no result.
+- `running` — any current run has an unexpired 39842 with status
+  queued/in_progress.
+- `concluded` — *every* current run has a 9842; conclusion rolls up worst-of
+  across workflows (`failure`/`timed_out`/`startup_failure` beat `cancelled`
+  beat `success`; `neutral`/`skipped` do not fail the rollup).
+- `stale` — nothing is running and at least one current run never concluded,
+  whether or not the workflows beside it did.
 - `none` — no CI events reference the PR.
 
 Results for earlier revisions are never presented as current; the detail view
@@ -859,8 +868,9 @@ on WP1.
   the non-blocking warning at the default floor, and `--require-ci-trust`
   refusing before anything is changed. Integration tests
   (`tests/pr_merge_ci.rs`): the blocked matrix (failing, no known context,
-  stale, no CI) each with the unflagged merge as a control and the refusal
-  keeping the runs that explain it, the allowed matrix (control-history
+  stale, a stale workflow beside a successful one, no CI) each with the
+  unflagged merge as a control and the refusal keeping the runs that explain
+  it, the allowed matrix (control-history
   coverage and a validated manual trigger, each isolated from the other's
   route, plus the cache tier under `--offline`), and the warning path —
   failing, running, a superseded revision, and a PR with no CI that must not
