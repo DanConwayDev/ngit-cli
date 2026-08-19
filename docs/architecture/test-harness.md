@@ -70,8 +70,39 @@ Three observations underpin this:
 | Working tree | `tempfile::TempDir` under `std::env::temp_dir()` |
 | `GIT_EXEC_PATH` (the dir containing `git-remote-nostr`) | Per-test tempdir; binary copied in once per test |
 | User identity | Per-test `nostr::Keys::generate()` |
+| The user's machine (`HOME`, XDG base dirs, global/system Git config) | Per-harness `TempDir` exported as `HOME`, `XDG_{CONFIG,DATA,STATE,CACHE}_HOME`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` — see "Sandboxed HOME" below |
 
 Nothing is process-global. Nothing requires `#[serial]`.
+
+### Sandboxed HOME
+
+`Harness::env` points `HOME`, every XDG base dir and the Git config
+scope overrides at a per-harness temp dir, reachable from a test as
+`harness.home()`. This is not belt-and-braces; each of those variables
+closes a distinct escape route:
+
+- **libgit2 ignores `GIT_CONFIG_GLOBAL`.** `git_config_open_default()`
+  never reads it, and `config_path_global()` honours it only for
+  repositories opened with `GIT_REPOSITORY_OPEN_FROM_ENV` — which
+  `git2::Repository::discover`, behind `Repo::discover`, does not use.
+  Global config otherwise resolves from `$HOME/.gitconfig` or
+  `$XDG_CONFIG_HOME/git/config`. (ngit resolves the override itself, in
+  `src/lib/git/mod.rs::open_global_config`, so the variable is
+  meaningful to ngit — but `HOME` still has to be sandboxed for the
+  fallback path and for plain `git`.)
+- **The `directories` crate reads `XDG_DATA_HOME` / `XDG_CACHE_HOME`.**
+  That is where ngit keeps its credential file store, the account index,
+  and the decrypted private relay-list cache that `ngit account logout`
+  deletes wholesale.
+- **An inherited `XDG_*` outranks `HOME`**, so each is set explicitly
+  rather than left to the `HOME` fallback.
+
+Most of ngit's global-scope behaviour is suppressed under `NGITTEST`, so
+a test only reaches these paths by removing it — which several account
+tests deliberately do, to cover the global login scope. Before the
+sandbox existed, such a test logged the developer out of their own
+machine and left its throwaway account in their real `~/.gitconfig`.
+`tests/account_global_config_scope.rs` is the regression test.
 
 ### Relay-injection mechanism: per-spawn env vars
 

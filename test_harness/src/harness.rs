@@ -11,6 +11,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -18,6 +19,7 @@ use nostr_sdk::{
     local_relay::LocalRelayBuilderNip42,
     prelude::{PublicKey, ToBech32},
 };
+use tempfile::TempDir;
 
 use crate::{
     grasp::GraspServer, port, relay::VanillaRelay, repo::Repo, vanilla_git_server::VanillaGitServer,
@@ -50,6 +52,20 @@ pub struct Harness {
     git_remote_nostr_bin: PathBuf,
     /// Per-test environment overrides applied to every child process.
     child_env: BTreeMap<String, String>,
+    /// Sandbox `HOME` for every child process, shared with the `Repo`s
+    /// handed out by this harness.
+    ///
+    /// Pointing `GIT_CONFIG_GLOBAL` at a temp file is **not** sufficient on
+    /// its own: `git_config_open_default()` — what git2 gives ngit — never
+    /// reads that variable, and libgit2 only honours it for repositories
+    /// opened with `GIT_REPOSITORY_OPEN_FROM_ENV`, which
+    /// `git2::Repository::discover` does not use. Global config therefore
+    /// resolves from `$HOME` / the XDG base dirs, which is also where the
+    /// `directories` crate puts ngit's credential file store and caches. A
+    /// test that drops `NGITTEST` (re-enabling ngit's global-scope
+    /// behaviour) would otherwise log the developer out of their own
+    /// machine and write test accounts into their real `~/.gitconfig`.
+    home: Arc<TempDir>,
 }
 
 impl Harness {
@@ -185,12 +201,40 @@ impl Harness {
     /// `NGITTEST=TRUE` so `Params::default()` enters its test branch, plus
     /// each `NGIT_*_SET` populated from the corresponding role.
     pub fn env(&self) -> Vec<(String, String)> {
+        let home = |relative: &str| {
+            let path = if relative.is_empty() {
+                self.home.path().to_path_buf()
+            } else {
+                self.home.path().join(relative)
+            };
+            path.to_string_lossy().into_owned()
+        };
         let mut env = vec![
             ("NGITTEST".to_string(), "TRUE".to_string()),
             // Plaintext-in-git-config policy so tests never touch a real
             // credential store; keyring scenarios override this per command
             // together with `NGIT_KEYRING_FILE`.
             ("NGIT_SECRET_STORAGE".to_string(), "git-config".to_string()),
+            // Sandbox every location a child process could treat as "the
+            // user's machine": libgit2 resolves global Git config from
+            // `HOME` / `XDG_CONFIG_HOME`, and the `directories` crate
+            // resolves ngit's data and cache dirs (credential file store,
+            // account index, decrypted private relay-list cache) from
+            // `XDG_DATA_HOME` / `XDG_CACHE_HOME`. Each is set explicitly
+            // rather than relying on the `HOME` fallback, because an
+            // inherited `XDG_*` would otherwise still point at the real
+            // user directories.
+            ("HOME".to_string(), home("")),
+            ("XDG_CONFIG_HOME".to_string(), home(".config")),
+            ("XDG_DATA_HOME".to_string(), home(".local/share")),
+            ("XDG_STATE_HOME".to_string(), home(".local/state")),
+            ("XDG_CACHE_HOME".to_string(), home(".cache")),
+            // Honoured by git, and by ngit itself (which reads it because
+            // libgit2 does not). Kept inside the sandbox so a global-scope
+            // write has somewhere legitimate to land.
+            ("GIT_CONFIG_GLOBAL".to_string(), home(".gitconfig")),
+            ("GIT_CONFIG_SYSTEM".to_string(), "/dev/null".to_string()),
+            ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
         ];
 
         let default_urls = self.relay_role_urls("default");
@@ -221,6 +265,21 @@ impl Harness {
     /// Absolute path to the `ngit` binary the test will spawn.
     pub fn ngit_bin(&self) -> &Path {
         &self.ngit_bin
+    }
+
+    /// Root of the sandboxed `HOME` every child process runs against.
+    ///
+    /// Tests that exercise ngit's global-login scope (typically by removing
+    /// `NGITTEST`) can assert against `home().join(".gitconfig")` — the
+    /// global Git config those children see.
+    pub fn home(&self) -> &Path {
+        self.home.path()
+    }
+
+    /// Handle onto the sandbox `HOME`, so a `Repo` keeps the directory
+    /// alive even if the `Harness` is dropped first.
+    pub(crate) fn home_handle(&self) -> Arc<TempDir> {
+        Arc::clone(&self.home)
     }
 
     /// Absolute path to the `git-remote-nostr` binary. Tests that exercise
@@ -492,6 +551,25 @@ impl HarnessBuilder {
             ngit_bin: self.ngit_bin,
             git_remote_nostr_bin: self.git_remote_nostr_bin,
             child_env: self.child_env,
+            home: Arc::new(sandbox_home()?),
         })
     }
+}
+
+/// Allocate the per-test sandbox `HOME`.
+///
+/// The XDG sub-directories and the global Git config file are created up
+/// front so a child process finds a plausible home rather than a bare temp
+/// dir, and so `git config --global` has a file to write to.
+fn sandbox_home() -> Result<TempDir> {
+    let home = TempDir::new().context("failed to allocate TempDir for the sandbox HOME")?;
+    for relative in [".config", ".local/share", ".local/state", ".cache"] {
+        let path = home.path().join(relative);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+    }
+    let gitconfig = home.path().join(".gitconfig");
+    std::fs::write(&gitconfig, "")
+        .with_context(|| format!("failed to create {}", gitconfig.display()))?;
+    Ok(home)
 }

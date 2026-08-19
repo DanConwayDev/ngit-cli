@@ -22,6 +22,7 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::Command as StdCommand,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -34,6 +35,9 @@ use crate::{harness::Harness, snapshot::RepoSnapshot};
 pub struct Repo {
     /// Owns the underlying tempdir; dropping `Repo` cleans the working tree.
     _tempdir: TempDir,
+    /// Keeps the harness's sandbox `HOME` alive for as long as this repo
+    /// can spawn children pointed at it.
+    _home: Arc<TempDir>,
     dir: PathBuf,
     env: Vec<(String, String)>,
     ngit_bin: PathBuf,
@@ -62,7 +66,9 @@ impl Repo {
 
         // `git init -b main` works on git ≥ 2.28 (released 2020-07). The CI
         // baseline assumed by the project is well above this.
-        let status = StdCommand::new("git")
+        let mut cmd = StdCommand::new("git");
+        Self::apply_env(&mut cmd, &harness.env());
+        let status = cmd
             .arg("init")
             .arg("-b")
             .arg("main")
@@ -73,10 +79,11 @@ impl Repo {
             anyhow::bail!("git init exited {status}");
         }
 
-        Self::set_default_identity(&dir)?;
+        Self::set_default_identity(&dir, &harness.env())?;
 
         Ok(Self {
             _tempdir: tempdir,
+            _home: harness.home_handle(),
             dir,
             env: harness.env(),
             ngit_bin: harness.ngit_bin().to_path_buf(),
@@ -116,8 +123,6 @@ impl Repo {
             cmd.env(k, v);
         }
         cmd.env("PATH", &augmented_path);
-        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
-        cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
         for (key, value) in git_config {
             cmd.arg("-c").arg(format!("{key}={value}"));
         }
@@ -136,10 +141,11 @@ impl Repo {
             );
         }
 
-        Self::set_default_identity(&dir)?;
+        Self::set_default_identity(&dir, &harness.env())?;
 
         Ok(Self {
             _tempdir: tempdir,
+            _home: harness.home_handle(),
             dir,
             env: harness.env(),
             ngit_bin: harness.ngit_bin().to_path_buf(),
@@ -173,13 +179,15 @@ impl Repo {
     /// Benign per-repo identity so future `git commit`s don't trip the
     /// default-identity check. Using `--local` keeps it scoped to the
     /// tempdir — no contamination of the caller's global config.
-    fn set_default_identity(dir: &Path) -> Result<()> {
+    fn set_default_identity(dir: &Path, env: &[(String, String)]) -> Result<()> {
         for (k, v) in [
             ("user.name", "ngit test"),
             ("user.email", "ngit-test@example.invalid"),
             ("commit.gpgSign", "false"),
         ] {
-            let status = StdCommand::new("git")
+            let mut cmd = StdCommand::new("git");
+            Self::apply_env(&mut cmd, env);
+            let status = cmd
                 .current_dir(dir)
                 .args(["config", "--local", k, v])
                 .status()
@@ -225,16 +233,24 @@ impl Repo {
 
     fn configure(&self, cmd: &mut Command) {
         cmd.current_dir(&self.dir);
-        // env_clear() would also remove harmless inherited vars like HOME
-        // that git needs; instead we just override the keys we care about.
+        // env_clear() would also remove harmless inherited vars that git
+        // needs; instead we just override the keys we care about. That set
+        // includes `HOME`, the XDG base dirs, and `GIT_CONFIG_GLOBAL` /
+        // `GIT_CONFIG_SYSTEM` — see `Harness::env`, which owns the sandbox
+        // that keeps a test run out of the developer's real login.
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
         cmd.env("PATH", &self.augmented_path);
-        // Keep ngit deterministic in tests: no interactive prompts, no
-        // global config interference.
-        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
-        cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+    }
+
+    /// Apply harness env to a synchronous setup command, so `git init` and
+    /// the per-repo identity writes run against the same sandbox as every
+    /// command the test itself spawns.
+    fn apply_env(cmd: &mut StdCommand, env: &[(String, String)]) {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
     }
 
     /// Read a single git-config key from this repo's local config.
