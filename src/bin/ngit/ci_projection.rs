@@ -487,25 +487,7 @@ impl CiReport {
     /// The `ngit ci status` human rendering.
     pub fn print(&self, target: &Target) {
         println!("CI for {}", target.describe());
-        if self.runs.is_empty() {
-            if self.revision_matched {
-                println!("  no CI results");
-            } else {
-                println!("  no CI results for the current revision");
-            }
-        }
-        for run in &self.runs {
-            run.print();
-        }
-        if let Some(conclusion) = self.conclusion {
-            println!("  {} ({conclusion})", self.state.as_str());
-        } else if !self.runs.is_empty() {
-            println!("  {}", self.state.as_str());
-        }
-        self.print_outdated();
-        if self.is_incomplete() && !self.runs.is_empty() {
-            println!("  {CONTEXT_INCOMPLETE_LABEL}");
-        }
+        self.print_result_lines();
         // Shape rejections are diagnostics for a publisher, not something a
         // reader of this repository can act on, so they follow ngit's
         // verbosity idiom. They stay in the JSON document unconditionally.
@@ -520,6 +502,19 @@ impl CiReport {
     pub fn print_checks(&self) {
         println!();
         println!("Checks:");
+        self.print_result_lines();
+    }
+
+    /// The check lines every surface shares: the current runs (or the
+    /// no-results message), the rolled-up state, superseded revisions, and
+    /// the coverage caveat. Framing — the heading, and `ci status`'s verbose
+    /// skip diagnostics — stays with each surface.
+    ///
+    /// The caveat is guarded by [`Self::has_results`]: on a surface built
+    /// without `include_outdated` (`ci status`, `pr merge`) `outdated` is
+    /// `None`, so this is the "any current run" guard those surfaces always
+    /// had.
+    fn print_result_lines(&self) {
         if self.runs.is_empty() {
             if self.revision_matched {
                 println!("  no CI results");
