@@ -237,7 +237,7 @@ async fn moderator_cannot_push_state() -> Result<()> {
     )
     .to_lowercase();
     assert!(
-        combined.contains("maintainer"),
+        combined.contains("isn't listed as a maintainer"),
         "the rejected push should cite the maintainer-listing check, got: {combined}",
     );
 
