@@ -358,6 +358,104 @@ async fn leave_after_accept_ends_the_self_role_with_a_boundary() -> Result<()> {
     Ok(())
 }
 
+/// Under a wire-asserted lead, a non-lead accepter follows NIP-34's
+/// SHOULD: their acceptance announcement lists only themselves (`m`) and
+/// the lead (re-asserted as `M`) — not the other co-maintainers — so the
+/// lead can change or remove co-maintainers unilaterally. The arrange uses
+/// a real `ngit init --lead-maintainer <self>` announcement listing the
+/// lead, another co-maintainer, and the invited accepter.
+#[tokio::test]
+async fn accept_under_lead_lists_only_self_and_lead() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_maintainer_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("repo-accept-under-lead".into()),
+            identifier: Some("repo-accept-under-lead".into()),
+            additional_maintainer_count: 2,
+            assert_self_as_lead: true,
+            ..Default::default()
+        })
+        .await?;
+    let lead_pubkey = published.maintainer_keys.public_key();
+    let other_co_pubkey = published.additional_maintainer_keys[0].public_key();
+    let invited_keys = published.additional_maintainer_keys[1].clone();
+    let invited_pubkey = invited_keys.public_key();
+
+    // Write relay for the accept fan-out, same as arrange_invited_clone.
+    harness.publish_user_relay_list(&invited_keys).await?;
+    let clone = harness
+        .clone_published_repo_as(&published, &invited_keys)
+        .await?;
+
+    let out = clone
+        .ngit(["repo", "accept"])
+        .output()
+        .await
+        .context("failed to spawn ngit repo accept")?;
+    assert!(
+        out.status.success(),
+        "ngit repo accept exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let announcements = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(invited_pubkey)
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    let announcement = announcements
+        .iter()
+        .find(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .context("no acceptance announcement was published on repo accept")?;
+
+    assert_eq!(
+        tag_values_multiple(announcement, "M"),
+        vec![lead_pubkey.to_string()],
+        "the acceptance must re-assert the wire lead as M",
+    );
+    assert_eq!(
+        tag_values_multiple(announcement, "m"),
+        vec![invited_pubkey.to_string()],
+        "a non-lead accepter lists only themselves as m",
+    );
+    let maintainers = tag_values(announcement, "maintainers");
+    assert_eq!(
+        {
+            let mut sorted = maintainers.clone();
+            sorted.sort();
+            sorted
+        },
+        {
+            let mut expected = vec![invited_pubkey.to_string(), lead_pubkey.to_string()];
+            expected.sort();
+            expected
+        },
+        "the degradation tag carries exactly [me, lead]",
+    );
+    assert!(
+        !announcement
+            .tags
+            .iter()
+            .any(|t| t.as_slice().contains(&other_co_pubkey.to_string())),
+        "the other co-maintainer must not appear anywhere on the acceptance",
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn accept_with_grasp_server_flag_publishes_announcement_without_rerooting_resolution()
 -> Result<()> {
