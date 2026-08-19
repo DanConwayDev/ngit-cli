@@ -107,9 +107,10 @@ async fn arrange_three_member_announcement(
                     third_keys.public_key(),
                 ]),
                 // Inert git server so init inherits infrastructure instead
-                // of demanding --grasp-server; NGITTEST short-circuits the
-                // post-init push, so unreachability is invisible (same
-                // shape as the state-C arrange).
+                // of demanding --grasp-server. The post-publish push then
+                // fails against it, which
+                // expect_announcement_published_but_push_failed treats as
+                // the publish-success signal.
                 clone_urls: vec!["https://ngit-test-clone.invalid/repo.git".to_string()],
                 name: Some("example name".to_string()),
                 euc: Some(state_b.root_oid.clone()),
