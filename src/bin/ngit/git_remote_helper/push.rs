@@ -431,7 +431,11 @@ async fn create_events_and_proposals(
     if !repo_ref.maintainers.contains(&user_ref.public_key) {
         for refspec in git_server_refspecs {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
-            eprintln!(
+            // `error <dst> <why>` is the remote-helper protocol response on
+            // stdout — like the out-of-sync and stale-lease rejections — so
+            // git reports the ref as rejected and exits non-zero. A stderr
+            // message would leave git believing nothing needed pushing.
+            println!(
                 "error {to} your nostr account {} isn't listed as a maintainer of the repo",
                 user_ref.metadata.name
             );
