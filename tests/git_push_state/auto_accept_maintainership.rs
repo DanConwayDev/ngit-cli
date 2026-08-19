@@ -15,7 +15,10 @@
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
-use test_harness::{CloneLogin, Harness, KIND_REPO_STATE, PublishRepoOpts, tag_value, tag_values};
+use test_harness::{
+    CloneLogin, Harness, KIND_REPO_STATE, PublishRepoOpts, tag_value, tag_values,
+    tag_values_multiple,
+};
 
 const BRANCH: &str = "co-maintainer-branch";
 const BRANCH_REF: &str = "refs/heads/co-maintainer-branch";
@@ -113,6 +116,13 @@ async fn invited_co_maintainer_pushes_branch_and_auto_accepts() -> Result<()> {
     assert!(
         maintainers.contains(&published.maintainer_keys.public_key().to_string()),
         "auto-published announcement should retain the inviting maintainer; got {maintainers:?}",
+    );
+    // NIP-34 graceful degradation: the indexed `m` role tags carry exactly
+    // the same current members as the deprecated `maintainers` tag
+    let m_roles = tag_values_multiple(co_maintainer_announcement, "m");
+    assert_eq!(
+        m_roles, maintainers,
+        "`m` role tags should list the same current members as the deprecated `maintainers` tag",
     );
 
     let origin_url_after = co_maintainer

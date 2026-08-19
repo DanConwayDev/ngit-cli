@@ -477,6 +477,20 @@ async fn maintainers_is_just_me(#[future] snapshot: Arc<Snapshot>) -> Result<()>
         s.maintainer_pubkey.to_string(),
         "expected sole maintainer to be the publisher",
     );
+    // first use of NIP-34 role tags on a fresh announcement: one untimed
+    // `m` entry for the publisher, same membership as `maintainers`
+    let m_tags: Vec<Vec<String>> = s
+        .announcement
+        .tags
+        .iter()
+        .map(|t| t.as_slice().to_vec())
+        .filter(|t| t.first().map(String::as_str) == Some("m"))
+        .collect();
+    assert_eq!(
+        m_tags,
+        vec![vec!["m".to_string(), s.maintainer_pubkey.to_string()]],
+        "expected a single untimed `m` role tag for the publisher",
+    );
     Ok(())
 }
 

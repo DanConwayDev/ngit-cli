@@ -68,11 +68,14 @@ pub struct RepoRef {
     /// names this field excludes.
     pub extra_tags: Vec<Tag>,
     /// NIP-34 indexed role tags (`M` lead, `m` co-maintainer, `o` moderator)
-    /// carried verbatim from the source announcement and re-emitted on
-    /// republish. Their currently-active entries populate `maintainers` and
-    /// `moderators`; when any role tag is present the deprecated
-    /// `maintainers` tag is ignored. ngit does not yet generate role tags
-    /// itself.
+    /// carried verbatim from the source announcement. Their currently-active
+    /// entries populate `maintainers` and `moderators`; when any role tag is
+    /// present the deprecated `maintainers` tag is ignored. On republish
+    /// `M`/`m` entries are not re-emitted verbatim: the typed `maintainers`
+    /// field is the source of truth for current membership (mirroring the
+    /// deprecated tag) and [`RepoRef::generate_role_tags`] emits one `m` tag
+    /// per active member, using these tags only as the record of start/end
+    /// history boundaries. `o` tags are preserved verbatim.
     pub role_tags: Vec<Tag>,
     /// Currently-active moderators from NIP-34 `o` role tags. Moderators are
     /// deliberately excluded from `maintainers`: per NIP-34 they can never
@@ -321,8 +324,9 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
                     }
                 }
                 [t, ..] if is_role_tag_name(t) => {
-                    // consumed by the role-tag pass above and re-emitted
-                    // verbatim from `role_tags`
+                    // consumed by the role-tag pass above; re-emission is
+                    // generated from the typed fields with `role_tags` as
+                    // the history record (see `generate_role_tags`)
                 }
                 [t, maintainers @ ..] if t == "maintainers" => {
                     // deprecated per NIP-34: ignored entirely when indexed
@@ -384,6 +388,7 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
 
 impl RepoRef {
     pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::prelude::Event> {
+        let public_key = signer.get_public_key().await?;
         let builder =
             nostr::prelude::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
                 [
@@ -468,13 +473,14 @@ impl RepoRef {
                             .unwrap(),
                         ]
                     },
-                    // NIP-34 indexed role tags carried over verbatim from
-                    // the source announcement. When present they are the
-                    // primary maintainer listing and the `maintainers` tag
-                    // emitted above degrades to the currently-active members
-                    // for older clients. ngit does not yet generate or edit
-                    // role tags itself.
-                    self.role_tags.clone(),
+                    // NIP-34 indexed role tags: one `m` tag per active
+                    // maintainer, generated from the typed field. They are
+                    // the primary maintainer listing; the `maintainers` tag
+                    // emitted above degrades to the same current members for
+                    // older clients. History boundaries come from the source
+                    // announcement's role tags and moderator (`o`) tags are
+                    // preserved verbatim. See [`RepoRef::generate_role_tags`].
+                    self.generate_role_tags(&public_key, Timestamp::now().as_secs()),
                     // Unknown tags carried over verbatim from the source
                     // announcement. See [`RepoRef::extra_tags`] and
                     // [`is_known_tag_name`]: ngit-known names never end up
@@ -486,7 +492,6 @@ impl RepoRef {
                 ]
                 .concat(),
             );
-        let public_key = signer.get_public_key().await?;
         crate::client::sign_draft_event(
             crate::event_ordering::finalize_ordered_unsigned(
                 builder,
@@ -499,6 +504,114 @@ impl RepoRef {
         .await
         .context("failed to create repository reference event")
     }
+
+    /// Generate the NIP-34 indexed role tags for this announcement.
+    ///
+    /// The typed `maintainers` field is the source of truth for *current*
+    /// membership, mirroring the deprecated `maintainers` tag: every active
+    /// maintainer gets exactly one `m` tag. The lead (`M`) distinction is
+    /// collapsed on parse and never re-asserted — ngit does not evaluate or
+    /// assign a lead, so no `M` tag is ever emitted. `self.role_tags` (the
+    /// source announcement's role tags) supplies each pubkey's start/end
+    /// history:
+    ///
+    /// - first use of role tags (none on the source announcement): plain `["m",
+    ///   <pubkey>]` entries with no start time;
+    /// - a pubkey with an active prior `M`/`m` entry keeps that entry's history
+    ///   verbatim;
+    /// - a pubkey whose prior entries all ended is started again by appending
+    ///   `now` as a fresh start boundary;
+    /// - a pubkey newly added while role tags are already in use starts at
+    ///   `now`; the author is exempt because an author absent from prior role
+    ///   tags was implicitly a member for the repository's entire history;
+    /// - a removed pubkey's active entry is closed by appending `now` as an end
+    ///   boundary (inserting a `0` start when the entry recorded no history),
+    ///   and already-ended records are kept so a later re-add restarts them
+    ///   rather than forgetting they ever held the role;
+    /// - moderator (`o`) tags are preserved verbatim — ngit does not yet assign
+    ///   or end moderators.
+    pub fn generate_role_tags(&self, author: &PublicKey, now: u64) -> Vec<Tag> {
+        // Prior maintainer-role (`M`/`m`) entries grouped per pubkey, in tag
+        // order. Entries without a pubkey slot carry no information and are
+        // dropped; moderator tags pass through untouched.
+        let mut prior: Vec<(String, Vec<Vec<String>>)> = Vec::new();
+        let mut moderator_tags: Vec<Tag> = Vec::new();
+        for tag in &self.role_tags {
+            let slice = tag.as_slice();
+            let Some(name) = slice.first() else { continue };
+            if name == "o" {
+                moderator_tags.push(tag.clone());
+                continue;
+            }
+            let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            if let Some((_, entries)) = prior.iter_mut().find(|(p, _)| p == pk) {
+                entries.push(slice.to_vec());
+            } else {
+                prior.push((pk.clone(), vec![slice.to_vec()]));
+            }
+        }
+
+        // Prefer an active entry's history; among ended entries prefer the
+        // `m` one so a restart continues the co-maintainer record rather than
+        // re-opening a former lead's.
+        fn chosen(entries: &[Vec<String>]) -> &Vec<String> {
+            entries
+                .iter()
+                .find(|entry| role_entry_is_active(entry))
+                .or_else(|| entries.iter().find(|entry| entry[0] == "m"))
+                .unwrap_or(&entries[0])
+        }
+
+        let first_use_of_role_tags = self.role_tags.is_empty();
+        let author_hex = author.to_string();
+        let mut tags: Vec<Tag> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for pk in &self.maintainers {
+            let pk_hex = pk.to_string();
+            if !seen.insert(pk_hex.clone()) {
+                continue;
+            }
+            let mut parts = vec!["m".to_string(), pk_hex.clone()];
+            if let Some((_, entries)) = prior.iter().find(|(p, _)| *p == pk_hex) {
+                let entry = chosen(entries);
+                parts.extend(entry[2..].iter().cloned());
+                if !role_entry_is_active(entry) {
+                    // stopped maintainer re-added: start again now
+                    parts.push(now.to_string());
+                }
+            } else if !first_use_of_role_tags && pk_hex != author_hex {
+                // newly added while role tags are already in use
+                parts.push(now.to_string());
+            }
+            tags.push(Tag::parse(parts).unwrap());
+        }
+
+        // removed maintainers: prior entries whose pubkey is no longer in the
+        // typed field
+        for (pk_hex, entries) in &prior {
+            if !seen.insert(pk_hex.clone()) {
+                continue;
+            }
+            let entry = chosen(entries);
+            let mut parts = vec!["m".to_string(), pk_hex.clone()];
+            parts.extend(entry[2..].iter().cloned());
+            if role_entry_is_active(entry) {
+                if parts.len() % 2 == 0 {
+                    // no recorded start: active from the beginning
+                    parts.push("0".to_string());
+                }
+                parts.push(now.to_string());
+            }
+            tags.push(Tag::parse(parts).unwrap());
+        }
+
+        tags.extend(moderator_tags);
+        tags
+    }
+
     /// coordinates without relay hints
     pub fn coordinates(&self) -> HashSet<Nip19Coordinate> {
         let mut res = HashSet::new();
@@ -2329,7 +2442,8 @@ mod tests {
 
     /// NIP-34 indexed role tags (`M`/`m`): activeness by element count,
     /// precedence over the deprecated `maintainers` tag, implicit author
-    /// membership, leaving via an ended self-entry, and verbatim re-emission.
+    /// membership, leaving via an ended self-entry, and re-emission generated
+    /// from the typed maintainer set (see [`RepoRef::generate_role_tags`]).
     mod role_tags {
         use nostr::prelude::{EventBuilder, event::FinalizeEvent};
 
@@ -2640,7 +2754,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn role_tags_round_trip_verbatim_and_degrade_maintainers_tag() {
+        async fn round_trip_emits_m_tags_for_active_maintainers_and_degrades() {
             let author = TEST_KEY_1_KEYS.public_key();
             let active = nostr::prelude::Keys::generate().public_key();
             let ended = nostr::prelude::Keys::generate().public_key();
@@ -2652,10 +2766,14 @@ mod tests {
                 tag(&["m", &ended.to_string(), "0", "100"]),
                 tag(&["o", &moderator.to_string()]),
             ];
-            let event = role_event(&TEST_KEY_1_KEYS, source_tags.clone());
+            let event = role_event(&TEST_KEY_1_KEYS, source_tags);
             let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author, active]);
             let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
 
+            // one `m` tag per active maintainer with its history carried
+            // over (the author's lead entry collapses to `m`), the removed
+            // maintainer's ended record preserved, and the `o` tag kept
             let emitted_role_tags: Vec<Vec<String>> = re_emitted
                 .tags
                 .iter()
@@ -2665,10 +2783,19 @@ mod tests {
                         .is_some_and(|name| name == "M" || name == "m" || name == "o")
                 })
                 .collect();
-            assert_eq!(emitted_role_tags, source_tags);
+            assert_eq!(
+                emitted_role_tags,
+                vec![
+                    tag(&["m", &author.to_string()]),
+                    tag(&["m", &active.to_string(), "100"]),
+                    tag(&["m", &ended.to_string(), "0", "100"]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
 
-            // the deprecated tag degrades to the currently-active maintainers
-            // and never includes moderators
+            // the deprecated tag degrades to exactly the same current
+            // members as the active `m` entries and never includes
+            // moderators or ended records
             let maintainers_tag = re_emitted
                 .tags
                 .iter()
@@ -2678,6 +2805,202 @@ mod tests {
                 maintainers_tag.as_slice()[1..].to_vec(),
                 vec![author.to_string(), active.to_string()],
             );
+        }
+
+        /// The history rules of [`RepoRef::generate_role_tags`], pinned with
+        /// a deterministic `now`.
+        mod generation {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            fn generate(
+                role_tags: Vec<Vec<String>>,
+                maintainers: Vec<PublicKey>,
+                author: &PublicKey,
+            ) -> Vec<Vec<String>> {
+                let mut repo_ref = create_repo_ref_for_maintainer_order(maintainers, vec![]);
+                repo_ref.role_tags = role_tags
+                    .into_iter()
+                    .map(|t| Tag::parse(t).unwrap())
+                    .collect();
+                repo_ref
+                    .generate_role_tags(author, NOW)
+                    .iter()
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            }
+
+            fn now() -> String {
+                NOW.to_string()
+            }
+
+            #[test]
+            fn first_use_of_role_tags_emits_untimed_entries() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(vec![], vec![author, other], &author),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn newly_added_maintainer_starts_now_once_role_tags_are_in_use() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let added = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![tag(&["M", &author.to_string()])],
+                        vec![author, added],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &added.to_string(), &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn author_without_prior_entry_was_implicit_and_stays_untimed() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let listed = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![tag(&["m", &listed.to_string()])],
+                        vec![author, listed],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &listed.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn stopped_maintainer_is_started_again_now() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let returning = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &returning.to_string(), "0", "100"]),
+                        ],
+                        vec![author, returning],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &returning.to_string(), "0", "100", &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn removed_maintainer_is_ended_now_with_zero_start_fallback() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let untimed = nostr::prelude::Keys::generate().public_key();
+                let timed = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &untimed.to_string()]),
+                            tag(&["m", &timed.to_string(), "50"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &untimed.to_string(), "0", &now()]),
+                        tag(&["m", &timed.to_string(), "50", &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn already_ended_records_are_preserved() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &former.to_string(), "0", "100"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &former.to_string(), "0", "100"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn moderator_tags_are_preserved_verbatim() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["M", &author.to_string()]),
+                            tag(&["o", &moderator.to_string()]),
+                            tag(&["o", &former.to_string(), "0", "100"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                        tag(&["o", &former.to_string(), "0", "100"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn active_lead_history_carries_into_the_generated_m_tag() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![tag(&["M", &author.to_string(), "100"])],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![tag(&["m", &author.to_string(), "100"])],
+                );
+            }
+
+            #[test]
+            fn restart_continues_the_co_maintainer_record_over_a_former_lead() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let returning = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["M", &author.to_string()]),
+                            tag(&["M", &returning.to_string(), "0", "100"]),
+                            tag(&["m", &returning.to_string(), "100", "200"]),
+                        ],
+                        vec![author, returning],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &returning.to_string(), "100", "200", &now()]),
+                    ],
+                );
+            }
         }
     }
 
@@ -2846,8 +3169,29 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn maintainer_role_tags() {
+                let event = create().await;
+                let m_tags: Vec<&[String]> = event
+                    .tags
+                    .iter()
+                    .map(Tag::as_slice)
+                    .filter(|tag| tag.first().is_some_and(|name| name == "m"))
+                    .collect();
+                // first use of role tags on this announcement: one untimed
+                // `m` tag per maintainer, same members as the deprecated
+                // `maintainers` tag
+                assert_eq!(
+                    m_tags,
+                    vec![
+                        &["m".to_string(), TEST_KEY_1_KEYS.public_key().to_string()][..],
+                        &["m".to_string(), TEST_KEY_2_KEYS.public_key().to_string()][..],
+                    ],
+                );
+            }
+
+            #[tokio::test]
             async fn no_other_tags() {
-                assert_eq!(create().await.tags.len(), 9)
+                assert_eq!(create().await.tags.len(), 11)
             }
         }
     }

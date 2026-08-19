@@ -154,6 +154,15 @@ struct ResolvedFields {
     /// third-party tool aren't silently dropped. Cleared when
     /// `--clean` is passed. See [`SubCommandArgs::clean`].
     extra_tags: Vec<nostr::prelude::Tag>,
+    /// NIP-34 indexed role tags from **my own** existing announcement,
+    /// supplying the start/end history boundaries and moderator (`o`)
+    /// entries that `RepoRef::generate_role_tags` builds the emitted
+    /// role tags from. Sourced from my announcement only — like
+    /// `maintainers`, each maintainer's role record is their own
+    /// statement. Deliberately unaffected by `--clean`: role tags are
+    /// ngit-known tags, and dropping them would silently discard
+    /// moderators and restart every member's role history.
+    role_tags: Vec<nostr::prelude::Tag>,
 }
 
 /// Extract my own announcement's `RepoRef` from the events map.
@@ -1144,6 +1153,14 @@ fn resolve_fields(
         vec![]
     };
 
+    // --- Role tags (my own announcement only, like `maintainers`) ---
+    // Prior role tags supply the history boundaries and moderator entries
+    // for the generated role tags; `--clean` leaves them alone (see
+    // [`ResolvedFields::role_tags`]).
+    let role_tags = my_ref
+        .as_ref()
+        .map_or_else(Vec::new, |mr| mr.role_tags.clone());
+
     let private = if args.private {
         true
     } else if args.public {
@@ -1171,6 +1188,7 @@ fn resolve_fields(
             .map(|repo_ref| repo_ref.events.clone())
             .unwrap_or_default(),
         extra_tags,
+        role_tags,
     })
 }
 
@@ -1335,7 +1353,7 @@ async fn publish_and_finalize(
         events: fields.announcement_events,
         nostr_git_url: None,
         extra_tags: fields.extra_tags,
-        role_tags: vec![],
+        role_tags: fields.role_tags,
         moderators: vec![],
     };
     clear_private_git_auth();
