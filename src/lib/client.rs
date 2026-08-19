@@ -1930,6 +1930,32 @@ pub async fn save_event_in_global_cache(
     }
 }
 
+/// Reduce announcements to the canonical event per author - NIP-01
+/// addressable-event rules: greatest `created_at`, lowest event id on a
+/// tie - sorted by `created_at` ascending with the lower id last on
+/// cross-author ties, so `.last()` is the event addressable rules select.
+fn latest_announcement_per_author(
+    events: Vec<nostr::prelude::Event>,
+) -> Vec<nostr::prelude::Event> {
+    let mut latest: HashMap<PublicKey, nostr::prelude::Event> = HashMap::new();
+    for event in events {
+        let supersedes = latest.get(&event.pubkey).is_none_or(|existing| {
+            event.created_at > existing.created_at
+                || (event.created_at == existing.created_at && event.id < existing.id)
+        });
+        if supersedes {
+            latest.insert(event.pubkey, event);
+        }
+    }
+    let mut events: Vec<nostr::prelude::Event> = latest.into_values().collect();
+    events.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    events
+}
+
 // use annoucement from selected maintainer but recursively add maintainers, git
 // servers and relays
 pub async fn get_repo_ref_from_cache(
@@ -1999,6 +2025,13 @@ pub async fn get_repo_ref_from_cache(
             break;
         }
     }
+    // NIP-01 addressable-event rules: only an author's latest announcement
+    // speaks for them. The global and per-repo caches can return different
+    // versions and the discovery loop re-collects every iteration, so
+    // reduce to the canonical event per author before consolidating -
+    // otherwise a stale version could keep an ended role assignment active
+    // or hide a newer acknowledgement, leave or return.
+    let repo_events = latest_announcement_per_author(repo_events);
     // A member's own announcement takes precedence over assignments in other
     // members' announcements: an author with role entries but no active
     // `M`/`m` self-entry left the maintainer set or acknowledges only
@@ -2010,7 +2043,6 @@ pub async fn get_repo_ref_from_cache(
         .map(|e| e.pubkey)
         .collect();
     ordered_maintainers.retain(|m| !declined_maintainers.contains(m));
-    repo_events.sort_by_key(|e| e.created_at);
     // moderator (and other role-fetched) announcements are consulted for
     // their authors' self-entries only: privacy classification and the
     // shared-metadata cascade keep reading the maintainer-listed
@@ -5168,6 +5200,75 @@ mod moderator_discovery_tests {
         assert_eq!(repo_ref.maintainers, vec![owner]);
         assert_eq!(repo_ref.moderators, vec![moderator]);
         assert!(!repo_ref.is_authorized_member(&crony));
+    }
+}
+
+#[cfg(test)]
+mod announcement_consolidation_tests {
+    use nostr::prelude::{EventBuilder, Keys, Tag, event::FinalizeEvent};
+
+    use super::*;
+
+    fn announcement_at(keys: &Keys, created_at: u64, content: &str) -> Event {
+        EventBuilder::new(Kind::GitRepoAnnouncement, content)
+            .tags([Tag::identifier("repo")])
+            .custom_created_at(Timestamp::from(created_at))
+            .finalize(keys)
+            .unwrap()
+    }
+
+    /// Only the author's latest announcement survives, whichever order the
+    /// caches returned the versions in.
+    #[test]
+    fn latest_event_per_author_survives() {
+        let keys = Keys::generate();
+        let old = announcement_at(&keys, 100, "old");
+        let new = announcement_at(&keys, 200, "new");
+
+        for events in [
+            vec![old.clone(), new.clone()],
+            vec![new.clone(), old.clone()],
+        ] {
+            let consolidated = latest_announcement_per_author(events);
+            assert_eq!(consolidated.len(), 1);
+            assert_eq!(consolidated[0].id, new.id);
+        }
+    }
+
+    /// A `created_at` tie keeps the lower event id, per NIP-01
+    /// addressable-event rules.
+    #[test]
+    fn created_at_ties_keep_the_lowest_event_id() {
+        let keys = Keys::generate();
+        let a = announcement_at(&keys, 100, "a");
+        let b = announcement_at(&keys, 100, "b");
+        let winner_id = std::cmp::min(a.id, b.id);
+
+        for events in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
+            let consolidated = latest_announcement_per_author(events);
+            assert_eq!(consolidated.len(), 1);
+            assert_eq!(consolidated[0].id, winner_id);
+        }
+    }
+
+    /// Ascending order with the NIP-01 winner of a cross-author tie last,
+    /// so the latest-metadata `.last()` pick is deterministic.
+    #[test]
+    fn sorted_ascending_with_the_canonical_winner_of_a_tie_last() {
+        let alice = announcement_at(&Keys::generate(), 100, "alice");
+        let bob = announcement_at(&Keys::generate(), 50, "bob");
+        let carol = announcement_at(&Keys::generate(), 100, "carol");
+
+        let tie_winner_id = std::cmp::min(alice.id, carol.id);
+        for events in [
+            vec![alice.clone(), bob.clone(), carol.clone()],
+            vec![carol.clone(), alice.clone(), bob.clone()],
+        ] {
+            let consolidated = latest_announcement_per_author(events);
+            assert_eq!(consolidated.len(), 3);
+            assert_eq!(consolidated[0].id, bob.id);
+            assert_eq!(consolidated[2].id, tie_winner_id);
+        }
     }
 }
 
