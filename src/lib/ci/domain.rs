@@ -23,6 +23,7 @@ use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use nostr::prelude::{PublicKey, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -460,6 +461,31 @@ fn hex_encode(value: &str) -> String {
         })
 }
 
+/// The most distinct NIP-05 addresses one resolution looks up over the
+/// network.
+///
+/// The candidate set is publisher-supplied: anyone can publish a run naming
+/// any coordinator pubkey, and every signer declares its own `nip05` domain.
+/// Thirty-two addresses is far more than a real view presents — the
+/// repository's own GRASP roots plus one declared identity per signer
+/// actually describing it — and few enough that the cap cannot be used to
+/// make a command wait. Addresses past the cap are left unsettled: partial
+/// coverage, never a negative claim.
+pub const MAX_IDENTITY_LOOKUPS: usize = 32;
+
+/// How many NIP-05 lookups are in flight at once.
+pub const IDENTITY_LOOKUP_CONCURRENCY: usize = 8;
+
+/// The budget for the identity-resolution step as a whole.
+///
+/// Lookups run concurrently, so the aggregate is held to what a single lookup
+/// was already allowed to cost ([`NIP05_LOOKUP_TIMEOUT`]): distinct slow
+/// domains share this budget instead of each consuming a timeout of their
+/// own, which is what stops a publisher from scaling the wait by adding them.
+/// Whatever has not answered when the budget runs out is unsettled, exactly
+/// like a lookup that timed out on its own.
+pub const IDENTITY_RESOLUTION_DEADLINE: Duration = NIP05_LOOKUP_TIMEOUT;
+
 /// Resolve one candidate identity for `signer`.
 ///
 /// Verification is exact: the document must map the local part to the
@@ -472,41 +498,22 @@ pub async fn verify_identity<L: Nip05Lookup + ?Sized + Sync>(
     signer: PublicKey,
     now: Timestamp,
 ) -> VerifiedIdentity {
-    let cached = cache.and_then(|cache| cache.get(&identity.nip05, now));
-    let settled = match cached {
-        Some(settled) => settled,
-        None => {
-            let settled = match lookup.lookup(&identity.nip05).await {
-                Ok(pubkey) => CachedLookup::Resolved(pubkey),
-                Err(_) => CachedLookup::Failed,
-            };
-            if let Some(cache) = cache {
-                // A cache we cannot write is only a missed optimization.
-                let _ = cache.put(&identity.nip05, settled, now);
-            }
-            settled
-        }
-    };
-    match settled {
-        CachedLookup::Resolved(pubkey) => VerifiedIdentity {
-            identity,
-            verified: pubkey == signer,
-            failed: false,
-        },
-        CachedLookup::Failed => VerifiedIdentity {
-            identity,
-            verified: false,
-            failed: true,
-        },
-    }
+    let settled =
+        resolve_addresses(lookup, cache, std::slice::from_ref(&identity.nip05), now).await;
+    let outcome = settled.get(&identity.nip05).copied();
+    settle_identity(identity, signer, outcome)
 }
 
 /// Resolve every candidate identity for every signer.
 ///
 /// `profile_nip05` holds the `nip05` value from each signer's kind-0 profile,
-/// where one is known. Candidates are resolved one at a time; with each
-/// lookup bounded by [`NIP05_LOOKUP_TIMEOUT`] and successes cached, the total
-/// wait is bounded by the number of distinct candidates.
+/// where one is known. Every distinct address is resolved once, however many
+/// signers name it, and the network step is bounded three ways: at most
+/// [`MAX_IDENTITY_LOOKUPS`] addresses are looked up, at most
+/// [`IDENTITY_LOOKUP_CONCURRENCY`] at a time, and the whole step is abandoned
+/// at [`IDENTITY_RESOLUTION_DEADLINE`]. Anything not settled within those
+/// bounds is reported as a failed lookup: partial coverage, no negative
+/// claim.
 pub async fn verify_identities<L: Nip05Lookup + ?Sized + Sync>(
     lookup: &L,
     cache: Option<&Nip05Cache>,
@@ -515,19 +522,148 @@ pub async fn verify_identities<L: Nip05Lookup + ?Sized + Sync>(
     repository_domains: &[String],
     now: Timestamp,
 ) -> HashMap<PublicKey, Vec<VerifiedIdentity>> {
-    let mut verified: HashMap<PublicKey, Vec<VerifiedIdentity>> = HashMap::new();
-    for signer in signers {
-        let candidates = identity_candidates(
-            profile_nip05.get(signer).map(String::as_str),
-            repository_domains,
-        );
-        let mut identities = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            identities.push(verify_identity(lookup, cache, candidate, *signer, now).await);
+    let candidates: Vec<(PublicKey, Vec<Nip05Identity>)> = signers
+        .iter()
+        .map(|signer| {
+            (
+                *signer,
+                identity_candidates(
+                    profile_nip05.get(signer).map(String::as_str),
+                    repository_domains,
+                ),
+            )
+        })
+        .collect();
+    let settled = resolve_addresses(
+        lookup,
+        cache,
+        &lookup_order(&candidates, repository_domains),
+        now,
+    )
+    .await;
+
+    candidates
+        .into_iter()
+        .map(|(signer, identities)| {
+            let verified = identities
+                .into_iter()
+                .map(|identity| {
+                    let outcome = settled.get(&identity.nip05).copied();
+                    settle_identity(identity, signer, outcome)
+                })
+                .collect();
+            (signer, verified)
+        })
+        .collect()
+}
+
+/// The distinct addresses to resolve, in the order the budget is spent on
+/// them.
+///
+/// The repository's own GRASP roots come first. They are named by the
+/// resolved repository rather than by whoever published a run, they are the
+/// same handful whatever the signer set looks like, and they are the route
+/// that needs no kind-0 profile — so they must not be crowded out of the
+/// budget by publisher-declared identities.
+fn lookup_order(
+    candidates: &[(PublicKey, Vec<Nip05Identity>)],
+    repository_domains: &[String],
+) -> Vec<String> {
+    let wanted: Vec<&str> = candidates
+        .iter()
+        .flat_map(|(_, identities)| identities.iter().map(|identity| identity.nip05.as_str()))
+        .collect();
+    let mut ordered: Vec<String> = Vec::new();
+    for domain in repository_domains {
+        let Some(root) = parse_nip05(domain) else {
+            continue;
+        };
+        if wanted.contains(&root.nip05.as_str()) && !ordered.contains(&root.nip05) {
+            ordered.push(root.nip05);
         }
-        verified.insert(*signer, identities);
     }
-    verified
+    for address in wanted {
+        if !ordered.iter().any(|existing| existing == address) {
+            ordered.push(address.to_owned());
+        }
+    }
+    ordered
+}
+
+/// Settle each address from the cache where possible and from the network
+/// otherwise, within the bounds [`verify_identities`] documents.
+///
+/// An address missing from the returned map did not settle — it was past the
+/// count cap, or still in flight at the deadline — which is the same
+/// unsettled state a failed lookup produces. Only lookups that actually
+/// completed are written to the cache: a budget decision is not a fact about
+/// a domain, so it must not suppress the next command's attempt.
+async fn resolve_addresses<L: Nip05Lookup + ?Sized + Sync>(
+    lookup: &L,
+    cache: Option<&Nip05Cache>,
+    addresses: &[String],
+    now: Timestamp,
+) -> HashMap<String, CachedLookup> {
+    let mut settled: HashMap<String, CachedLookup> = HashMap::new();
+    let mut wanted: Vec<&String> = Vec::new();
+    for address in addresses {
+        if let Some(cached) = cache.and_then(|cache| cache.get(address, now)) {
+            settled.insert(address.clone(), cached);
+        } else if wanted.len() < MAX_IDENTITY_LOOKUPS {
+            wanted.push(address);
+        }
+    }
+    if wanted.is_empty() {
+        return settled;
+    }
+
+    let mut pending = stream::iter(
+        wanted
+            .into_iter()
+            .map(|address| async move { (address, lookup.lookup(address).await) }),
+    )
+    .buffer_unordered(IDENTITY_LOOKUP_CONCURRENCY);
+    let deadline = tokio::time::sleep(IDENTITY_RESOLUTION_DEADLINE);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            biased;
+            // Whatever is still in flight is abandoned unsettled.
+            () = &mut deadline => break,
+            next = pending.next() => {
+                let Some((address, resolved)) = next else { break };
+                let outcome = resolved.map_or(CachedLookup::Failed, CachedLookup::Resolved);
+                if let Some(cache) = cache {
+                    // A cache we cannot write is only a missed optimization.
+                    let _ = cache.put(address, outcome, now);
+                }
+                settled.insert(address.clone(), outcome);
+            }
+        }
+    }
+    settled
+}
+
+/// Read one settled outcome as a verification verdict.
+fn settle_identity(
+    identity: Nip05Identity,
+    signer: PublicKey,
+    settled: Option<CachedLookup>,
+) -> VerifiedIdentity {
+    match settled {
+        Some(CachedLookup::Resolved(pubkey)) => VerifiedIdentity {
+            identity,
+            verified: pubkey == signer,
+            failed: false,
+        },
+        // Either the lookup itself did not settle, or the bounds were reached
+        // before it was tried. Both are unsettled, never a negative claim.
+        Some(CachedLookup::Failed) | None => VerifiedIdentity {
+            identity,
+            verified: false,
+            failed: true,
+        },
+    }
 }
 
 /// Whether any resolution left coverage incomplete.
@@ -571,19 +707,62 @@ pub(crate) mod tests {
         }
     }
 
-    /// Counts lookups so a test can prove the cache was used.
+    /// Records every address that reached the network, so a test can prove
+    /// which identities entered the lookup step and how often.
     #[derive(Debug, Default)]
-    struct CountingLookup {
-        inner: StubNip05Lookup,
-        calls: std::sync::atomic::AtomicUsize,
+    pub(crate) struct CountingLookup {
+        pub(crate) inner: StubNip05Lookup,
+        looked_up: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CountingLookup {
+        pub(crate) fn resolving(address: &str, pubkey: PublicKey) -> Self {
+            Self {
+                inner: StubNip05Lookup::resolving(address, pubkey),
+                looked_up: std::sync::Mutex::default(),
+            }
+        }
+
+        pub(crate) fn looked_up(&self) -> Vec<String> {
+            self.looked_up.lock().unwrap().clone()
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            self.looked_up.lock().unwrap().len()
+        }
     }
 
     #[async_trait]
     impl Nip05Lookup for CountingLookup {
         async fn lookup(&self, address: &str) -> Result<PublicKey> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.looked_up.lock().unwrap().push(address.to_owned());
             self.inner.lookup(address).await
+        }
+    }
+
+    /// A lookup that never answers for an address it has no resolution for.
+    ///
+    /// The identity step's only escape is its own deadline, which is what the
+    /// deadline test measures — on the paused tokio test clock, so no
+    /// wall-clock time passes.
+    #[derive(Debug, Default)]
+    struct StallingLookup {
+        inner: StubNip05Lookup,
+        started: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Nip05Lookup for StallingLookup {
+        async fn lookup(&self, address: &str) -> Result<PublicKey> {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match self.inner.lookup(address).await {
+                Ok(pubkey) => Ok(pubkey),
+                Err(_) => {
+                    tokio::time::sleep(IDENTITY_RESOLUTION_DEADLINE * 10).await;
+                    anyhow::bail!("{address} never answers")
+                }
+            }
         }
     }
 
@@ -877,10 +1056,7 @@ pub(crate) mod tests {
         let dir = TempDir::new().unwrap();
         let signer = Keys::generate();
         let cache = Nip05Cache::in_dir(dir.path());
-        let lookup = CountingLookup {
-            inner: StubNip05Lookup::resolving("_@grasp.example", signer.public_key()),
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        };
+        let lookup = CountingLookup::resolving("_@grasp.example", signer.public_key());
 
         for _ in 0..3 {
             let resolved = verify_identity(
@@ -893,7 +1069,7 @@ pub(crate) mod tests {
             .await;
             assert!(resolved.verified);
         }
-        assert_eq!(lookup.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(lookup.calls(), 1);
 
         // Past the success TTL the entry is absent again.
         let refreshed = verify_identity(
@@ -905,7 +1081,7 @@ pub(crate) mod tests {
         )
         .await;
         assert!(refreshed.verified);
-        assert_eq!(lookup.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(lookup.calls(), 2);
     }
 
     #[tokio::test]
@@ -1045,5 +1221,130 @@ pub(crate) mod tests {
         // The provider is not the root operator, so the root candidate is a
         // settled non-match rather than evidence.
         assert!(!identities[&provider.public_key()][1].verified);
+    }
+
+    #[tokio::test]
+    async fn one_address_is_resolved_once_however_many_signers_name_it() {
+        let operator = Keys::generate();
+        let signers: Vec<PublicKey> = (0..12)
+            .map(|_| Keys::generate().public_key())
+            .chain([operator.public_key()])
+            .collect();
+        let lookup = CountingLookup::resolving("_@grasp.example", operator.public_key());
+
+        let identities = verify_identities(
+            &lookup,
+            None,
+            &signers,
+            &HashMap::new(),
+            &["grasp.example".to_owned()],
+            ts(100),
+        )
+        .await;
+
+        assert_eq!(
+            lookup.calls(),
+            1,
+            "the repository root is one address, not one per signer"
+        );
+        // Every signer still gets its own verdict against that one document.
+        assert!(identities[&operator.public_key()][0].verified);
+        assert!(!identities[&signers[0]][0].verified);
+        assert!(!identities[&signers[0]][0].failed);
+    }
+
+    #[tokio::test]
+    async fn the_lookup_count_is_bounded_and_repository_roots_come_first() {
+        let operator = Keys::generate();
+        // Far more declared identities than the cap, each on its own domain,
+        // as an unrelated publisher would supply them.
+        let flooders: Vec<PublicKey> = (0..MAX_IDENTITY_LOOKUPS * 3)
+            .map(|_| Keys::generate().public_key())
+            .collect();
+        let profiles: HashMap<PublicKey, String> = flooders
+            .iter()
+            .enumerate()
+            .map(|(index, signer)| (*signer, format!("signer@flood{index}.example")))
+            .collect();
+        let mut signers = vec![operator.public_key()];
+        signers.extend(flooders.iter().copied());
+        let lookup = CountingLookup::resolving("_@grasp.example", operator.public_key());
+
+        let identities = verify_identities(
+            &lookup,
+            None,
+            &signers,
+            &profiles,
+            &["grasp.example".to_owned()],
+            ts(100),
+        )
+        .await;
+
+        let looked_up = lookup.looked_up();
+        assert_eq!(looked_up.len(), MAX_IDENTITY_LOOKUPS);
+        assert_eq!(
+            looked_up[0], "_@grasp.example",
+            "the repository's own root is resolved before publisher-declared identities"
+        );
+        // The operator keeps its evidence despite the flood.
+        assert!(
+            identities[&operator.public_key()][0].verified,
+            "the repository-listed domain still resolved"
+        );
+        // The declared identities past the cap were never tried, and are
+        // reported as unsettled rather than as a negative claim.
+        let last = identities[flooders.last().unwrap()][0].clone();
+        assert!(!looked_up.contains(&last.identity.nip05));
+        assert!(last.failed && !last.verified);
+        assert!(any_lookup_failed(&identities));
+    }
+
+    /// The tokio test clock is paused and auto-advances, so this measures the
+    /// deadline without any wall-clock time passing.
+    #[tokio::test(start_paused = true)]
+    async fn the_identity_step_abandons_what_has_not_answered_at_the_deadline() {
+        let operator = Keys::generate();
+        let stallers: Vec<PublicKey> = (0..24).map(|_| Keys::generate().public_key()).collect();
+        let profiles: HashMap<PublicKey, String> = stallers
+            .iter()
+            .enumerate()
+            .map(|(index, signer)| (*signer, format!("signer@stall{index}.example")))
+            .collect();
+        let mut signers = vec![operator.public_key()];
+        signers.extend(stallers.iter().copied());
+        let lookup = StallingLookup {
+            inner: StubNip05Lookup::resolving("_@grasp.example", operator.public_key()),
+            started: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let started_at = tokio::time::Instant::now();
+        let identities = verify_identities(
+            &lookup,
+            None,
+            &signers,
+            &profiles,
+            &["grasp.example".to_owned()],
+            ts(100),
+        )
+        .await;
+        let elapsed = started_at.elapsed();
+
+        assert!(
+            elapsed <= IDENTITY_RESOLUTION_DEADLINE,
+            "the whole step is bounded by one deadline, not by a timeout per domain: {elapsed:?}"
+        );
+        let started = lookup.started.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            started >= IDENTITY_LOOKUP_CONCURRENCY,
+            "lookups run concurrently rather than one at a time: {started}"
+        );
+        assert!(
+            started <= IDENTITY_LOOKUP_CONCURRENCY + 1,
+            "and no more than the concurrency limit are in flight: {started}"
+        );
+        // The domain that answered keeps its evidence; the rest are unsettled.
+        assert!(identities[&operator.public_key()][0].verified);
+        assert!(identities[&stallers[0]][0].failed);
+        assert!(any_lookup_failed(&identities));
     }
 }

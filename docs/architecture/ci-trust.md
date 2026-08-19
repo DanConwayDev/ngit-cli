@@ -277,13 +277,41 @@ reference left open:
   omits the name from a transport failure, so every error settles as `failed`
   → partial coverage. A document that resolves the local part to *another*
   pubkey is a settled non-match: no evidence, no partial.
-- **Every lookup is bounded.** `nip05_query` has no deadline of its own, so
-  `NetworkNip05Lookup` wraps it in a five-second timeout —
-  gitworkshop's `IDENTITY_TIMEOUT_MS` — and an elapsed lookup becomes a
-  failed one. That is what makes the trust doc's "a bounded
-  identity-resolution failure counts as settled" true here. Candidates are
-  resolved one at a time, so the wait is bounded by the number of distinct
-  candidates, and successes are cached across commands.
+- **Every lookup is bounded, and so is the step as a whole.** `nip05_query`
+  has no deadline of its own, so `NetworkNip05Lookup` wraps it in a
+  five-second timeout — gitworkshop's `IDENTITY_TIMEOUT_MS` — and an elapsed
+  lookup becomes a failed one. That is what makes the trust doc's "a bounded
+  identity-resolution failure counts as settled" true here. A per-lookup
+  timeout alone is not enough: the candidate set is publisher-supplied, so
+  resolving candidates one at a time let anyone who can add a signer add a
+  distinct slow domain, and another whole timeout, to every full-tier
+  command — including a default, non-blocking `ngit pr merge`.
+  `verify_identities` therefore resolves each distinct address once however
+  many signers name it, keeps at most `IDENTITY_LOOKUP_CONCURRENCY` (8)
+  lookups in flight, tries at most `MAX_IDENTITY_LOOKUPS` (32) addresses,
+  and abandons the step at `IDENTITY_RESOLUTION_DEADLINE` — the same five
+  seconds one lookup was already allowed, since concurrent lookups share
+  that budget rather than each consuming one of their own. The repository's
+  own GRASP roots are resolved first, so publisher-declared identities
+  cannot crowd them out of the count. Whatever is left — past the cap, or
+  still in flight at the deadline — is reported exactly like a failed
+  lookup: partial coverage, never a negative claim. Only lookups that
+  actually completed are written to the cache, so a budget decision does not
+  suppress the next command's attempt, and successes are reused across
+  commands.
+- **Only signers that survive authorization are resolved.**
+  `identity_lookup_signers` is deliberately narrower than the view's signer
+  set: run coordinators and job providers — which every surface displays and
+  the merge gate rolls up — plus the coordinators of controls a *confirmed
+  maintainer* authored, which are the only controls that yield a relationship
+  tier. Anyone may sign a Service Request naming this repository's coordinate
+  and any coordinator pubkey, and `controls_in_closure` filters by coordinate
+  rather than by author, so the broad set let an unrelated publisher put a
+  domain of their choosing into the identity step of every full-tier command.
+  Such a coordinator keeps its (empty) resolution and its unassociated
+  relationship — no surface describes it either way; only the lookup is
+  withheld. `ci_projection` scopes its kind-0 profile query to the same set,
+  since a profile fetched for anybody else feeds a lookup that never happens.
 - **Identity candidates use every GRASP clone URL.** `RepoRef::grasp_servers`
   additionally requires a matching relay entry, which is the right test for
   publishing infrastructure but too narrow for evidence. `domain::
@@ -572,6 +600,23 @@ reference left open:
   straight out of it: `Tier::Cache` offline, `Tier::Full` otherwise, with the
   caller-side coverage taken from the fetch report exactly as `ci status`
   takes it.
+- **An advisory merge stays on the full tier.** The review that produced the
+  identity-lookup bounds (WP2 decisions) asked whether a default,
+  non-blocking `pr merge` should default to the cache tier instead, to keep
+  it off the network. It should not. The cache tier skips the domain ladder
+  by definition, so every coordinator whose association *is* the repository's
+  listed infrastructure would fall to "no known context" and the unflagged
+  merge would warn about a correctly configured repository — a false alarm,
+  which WP6 already treats as worse than silence for an advisory check, and
+  which would invert what the warning means. The tier also answers "may this
+  surface go to the network at all", which is what `--offline` says, rather
+  than "is this output advisory"; splitting it by the presence of
+  `--require-ci-trust` would introduce an unstated third tier where quoted
+  requests are fetched but identities are not. Non-blocking behaviour is
+  preserved by the bound instead: the identity step costs at most one
+  five-second budget however many domains a publisher supplies, on a command
+  that already performs a repository fetch. `pr merge --offline` remains
+  cache tier.
 
 Fetching: the consumed CI kinds (9840–9844, 39842) are one further repository
 `#a` filter in `client::get_filter_ci_events`, added to the repository-scope
@@ -870,8 +915,11 @@ on WP1.
   progress expiry).
 - **WP2 — provenance + domain + resolve tiers** *(done)*: quote validation,
   NIP-05 domain ladder with TTL cache, cache/full tiers, coverage states. Unit
-  tests for the domain ladder (label boundaries, ports, trailing dots) and
-  coverage.
+  tests for the domain ladder (label boundaries, ports, trailing dots),
+  coverage, and the identity-lookup scope and bounds (an unauthorized
+  control's coordinator is never resolved; the address count is capped with
+  repository roots first; the step stops at its deadline, measured on the
+  paused tokio test clock so no wall-clock time passes).
 - **WP3 — `ngit ci status`** *(done)*: target resolution (order above),
   fetch-filter extension in `get_fetch_filters`, human + JSON output,
   integrity check, `--require-ci-trust`, `--offline`. Integration tests

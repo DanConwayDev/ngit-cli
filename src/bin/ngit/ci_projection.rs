@@ -31,8 +31,8 @@ use ngit::{
         kinds::{self, CONSUMED_CI_KINDS, Conclusion, JobResult, ServiceControl},
         provenance::{WantedQuote, wanted_quotes},
         resolve::{
-            CiInputs, CiTrustContext, QuotedEventFetcher, RepositoryContext, resolve_cache_tier,
-            resolve_full_tier,
+            CiInputs, CiTrustContext, QuotedEventFetcher, RepositoryContext,
+            identity_lookup_signers, resolve_cache_tier, resolve_full_tier,
         },
         trust::{CONTEXT_INCOMPLETE_LABEL, Coverage, TrustClassification, TrustResolution},
     },
@@ -709,7 +709,12 @@ pub async fn build_report(
     let wanted = wanted_quotes(&described);
     let quoted_events = load_quoted_events(git_repo_path, &wanted).await?;
 
-    let signers = signers(&described, &controls);
+    // Only the signers the full tier will actually resolve identities for: a
+    // profile fetched for anyone else would feed a lookup that never happens.
+    let signers: HashSet<PublicKey> =
+        identity_lookup_signers(&described, &controls, &repository.confirmed_maintainers)
+            .into_iter()
+            .collect();
     if request.tier == Tier::Full {
         // The signer-declared identity route needs the signer's kind-0. CI
         // signers are not repository contributors, so the repository fetch
@@ -1230,18 +1235,6 @@ async fn load_quoted_events(
     .into_iter()
     .map(|event| (event.id, event))
     .collect())
-}
-
-/// Every signer a view describes: run coordinators, job providers, and the
-/// coordinators the repository's control history addresses.
-fn signers(runs: &[WorkflowRun], controls: &[ServiceControl]) -> HashSet<PublicKey> {
-    let mut signers: HashSet<PublicKey> = HashSet::new();
-    for run in runs {
-        signers.insert(run.coordinator);
-        signers.extend(run.jobs.iter().map(|job| job.author));
-    }
-    signers.extend(controls.iter().map(|control| control.coordinator));
-    signers
 }
 
 /// Fetch the signers' kind-0 profiles and cache them.

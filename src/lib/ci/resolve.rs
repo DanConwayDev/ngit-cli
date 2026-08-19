@@ -11,6 +11,9 @@
 //! - The **full tier** ([`resolve_full_tier`]) additionally obtains the missing
 //!   quoted requests through an injected fetcher and verifies NIP-05 identities
 //!   through an injected lookup. `pr view`, `pr merge` and `ci status` use it.
+//!   Only the signers in [`identity_lookup_signers`] are resolved, and the
+//!   lookups themselves are bounded in count and in total time, so a publisher
+//!   cannot scale the wait by naming more domains.
 //!
 //! Neither tier can leave a signer classified as
 //! [`TrustClassification::NoKnownContext`] while one of its queries is still
@@ -341,7 +344,11 @@ where
     let identities = verify_identities(
         lookup,
         nip05_cache,
-        &signers(inputs.runs, &controls),
+        &identity_lookup_signers(
+            inputs.runs,
+            &controls,
+            &inputs.repository.confirmed_maintainers,
+        ),
         inputs.profile_nip05,
         &inputs.repository.grasp_domains,
         inputs.now,
@@ -377,6 +384,15 @@ fn controls_in_closure(inputs: &CiInputs<'_>) -> Vec<ServiceControl> {
 /// Every signer the view describes: run coordinators, job providers, and the
 /// coordinators the repository's control history addresses.
 fn signers(runs: &[WorkflowRun], controls: &[ServiceControl]) -> Vec<PublicKey> {
+    let mut signers = run_signers(runs);
+    push_control_coordinators(&mut signers, controls);
+    signers
+}
+
+/// The signers a surface actually shows: the coordinator of every run
+/// described and the provider of every job under it. These are also the only
+/// signers the merge gate reads, through the rollup over the current runs.
+fn run_signers(runs: &[WorkflowRun]) -> Vec<PublicKey> {
     let mut signers: Vec<PublicKey> = Vec::new();
     let mut push = |pubkey: PublicKey| {
         if !signers.contains(&pubkey) {
@@ -389,9 +405,42 @@ fn signers(runs: &[WorkflowRun], controls: &[ServiceControl]) -> Vec<PublicKey> 
             push(job.author);
         }
     }
+    signers
+}
+
+fn push_control_coordinators(signers: &mut Vec<PublicKey>, controls: &[ServiceControl]) {
     for control in controls {
-        push(control.coordinator);
+        if !signers.contains(&control.coordinator) {
+            signers.push(control.coordinator);
+        }
     }
+}
+
+/// The signers whose NIP-05 identities are resolved over the network.
+///
+/// Deliberately narrower than [`signers`]: the run signers, which every
+/// surface displays and the merge gate rolls up, plus the coordinators of
+/// controls a *confirmed maintainer* authored, which are the only controls
+/// that yield a relationship tier. A control from anybody else names a
+/// coordinator this repository has no relationship with and no surface
+/// describes, so resolving it would buy nothing — while letting an unrelated
+/// publisher add a domain of their choosing to the identity step of every
+/// command that runs the full tier, including a default, non-blocking
+/// `ngit pr merge`. Such a coordinator keeps its (empty) resolution and its
+/// unassociated relationship; only the lookup is withheld.
+#[must_use]
+pub fn identity_lookup_signers(
+    runs: &[WorkflowRun],
+    controls: &[ServiceControl],
+    confirmed_maintainers: &[PublicKey],
+) -> Vec<PublicKey> {
+    let authorized: Vec<ServiceControl> = controls
+        .iter()
+        .filter(|control| confirmed_maintainers.contains(&control.author))
+        .cloned()
+        .collect();
+    let mut signers = run_signers(runs);
+    push_control_coordinators(&mut signers, &authorized);
     signers
 }
 
@@ -477,7 +526,7 @@ mod tests {
     use super::{
         super::{
             controls::CoordinatorRelationshipLevel,
-            domain::tests::StubNip05Lookup,
+            domain::tests::{CountingLookup, StubNip05Lookup},
             kinds::test_events::*,
             provenance::tests::{
                 manual_trigger_run, perspective, run_on_another_commit, service_request_run,
@@ -910,6 +959,112 @@ mod tests {
             CoordinatorRelationshipLevel::Unassociated
         );
         assert_eq!(context.coverage(), Some(Coverage::Complete));
+    }
+
+    #[test]
+    fn only_a_maintainers_control_adds_a_coordinator_to_the_identity_lookup_set() {
+        let coordinator = Keys::generate();
+        let provider = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let stranger = Keys::generate();
+        let requested = Keys::generate();
+        let unrelated = Keys::generate();
+
+        let grouped = super::super::events::group_workflow_runs(&[
+            workflow_result(&coordinator, &owner, "run-1", 100),
+            job_result(&provider, &coordinator, &owner, "run-1", "build", 110),
+        ]);
+        assert!(grouped.skipped.is_empty(), "{:?}", grouped.skipped);
+        let controls = vec![
+            super::super::controls::tests::control(&maintainer, &requested, &owner, true, 100, 1),
+            // Anyone may sign a Service Request naming this repository's
+            // coordinate and any coordinator pubkey.
+            super::super::controls::tests::control(&stranger, &unrelated, &owner, true, 100, 2),
+        ];
+
+        let lookup_set =
+            identity_lookup_signers(&grouped.runs, &controls, &[maintainer.public_key()]);
+        assert!(
+            lookup_set.contains(&coordinator.public_key()),
+            "the run's coordinator is displayed and read by the gate"
+        );
+        assert!(
+            lookup_set.contains(&provider.public_key()),
+            "so is the provider of a job under it"
+        );
+        assert!(
+            lookup_set.contains(&requested.public_key()),
+            "a confirmed maintainer's request survives authorization"
+        );
+        assert!(
+            !lookup_set.contains(&unrelated.public_key()),
+            "a coordinator known only through an unauthorized control is not resolved"
+        );
+        // It is still a signer of the view — it simply gets no lookup.
+        assert!(signers(&grouped.runs, &controls).contains(&unrelated.public_key()));
+    }
+
+    #[tokio::test]
+    async fn the_full_tier_looks_up_no_identity_for_an_unauthorized_control() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let stranger = Keys::generate();
+        let unrelated = Keys::generate();
+        let repository = repository(&owner, &maintainer);
+        let runs = super::super::events::group_workflow_runs(&[workflow_result(
+            &coordinator,
+            &owner,
+            "run-1",
+            100,
+        )])
+        .runs;
+        let controls = vec![super::super::controls::tests::control(
+            &stranger, &unrelated, &owner, true, 100, 1,
+        )];
+        let profiles: HashMap<PublicKey, String> = [
+            (coordinator.public_key(), "act-1@grasp.example".to_owned()),
+            (unrelated.public_key(), "slow@attacker.example".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let quoted = HashMap::new();
+
+        let lookup = CountingLookup::resolving("act-1@grasp.example", coordinator.public_key());
+        let context = resolve_full_tier(
+            &CiInputs::new(&repository, &runs, &controls, &quoted, &profiles, ts(1_000)),
+            &NoQuotedEventFetcher,
+            &lookup,
+            None,
+        )
+        .await;
+
+        let looked_up = lookup.looked_up();
+        assert!(
+            !looked_up
+                .iter()
+                .any(|address| address.contains("attacker.example")),
+            "an unrelated publisher's domain never reaches the identity step: {looked_up:?}"
+        );
+        assert_eq!(
+            looked_up.len(),
+            2,
+            "only the run coordinator's declared identity and the repository root: {looked_up:?}"
+        );
+        assert_eq!(
+            context
+                .signer_resolution(&coordinator.public_key())
+                .classification(),
+            Some(TrustClassification::OperationallyAssociated),
+            "the signers that are resolved keep their domain evidence"
+        );
+        assert_eq!(
+            context
+                .signer_resolution(&unrelated.public_key())
+                .classification(),
+            Some(TrustClassification::NoKnownContext),
+        );
     }
 
     #[test]
