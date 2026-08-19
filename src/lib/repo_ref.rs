@@ -73,10 +73,11 @@ pub struct RepoRef {
     /// present the deprecated `maintainers` tag is ignored. On republish
     /// `M`/`m` entries are not re-emitted verbatim: the typed `maintainers`
     /// field is the source of truth for current membership (mirroring the
-    /// deprecated tag) and [`RepoRef::generate_role_tags`] emits one role tag
-    /// per active member (`M` for `lead`, `m` otherwise), using these tags
-    /// only as the record of start/end history boundaries. `o` tags are
-    /// preserved verbatim.
+    /// deprecated tag) and [`RepoRef::generate_role_tags`] emits an active
+    /// role tag per member (`M` for `lead`, `m` otherwise) plus closed
+    /// per-letter records for removals and role transitions, using these
+    /// tags only as the record of start/end history boundaries. `o` tags
+    /// are preserved verbatim.
     pub role_tags: Vec<Tag>,
     /// Currently-active moderators from NIP-34 `o` role tags. Moderators are
     /// deliberately excluded from `maintainers`: per NIP-34 they can never
@@ -141,6 +142,15 @@ fn role_entry_is_active(slice: &[String]) -> bool {
 /// pass in [`RepoRef::try_from`].
 fn is_role_tag_name(name: &str) -> bool {
     matches!(name, "M" | "m" | "o")
+}
+
+/// Close an active role entry: append `now` as an end boundary, inserting a
+/// `0` start when the entry recorded no history (active from the beginning).
+fn close_role_entry(entry: &mut Vec<String>, now: u64) {
+    if entry.len().is_multiple_of(2) {
+        entry.push("0".to_string());
+    }
+    entry.push(now.to_string());
 }
 
 /// Whether `event`'s author does not assert maintainership: at least one
@@ -524,34 +534,49 @@ impl RepoRef {
     ///
     /// The typed `maintainers` field is the source of truth for *current*
     /// membership, mirroring the deprecated `maintainers` tag: every active
-    /// maintainer gets exactly one role tag — the letter `M` for the pubkey
-    /// in `self.lead`, `m` for everyone else. Without a lead no `M` tag is
-    /// emitted. `self.role_tags` (the source announcement's role tags)
-    /// supplies each pubkey's start/end history:
+    /// maintainer gets an active role tag — the letter `M` for the pubkey
+    /// in `self.lead`, `m` for everyone else. Without a lead no active `M`
+    /// tag is emitted. `self.role_tags` (the source announcement's role
+    /// tags) supplies each pubkey's per-letter start/end history — per
+    /// NIP-34 a pubkey MAY appear in one `M`, one `m`, and one `o` tag to
+    /// record transitions between roles:
     ///
     /// - first use of role tags (none on the source announcement): plain
     ///   untimed entries with no start time;
-    /// - a pubkey with an active prior `M`/`m` entry keeps that entry's history
-    ///   verbatim under the letter being emitted (a promotion or demotion
-    ///   relabels the single record rather than closing one letter's entry and
-    ///   opening the other's);
+    /// - a pubkey with an active prior entry under the letter being emitted
+    ///   keeps that entry's history verbatim;
+    /// - a promotion or demotion between `M` and `m` records a per-letter
+    ///   transition boundary: the old letter's active entry is closed with
+    ///   `now` and the new letter's entry opens at `now`, restarting the
+    ///   pubkey's ended record under that letter when one exists;
     /// - a pubkey whose prior entries all ended is started again by appending
-    ///   `now` as a fresh start boundary, continuing the record whose letter is
-    ///   being emitted when one exists;
+    ///   `now` as a fresh start boundary to their record under the letter being
+    ///   emitted; when their only ended record is under the other letter it is
+    ///   kept verbatim and a new record opens at `now`;
     /// - a pubkey newly added while role tags are already in use starts at
     ///   `now`; the author is exempt because an author absent from prior role
     ///   tags was implicitly a member for the repository's entire history;
-    /// - a removed pubkey's active entry is closed by appending `now` as an end
-    ///   boundary (inserting a `0` start when the entry recorded no history),
-    ///   and already-ended records are kept so a later re-add restarts them
-    ///   rather than forgetting they ever held the role;
+    /// - a removed pubkey's active entry is closed under its own letter by
+    ///   appending `now` as an end boundary (inserting a `0` start when the
+    ///   entry recorded no history), and already-ended records are kept so a
+    ///   later re-add restarts them rather than forgetting they ever held the
+    ///   role;
     /// - moderator (`o`) tags are preserved verbatim — ngit does not yet assign
     ///   or end moderators.
     pub fn generate_role_tags(&self, author: &PublicKey, now: u64) -> Vec<Tag> {
-        // Prior maintainer-role (`M`/`m`) entries grouped per pubkey, in tag
-        // order. Entries without a pubkey slot carry no information and are
-        // dropped; moderator tags pass through untouched.
-        let mut prior: Vec<(String, Vec<Vec<String>>)> = Vec::new();
+        // Prior maintainer-role entries per pubkey, split per letter
+        // (`[0]` = `M`, `[1]` = `m`) since a pubkey may appear in one tag of
+        // each. Entries without a pubkey slot carry no information and are
+        // dropped; moderator tags pass through untouched. Among duplicate
+        // same-letter entries an active one wins, otherwise the first.
+        fn upsert(slot: &mut Option<Vec<String>>, entry: Vec<String>) {
+            match slot {
+                Some(existing)
+                    if role_entry_is_active(existing) || !role_entry_is_active(&entry) => {}
+                _ => *slot = Some(entry),
+            }
+        }
+        let mut prior: Vec<(String, [Option<Vec<String>>; 2])> = Vec::new();
         let mut moderator_tags: Vec<Tag> = Vec::new();
         for tag in &self.role_tags {
             let slice = tag.as_slice();
@@ -563,22 +588,14 @@ impl RepoRef {
             let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
                 continue;
             };
-            if let Some((_, entries)) = prior.iter_mut().find(|(p, _)| p == pk) {
-                entries.push(slice.to_vec());
+            let index = usize::from(name != "M");
+            if let Some((_, records)) = prior.iter_mut().find(|(p, _)| p == pk) {
+                upsert(&mut records[index], slice.to_vec());
             } else {
-                prior.push((pk.clone(), vec![slice.to_vec()]));
+                let mut records = [None, None];
+                upsert(&mut records[index], slice.to_vec());
+                prior.push((pk.clone(), records));
             }
-        }
-
-        // Prefer an active entry's history; among ended entries prefer the
-        // record with the letter being emitted so a restart continues that
-        // role's record rather than re-opening the other role's.
-        fn chosen<'a>(entries: &'a [Vec<String>], letter: &str) -> &'a Vec<String> {
-            entries
-                .iter()
-                .find(|entry| role_entry_is_active(entry))
-                .or_else(|| entries.iter().find(|entry| entry[0] == letter))
-                .unwrap_or(&entries[0])
         }
 
         let first_use_of_role_tags = self.role_tags.is_empty();
@@ -592,44 +609,54 @@ impl RepoRef {
             if !seen.insert(pk_hex.clone()) {
                 continue;
             }
-            let letter = if lead_hex.as_deref() == Some(pk_hex.as_str()) {
-                "M"
-            } else {
-                "m"
-            };
+            let is_lead = lead_hex.as_deref() == Some(pk_hex.as_str());
+            let letter = if is_lead { "M" } else { "m" };
+            let (current_index, other_index) = if is_lead { (0, 1) } else { (1, 0) };
+            let records = prior.iter().find(|(p, _)| *p == pk_hex).map(|(_, r)| r);
+            let current_record = records.and_then(|r| r[current_index].clone());
+            let other_record = records.and_then(|r| r[other_index].clone());
+
             let mut parts = vec![letter.to_string(), pk_hex.clone()];
-            if let Some((_, entries)) = prior.iter().find(|(p, _)| *p == pk_hex) {
-                let entry = chosen(entries, letter);
+            if let Some(entry) = &current_record {
                 parts.extend(entry[2..].iter().cloned());
                 if !role_entry_is_active(entry) {
-                    // stopped maintainer re-added: start again now
+                    // stopped record under this letter: start again now (a
+                    // re-add, or a transition back to this letter)
                     parts.push(now.to_string());
                 }
-            } else if !first_use_of_role_tags && pk_hex != author_hex {
-                // newly added while role tags are already in use
+            } else if other_record.is_some() || (!first_use_of_role_tags && pk_hex != author_hex) {
+                // the record under this letter opens now: a per-letter
+                // transition from the other letter, a re-add under a new
+                // letter, or a pubkey newly added while role tags are in use
                 parts.push(now.to_string());
             }
             tags.push(Tag::parse(parts).unwrap());
+
+            // the other letter's record: a transition closes its active
+            // entry; an already-ended one is kept so the transition history
+            // survives
+            if let Some(mut entry) = other_record {
+                if role_entry_is_active(&entry) {
+                    close_role_entry(&mut entry, now);
+                }
+                tags.push(Tag::parse(entry).unwrap());
+            }
         }
 
-        // removed maintainers: prior entries whose pubkey is no longer in the
-        // typed field (closed under `m` regardless of prior letter; per-letter
-        // removal history is refined separately)
-        for (pk_hex, entries) in &prior {
+        // removed maintainers: prior records whose pubkey is no longer in
+        // the typed field are closed under their own letter; already-ended
+        // records are kept
+        for (pk_hex, records) in &prior {
             if !seen.insert(pk_hex.clone()) {
                 continue;
             }
-            let entry = chosen(entries, "m");
-            let mut parts = vec!["m".to_string(), pk_hex.clone()];
-            parts.extend(entry[2..].iter().cloned());
-            if role_entry_is_active(entry) {
-                if parts.len() % 2 == 0 {
-                    // no recorded start: active from the beginning
-                    parts.push("0".to_string());
+            for entry in records.iter().flatten() {
+                let mut entry = entry.clone();
+                if role_entry_is_active(&entry) {
+                    close_role_entry(&mut entry, now);
                 }
-                parts.push(now.to_string());
+                tags.push(Tag::parse(entry).unwrap());
             }
-            tags.push(Tag::parse(parts).unwrap());
         }
 
         tags.extend(moderator_tags);
@@ -3009,7 +3036,7 @@ mod tests {
                 let added = nostr::prelude::Keys::generate().public_key();
                 assert_eq!(
                     generate(
-                        vec![tag(&["M", &author.to_string()])],
+                        vec![tag(&["m", &author.to_string()])],
                         vec![author, added],
                         &author,
                     ),
@@ -3044,7 +3071,7 @@ mod tests {
                 assert_eq!(
                     generate(
                         vec![
-                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &author.to_string()]),
                             tag(&["m", &returning.to_string(), "0", "100"]),
                         ],
                         vec![author, returning],
@@ -3065,7 +3092,7 @@ mod tests {
                 assert_eq!(
                     generate(
                         vec![
-                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &author.to_string()]),
                             tag(&["m", &untimed.to_string()]),
                             tag(&["m", &timed.to_string(), "50"]),
                         ],
@@ -3087,7 +3114,7 @@ mod tests {
                 assert_eq!(
                     generate(
                         vec![
-                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &author.to_string()]),
                             tag(&["m", &former.to_string(), "0", "100"]),
                         ],
                         vec![author],
@@ -3108,7 +3135,7 @@ mod tests {
                 assert_eq!(
                     generate(
                         vec![
-                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &author.to_string()]),
                             tag(&["o", &moderator.to_string()]),
                             tag(&["o", &former.to_string(), "0", "100"]),
                         ],
@@ -3155,10 +3182,12 @@ mod tests {
             }
 
             #[test]
-            fn promotion_and_demotion_relabel_the_active_record() {
+            fn promotion_and_demotion_record_per_letter_boundaries() {
                 // the lead moves from the author to the other maintainer:
-                // each keeps their active entry's history under the new
-                // letter (per-letter transition boundaries are out of scope)
+                // each old letter's active entry is closed and the new
+                // letter's entry opens now, so a pubkey's record of each
+                // role survives the transition (a pubkey MAY appear in one
+                // `M` and one `m` tag)
                 let author = nostr::prelude::Keys::generate().public_key();
                 let promoted = nostr::prelude::Keys::generate().public_key();
                 assert_eq!(
@@ -3172,8 +3201,10 @@ mod tests {
                         &author,
                     ),
                     vec![
-                        tag(&["m", &author.to_string()]),
-                        tag(&["M", &promoted.to_string(), "100"]),
+                        tag(&["m", &author.to_string(), &now()]),
+                        tag(&["M", &author.to_string(), "0", &now()]),
+                        tag(&["M", &promoted.to_string(), &now()]),
+                        tag(&["m", &promoted.to_string(), "100", &now()]),
                     ],
                 );
             }
@@ -3196,12 +3227,16 @@ mod tests {
                     vec![
                         tag(&["m", &author.to_string()]),
                         tag(&["M", &returning.to_string(), "0", "100", &now()]),
+                        tag(&["m", &returning.to_string(), "100", "200"]),
                     ],
                 );
             }
 
             #[test]
-            fn active_lead_history_carries_into_the_generated_m_tag() {
+            fn demotion_closes_the_lead_record_and_opens_a_co_maintainer_one() {
+                // no lead asserted any more: the author's active `M` entry
+                // is closed with its recorded start preserved and their `m`
+                // record opens now
                 let author = nostr::prelude::Keys::generate().public_key();
                 assert_eq!(
                     generate(
@@ -3209,7 +3244,10 @@ mod tests {
                         vec![author],
                         &author,
                     ),
-                    vec![tag(&["m", &author.to_string(), "100"])],
+                    vec![
+                        tag(&["m", &author.to_string(), &now()]),
+                        tag(&["M", &author.to_string(), "100", &now()]),
+                    ],
                 );
             }
 
@@ -3220,7 +3258,7 @@ mod tests {
                 assert_eq!(
                     generate(
                         vec![
-                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &author.to_string()]),
                             tag(&["M", &returning.to_string(), "0", "100"]),
                             tag(&["m", &returning.to_string(), "100", "200"]),
                         ],
@@ -3230,6 +3268,34 @@ mod tests {
                     vec![
                         tag(&["m", &author.to_string()]),
                         tag(&["m", &returning.to_string(), "100", "200", &now()]),
+                        tag(&["M", &returning.to_string(), "0", "100"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn removed_maintainers_are_closed_under_their_own_letter() {
+                // a removed lead's record closes as `M`, not `m`, and a
+                // removed pubkey with records under both letters keeps both
+                let author = nostr::prelude::Keys::generate().public_key();
+                let former_lead = nostr::prelude::Keys::generate().public_key();
+                let former_both = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["M", &former_lead.to_string()]),
+                            tag(&["M", &former_both.to_string(), "0", "100"]),
+                            tag(&["m", &former_both.to_string(), "100"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["M", &former_lead.to_string(), "0", &now()]),
+                        tag(&["M", &former_both.to_string(), "0", "100"]),
+                        tag(&["m", &former_both.to_string(), "100", &now()]),
                     ],
                 );
             }
