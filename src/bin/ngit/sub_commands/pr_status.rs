@@ -71,8 +71,8 @@ async fn launch_status(
 
     let user_pubkey = signer.get_public_key().await?;
 
-    // Only author or maintainer may change status
-    if proposal.pubkey != user_pubkey && !repo_ref.maintainers.contains(&user_pubkey) {
+    // Only author or confirmed maintainer may change status
+    if proposal.pubkey != user_pubkey && !repo_ref.is_authorized_maintainer(&user_pubkey) {
         bail!("only the PR author or a repository maintainer can change the status of a PR");
     }
 

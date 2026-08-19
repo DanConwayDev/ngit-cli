@@ -2146,23 +2146,28 @@ pub async fn get_state_from_cache(
     git_repo_path: Option<&Path>,
     repo_ref: &RepoRef,
 ) -> Result<RepoState> {
-    if let Some(git_repo_path) = git_repo_path {
-        RepoState::try_from(
-            get_events_from_local_cache(
-                git_repo_path,
-                vec![get_filter_state_events(&repo_ref.coordinates(), true)],
-            )
-            .await?,
+    let events = if let Some(git_repo_path) = git_repo_path {
+        get_events_from_local_cache(
+            git_repo_path,
+            vec![get_filter_state_events(&repo_ref.coordinates(), true)],
         )
+        .await?
     } else {
-        RepoState::try_from(
-            get_event_from_global_cache(
-                git_repo_path,
-                vec![get_filter_state_events(&repo_ref.coordinates(), true)],
-            )
-            .await?,
+        get_event_from_global_cache(
+            git_repo_path,
+            vec![get_filter_state_events(&repo_ref.coordinates(), true)],
         )
-    }
+        .await?
+    };
+    // state events are only authoritative from confirmed maintainers; invited
+    // maintainers' state events are ignored until they accept
+    let authorized_state_authors = repo_ref.confirmed_maintainers();
+    RepoState::try_from(
+        events
+            .into_iter()
+            .filter(|event| authorized_state_authors.contains(&event.pubkey))
+            .collect::<Vec<Event>>(),
+    )
 }
 
 #[allow(clippy::too_many_lines)]

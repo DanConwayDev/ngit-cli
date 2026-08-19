@@ -629,8 +629,8 @@ async fn print_repo_info(
             dim.apply_to(
                 "Note: git servers and relays are pooled from all maintainers' announcements.\n\
                  Name, description, web, upstream, and hashtags come from the most recently updated announcement.\n\
-                 Every listed maintainer has maintainer rights through the directional graph.\n\
-                 Reciprocal links confirm co-maintainership; a unique lead coordinates but has no extra rights."
+                 Reciprocal links confirm co-maintainership; only confirmed maintainers' state and status events are authoritative.\n\
+                 Invited maintainers gain authority by accepting; a unique lead coordinates but has no extra rights."
             )
         );
     }

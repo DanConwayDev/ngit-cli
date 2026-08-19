@@ -459,9 +459,10 @@ impl RepoRef {
 
     /// Maintainers in the selected maintainer's reciprocally connected group.
     ///
-    /// Every maintainer reachable from the selected announcement is authorized.
-    /// Reciprocal connectivity is only the accepted-membership framing used in
-    /// user-facing output; it does not restrict event authority.
+    /// Per NIP-34 a listed pubkey is only invited until their own announcement
+    /// makes the relationship reciprocal, and an invited pubkey's events MUST
+    /// NOT be treated as authoritative. Confirmed maintainers are therefore
+    /// the authoritative set: see [`RepoRef::is_authorized_maintainer`].
     pub fn confirmed_maintainers(&self) -> Vec<PublicKey> {
         let edges = self.maintainer_edges();
         self.maintainers
@@ -474,7 +475,19 @@ impl RepoRef {
             .collect()
     }
 
-    /// Authorized maintainers not reciprocally connected to the selected group.
+    /// Whether `pubkey`'s repository events are authoritative.
+    ///
+    /// True only for confirmed maintainers. Invited maintainers' state events
+    /// (kind 30618), status events (kinds 1630-1633) and label, subject and
+    /// cover-note overrides are ignored until they publish an announcement
+    /// that makes the relationship reciprocal.
+    pub fn is_authorized_maintainer(&self, pubkey: &PublicKey) -> bool {
+        self.confirmed_maintainers().contains(pubkey)
+    }
+
+    /// Listed maintainers not reciprocally connected to the selected group.
+    /// Their events are not authoritative until they accept; see
+    /// [`RepoRef::is_authorized_maintainer`].
     pub fn invited_maintainers(&self) -> Vec<PublicKey> {
         let confirmed: HashSet<_> = self.confirmed_maintainers().into_iter().collect();
         self.maintainers
@@ -1818,6 +1831,29 @@ mod tests {
 
             assert_eq!(repo_ref.confirmed_maintainers(), vec![selected]);
             assert_eq!(repo_ref.invited_maintainers(), vec![invited]);
+        }
+
+        #[tokio::test]
+        async fn only_confirmed_maintainers_are_authorized() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let invited = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, invited], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, invited]).await,
+            );
+
+            assert!(repo_ref.is_authorized_maintainer(&selected));
+            assert!(!repo_ref.is_authorized_maintainer(&invited));
+
+            // acceptance makes the relationship reciprocal and authorizes the
+            // previously invited maintainer
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![invited, selected]).await,
+            );
+            assert!(repo_ref.is_authorized_maintainer(&invited));
         }
 
         #[tokio::test]

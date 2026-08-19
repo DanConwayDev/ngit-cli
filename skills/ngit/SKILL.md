@@ -45,7 +45,7 @@ git remote -v | grep -q 'nostr://'   # primary check — no cache needed
 ngit repo --json --offline            # full metadata when needed
 ```
 
-`ngit repo` always exits 0; `is_nostr_repo: false` can be a cold-cache false negative — if remotes show `nostr://`, run `git fetch origin` then retry. Full output includes `nostr_url`, `maintainers`, `selected_maintainer`, `confirmed_maintainers`, `invited_maintainers`, `lead_maintainer`, `maintainer_edges`, and `grasp_servers`. "Invited" means the relationship is not reciprocal; it does not mean the maintainer lacks authority.
+`ngit repo` always exits 0; `is_nostr_repo: false` can be a cold-cache false negative — if remotes show `nostr://`, run `git fetch origin` then retry. Full output includes `nostr_url`, `maintainers`, `selected_maintainer`, `confirmed_maintainers`, `invited_maintainers`, `lead_maintainer`, `maintainer_edges`, and `grasp_servers`. "Invited" means the relationship is not reciprocal; an invited maintainer's state and status events are not treated as authoritative until they accept.
 
 ## Selecting the target repository
 

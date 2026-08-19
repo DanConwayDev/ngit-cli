@@ -1082,13 +1082,14 @@ pub fn is_event_proposal_root_for_branch(
 ///    "#t"]` tags.
 ///
 /// A label is only applied when the author of the source event is either the
-/// author of `event` itself or one of the repository maintainers.
+/// author of `event` itself or a confirmed repository maintainer.
 ///
 /// Labels are additive — all valid label events contribute; there is no
 /// "latest wins" replacement semantics.
 pub fn process_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> Vec<String> {
+    let authorized_maintainers = repo_ref.confirmed_maintainers();
     let is_permitted = |pubkey: &PublicKey| -> bool {
-        pubkey.eq(&event.pubkey) || repo_ref.maintainers.contains(pubkey)
+        pubkey.eq(&event.pubkey) || authorized_maintainers.contains(pubkey)
     };
 
     // 1. Inline `t` tags on the event itself.
@@ -1163,15 +1164,16 @@ pub fn process_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event])
 /// latest authorised event wins, with tiebreak by lexicographically lower
 /// event ID as required by NIP-01.
 ///
-/// Only the author of `event` or a repository maintainer may set the subject.
-/// Returns `None` when no valid subject override exists.
+/// Only the author of `event` or a confirmed repository maintainer may set
+/// the subject. Returns `None` when no valid subject override exists.
 pub fn process_subject(
     event: &Event,
     repo_ref: &RepoRef,
     label_events: &[Event],
 ) -> Option<String> {
+    let authorized_maintainers = repo_ref.confirmed_maintainers();
     let is_permitted = |pubkey: &PublicKey| -> bool {
-        pubkey.eq(&event.pubkey) || repo_ref.maintainers.contains(pubkey)
+        pubkey.eq(&event.pubkey) || authorized_maintainers.contains(pubkey)
     };
 
     let event_id_str = event.id.to_string();
@@ -1249,7 +1251,8 @@ pub fn get_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> 
 /// kind-1624 events.
 ///
 /// A cover note is a markdown body attached to a PR, patch or issue by its
-/// author or a repository maintainer.  Only the latest authorised event wins
+/// author or a confirmed repository maintainer.  Only the latest authorised
+/// event wins
 /// (replaceable semantics: newest `created_at`, tiebreak by lexicographically
 /// lower event ID). Events authored by other pubkeys are ignored.
 ///
@@ -1259,8 +1262,9 @@ pub fn process_cover_note(
     repo_ref: &RepoRef,
     cover_note_events: &[Event],
 ) -> Option<(Event, bool)> {
+    let authorized_maintainers = repo_ref.confirmed_maintainers();
     let is_permitted = |pubkey: &PublicKey| -> bool {
-        pubkey.eq(&event.pubkey) || repo_ref.maintainers.contains(pubkey)
+        pubkey.eq(&event.pubkey) || authorized_maintainers.contains(pubkey)
     };
 
     let event_id_str = event.id.to_string();
@@ -1292,6 +1296,7 @@ pub fn get_status(
     all_status_in_repo: &[Event],
     all_pr_roots_in_repo: &[Event],
 ) -> Kind {
+    let authorized_maintainers = repo_ref.confirmed_maintainers();
     let get_direct_status = |proposal: &Event| {
         if let Some(e) =
             crate::event_ordering::latest_event(all_status_in_repo.iter().filter(|e| {
@@ -1299,7 +1304,7 @@ pub fn get_status(
                     && e.tags.iter().any(|t| {
                         t.as_slice().len() > 1 && t.as_slice()[1].eq(&proposal.id.to_string())
                     })
-                    && (proposal.pubkey.eq(&e.pubkey) || repo_ref.maintainers.contains(&e.pubkey))
+                    && (proposal.pubkey.eq(&e.pubkey) || authorized_maintainers.contains(&e.pubkey))
             }))
         {
             e.kind

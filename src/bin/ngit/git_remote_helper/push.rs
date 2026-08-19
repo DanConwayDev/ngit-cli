@@ -1737,9 +1737,10 @@ async fn get_issue_resolution_status_events(
                     }
 
                     // Match command-level permissions: only issue author or
-                    // repository maintainers can change issue status.
+                    // confirmed repository maintainers can change issue
+                    // status.
                     if issue.pubkey != signer_pubkey
-                        && !repo_ref.maintainers.contains(&signer_pubkey)
+                        && !repo_ref.is_authorized_maintainer(&signer_pubkey)
                     {
                         term.write_line(
                             format!(

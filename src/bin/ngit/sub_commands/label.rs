@@ -76,8 +76,8 @@ async fn publish_label_event(
 
     let user_pubkey = signer.get_public_key().await?;
 
-    // Permission check: only the author or a maintainer may label.
-    if target.pubkey != user_pubkey && !repo_ref.maintainers.contains(&user_pubkey) {
+    // Permission check: only the author or a confirmed maintainer may label.
+    if target.pubkey != user_pubkey && !repo_ref.is_authorized_maintainer(&user_pubkey) {
         bail!("only the {target_kind} author or a repository maintainer can label a {target_kind}");
     }
 

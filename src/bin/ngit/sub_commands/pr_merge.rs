@@ -66,7 +66,7 @@ pub async fn launch(id: &str, squash: bool, offline: bool, auth: SignerParams<'_
 
     let user_pubkey = signer.get_public_key().await?;
 
-    if !repo_ref.maintainers.contains(&user_pubkey) {
+    if !repo_ref.is_authorized_maintainer(&user_pubkey) {
         bail!("only a repository maintainer can merge a PR");
     }
 

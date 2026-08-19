@@ -716,10 +716,10 @@ impl Harness {
     /// Pass [`PublishedRepo::identifier`] straight through.
     ///
     /// **Signing.** Defaults to [`PublishedRepo::maintainer_keys`] because
-    /// `list.rs:64-69` filters candidate state events by
-    /// `repo_ref.maintainers.contains(&event.pubkey)` — events signed by a
-    /// non-maintainer are silently ignored and the test wouldn't fail in
-    /// any way that points at the cause. The
+    /// `list.rs` filters candidate state events by
+    /// `repo_ref.confirmed_maintainers()` — events signed by anyone who is
+    /// not a confirmed maintainer are silently ignored and the test wouldn't
+    /// fail in any way that points at the cause. The
     /// [`PublishStateEventOpts::signer_keys`] knob is there only for tests
     /// that specifically want a non-maintainer event present (so they can
     /// assert it's discarded).
@@ -1297,10 +1297,9 @@ pub struct PublishStateEventOpts {
     /// today).
     pub identifier: Option<String>,
     /// Sign with these keys instead of [`PublishedRepo::maintainer_keys`].
-    /// `list.rs:67-69` filters candidates by
-    /// `repo_ref.maintainers.contains(&event.pubkey)`, so a non-maintainer
-    /// signer is only useful for tests asserting "this event is
-    /// discarded".
+    /// `list.rs` filters candidates by `repo_ref.confirmed_maintainers()`,
+    /// so a signer who is not a confirmed maintainer is only useful for
+    /// tests asserting "this event is discarded".
     pub signer_keys: Option<Keys>,
     /// Subtract this many seconds from `Timestamp::now()` for the
     /// event's `created_at`. Used to deterministically order two state
