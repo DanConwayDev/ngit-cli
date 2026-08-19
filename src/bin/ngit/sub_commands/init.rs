@@ -1336,6 +1336,7 @@ async fn publish_and_finalize(
         nostr_git_url: None,
         extra_tags: fields.extra_tags,
         role_tags: vec![],
+        moderators: vec![],
     };
     clear_private_git_auth();
     if repo_ref.private {

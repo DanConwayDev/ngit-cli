@@ -166,6 +166,7 @@ pub async fn build_maintainership_acceptance_with_defaults(
         nostr_git_url: None,
         extra_tags: vec![],
         role_tags: vec![],
+        moderators: vec![],
     };
 
     // --- Step 5: sign the announcement ---

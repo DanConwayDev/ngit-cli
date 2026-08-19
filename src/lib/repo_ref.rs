@@ -67,12 +67,20 @@ pub struct RepoRef {
     /// not silently dropped. See [`is_known_tag_name`] for the allowlist of
     /// names this field excludes.
     pub extra_tags: Vec<Tag>,
-    /// NIP-34 indexed role tags (`M` lead, `m` co-maintainer) carried
-    /// verbatim from the source announcement and re-emitted on republish.
-    /// Their currently-active entries populate `maintainers`; when any role
-    /// tag is present the deprecated `maintainers` tag is ignored. ngit does
-    /// not yet generate role tags itself.
+    /// NIP-34 indexed role tags (`M` lead, `m` co-maintainer, `o` moderator)
+    /// carried verbatim from the source announcement and re-emitted on
+    /// republish. Their currently-active entries populate `maintainers` and
+    /// `moderators`; when any role tag is present the deprecated
+    /// `maintainers` tag is ignored. ngit does not yet generate role tags
+    /// itself.
     pub role_tags: Vec<Tag>,
+    /// Currently-active moderators from NIP-34 `o` role tags. Moderators are
+    /// deliberately excluded from `maintainers`: per NIP-34 they can never
+    /// publish authoritative repository state (kind 30618), so they must not
+    /// reach the state-event authority checks built on the maintainer set.
+    /// An `o` self-entry also stops an announcement author from implicitly
+    /// asserting maintainership.
+    pub moderators: Vec<PublicKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -125,6 +133,7 @@ pub fn is_known_tag_name(name: &str) -> bool {
             | "alt"
             | "M"
             | "m"
+            | "o"
     )
 }
 
@@ -139,7 +148,7 @@ fn role_entry_is_active(slice: &[String]) -> bool {
 /// Whether the name is a NIP-34 indexed role tag consumed by the role-tag
 /// pass in [`RepoRef::try_from`].
 fn is_role_tag_name(name: &str) -> bool {
-    matches!(name, "M" | "m")
+    matches!(name, "M" | "m" | "o")
 }
 
 /// Whether `event`'s author has left the repository: at least one role tag
@@ -203,17 +212,19 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             nostr_git_url: None,
             extra_tags: Vec::new(),
             role_tags: Vec::new(),
+            moderators: Vec::new(),
         };
 
-        // NIP-34 indexed role tags: ["M"|"m", "<pubkey>", <alternating
+        // NIP-34 indexed role tags: ["M"|"m"|"o", "<pubkey>", <alternating
         // start/end unix timestamps>...]. The lead/co-maintainer distinction
         // carries no meaning for ngit's authorization, so both collapse into
-        // one maintainer set. Entries whose history shows the role has ended
-        // are ignored entirely: role history only ever concludes that a
-        // pubkey is no longer a maintainer, never grants retroactive
-        // authority over historic events. Duplicate tags for the same pubkey
-        // are consolidated: the pubkey is a maintainer while any of its
-        // entries is active.
+        // one maintainer set; moderators (`o`) are kept separate because they
+        // can never publish authoritative repository state. Entries whose
+        // history shows the role has ended are ignored entirely: role history
+        // only ever concludes that a pubkey no longer holds the role, never
+        // grants retroactive authority over historic events. Duplicate tags
+        // for the same pubkey are consolidated: the pubkey holds a role while
+        // any of its entries is active.
         let mut role_tags_present = false;
         let mut author_has_role_entry = false;
         let mut active_role_maintainers: Vec<PublicKey> = Vec::new();
@@ -234,14 +245,22 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             if pk == event.pubkey {
                 author_has_role_entry = true;
             }
-            if role_entry_is_active(slice) && !active_role_maintainers.contains(&pk) {
-                active_role_maintainers.push(pk);
+            if role_entry_is_active(slice) {
+                if name == "o" {
+                    if !r.moderators.contains(&pk) {
+                        r.moderators.push(pk);
+                    }
+                } else if !active_role_maintainers.contains(&pk) {
+                    active_role_maintainers.push(pk);
+                }
             }
         }
         if role_tags_present {
             // per NIP-34 an author who appears in no role tag is implicitly a
-            // maintainer for the repository's entire history, while an author
-            // whose entries have all ended has left
+            // maintainer for the repository's entire history. An author with
+            // a role entry is exactly what it records: a maintainer, a
+            // moderator (never a maintainer via the implicit rule), or — when
+            // every entry has ended — a member who left.
             if !author_has_role_entry {
                 r.maintainers.push(event.pubkey);
             }
@@ -355,8 +374,9 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
         }
 
         // If no maintainers were added, add the event's public key. With role
-        // tags present an empty set is deliberate: it means the author's own
-        // entries have all ended (they left) and no other entry is active.
+        // tags present an empty set is deliberate: the author's own entries
+        // have all ended (they left) or record only moderatorship, and no
+        // other maintainer entry is active.
         if r.maintainers.is_empty() && !role_tags_present {
             r.maintainers.push(event.pubkey);
         }
@@ -593,7 +613,10 @@ impl RepoRef {
     /// True only for confirmed maintainers. Invited maintainers' state events
     /// (kind 30618), status events (kinds 1630-1633) and label, subject and
     /// cover-note overrides are ignored until they publish an announcement
-    /// that makes the relationship reciprocal.
+    /// that makes the relationship reciprocal. Moderators (`o` role tags,
+    /// [`RepoRef::moderators`]) never qualify: per NIP-34 they cannot publish
+    /// authoritative repository state, so a moderator-only pubkey is excluded
+    /// from the maintainer set this check is built on.
     pub fn is_authorized_maintainer(&self, pubkey: &PublicKey) -> bool {
         self.confirmed_maintainers().contains(pubkey)
     }
@@ -1842,6 +1865,7 @@ mod tests {
             nostr_git_url: None,
             extra_tags: vec![],
             role_tags: vec![],
+            moderators: vec![],
         }
         .to_event(&TEST_KEY_1_SIGNER)
         .await
@@ -1871,6 +1895,7 @@ mod tests {
             nostr_git_url: None,
             extra_tags: vec![],
             role_tags: vec![],
+            moderators: vec![],
         }
     }
 
@@ -2396,16 +2421,99 @@ mod tests {
             assert!(!parsed.maintainers.contains(&ended_twice));
         }
 
+        #[test]
+        fn moderators_are_parsed_and_supersede_the_maintainers_tag() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let moderator = nostr::prelude::Keys::generate().public_key();
+            let legacy_listed = nostr::prelude::Keys::generate().public_key();
+
+            // an `o` tag alone counts as role-tag usage: the deprecated
+            // `maintainers` tag is ignored and the author is implicitly the
+            // sole maintainer
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["o", &moderator.to_string()]),
+                    tag(&["maintainers", &legacy_listed.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author]);
+            assert_eq!(parsed.moderators, vec![moderator]);
+        }
+
+        #[test]
+        fn ended_moderator_entries_are_ignored() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let former = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["o", &former.to_string(), "0", "100"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(parsed.moderators.is_empty());
+            assert!(!parsed.maintainers.contains(&former));
+        }
+
+        #[test]
+        fn moderator_self_entry_does_not_assert_maintainership() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            // a moderator's acknowledgement announcement: without `o` support
+            // the author would appear in no known role tag and wrongly become
+            // an implicit maintainer, making their state events authoritative
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["o", &author.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![lead]);
+            assert_eq!(parsed.moderators, vec![author]);
+            // an active `o` self-entry is a held role, not leaving
+            assert!(!announcement_author_has_left(&event));
+        }
+
+        #[test]
+        fn moderator_is_not_authorized_for_state_events() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            let repo_ref = RepoRef::try_from((event, None)).unwrap();
+            assert!(repo_ref.is_authorized_maintainer(&owner));
+            assert!(!repo_ref.is_authorized_maintainer(&moderator));
+        }
+
         #[tokio::test]
         async fn role_tags_round_trip_verbatim_and_degrade_maintainers_tag() {
             let author = TEST_KEY_1_KEYS.public_key();
             let active = nostr::prelude::Keys::generate().public_key();
             let ended = nostr::prelude::Keys::generate().public_key();
+            let moderator = nostr::prelude::Keys::generate().public_key();
 
             let source_tags = vec![
                 tag(&["M", &author.to_string()]),
                 tag(&["m", &active.to_string(), "100"]),
                 tag(&["m", &ended.to_string(), "0", "100"]),
+                tag(&["o", &moderator.to_string()]),
             ];
             let event = role_event(&TEST_KEY_1_KEYS, source_tags.clone());
             let parsed = RepoRef::try_from((event, None)).unwrap();
@@ -2415,11 +2523,15 @@ mod tests {
                 .tags
                 .iter()
                 .map(|t| t.as_slice().to_vec())
-                .filter(|s| s.first().is_some_and(|name| name == "M" || name == "m"))
+                .filter(|s| {
+                    s.first()
+                        .is_some_and(|name| name == "M" || name == "m" || name == "o")
+                })
                 .collect();
             assert_eq!(emitted_role_tags, source_tags);
 
-            // the deprecated tag degrades to the currently-active members
+            // the deprecated tag degrades to the currently-active maintainers
+            // and never includes moderators
             let maintainers_tag = re_emitted
                 .tags
                 .iter()

@@ -816,6 +816,7 @@ mod tests {
             nostr_git_url: None,
             extra_tags: vec![],
             role_tags: vec![],
+            moderators: vec![],
         }
     }
 

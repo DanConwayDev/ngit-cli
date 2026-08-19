@@ -2031,6 +2031,11 @@ pub async fn get_repo_ref_from_cache(
     // also set maintainers_without_annoucnement
     let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
 
+    // moderators (`o` role tags) unioned across the members' announcements;
+    // kept separate from maintainers because they are never authoritative for
+    // repository state events
+    let mut moderators: Vec<PublicKey> = vec![];
+
     for m in &ordered_maintainers {
         if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
             if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
@@ -2047,6 +2052,11 @@ pub async fn get_repo_ref_from_cache(
                 for blossom in m_repo_ref.blossoms {
                     if seen_blossoms.insert(blossom.clone()) {
                         blossoms.push(blossom);
+                    }
+                }
+                for moderator in m_repo_ref.moderators {
+                    if !moderators.contains(&moderator) {
+                        moderators.push(moderator);
                     }
                 }
             }
@@ -2073,6 +2083,7 @@ pub async fn get_repo_ref_from_cache(
         // use all maintainers from all events found, not just maintainers in the most
         // recent event
         maintainers: ordered_maintainers,
+        moderators,
         relays,
         git_server,
         events,

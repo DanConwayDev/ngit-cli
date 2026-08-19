@@ -257,6 +257,7 @@ async fn accept_with_grasp_servers(
         nostr_git_url: None,
         extra_tags: vec![],
         role_tags: vec![],
+        moderators: vec![],
     };
 
     let repo_event = my_repo_ref.to_event(signer).await?;
