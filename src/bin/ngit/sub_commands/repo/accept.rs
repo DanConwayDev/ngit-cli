@@ -256,6 +256,7 @@ async fn accept_with_grasp_servers(
         events: std::collections::HashMap::new(),
         nostr_git_url: None,
         extra_tags: vec![],
+        role_tags: vec![],
     };
 
     let repo_event = my_repo_ref.to_event(signer).await?;

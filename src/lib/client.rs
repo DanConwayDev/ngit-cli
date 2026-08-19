@@ -65,7 +65,7 @@ use crate::{
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
     relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
-    repo_ref::{RepoRef, normalize_grasp_server_url},
+    repo_ref::{RepoRef, announcement_author_has_left, normalize_grasp_server_url},
     repo_state::RepoState,
     signer::NgitSigner,
     version_check,
@@ -1972,6 +1972,16 @@ pub async fn get_repo_ref_from_cache(
             break;
         }
     }
+    // A member may leave by ending their self-role in their own announcement;
+    // per NIP-34 this takes precedence over active assignments in other
+    // members' announcements, so drop them from the maintainer set (and with
+    // it the pooling of their infrastructure).
+    let left_maintainers: HashSet<PublicKey> = repo_events
+        .iter()
+        .filter(|e| announcement_author_has_left(e))
+        .map(|e| e.pubkey)
+        .collect();
+    ordered_maintainers.retain(|m| !left_maintainers.contains(m));
     repo_events.sort_by_key(|e| e.created_at);
     let private = repository_events_are_private(&repo_events);
     let repo_ref = RepoRef::try_from((

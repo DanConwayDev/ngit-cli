@@ -67,6 +67,12 @@ pub struct RepoRef {
     /// not silently dropped. See [`is_known_tag_name`] for the allowlist of
     /// names this field excludes.
     pub extra_tags: Vec<Tag>,
+    /// NIP-34 indexed role tags (`M` lead, `m` co-maintainer) carried
+    /// verbatim from the source announcement and re-emitted on republish.
+    /// Their currently-active entries populate `maintainers`; when any role
+    /// tag is present the deprecated `maintainers` tag is ignored. ngit does
+    /// not yet generate role tags itself.
+    pub role_tags: Vec<Tag>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -117,7 +123,49 @@ pub fn is_known_tag_name(name: &str) -> bool {
             | "maintainers"
             | "private"
             | "alt"
+            | "M"
+            | "m"
     )
+}
+
+/// Whether a NIP-34 indexed role tag entry is currently active. A role tag
+/// lists a pubkey followed by optional alternating start/end history
+/// timestamps; the entry is active when the tag has fewer than four elements
+/// or an odd number of elements (its last boundary is a start).
+fn role_entry_is_active(slice: &[String]) -> bool {
+    slice.len() < 4 || slice.len() % 2 == 1
+}
+
+/// Whether the name is a NIP-34 indexed role tag consumed by the role-tag
+/// pass in [`RepoRef::try_from`].
+fn is_role_tag_name(name: &str) -> bool {
+    matches!(name, "M" | "m")
+}
+
+/// Whether `event`'s author has left the repository: at least one role tag
+/// names the author but none of their entries is active. Per NIP-34 a member
+/// may leave by ending their self-role, which takes precedence over
+/// assignments in other announcements. An author absent from all role tags
+/// has *not* left — they are implicitly a maintainer for the repository's
+/// entire history.
+pub fn announcement_author_has_left(event: &nostr::prelude::Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut author_has_entry = false;
+    let mut author_has_active_entry = false;
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        if !slice.first().is_some_and(|name| is_role_tag_name(name)) {
+            continue;
+        }
+        if slice.get(1) != Some(&author) {
+            continue;
+        }
+        author_has_entry = true;
+        if role_entry_is_active(slice) {
+            author_has_active_entry = true;
+        }
+    }
+    author_has_entry && !author_has_active_entry
 }
 
 impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
@@ -154,7 +202,55 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             events: HashMap::new(),
             nostr_git_url: None,
             extra_tags: Vec::new(),
+            role_tags: Vec::new(),
         };
+
+        // NIP-34 indexed role tags: ["M"|"m", "<pubkey>", <alternating
+        // start/end unix timestamps>...]. The lead/co-maintainer distinction
+        // carries no meaning for ngit's authorization, so both collapse into
+        // one maintainer set. Entries whose history shows the role has ended
+        // are ignored entirely: role history only ever concludes that a
+        // pubkey is no longer a maintainer, never grants retroactive
+        // authority over historic events. Duplicate tags for the same pubkey
+        // are consolidated: the pubkey is a maintainer while any of its
+        // entries is active.
+        let mut role_tags_present = false;
+        let mut author_has_role_entry = false;
+        let mut active_role_maintainers: Vec<PublicKey> = Vec::new();
+        for tag in event.tags.iter() {
+            let slice = tag.as_slice();
+            let Some(name) = slice.first() else { continue };
+            if !is_role_tag_name(name) {
+                continue;
+            }
+            role_tags_present = true;
+            r.role_tags.push(tag.clone());
+            let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let pk = PublicKey::from_str(pk)
+                .context(format!("failed to convert entry from `{name}` role tag {pk} into a valid nostr public key. it should be in hex format"))
+                .context("invalid repository event")?;
+            if pk == event.pubkey {
+                author_has_role_entry = true;
+            }
+            if role_entry_is_active(slice) && !active_role_maintainers.contains(&pk) {
+                active_role_maintainers.push(pk);
+            }
+        }
+        if role_tags_present {
+            // per NIP-34 an author who appears in no role tag is implicitly a
+            // maintainer for the repository's entire history, while an author
+            // whose entries have all ended has left
+            if !author_has_role_entry {
+                r.maintainers.push(event.pubkey);
+            }
+            for pk in active_role_maintainers {
+                if !r.maintainers.contains(&pk) {
+                    r.maintainers.push(pk);
+                }
+            }
+        }
 
         for tag in event.tags.iter() {
             match tag.as_slice() {
@@ -219,16 +315,24 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
                         }
                     }
                 }
+                [t, ..] if is_role_tag_name(t) => {
+                    // consumed by the role-tag pass above and re-emitted
+                    // verbatim from `role_tags`
+                }
                 [t, maintainers @ ..] if t == "maintainers" => {
-                    if !maintainers.contains(&event.pubkey.to_string()) {
-                        r.maintainers.push(event.pubkey);
-                    }
-                    for pk in maintainers {
-                        r.maintainers.push(
-                            PublicKey::from_str(pk)
-                                .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
-                                .context("invalid repository event")?,
-                        );
+                    // deprecated per NIP-34: ignored entirely when indexed
+                    // role tags are present
+                    if !role_tags_present {
+                        if !maintainers.contains(&event.pubkey.to_string()) {
+                            r.maintainers.push(event.pubkey);
+                        }
+                        for pk in maintainers {
+                            r.maintainers.push(
+                                PublicKey::from_str(pk)
+                                    .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
+                                    .context("invalid repository event")?,
+                            );
+                        }
                     }
                 }
                 _ => {
@@ -250,8 +354,10 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             }
         }
 
-        // If no maintainers were added, add the event's public key
-        if r.maintainers.is_empty() {
+        // If no maintainers were added, add the event's public key. With role
+        // tags present an empty set is deliberate: it means the author's own
+        // entries have all ended (they left) and no other entry is active.
+        if r.maintainers.is_empty() && !role_tags_present {
             r.maintainers.push(event.pubkey);
         }
         r.events = HashMap::new();
@@ -356,6 +462,13 @@ impl RepoRef {
                             .unwrap(),
                         ]
                     },
+                    // NIP-34 indexed role tags carried over verbatim from
+                    // the source announcement. When present they are the
+                    // primary maintainer listing and the `maintainers` tag
+                    // emitted above degrades to the currently-active members
+                    // for older clients. ngit does not yet generate or edit
+                    // role tags itself.
+                    self.role_tags.clone(),
                     // Unknown tags carried over verbatim from the source
                     // announcement. See [`RepoRef::extra_tags`] and
                     // [`is_known_tag_name`]: ngit-known names never end up
@@ -1728,6 +1841,7 @@ mod tests {
             events: HashMap::new(),
             nostr_git_url: None,
             extra_tags: vec![],
+            role_tags: vec![],
         }
         .to_event(&TEST_KEY_1_SIGNER)
         .await
@@ -1756,6 +1870,7 @@ mod tests {
             events: HashMap::new(),
             nostr_git_url: None,
             extra_tags: vec![],
+            role_tags: vec![],
         }
     }
 
@@ -2096,6 +2211,224 @@ mod tests {
                     "malformed known private tag must not leak into extra_tags"
                 );
             }
+        }
+    }
+
+    /// NIP-34 indexed role tags (`M`/`m`): activeness by element count,
+    /// precedence over the deprecated `maintainers` tag, implicit author
+    /// membership, leaving via an ended self-entry, and verbatim re-emission.
+    mod role_tags {
+        use nostr::prelude::{EventBuilder, event::FinalizeEvent};
+
+        use super::*;
+
+        fn tag(parts: &[&str]) -> Vec<String> {
+            parts.iter().map(ToString::to_string).collect()
+        }
+
+        fn role_event(
+            keys: &nostr::prelude::Keys,
+            tags: Vec<Vec<String>>,
+        ) -> nostr::prelude::Event {
+            let mut event_tags = vec![Tag::identifier("test-repo")];
+            for t in tags {
+                event_tags.push(Tag::parse(t).unwrap());
+            }
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(event_tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        #[test]
+        fn entry_activeness_follows_element_count() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let other = nostr::prelude::Keys::generate().public_key();
+            let other_hex = other.to_string();
+
+            // (history values after the pubkey, expected active)
+            // Tag element counts: 2 -> active, 3 -> active, 4 -> ended,
+            // 5 -> active, 6 -> ended.
+            let cases: Vec<(Vec<&str>, bool)> = vec![
+                (vec![], true),
+                (vec!["100"], true),
+                (vec!["100", "200"], false),
+                (vec!["100", "200", "300"], true),
+                (vec!["100", "200", "300", "400"], false),
+            ];
+
+            for (history, expected_active) in cases {
+                let mut m_tag = vec!["m".to_string(), other_hex.clone()];
+                m_tag.extend(history.iter().map(ToString::to_string));
+                let event =
+                    role_event(&keys, vec![tag(&["M", &author.to_string()]), m_tag.clone()]);
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+                assert_eq!(
+                    parsed.maintainers.contains(&other),
+                    expected_active,
+                    "history {history:?} expected active={expected_active}"
+                );
+            }
+        }
+
+        #[test]
+        fn lead_and_co_maintainer_collapse_into_one_maintainer_set() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let listed_as_lead = nostr::prelude::Keys::generate().public_key();
+            let listed_as_co = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["M", &listed_as_lead.to_string()]),
+                    tag(&["m", &listed_as_co.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(
+                parsed.maintainers,
+                vec![author, listed_as_lead, listed_as_co]
+            );
+        }
+
+        #[test]
+        fn deprecated_maintainers_tag_is_ignored_when_role_tags_present() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let legacy_listed = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["maintainers", &legacy_listed.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author]);
+        }
+
+        #[test]
+        fn author_without_role_entry_is_implicitly_a_maintainer() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let other = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(&keys, vec![tag(&["m", &other.to_string()])]);
+            let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author, other]);
+            assert!(!announcement_author_has_left(&event));
+        }
+
+        #[test]
+        fn author_with_only_ended_entries_has_left() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["m", &author.to_string(), "0", "1700000000"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![lead]);
+            assert!(announcement_author_has_left(&event));
+
+            // an active self-entry means the author has not left
+            let active = role_event(&keys, vec![tag(&["M", &author.to_string()])]);
+            assert!(!announcement_author_has_left(&active));
+
+            // the deprecated format never records leaving
+            let legacy = role_event(&keys, vec![tag(&["maintainers", &lead.to_string()])]);
+            assert!(!announcement_author_has_left(&legacy));
+        }
+
+        #[test]
+        fn role_transition_is_active_while_either_entry_is_active() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let demoted = nostr::prelude::Keys::generate().public_key();
+            let gone = nostr::prelude::Keys::generate().public_key();
+
+            // one `M` and one `m` tag for the same pubkey record a transition
+            // between the roles: the pubkey is a maintainer while either
+            // entry is active, and no longer one when both have ended
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["M", &demoted.to_string(), "0", "100"]),
+                    tag(&["m", &demoted.to_string(), "100"]),
+                    tag(&["M", &gone.to_string(), "0", "100"]),
+                    tag(&["m", &gone.to_string(), "100", "200"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(parsed.maintainers.contains(&demoted));
+            assert!(!parsed.maintainers.contains(&gone));
+        }
+
+        #[test]
+        fn duplicate_same_letter_entries_are_consolidated() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let returning = nostr::prelude::Keys::generate().public_key();
+            let ended_twice = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["m", &returning.to_string(), "0", "100"]),
+                    tag(&["m", &returning.to_string(), "200"]),
+                    tag(&["m", &ended_twice.to_string(), "0", "100"]),
+                    tag(&["m", &ended_twice.to_string(), "200", "300"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(parsed.maintainers.contains(&returning));
+            assert!(!parsed.maintainers.contains(&ended_twice));
+        }
+
+        #[tokio::test]
+        async fn role_tags_round_trip_verbatim_and_degrade_maintainers_tag() {
+            let author = TEST_KEY_1_KEYS.public_key();
+            let active = nostr::prelude::Keys::generate().public_key();
+            let ended = nostr::prelude::Keys::generate().public_key();
+
+            let source_tags = vec![
+                tag(&["M", &author.to_string()]),
+                tag(&["m", &active.to_string(), "100"]),
+                tag(&["m", &ended.to_string(), "0", "100"]),
+            ];
+            let event = role_event(&TEST_KEY_1_KEYS, source_tags.clone());
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+
+            let emitted_role_tags: Vec<Vec<String>> = re_emitted
+                .tags
+                .iter()
+                .map(|t| t.as_slice().to_vec())
+                .filter(|s| s.first().is_some_and(|name| name == "M" || name == "m"))
+                .collect();
+            assert_eq!(emitted_role_tags, source_tags);
+
+            // the deprecated tag degrades to the currently-active members
+            let maintainers_tag = re_emitted
+                .tags
+                .iter()
+                .find(|t| t.as_slice()[0].eq("maintainers"))
+                .unwrap();
+            assert_eq!(
+                maintainers_tag.as_slice()[1..].to_vec(),
+                vec![author.to_string(), active.to_string()],
+            );
         }
     }
 
