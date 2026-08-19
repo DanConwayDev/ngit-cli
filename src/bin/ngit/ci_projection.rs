@@ -366,6 +366,10 @@ impl CiReport {
     /// that acts on a trust floor — the `--require-ci-trust` gate and
     /// `pr merge`'s warning — goes through here, so they cannot disagree
     /// about what "below the floor" means.
+    ///
+    /// What counts as a green conclusion is [`is_green`], the same predicate
+    /// the `pr list` glyph renders, so the gate and the glyphs cannot
+    /// disagree about that either.
     #[must_use]
     pub fn shortfall(&self, floor: CiTrustFloor) -> Option<String> {
         if self.state != CiState::Concluded {
@@ -374,7 +378,7 @@ impl CiReport {
                 self.state.as_str(),
             ));
         }
-        if self.conclusion != Some(Conclusion::Success) {
+        if !self.conclusion.is_some_and(is_green) {
             return Some(format!(
                 "CI concluded {}",
                 self.conclusion.map_or("unknown", Conclusion::as_str),
@@ -824,6 +828,10 @@ impl ListCiRow {
     /// A failure is a prompt to look rather than a verdict, so it carries no
     /// trust qualifier; only a passing result distinguishes "trust floor met"
     /// from "the weakest signer behind it has no known context".
+    ///
+    /// Which conclusions pass is [`is_green`], the predicate
+    /// [`CiReport::shortfall`] gates on, so `✓` is never a merge
+    /// `--require-ci-trust=operationally-associated` would refuse.
     #[must_use]
     pub fn glyph(&self) -> &'static str {
         match self.state {
@@ -831,7 +839,7 @@ impl ListCiRow {
             CiState::Stale => "~",
             CiState::None => "-",
             CiState::Concluded => {
-                if self.conclusion.is_some_and(is_passing) {
+                if self.conclusion.is_some_and(is_green) {
                     if self.trust_floor_met { "✓" } else { "✓?" }
                 } else {
                     "✗"
@@ -1131,9 +1139,20 @@ fn conclusion_severity(conclusion: Conclusion) -> u8 {
     }
 }
 
-/// Whether a conclusion is a pass. `cancelled` is not: nothing ran to
-/// completion, so it is grouped with the outcomes that ask for a look.
-fn is_passing(conclusion: Conclusion) -> bool {
+/// The one green predicate, read by every surface.
+///
+/// The `pr list` glyph calls it directly and [`CiReport::shortfall`] — the
+/// `--require-ci-trust` gate on `ngit ci status` and `ngit pr merge`, and
+/// `pr merge`'s unflagged warning — calls it for the rolled-up conclusion, so
+/// a row that renders `✓` can never be a merge the gate refuses.
+///
+/// `neutral` and `skipped` are green. They are *concluded* runs reporting
+/// that there was nothing to do, which is why the worst-of rollup already
+/// ranks them below `success` rather than above it; a workflow that decided
+/// it had no work must not be the reason a merge is blocked. `cancelled` is
+/// not green: nothing ran to completion, so it is grouped with the outcomes
+/// that ask for a look.
+fn is_green(conclusion: Conclusion) -> bool {
     conclusion_severity(conclusion) <= conclusion_severity(Conclusion::Success)
 }
 
@@ -1534,6 +1553,15 @@ mod tests {
             "✓",
             "skipped and neutral do not fail the rollup"
         );
+        assert_eq!(
+            row(CiState::Concluded, Some(Conclusion::Neutral), true).glyph(),
+            "✓"
+        );
+        assert_eq!(
+            row(CiState::Concluded, Some(Conclusion::Neutral), false).glyph(),
+            "✓?",
+            "a green non-success is qualified by trust like any other pass"
+        );
         assert_eq!(row(CiState::Running, None, false).glyph(), "…");
         assert_eq!(row(CiState::Stale, None, false).glyph(), "~");
         assert_eq!(row(CiState::None, None, false).glyph(), "-");
@@ -1807,5 +1835,84 @@ mod tests {
              evidence that met the floor"
         );
         assert!(unsettled.merge_warning().is_some());
+    }
+
+    #[test]
+    fn the_gate_and_the_glyph_agree_on_every_conclusion() {
+        // Trust is held at the strongest there is, so the only thing either
+        // surface can be reacting to is the conclusion itself.
+        for conclusion in [
+            Conclusion::Success,
+            Conclusion::Neutral,
+            Conclusion::Skipped,
+            Conclusion::Cancelled,
+            Conclusion::Failure,
+            Conclusion::TimedOut,
+            Conclusion::StartupFailure,
+        ] {
+            let report = rolled_up(
+                CiState::Concluded,
+                Some(conclusion),
+                TrustClassification::MaintainerDirected,
+            );
+            let green = is_green(conclusion);
+            assert_eq!(
+                report.shortfall(DEFAULT_TRUST_FLOOR).is_none(),
+                green,
+                "`{conclusion}` must gate exactly as the one green predicate \
+                 says",
+            );
+            assert_eq!(
+                report.merge_warning().is_none(),
+                green,
+                "`{conclusion}` must warn exactly as it gates",
+            );
+            assert_eq!(
+                row(CiState::Concluded, Some(conclusion), true).glyph() == "✓",
+                green,
+                "`{conclusion}` must render exactly as it gates: a row that \
+                 shows a pass is never a merge the gate refuses",
+            );
+        }
+    }
+
+    #[test]
+    fn a_neutral_or_skipped_conclusion_is_green_and_a_cancelled_one_is_not() {
+        // The verdicts the agreement above is agreement *on*: a workflow that
+        // concluded there was nothing to do does not block a merge, while a
+        // cancelled one — nothing ran to completion — does.
+        for conclusion in [Conclusion::Neutral, Conclusion::Skipped] {
+            let report = rolled_up(
+                CiState::Concluded,
+                Some(conclusion),
+                TrustClassification::OperationallyAssociated,
+            );
+            assert_eq!(
+                report.gate_failure(CiTrustFloor::OperationallyAssociated),
+                None,
+                "a concluded `{conclusion}` run meets the floor its trust met",
+            );
+            assert_eq!(report.merge_warning(), None);
+
+            // The trust floor still applies to it: green is about the
+            // conclusion, never about who signed it.
+            let weak = rolled_up(
+                CiState::Concluded,
+                Some(conclusion),
+                TrustClassification::NoKnownContext,
+            );
+            assert!(weak.shortfall(DEFAULT_TRUST_FLOOR).is_some());
+        }
+
+        let cancelled = rolled_up(
+            CiState::Concluded,
+            Some(Conclusion::Cancelled),
+            TrustClassification::MaintainerDirected,
+        );
+        assert!(
+            cancelled.shortfall(DEFAULT_TRUST_FLOOR).is_some(),
+            "nothing ran to completion, so cancelled is not green at any \
+             trust level"
+        );
     }
 }

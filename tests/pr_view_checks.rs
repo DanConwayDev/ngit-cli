@@ -468,6 +468,102 @@ async fn a_delegated_job_and_a_signer_with_no_context_are_labelled_separately() 
 }
 
 #[tokio::test]
+async fn a_neutral_or_skipped_conclusion_is_reported_and_gated_as_a_pass() -> Result<()> {
+    let arranged = arrange("view-green").await?;
+
+    // A confirmed maintainer's standing request covers both runs, so the
+    // only thing either surface can be reacting to is the conclusion.
+    let request = build_service_control(
+        &arranged.published.maintainer_keys,
+        &arranged.coordinator.public_key(),
+        &repo_coordinate(&arranged.published),
+        true,
+        arranged.now - 900,
+    )?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, std::slice::from_ref(&request))
+        .await?;
+
+    for (conclusion, run_id) in [("neutral", "run-neutral"), ("skipped", "run-skipped")] {
+        let pr: PublishedPr = arranged
+            .harness
+            .publish_pr(
+                &arranged.published,
+                PublishPrOpts {
+                    branch: None,
+                    commits: Vec::new(),
+                    title: format!("a pr whose ci concluded {conclusion}"),
+                    description: "body".to_string(),
+                    in_reply_to: Vec::new(),
+                },
+            )
+            .await?;
+        let spec = CiRunSpec::new(
+            &arranged.published,
+            run_id,
+            pr.tip.clone(),
+            CiTrigger::pull_request(&pr),
+            arranged.now,
+        )
+        .workflow("ci.yml", workflow_hash(WORKFLOW))
+        .started_at(arranged.now - 300)
+        .conclusion(Some(conclusion))
+        .provenance(CiProvenance::service_request(&request));
+        arranged
+            .harness
+            .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &spec)
+            .await?;
+
+        let id = pr.event_id.to_hex();
+        let (out, view) = pr_view(&arranged.publisher, &id, &[]).await?;
+        assert!(
+            out.status.success(),
+            "`ngit pr view` exited {:?}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(
+            view["ci"]["state"], "concluded",
+            "a run that concluded there was nothing to do has concluded: {view}"
+        );
+        assert_eq!(view["ci"]["conclusion"], conclusion, "{view}");
+        assert_eq!(runs(&view).len(), 1, "{view}");
+        assert_eq!(runs(&view)[0]["conclusion"], conclusion, "{view}");
+        assert_eq!(runs(&view)[0]["classification"], "maintainer-directed");
+
+        // The same result, read through the surface that acts on it: the
+        // Checks section and the trust gate share one green predicate, so a
+        // conclusion `pr view` shows as a pass is one the gate admits.
+        let (out, status) = ngit_json(
+            &arranged.publisher,
+            &[
+                "ci",
+                "status",
+                id.as_str(),
+                "--require-ci-trust",
+                "operationally-associated",
+                "--json",
+            ],
+        )
+        .await?;
+        assert!(
+            out.status.success(),
+            "`{conclusion}` is green for the gate exactly as it is for the \
+             Checks section: {status}"
+        );
+        assert_eq!(status["status"], "ok", "{status}");
+        assert_eq!(status["ci"]["state"], view["ci"]["state"], "{status}");
+        assert_eq!(
+            status["ci"]["conclusion"], view["ci"]["conclusion"],
+            "{status} vs {view}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_earlier_revisions_run_is_evidence_on_every_surface() -> Result<()> {
     let arranged = arrange("view-evidence").await?;
     let (pr, revision, first_tip, second_tip) = two_revision_pr(&arranged, "evidenced").await?;

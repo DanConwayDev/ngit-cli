@@ -109,6 +109,8 @@ async fn every_ci_state_gets_its_own_row() -> Result<()> {
         "running",
         "stale",
         "no ci",
+        "neutral",
+        "skipped",
     ];
     let mut prs: Vec<PublishedPr> = Vec::with_capacity(subjects.len());
     for (index, subject) in subjects.iter().enumerate() {
@@ -198,6 +200,23 @@ async fn every_ci_state_gets_its_own_row() -> Result<()> {
 
     // `-` — the sixth proposal has no CI events at all.
 
+    // ✓ — a workflow that concluded there was nothing to do. `neutral` and
+    // `skipped` are green by the same predicate the merge gate reads, so
+    // these rows render the pass a `--require-ci-trust` merge would allow.
+    for (index, conclusion, run_id) in
+        [(6, "neutral", "run-neutral"), (7, "skipped", "run-skipped")]
+    {
+        harness
+            .publish_ci_run(
+                &ci_relay,
+                &coordinator,
+                &spec(&prs[index], run_id)
+                    .conclusion(Some(conclusion))
+                    .provenance(CiProvenance::service_request(&request)),
+            )
+            .await?;
+    }
+
     let (out, json) = pr_list(&publisher).await?;
     assert!(
         out.status.success(),
@@ -258,6 +277,21 @@ async fn every_ci_state_gets_its_own_row() -> Result<()> {
         none["revision_matched"], true,
         "no CI at all is `no CI`, not `CI for something else`: {none}"
     );
+
+    // The glyph itself is human output and unit-tested against these fields;
+    // what the row must carry is a concluded, floor-meeting result, which is
+    // exactly what the merge gate accepts for the same conclusions.
+    for (index, conclusion) in [(6, "neutral"), (7, "skipped")] {
+        let green = row_ci(&json, subjects[index]);
+        assert_eq!(green["state"], "concluded", "{green}");
+        assert_eq!(green["conclusion"], conclusion, "{green}");
+        assert_eq!(
+            green["trust_floor_met"], true,
+            "a `{conclusion}` run the maintainer's standing request covers is \
+             a pass that meets the floor: {green}"
+        );
+        assert_eq!(green["classification"], "maintainer-directed", "{green}");
+    }
 
     Ok(())
 }

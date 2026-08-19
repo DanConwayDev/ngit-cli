@@ -371,7 +371,7 @@ reference left open:
   refusal. `ci status` therefore emits its full document — the `ci` object,
   plus `status: "error"` and the reason — and exits non-zero through
   `output::finish_and_exit`. The gate is evaluated on the rolled-up current
-  result: not `concluded`, not `success`, or a weakest run below the floor.
+  result: not `concluded`, not green, or a weakest run below the floor.
 - **A PR's `#E` anchor is not always the event ngit threads from.** When a
   patch thread is upgraded to a PR, ngit keeps the patch root as the thread's
   identity while every later PR update — and every CI event — references the
@@ -518,7 +518,8 @@ reference left open:
   failing without placing `cancelled`; nothing ran to completion, so it is
   grouped with the outcomes that ask for a look. `neutral` and `skipped`
   stay passes, consistent with the rollup that already refuses to let them
-  displace a real outcome.
+  displace a real outcome. Which conclusions pass is not decided here: the
+  glyph calls the same `is_green` the merge gate does (WP5).
 - **The column and its footer appear only when a listed PR has CI.** A
   repository with no CI gets no column of dashes and no legend. The footer
   is one line: it reads the glyphs and says what `?` means — the *weakest*
@@ -547,11 +548,25 @@ reference left open:
 
 - **One shortfall, two consequences.** `CiReport::gate_failure` was split:
   `shortfall(floor)` returns the bare reason a current result does not meet a
-  floor — not concluded, not `success`, or a weakest run below it — and the
+  floor — not concluded, not green, or a weakest run below it — and the
   gate is that reason prefixed with the flag that demanded it. `pr merge`'s
   warning is the same call at the default floor. The two surfaces therefore
   cannot drift into disagreeing about what "below the floor" means, and the
   refusal wording `ci status` already emits is unchanged.
+- **One green predicate, and every surface calls it.** `is_green` decides
+  which conclusions pass; the `pr list` glyph reads it directly and
+  `shortfall` reads it for the rolled-up conclusion, so the set of results
+  that render `✓` and the set a merge
+  `--require-ci-trust=operationally-associated` allows are the same set by
+  construction rather than by two implementations agreeing. They did not
+  agree at first: the glyph accepted `neutral`/`skipped` while the gate
+  compared against `success` alone, so `pr list` showed a pass the merge gate
+  refused. `neutral` and `skipped` are green. They are *concluded* runs
+  reporting that there was nothing to do, which is why the worst-of rollup
+  already ranks them below `success` rather than above it, and "block until
+  CI is green" is not a licence to block on a workflow that decided it had no
+  work. `cancelled` is not green — nothing ran to completion — and neither is
+  a target that has not concluded at all.
 - **The unnamed floor is `operationally-associated`.** The design fixed the
   floor only for an explicit `--require-ci-trust`; the warning needs one
   without a flag. It shares `pr list`'s, as `DEFAULT_TRUST_FLOOR`, so a row
@@ -748,6 +763,13 @@ For the PR's **latest revision** (root 1618 or newest 1619 tip):
   whether or not the workflows beside it did.
 - `none` — no CI events reference the PR.
 
+A target is **green** when it is `concluded` and the rolled-up conclusion is
+`success`, `neutral` or `skipped` — the concluded outcomes that are not a call
+to look. `cancelled` is not green, and neither is any state other than
+`concluded`. That definition lives in one predicate (`is_green`) which every
+surface calls, so "passing" cannot mean one thing in a table and another at a
+gate.
+
 Results for earlier revisions are never presented as current; the detail view
 lists them under an "outdated" heading.
 
@@ -773,7 +795,7 @@ one-line evidence summary — plus integrity marker and a trailing
 `context incomplete` caveat when coverage is partial. Exit code 0; with
 `--require-ci-trust=<maintainer-directed|operationally-associated>` exit
 non-zero when the rolled-up current result does not meet the floor or is not
-`success`. Supports `--offline` (cache tier only) and JSON output.
+green. Supports `--offline` (cache tier only) and JSON output.
 
 ### `ngit ci request|stop|trigger <coordinator>` (new commands)
 
@@ -811,7 +833,9 @@ Add a `CI` column computed from the cache tier:
 ```
 
 `cancelled` is not a pass: nothing ran to completion, so it renders `✗`.
-`neutral` and `skipped` are passes, as in the rollup. One footer line
+`neutral` and `skipped` are passes, as in the rollup — the glyph asks the same
+green predicate `--require-ci-trust` does, so `✓` is never a merge the gate
+would refuse for its conclusion. One footer line
 explains `?` and points at `ngit pr view`; column and footer appear only when
 a listed PR has CI. No network beyond the shared fetch; no NIP-05 lookups
 from the list path.
@@ -944,7 +968,9 @@ on WP1.
   coverage and a validated manual trigger, each isolated from the other's
   route, plus the cache tier under `--offline`), and the warning path —
   failing, running, a superseded revision, and a PR with no CI that must not
-  warn.
+  warn. A `neutral` and a `skipped` conclusion are exercised on every surface
+  that reads the green predicate — `ci status`, `pr list`, `pr view` and both
+  `pr merge` paths — asserting the one verdict.
 - **WP6 — maintainer controls** *(done)*: `ngit ci request|stop|trigger`
   publishing 9843/9844/9840 (trigger computes `w` hash from the local blob and
   peel-verifies `c` tags). These create the Level 1 evidence WP1 consumes.

@@ -856,6 +856,79 @@ async fn require_ci_trust_gates_on_the_weakest_current_run() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_neutral_or_skipped_conclusion_passes_the_gate_and_a_cancelled_one_does_not() -> Result<()>
+{
+    let arranged = arrange("ci-green").await?;
+    let hash = workflow_hash(WORKFLOW);
+
+    // A confirmed maintainer's standing request covers every run below, so
+    // the only thing the gate can be reacting to is the conclusion itself.
+    let request = build_service_control(
+        &arranged.published.maintainer_keys,
+        &arranged.coordinator.public_key(),
+        &repo_coordinate(&arranged.published),
+        true,
+        arranged.now - 900,
+    )?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, std::slice::from_ref(&request))
+        .await?;
+
+    // One commit per conclusion, so no run is ever rolled up with another.
+    for (file, run_id, conclusion, green) in [
+        ("neutral.md", "run-neutral", "neutral", true),
+        ("skipped.md", "run-skipped", "skipped", true),
+        // The control: `cancelled` is a concluded run too, and nothing ran to
+        // completion, so it is refused at the same trust.
+        ("cancelled.md", "run-cancelled", "cancelled", false),
+    ] {
+        let commit = commit_file(&arranged.publisher, file, conclusion).await?;
+        let spec = CiRunSpec::new(
+            &arranged.published,
+            run_id,
+            commit.clone(),
+            CiTrigger::push("refs/heads/main"),
+            arranged.now,
+        )
+        .workflow("ci.yml", hash.clone())
+        .started_at(arranged.now - 300)
+        .conclusion(Some(conclusion))
+        .provenance(CiProvenance::service_request(&request));
+        arranged
+            .harness
+            .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &spec)
+            .await?;
+
+        let (out, json) = ci_status(
+            &arranged.publisher,
+            &[
+                commit.as_str(),
+                "--require-ci-trust",
+                "operationally-associated",
+            ],
+        )
+        .await?;
+        assert_eq!(json["ci"]["state"], "concluded", "{json}");
+        assert_eq!(json["ci"]["conclusion"], conclusion, "{json}");
+        assert_eq!(
+            runs(&json)[0]["classification"],
+            "maintainer-directed",
+            "the gate's verdict below is about the conclusion, not the \
+             trust: {json}"
+        );
+        assert_eq!(
+            out.status.success(),
+            green,
+            "`{conclusion}` must gate as the shared green predicate says: {json}"
+        );
+        assert_eq!(json["status"], if green { "ok" } else { "error" }, "{json}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_validated_manual_trigger_is_maintainer_direction_for_its_run() -> Result<()> {
     let arranged = arrange("ci-manual").await?;
     let head = arranged.publisher.rev_parse("HEAD").await?;

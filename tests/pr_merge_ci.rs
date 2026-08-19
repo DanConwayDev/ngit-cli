@@ -663,6 +663,106 @@ async fn require_ci_trust_allows_a_merge_backed_by_maintainer_direction() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn a_neutral_or_skipped_conclusion_is_merged_rather_than_refused_or_warned_about()
+-> Result<()> {
+    let arranged = arrange("merge-green").await?;
+    // Both runs rest on this standing request through the control history,
+    // so the only thing the gate and the warning can be reacting to is the
+    // conclusion.
+    arranged.service_request().await?;
+
+    let neutral = arranged.open_pr("neutral").await?;
+    arranged
+        .publish_run(
+            &arranged.coordinator,
+            &arranged.run_spec(&neutral, "run-neutral", "neutral"),
+        )
+        .await?;
+
+    let skipped = arranged.open_pr("skipped").await?;
+    arranged
+        .publish_run(
+            &arranged.coordinator,
+            &arranged.run_spec(&skipped, "run-skipped", "skipped"),
+        )
+        .await?;
+
+    arranged
+        .publisher
+        .git_ok(["fetch", "origin"], "git fetch origin")
+        .await?;
+
+    // A workflow that concluded there was nothing to do is green: the floor
+    // it meets is its trust's, and the conclusion is no obstacle.
+    let main_before = arranged.publisher.rev_parse("main").await?;
+    let (out, json) = pr_merge(
+        &arranged.publisher,
+        &neutral.event_id.to_hex(),
+        &["--require-ci-trust", "operationally-associated"],
+    )
+    .await?;
+    assert!(
+        out.status.success(),
+        "a `neutral` conclusion must not block a merge the same result \
+         renders as a pass elsewhere: {json}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(json["status"], "ok", "{json}");
+    assert_eq!(json["ci"]["state"], "concluded", "{json}");
+    assert_eq!(json["ci"]["conclusion"], "neutral", "{json}");
+    assert_eq!(
+        json["ci"]["runs"][0]["classification"], "maintainer-directed",
+        "{json}"
+    );
+    assert_eq!(json["ci_warning"], Value::Null, "{json}");
+    assert_merged(&arranged, &neutral, &main_before).await?;
+
+    // `ngit ci status` reads the same predicate, so it admits the same
+    // target rather than refusing what the merge allowed.
+    let id = skipped.event_id.to_hex();
+    let out = arranged
+        .publisher
+        .ngit(vec![
+            "ci",
+            "status",
+            id.as_str(),
+            "--require-ci-trust",
+            "operationally-associated",
+            "--json",
+        ])
+        .output()
+        .await
+        .context("failed to spawn `ngit ci status`")?;
+    let status: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .context("`ngit ci status` stdout is not valid JSON")?;
+    assert!(
+        out.status.success(),
+        "the surfaces must not disagree about what is green: {status}"
+    );
+    assert_eq!(status["ci"]["conclusion"], "skipped", "{status}");
+
+    // And with no floor demanded there is nothing to say about it: a green
+    // result is not a failing, unfinished or weakly-signed one.
+    let main_before = arranged.publisher.rev_parse("main").await?;
+    let (out, json) = pr_merge(&arranged.publisher, &id, &[]).await?;
+    assert!(
+        out.status.success(),
+        "{json}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(json["ci"]["conclusion"], "skipped", "{json}");
+    assert_eq!(
+        json["ci_warning"],
+        Value::Null,
+        "a `skipped` conclusion is a pass, so merging past it is not warned \
+         about: {json}"
+    );
+    assert_merged(&arranged, &skipped, &main_before).await?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Warn: without the flag a shortfall is reported, and the merge proceeds.
 // ---------------------------------------------------------------------------
