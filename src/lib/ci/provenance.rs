@@ -9,9 +9,14 @@
 //!
 //! Nothing here fetches. The caller supplies whatever quoted events it has
 //! (from the local nostr cache, or from a relay fetch in the full tier) and
-//! receives back the ids that passed, which is exactly the
-//! `validated_provenance` set [`crate::ci::trust::run_trust_resolution`] and
-//! [`crate::ci::controls::run_maintainer_link`] take.
+//! receives back one [`ValidatedProvenance`] verdict per run that passed,
+//! which is exactly the `validated_provenance` set
+//! [`crate::ci::trust::run_trust_resolution`] and
+//! [`crate::ci::controls::run_maintainer_link`] take. A verdict names the run
+//! it was reached for, because validation is a statement about that run: the
+//! same Manual Trigger authorizes one run's workflow and commit and says
+//! nothing about the next, so a verdict must never transfer by quoted id
+//! alone.
 
 use std::{collections::HashMap, fmt};
 
@@ -131,6 +136,45 @@ impl fmt::Display for RejectedProvenance {
     }
 }
 
+/// A run whose frozen quote was checked against the quoted event and held.
+///
+/// The verdict is scoped to the run it was reached for. A quoted id alone
+/// would not be: a Manual Trigger authorizes one workflow, commit and
+/// pull-request context, so a run that matches it legitimizes only itself,
+/// and a Service Request is checked against the coordinator each run names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ValidatedProvenance {
+    pub coordinator: PublicKey,
+    pub run_id: String,
+    /// The quoted request's event id.
+    pub quote: EventId,
+}
+
+impl ValidatedProvenance {
+    /// The verdict for the run whose quote checked out.
+    ///
+    /// Constructing one is how a run gains maintainer direction, so this stays
+    /// inside `ci`: outside it, a verdict is only obtainable from
+    /// [`validate_run_provenance`].
+    pub(super) fn for_run(run: &WorkflowRun, quote: EventId) -> Self {
+        Self {
+            coordinator: run.coordinator,
+            run_id: run.run_id.clone(),
+            quote,
+        }
+    }
+
+    /// Whether this verdict was reached for `run`'s own frozen quote.
+    #[must_use]
+    pub fn covers(&self, run: &WorkflowRun) -> bool {
+        self.coordinator == run.coordinator
+            && self.run_id == run.run_id
+            && run
+                .provenance()
+                .is_some_and(|quote| quote.event_id == self.quote)
+    }
+}
+
 /// A quoted request a run needs before its provenance can be checked.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WantedQuote {
@@ -156,8 +200,8 @@ impl From<&ProvenanceQuote> for WantedQuote {
 /// The outcome of validating every run's frozen quote.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProvenanceOutcome {
-    /// Quote ids that passed, for `validated_provenance`.
-    pub validated: Vec<EventId>,
+    /// Runs whose quote passed, for `validated_provenance`.
+    pub validated: Vec<ValidatedProvenance>,
     pub rejected: Vec<RejectedProvenance>,
     /// Quotes whose event the caller did not supply. These are neither
     /// evidence nor a negative finding: the query is simply unresolved, which
@@ -183,6 +227,9 @@ pub fn wanted_quotes(runs: &[WorkflowRun]) -> Vec<WantedQuote> {
 
 /// Validate one run's frozen provenance quote against the quoted event.
 ///
+/// The verdict is [`ValidatedProvenance`] for *this* run: passing here says
+/// nothing about another run that quotes the same request.
+///
 /// # Errors
 ///
 /// Returns the [`ProvenanceRejection`] the quote failed on. A rejection is
@@ -193,7 +240,7 @@ pub fn validate_run_provenance(
     quoted: &Event,
     confirmed_maintainers: &[PublicKey],
     closure_coordinates: &[Coordinate],
-) -> Result<EventId, ProvenanceRejection> {
+) -> Result<ValidatedProvenance, ProvenanceRejection> {
     let quote = run.provenance().ok_or(ProvenanceRejection::NoQuote)?;
 
     if quoted.id != quote.event_id {
@@ -245,7 +292,7 @@ pub fn validate_run_provenance(
         }
     }
 
-    Ok(quote.event_id)
+    Ok(ValidatedProvenance::for_run(run, quote.event_id))
 }
 
 /// Validate every run's quote against the supplied events.
@@ -276,9 +323,9 @@ pub fn validate_run_quotes(
             continue;
         };
         match validate_run_provenance(run, quoted, confirmed_maintainers, closure_coordinates) {
-            Ok(event_id) => {
-                if !outcome.validated.contains(&event_id) {
-                    outcome.validated.push(event_id);
+            Ok(validated) => {
+                if !outcome.validated.contains(&validated) {
+                    outcome.validated.push(validated);
                 }
             }
             Err(reason) => outcome.rejected.push(RejectedProvenance {
@@ -369,7 +416,7 @@ pub(crate) mod tests {
 
     use super::{
         super::{
-            controls::tests::quoted_run,
+            controls::{RunMaintainerLink, run_maintainer_link, tests::quoted_run},
             kinds::{
                 KIND_REPO_ANNOUNCEMENT, MARKER_MANUAL_TRIGGER, MARKER_SERVICE_REQUEST,
                 test_events::*,
@@ -405,7 +452,7 @@ pub(crate) mod tests {
     }
 
     /// A Manual Trigger from `maintainer` and the run that quotes it.
-    fn manual_trigger_run(
+    pub(crate) fn manual_trigger_run(
         coordinator: &Keys,
         owner: &Keys,
         maintainer: &Keys,
@@ -456,7 +503,7 @@ pub(crate) mod tests {
                 &[maintainer.public_key()],
                 &[perspective(&owner)]
             ),
-            Ok(request.id)
+            Ok(ValidatedProvenance::for_run(&run, request.id))
         );
     }
 
@@ -474,7 +521,7 @@ pub(crate) mod tests {
                 &[maintainer.public_key()],
                 &[perspective(&owner)]
             ),
-            Ok(trigger.id)
+            Ok(ValidatedProvenance::for_run(&run, trigger.id))
         );
     }
 
@@ -1045,15 +1092,81 @@ pub(crate) mod tests {
         ]
         .into_iter()
         .collect();
+        let runs = [requested_run, strangers_run];
         let outcome = validate_run_quotes(
-            &[requested_run, strangers_run],
+            &runs,
             &quoted,
             &[maintainer.public_key()],
             &[perspective(&owner)],
         );
-        assert_eq!(outcome.validated, vec![request.id]);
+        assert_eq!(
+            outcome.validated,
+            vec![ValidatedProvenance::for_run(&runs[0], request.id)]
+        );
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].quote, strangers_request.id);
         assert!(outcome.unavailable.is_empty());
+    }
+
+    /// A run that quotes `quote_id` but ran a different commit.
+    pub(crate) fn run_on_another_commit(
+        coordinator: &Keys,
+        owner: &Keys,
+        requester: &Keys,
+        run_id: &str,
+        quote_id: EventId,
+    ) -> WorkflowRun {
+        let base = workflow_result(coordinator, owner, run_id, 100);
+        let event = with_tags(coordinator, &base, |tags| {
+            tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("c"));
+            tags.extend([
+                tag(&["c", &"9".repeat(40)]),
+                tag(&[
+                    "q",
+                    &quote_id.to_hex(),
+                    "wss://relay.example",
+                    &requester.public_key().to_hex(),
+                    MARKER_MANUAL_TRIGGER,
+                ]),
+            ]);
+        });
+        let grouped = super::super::events::group_workflow_runs(std::slice::from_ref(&event));
+        assert!(grouped.skipped.is_empty(), "{:?}", grouped.skipped);
+        grouped.runs.into_iter().next().expect("one run")
+    }
+
+    #[test]
+    fn a_validated_trigger_does_not_legitimize_another_run_quoting_it() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        // Both runs quote the same Manual Trigger; only `authorized` ran the
+        // workflow and commit the maintainer authorized.
+        let (trigger, authorized) = manual_trigger_run(&coordinator, &owner, &maintainer);
+        let replayed =
+            run_on_another_commit(&coordinator, &owner, &maintainer, "run-2", trigger.id);
+        let quoted: HashMap<EventId, Event> = [(trigger.id, trigger.clone())].into_iter().collect();
+        let maintainers = [maintainer.public_key()];
+
+        let runs = [authorized, replayed];
+        let outcome = validate_run_quotes(&runs, &quoted, &maintainers, &[perspective(&owner)]);
+        assert_eq!(
+            outcome.validated,
+            vec![ValidatedProvenance::for_run(&runs[0], trigger.id)],
+            "the verdict names the run it was reached for"
+        );
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(outcome.rejected[0].run_id, "run-2");
+
+        // The verdict covers only that run, so the mismatching one gains no
+        // maintainer direction from its neighbour's quote.
+        assert_eq!(
+            run_maintainer_link(&runs[0], &maintainers, &outcome.validated),
+            Some(RunMaintainerLink::Manual)
+        );
+        assert_eq!(
+            run_maintainer_link(&runs[1], &maintainers, &outcome.validated),
+            None
+        );
     }
 }

@@ -42,7 +42,7 @@ use super::{
     },
     events::WorkflowRun,
     kinds::{JobResult, ServiceControl},
-    provenance::{self, RejectedProvenance, WantedQuote},
+    provenance::{self, RejectedProvenance, ValidatedProvenance, WantedQuote},
     trust::{
         CONTEXT_INCOMPLETE_LABEL, Coverage, TrustClassification, TrustContextState,
         TrustResolution, job_trust_resolution, relationship_evidence, run_trust_resolution,
@@ -168,10 +168,11 @@ pub struct CiTrustContext {
     /// Repository-to-coordinator relationship tiers.
     pub relationships: HashMap<PublicKey, CoordinatorRelationship>,
     // The provenance verdicts and the repository facts they were reached
-    // from are private: an id only enters `validated_provenance` by passing
-    // `provenance::validate_run_provenance`, and a caller that could push
-    // into it could manufacture maintainer direction for any run.
-    validated_provenance: Vec<EventId>,
+    // from are private: a verdict only enters `validated_provenance` by
+    // passing `provenance::validate_run_provenance` for the run it names, and
+    // a caller that could push into it could manufacture maintainer direction
+    // for any run.
+    validated_provenance: Vec<ValidatedProvenance>,
     rejected_provenance: Vec<RejectedProvenance>,
     unavailable_provenance: Vec<WantedQuote>,
     confirmed_maintainers: Vec<PublicKey>,
@@ -198,9 +199,10 @@ impl CiTrustContext {
         }
     }
 
-    /// Quote ids that passed provenance validation.
+    /// Runs whose quote passed provenance validation, each verdict scoped to
+    /// the run it was reached for.
     #[must_use]
-    pub fn validated_provenance(&self) -> &[EventId] {
+    pub fn validated_provenance(&self) -> &[ValidatedProvenance] {
         &self.validated_provenance
     }
 
@@ -477,7 +479,9 @@ mod tests {
             controls::CoordinatorRelationshipLevel,
             domain::tests::StubNip05Lookup,
             kinds::test_events::*,
-            provenance::tests::{perspective, service_request_run},
+            provenance::tests::{
+                manual_trigger_run, perspective, run_on_another_commit, service_request_run,
+            },
             trust::{EvidenceScope, TrustEvidenceKind},
         },
         *,
@@ -534,7 +538,10 @@ mod tests {
         assert!(context.is_incomplete());
         // The locally cached quote is still validated, so the run keeps its
         // maintainer direction.
-        assert_eq!(context.validated_provenance(), vec![request.id]);
+        assert_eq!(
+            context.validated_provenance(),
+            vec![ValidatedProvenance::for_run(&runs[0], request.id)]
+        );
         assert_eq!(
             context.run_resolution(&runs[0]).classification(),
             Some(TrustClassification::MaintainerDirected)
@@ -717,7 +724,10 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(fetched.validated_provenance(), vec![request.id]);
+        assert_eq!(
+            fetched.validated_provenance(),
+            vec![ValidatedProvenance::for_run(&runs[0], request.id)]
+        );
         assert_eq!(
             fetched.run_resolution(&runs[0]).classification(),
             Some(TrustClassification::MaintainerDirected)
@@ -772,6 +782,53 @@ mod tests {
         assert_eq!(
             context.run_resolution(&runs[0]).classification(),
             Some(TrustClassification::NoKnownContext)
+        );
+    }
+
+    #[test]
+    fn a_trigger_validated_for_one_run_does_not_legitimize_another() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        // Both runs quote the same Manual Trigger; the second ran a commit
+        // the maintainer never authorized.
+        let (trigger, authorized) = manual_trigger_run(&coordinator, &owner, &maintainer);
+        let replayed =
+            run_on_another_commit(&coordinator, &owner, &maintainer, "run-2", trigger.id);
+        let repository = repository(&owner, &maintainer);
+        let quoted: HashMap<EventId, Event> = [(trigger.id, trigger.clone())].into_iter().collect();
+        let profiles = HashMap::new();
+        let runs = [authorized, replayed];
+
+        let context = resolve_cache_tier(&CiInputs::new(
+            &repository,
+            &runs,
+            &[],
+            &quoted,
+            &profiles,
+            ts(1_000),
+        ));
+        assert_eq!(
+            context.validated_provenance(),
+            vec![ValidatedProvenance::for_run(&runs[0], trigger.id)]
+        );
+        assert_eq!(
+            context.run_resolution(&runs[0]).classification(),
+            Some(TrustClassification::MaintainerDirected)
+        );
+        assert_eq!(
+            context.run_resolution(&runs[1]).classification(),
+            // The coordinator identity keeps the earlier direction the
+            // authorized run established, but this run gains none of its own.
+            Some(TrustClassification::OperationallyAssociated),
+            "the trigger authorized the other run, so this one is not directed"
+        );
+        assert_eq!(context.rejected_provenance().len(), 1);
+        // The gate reads the rollup, which the unauthorized run must weaken
+        // below the maintainer-directed floor.
+        assert_eq!(
+            context.summarize(&runs).classification(),
+            Some(TrustClassification::OperationallyAssociated)
         );
     }
 

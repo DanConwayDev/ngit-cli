@@ -17,11 +17,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nostr::prelude::{Coordinate, EventId, PublicKey, Timestamp};
+use nostr::prelude::{Coordinate, PublicKey, Timestamp};
 
 use super::{
     events::WorkflowRun,
     kinds::{ProvenanceKind, ServiceControl},
+    provenance::ValidatedProvenance,
     total_order_position,
 };
 
@@ -70,20 +71,25 @@ pub enum RunMaintainerLink {
 ///
 /// A coordinator-authored `q` tag naming a maintainer pubkey is the
 /// coordinator's own claim, not evidence. `validated_provenance` holds the
-/// ids of quoted requests that have been fetched and checked — event id,
+/// verdicts reached by fetching and checking quoted requests — event id,
 /// kind, author, repository, coordinator and run context — so a link is only
-/// reported for a quote in that set whose requester is a confirmed
-/// maintainer. Callers with no validation available pass an empty slice and
-/// get `None`, which is the safe direction: the control-history reduction
-/// remains available as independent evidence.
+/// reported when a verdict covers *this* run and its requester is a confirmed
+/// maintainer. A verdict reached for another run is not evidence here, even
+/// when both runs quote the same request: the check that passed there was
+/// against that run's workflow, commit and pull-request context. Callers with
+/// no validation available pass an empty slice and get `None`, which is the
+/// safe direction: the control-history reduction remains available as
+/// independent evidence.
 #[must_use]
 pub fn run_maintainer_link(
     run: &WorkflowRun,
     confirmed_maintainers: &[PublicKey],
-    validated_provenance: &[EventId],
+    validated_provenance: &[ValidatedProvenance],
 ) -> Option<RunMaintainerLink> {
     let quote = run.provenance()?;
-    if !validated_provenance.contains(&quote.event_id)
+    if !validated_provenance
+        .iter()
+        .any(|validated| validated.covers(run))
         || !confirmed_maintainers.contains(&quote.requester)
     {
         return None;
@@ -259,7 +265,7 @@ pub fn classify_coordinator_relationships(
     requested_coordinator_pubkeys: &HashSet<PublicKey>,
     previously_requested_coordinator_pubkeys: &HashSet<PublicKey>,
     controls: &[ServiceControl],
-    validated_provenance: &[EventId],
+    validated_provenance: &[ValidatedProvenance],
 ) -> HashMap<PublicKey, CoordinatorRelationship> {
     let mut relationships: HashMap<PublicKey, CoordinatorRelationship> = HashMap::new();
 
@@ -312,7 +318,7 @@ pub fn coordinator_relationship(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use nostr::prelude::Keys;
+    use nostr::prelude::{EventId, Keys};
 
     use super::{
         super::{
@@ -388,6 +394,11 @@ pub(crate) mod tests {
         EventId::from_slice(&[byte; 32]).unwrap()
     }
 
+    /// The verdict `validate_run_quotes` reaches for a run whose quote held.
+    pub(crate) fn validated(run: &WorkflowRun) -> ValidatedProvenance {
+        ValidatedProvenance::for_run(run, run.provenance().expect("a quoted run").event_id)
+    }
+
     #[test]
     fn validated_run_provenance_counts_toward_the_previous_relationship() {
         let coordinator = Keys::generate();
@@ -414,13 +425,14 @@ pub(crate) mod tests {
             ),
         ];
 
+        let validated_provenance = vec![validated(&runs[0]), validated(&runs[1])];
         let relationships = classify_coordinator_relationships(
             &runs,
             &[maintainer.public_key()],
             &HashSet::new(),
             &HashSet::new(),
             &[],
-            &[manual, service],
+            &validated_provenance,
         );
         let relationship = coordinator_relationship(&relationships, &coordinator.public_key());
         assert_eq!(
@@ -469,6 +481,59 @@ pub(crate) mod tests {
         );
         assert_eq!(relationship.manual_run_count, 0);
         assert!(relationship.requester_pubkeys.is_empty());
+    }
+
+    #[test]
+    fn a_verdict_reached_for_one_run_does_not_link_another_quoting_it() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let quote = quote_id(0xa1);
+        // Two runs quote the same trigger; validation held for the first only.
+        let runs = vec![
+            quoted_run(
+                &coordinator,
+                &owner,
+                &maintainer,
+                "run-1",
+                quote,
+                MARKER_MANUAL_TRIGGER,
+            ),
+            quoted_run(
+                &coordinator,
+                &owner,
+                &maintainer,
+                "run-2",
+                quote,
+                MARKER_MANUAL_TRIGGER,
+            ),
+        ];
+        let maintainers = [maintainer.public_key()];
+        let validated_provenance = vec![validated(&runs[0])];
+
+        assert_eq!(
+            run_maintainer_link(&runs[0], &maintainers, &validated_provenance),
+            Some(RunMaintainerLink::Manual)
+        );
+        assert_eq!(
+            run_maintainer_link(&runs[1], &maintainers, &validated_provenance),
+            None,
+            "the quoted id alone is not the second run's evidence"
+        );
+
+        let relationships = classify_coordinator_relationships(
+            &runs,
+            &maintainers,
+            &HashSet::new(),
+            &HashSet::new(),
+            &[],
+            &validated_provenance,
+        );
+        assert_eq!(
+            coordinator_relationship(&relationships, &coordinator.public_key()).manual_run_count,
+            1,
+            "only the validated run counts"
+        );
     }
 
     #[test]

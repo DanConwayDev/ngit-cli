@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use nostr::prelude::{Coordinate, EventId, PublicKey};
+use nostr::prelude::{Coordinate, PublicKey};
 
 use super::{
     controls::{
@@ -19,6 +19,7 @@ use super::{
     },
     events::WorkflowRun,
     kinds::{JobResult, ServiceControl},
+    provenance::ValidatedProvenance,
 };
 
 /// The canonical caveat shown when evidence queries did not all settle.
@@ -288,9 +289,9 @@ pub fn trust_resolution(state: Option<&TrustContextState>, pubkey: &PublicKey) -
 /// Identity-level `maintainer-request` evidence with `current` scope is
 /// dropped, then run-scoped evidence is added when either
 ///
-/// - the run's frozen quote is in `validated_provenance` — the ids of quoted
-///   requests already fetched and checked — and names a confirmed maintainer;
-///   or
+/// - a verdict in `validated_provenance` — the quoted requests already fetched
+///   and checked, each scoped to the run it was checked against — covers this
+///   run and names a confirmed maintainer; or
 /// - reducing the immutable control history shows a maintainer's Service
 ///   Request was active when the run started.
 ///
@@ -303,7 +304,7 @@ pub fn run_trust_resolution(
     confirmed_maintainers: &[PublicKey],
     service_controls: &[ServiceControl],
     perspectives: &[Coordinate],
-    validated_provenance: &[EventId],
+    validated_provenance: &[ValidatedProvenance],
 ) -> TrustResolution {
     let TrustResolution::Settled {
         evidence, coverage, ..
@@ -526,20 +527,20 @@ pub fn relationship_evidence(relationship: Option<&CoordinatorRelationship>) -> 
 
 #[cfg(test)]
 mod tests {
-    use nostr::prelude::{Event, Keys};
+    use nostr::prelude::{Event, EventId, Keys};
 
     use super::{
         super::{
-            controls::tests::{control, quoted_run},
+            controls::tests::{control, quoted_run, validated},
             events::group_workflow_runs,
             kinds::{KIND_REPO_ANNOUNCEMENT, test_events::*},
         },
         *,
     };
 
-    /// The id of the request a run quotes. Tests pass it in
-    /// `validated_provenance` only when the quote is meant to have been
-    /// fetched and checked.
+    /// The id of the request a run quotes. Tests build a verdict for it with
+    /// `validated` only when the quote is meant to have been fetched and
+    /// checked for that run.
     fn request_id() -> EventId {
         EventId::from_slice(&[0xaa; 32]).unwrap()
     }
@@ -624,6 +625,16 @@ mod tests {
         let owner = Keys::generate();
         let maintainer = Keys::generate();
         let run = run_with_quote(&coordinator, &owner, &maintainer, "manual-trigger");
+        // A sibling run quoting the same request, whose quote checked out
+        // against *its* context.
+        let sibling = quoted_run(
+            &coordinator,
+            &owner,
+            &maintainer,
+            "run-2",
+            request_id(),
+            "manual-trigger",
+        );
         let state = settled_state(Vec::new(), Coverage::Complete);
 
         let resolution = run_trust_resolution(
@@ -632,11 +643,19 @@ mod tests {
             &[maintainer.public_key()],
             &[],
             &[perspective(&owner)],
-            &[EventId::from_slice(&[0xcc; 32]).unwrap()],
+            &[
+                validated(&sibling),
+                ValidatedProvenance {
+                    coordinator: coordinator.public_key(),
+                    run_id: run.run_id.clone(),
+                    quote: EventId::from_slice(&[0xcc; 32]).unwrap(),
+                },
+            ],
         );
         assert_eq!(
             resolution.classification(),
-            Some(TrustClassification::NoKnownContext)
+            Some(TrustClassification::NoKnownContext),
+            "neither another run's verdict nor another quote's is this run's"
         );
     }
 
@@ -712,7 +731,7 @@ mod tests {
             &[maintainer.public_key()],
             &[],
             &[perspective(&owner)],
-            &[request_id()],
+            &[validated(&run)],
         );
         assert_eq!(
             resolution.classification(),
@@ -742,7 +761,7 @@ mod tests {
             &[Keys::generate().public_key()],
             &[],
             &[perspective(&owner)],
-            &[request_id()],
+            &[validated(&run)],
         );
         assert_eq!(
             resolution.classification(),
@@ -764,7 +783,7 @@ mod tests {
             &[maintainer.public_key()],
             &[],
             &[perspective(&owner)],
-            &[request_id()],
+            &[validated(&run)],
         );
         let item = &resolution.evidence()[0];
         assert_eq!(item.summary, "Covered by a maintainer request");
@@ -1221,7 +1240,7 @@ mod tests {
             &[maintainer.public_key()],
             &[],
             &[perspective(&owner)],
-            &[request_id()],
+            &[validated(&run)],
         );
         let kinds: Vec<TrustEvidenceKind> =
             resolution.evidence().iter().map(|item| item.kind).collect();

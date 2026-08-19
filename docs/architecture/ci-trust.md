@@ -135,11 +135,20 @@ reference left open:
 - **A frozen quote is only evidence once validated.** Rule 4 is enforced at
   this layer by construction: `run_maintainer_link` and
   `run_trust_resolution` take a caller-supplied `validated_provenance` set of
-  quote ids that WP2 has fetched and checked, and report maintainer direction
-  only for a quote in that set whose requester is a confirmed maintainer.
-  With an empty set — every caller until WP2 lands — an unvalidated quote
-  contributes nothing, and only the control-history reduction can establish
-  maintainer direction.
+  verdicts that WP2 has fetched and checked, and report maintainer direction
+  only for a verdict covering *this* run whose requester is a confirmed
+  maintainer. With an empty set — every caller until WP2 lands — an
+  unvalidated quote contributes nothing, and only the control-history
+  reduction can establish maintainer direction.
+- **A verdict is scoped to the run it was reached for.** A validated quote is
+  a `ValidatedProvenance { coordinator, run_id, quote }`, not a bare event id,
+  and `covers(run)` requires all three to match the run's own frozen quote.
+  Keying by quoted id alone would let one run's valid quote legitimize every
+  other run referencing it: a Manual Trigger authorizes one workflow, commit
+  and pull-request context, so a coordinator could replay the id on a run the
+  maintainer never authorized and satisfy `--require-ci-trust
+  maintainer-directed`. A Service Request is likewise checked against the
+  coordinator the quoting run names.
 - **Strict shapes, skipped with a reason.** `kinds.rs` rejects an event that
   breaks a NIP MUST rather than reinterpreting it: a Job Result quoting a
   Service Request; a *queued* Progress carrying the `service-request` quote
@@ -279,9 +288,9 @@ reference left open:
   every per-run reduction later reads.
 - **Provenance verdicts are read-only.** `validated_provenance`,
   `rejected_provenance` and `unavailable_provenance` are private with
-  accessors, like the repository facts beside them: an id enters the
-  validated set only by passing `validate_run_provenance`, so no caller can
-  manufacture maintainer direction for a run.
+  accessors, like the repository facts beside them: a verdict enters the
+  validated set only by passing `validate_run_provenance` for the run it
+  names, so no caller can manufacture maintainer direction for a run.
 - **Callers declare their own coverage.** `CiInputs::input_coverage` carries
   the settlement of the caller's relay queries into the context, so a failed
   relay makes the whole context partial even when every check this layer
