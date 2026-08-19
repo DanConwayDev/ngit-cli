@@ -290,7 +290,7 @@ pub fn resolve_cache_tier(inputs: &CiInputs<'_>) -> CiTrustContext {
         &inputs.repository.coordinates,
     );
     let controls = controls_in_closure(inputs);
-    let coverage = if signers(inputs.runs, &controls).is_empty() {
+    let coverage = if described_signers(inputs.runs, &controls).is_empty() {
         inputs.input_coverage
     } else {
         Coverage::Partial
@@ -381,47 +381,66 @@ fn controls_in_closure(inputs: &CiInputs<'_>) -> Vec<ServiceControl> {
         .collect()
 }
 
+/// Which controls contribute their coordinator to a signer set.
+///
+/// The one statement of the scoping rule from the NIP-05 bounding fix: the
+/// display set describes every coordinator the control history addresses,
+/// while the network-lookup set admits only controls a confirmed maintainer
+/// authored.
+enum ControlScope<'a> {
+    /// Every control in the maintainer closure.
+    Any,
+    /// Only controls one of these confirmed maintainers authored.
+    MaintainerAuthored(&'a [PublicKey]),
+}
+
+/// The one signer-set constructor: the coordinator of every run described
+/// and the provider of every job under it — the signers every surface shows
+/// and the merge gate rolls up — then the coordinator of every control
+/// `scope` admits. First-seen order, deduplicated.
+fn collect_signers(
+    runs: &[WorkflowRun],
+    controls: &[ServiceControl],
+    scope: &ControlScope,
+) -> Vec<PublicKey> {
+    let mut signers: Vec<PublicKey> = Vec::new();
+    for run in runs {
+        push_unique(&mut signers, run.coordinator);
+        for job in &run.jobs {
+            push_unique(&mut signers, job.author);
+        }
+    }
+    for control in controls {
+        let admitted = match scope {
+            ControlScope::Any => true,
+            ControlScope::MaintainerAuthored(maintainers) => maintainers.contains(&control.author),
+        };
+        if admitted {
+            push_unique(&mut signers, control.coordinator);
+        }
+    }
+    signers
+}
+
+fn push_unique(signers: &mut Vec<PublicKey>, signer: PublicKey) {
+    if !signers.contains(&signer) {
+        signers.push(signer);
+    }
+}
+
 /// Every signer the view describes: run coordinators, job providers, and the
 /// coordinators the repository's control history addresses.
-fn signers(runs: &[WorkflowRun], controls: &[ServiceControl]) -> Vec<PublicKey> {
-    let mut signers = run_signers(runs);
-    push_control_coordinators(&mut signers, controls);
-    signers
-}
-
-/// The signers a surface actually shows: the coordinator of every run
-/// described and the provider of every job under it. These are also the only
-/// signers the merge gate reads, through the rollup over the current runs.
-fn run_signers(runs: &[WorkflowRun]) -> Vec<PublicKey> {
-    let mut signers: Vec<PublicKey> = Vec::new();
-    let mut push = |pubkey: PublicKey| {
-        if !signers.contains(&pubkey) {
-            signers.push(pubkey);
-        }
-    };
-    for run in runs {
-        push(run.coordinator);
-        for job in &run.jobs {
-            push(job.author);
-        }
-    }
-    signers
-}
-
-fn push_control_coordinators(signers: &mut Vec<PublicKey>, controls: &[ServiceControl]) {
-    for control in controls {
-        if !signers.contains(&control.coordinator) {
-            signers.push(control.coordinator);
-        }
-    }
+fn described_signers(runs: &[WorkflowRun], controls: &[ServiceControl]) -> Vec<PublicKey> {
+    collect_signers(runs, controls, &ControlScope::Any)
 }
 
 /// The signers whose NIP-05 identities are resolved over the network.
 ///
-/// Deliberately narrower than [`signers`]: the run signers, which every
-/// surface displays and the merge gate rolls up, plus the coordinators of
-/// controls a *confirmed maintainer* authored, which are the only controls
-/// that yield a relationship tier. A control from anybody else names a
+/// Deliberately narrower than [`described_signers`]: the run signers, which
+/// every surface displays and the merge gate rolls up, plus the coordinators
+/// of controls a *confirmed maintainer* authored
+/// ([`ControlScope::MaintainerAuthored`]), which are the only controls that
+/// yield a relationship tier. A control from anybody else names a
 /// coordinator this repository has no relationship with and no surface
 /// describes, so resolving it would buy nothing — while letting an unrelated
 /// publisher add a domain of their choosing to the identity step of every
@@ -434,14 +453,11 @@ pub fn identity_lookup_signers(
     controls: &[ServiceControl],
     confirmed_maintainers: &[PublicKey],
 ) -> Vec<PublicKey> {
-    let authorized: Vec<ServiceControl> = controls
-        .iter()
-        .filter(|control| confirmed_maintainers.contains(&control.author))
-        .cloned()
-        .collect();
-    let mut signers = run_signers(runs);
-    push_control_coordinators(&mut signers, &authorized);
-    signers
+    collect_signers(
+        runs,
+        controls,
+        &ControlScope::MaintainerAuthored(confirmed_maintainers),
+    )
 }
 
 /// Build the per-signer resolutions from the evidence each tier gathered.
@@ -475,7 +491,7 @@ fn assemble(
     );
 
     let mut resolutions = HashMap::new();
-    for signer in signers(inputs.runs, &controls)
+    for signer in described_signers(inputs.runs, &controls)
         .into_iter()
         .chain(relationships.keys().copied())
     {
@@ -1002,7 +1018,7 @@ mod tests {
             "a coordinator known only through an unauthorized control is not resolved"
         );
         // It is still a signer of the view — it simply gets no lookup.
-        assert!(signers(&grouped.runs, &controls).contains(&unrelated.public_key()));
+        assert!(described_signers(&grouped.runs, &controls).contains(&unrelated.public_key()));
     }
 
     #[tokio::test]
