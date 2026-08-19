@@ -986,6 +986,14 @@ secrets provisioning (29846), NIP-11 strengthening, courtesy CI lines in
 `pr checkout`/`pr apply`, and PR-context Manual Triggers (see the WP6
 decisions).
 
+Also deferred, and to be done *before* more CI functionality is added:
+consolidating the parallel implementations of signer collection, commit
+resolution and check rendering. Each exists in more than one place today and
+can drift; the typed rust-nostr replacements (`Nip05Address`,
+`Tag::coordinate`, `Kind::GitRepoAnnouncement`) have already been made, but
+this internal consolidation is a behaviour-preserving refactor of its own and
+was kept out of the CI work packages.
+
 ## Test-harness constraints (mandatory)
 
 Per `docs/architecture/test-harness.md` and `AGENTS.md`: no `#[serial]`, no

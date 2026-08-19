@@ -537,13 +537,13 @@ pub fn relationship_evidence(relationship: Option<&CoordinatorRelationship>) -> 
 
 #[cfg(test)]
 mod tests {
-    use nostr::prelude::{Event, EventId, Keys, Timestamp};
+    use nostr::prelude::{Event, EventId, Keys, Kind, Timestamp};
 
     use super::{
         super::{
             controls::tests::{control, quoted_run, validated, validated_at},
             events::group_workflow_runs,
-            kinds::{KIND_REPO_ANNOUNCEMENT, test_events::*},
+            kinds::test_events::*,
             provenance::ValidatedRequest,
         },
         *,
@@ -558,7 +558,7 @@ mod tests {
 
     fn perspective(owner: &Keys) -> Coordinate {
         Coordinate {
-            kind: KIND_REPO_ANNOUNCEMENT,
+            kind: Kind::GitRepoAnnouncement,
             public_key: owner.public_key(),
             identifier: "ngit".to_owned(),
         }

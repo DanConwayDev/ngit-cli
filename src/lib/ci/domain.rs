@@ -19,12 +19,15 @@
 //! [`CONTEXT_INCOMPLETE_LABEL`](super::trust::CONTEXT_INCOMPLETE_LABEL) caveat
 //! — and never produces a negative claim.
 
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{borrow::Cow, collections::HashMap, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use nostr::prelude::{PublicKey, Timestamp};
+use nostr::{
+    nips::nip05::Nip05Address,
+    prelude::{PublicKey, Timestamp},
+};
 use serde::{Deserialize, Serialize};
 
 use super::trust::{EvidenceClassification, EvidenceScope, TrustEvidence, TrustEvidenceKind};
@@ -144,49 +147,65 @@ pub fn repository_grasp_domains(clone_urls: &[String]) -> Vec<String> {
     domains
 }
 
-/// A NIP-05 identifier split into its parts.
+/// A NIP-05 identifier, parsed once by [`Nip05Address`].
+///
+/// The wrapper adds only what the domain ladder needs on top of the typed
+/// address: the value is trimmed and lowercased before parsing, so a domain
+/// a repository names in one case matches the one a profile declares in
+/// another; and an address with no local part or no domain is rejected,
+/// because [`Nip05Address::parse`] reads `@example.com` as a name of `""`,
+/// which names nobody. The parsed address is what the lookup resolves, so
+/// the identifier is never parsed a second time on the way to the network.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Nip05Identity {
-    /// The standardized `<local-part>@<domain>` address.
-    pub nip05: String,
-    pub local_part: String,
-    pub domain: String,
+    address: Nip05Address,
 }
 
 impl Nip05Identity {
+    /// Parse a NIP-05 value, standardizing a bare domain to its root
+    /// identity.
+    ///
+    /// A value [`Nip05Address`] cannot parse is not a candidate: there is no
+    /// document it could ever name, so it is dropped here rather than
+    /// carried to the network to fail.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let address = Nip05Address::parse(&value.trim().to_lowercase()).ok()?;
+        if address.name().is_empty() || address.domain().is_empty() {
+            return None;
+        }
+        Some(Self { address })
+    }
+
+    /// The parsed address, which is both the lookup input and the identity's
+    /// canonical `<local-part>@<domain>` spelling.
+    #[must_use]
+    pub fn address(&self) -> &Nip05Address {
+        &self.address
+    }
+
+    /// The `<local-part>`, `_` for a root identity.
+    #[must_use]
+    pub fn local_part(&self) -> &str {
+        self.address.name()
+    }
+
+    /// The `<domain>` the document is served from.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        self.address.domain()
+    }
+
     /// How the identity is shown to people: a `_` local part displays as the
     /// bare domain, per NIP-05 root-identity semantics.
     #[must_use]
-    pub fn display(&self) -> &str {
-        if self.local_part == "_" {
-            &self.domain
+    pub fn display(&self) -> Cow<'_, str> {
+        if self.local_part() == "_" {
+            Cow::Borrowed(self.domain())
         } else {
-            &self.nip05
+            Cow::Owned(self.address.to_string())
         }
     }
-}
-
-/// Parse a NIP-05 value, standardizing a bare domain to its root identity.
-#[must_use]
-pub fn parse_nip05(value: &str) -> Option<Nip05Identity> {
-    let trimmed = value.trim().to_lowercase();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let standardized = if trimmed.contains('@') {
-        trimmed
-    } else {
-        format!("_@{trimmed}")
-    };
-    let separator = standardized.find('@')?;
-    if separator == 0 || separator == standardized.len() - 1 {
-        return None;
-    }
-    Some(Nip05Identity {
-        local_part: standardized[..separator].to_owned(),
-        domain: standardized[separator + 1..].to_owned(),
-        nip05: standardized,
-    })
 }
 
 /// The identities worth checking for one signer: its profile `nip05` plus the
@@ -202,12 +221,12 @@ pub fn identity_candidates(
             .iter()
             .map(|domain| format!("_@{domain}")),
     ) {
-        let Some(identity) = parse_nip05(&raw) else {
+        let Some(identity) = Nip05Identity::parse(&raw) else {
             continue;
         };
         if !candidates
             .iter()
-            .any(|existing| existing.nip05 == identity.nip05)
+            .any(|existing| existing.address() == identity.address())
         {
             candidates.push(identity);
         }
@@ -238,7 +257,7 @@ pub fn domain_evidence(
     let mut evidence: Vec<TrustEvidence> = Vec::new();
     for identity in identities.iter().filter(|identity| identity.verified) {
         let Some(matched) =
-            classify_domain_relationship(&identity.identity.domain, repository_domains)
+            classify_domain_relationship(identity.identity.domain(), repository_domains)
         else {
             continue;
         };
@@ -292,7 +311,7 @@ pub trait Nip05Lookup {
     ///
     /// Any error means the lookup did not settle. It is never a statement
     /// that the identity is invalid.
-    async fn lookup(&self, address: &str) -> Result<PublicKey>;
+    async fn lookup(&self, address: &Nip05Address) -> Result<PublicKey>;
 }
 
 /// How long one NIP-05 lookup may take before it is abandoned.
@@ -311,18 +330,19 @@ pub struct NetworkNip05Lookup;
 
 #[async_trait]
 impl Nip05Lookup for NetworkNip05Lookup {
-    async fn lookup(&self, address: &str) -> Result<PublicKey> {
-        Ok(
-            tokio::time::timeout(NIP05_LOOKUP_TIMEOUT, crate::client::nip05_query(address))
-                .await
-                .with_context(|| {
-                    format!(
-                        "nip05 lookup for {address} did not answer within {}s",
-                        NIP05_LOOKUP_TIMEOUT.as_secs()
-                    )
-                })??
-                .public_key,
+    async fn lookup(&self, address: &Nip05Address) -> Result<PublicKey> {
+        Ok(tokio::time::timeout(
+            NIP05_LOOKUP_TIMEOUT,
+            crate::client::nip05_query_address(address),
         )
+        .await
+        .with_context(|| {
+            format!(
+                "nip05 lookup for {address} did not answer within {}s",
+                NIP05_LOOKUP_TIMEOUT.as_secs()
+            )
+        })??
+        .public_key)
     }
 }
 
@@ -395,10 +415,11 @@ impl Nip05Cache {
 
     /// The entry for `address`, when one is present and still fresh.
     #[must_use]
-    pub fn get(&self, address: &str, now: Timestamp) -> Option<CachedLookup> {
-        let raw = fs::read_to_string(self.path(address)).ok()?;
+    pub fn get(&self, address: &Nip05Address, now: Timestamp) -> Option<CachedLookup> {
+        let key = address.to_string();
+        let raw = fs::read_to_string(self.path(&key)).ok()?;
         let entry: CacheEntry = serde_json::from_str(&raw).ok()?;
-        if entry.address != address {
+        if entry.address != key {
             return None;
         }
         let lookup = match &entry.pubkey {
@@ -420,22 +441,23 @@ impl Nip05Cache {
     ///
     /// Returns an error when the entry cannot be written. Callers treat a
     /// write failure as a missed cache, not a failed lookup.
-    pub fn put(&self, address: &str, lookup: CachedLookup, now: Timestamp) -> Result<()> {
+    pub fn put(&self, address: &Nip05Address, lookup: CachedLookup, now: Timestamp) -> Result<()> {
         fs::create_dir_all(&self.dir).with_context(|| {
             format!(
                 "failed to create nip05 cache directory {}",
                 self.dir.display()
             )
         })?;
+        let key = address.to_string();
         let entry = CacheEntry {
-            address: address.to_owned(),
+            address: key.clone(),
             pubkey: match lookup {
                 CachedLookup::Resolved(pubkey) => Some(pubkey.to_hex()),
                 CachedLookup::Failed => None,
             },
             fetched_at: now.as_secs(),
         };
-        let path = self.path(address);
+        let path = self.path(&key);
         fs::write(
             &path,
             serde_json::to_string(&entry).context("failed to serialize nip05 cache entry")?,
@@ -499,8 +521,8 @@ pub async fn verify_identity<L: Nip05Lookup + ?Sized + Sync>(
     now: Timestamp,
 ) -> VerifiedIdentity {
     let settled =
-        resolve_addresses(lookup, cache, std::slice::from_ref(&identity.nip05), now).await;
-    let outcome = settled.get(&identity.nip05).copied();
+        resolve_addresses(lookup, cache, std::slice::from_ref(identity.address()), now).await;
+    let outcome = settled.get(identity.address()).copied();
     settle_identity(identity, signer, outcome)
 }
 
@@ -548,7 +570,7 @@ pub async fn verify_identities<L: Nip05Lookup + ?Sized + Sync>(
             let verified = identities
                 .into_iter()
                 .map(|identity| {
-                    let outcome = settled.get(&identity.nip05).copied();
+                    let outcome = settled.get(identity.address()).copied();
                     settle_identity(identity, signer, outcome)
                 })
                 .collect();
@@ -568,23 +590,23 @@ pub async fn verify_identities<L: Nip05Lookup + ?Sized + Sync>(
 fn lookup_order(
     candidates: &[(PublicKey, Vec<Nip05Identity>)],
     repository_domains: &[String],
-) -> Vec<String> {
-    let wanted: Vec<&str> = candidates
+) -> Vec<Nip05Address> {
+    let wanted: Vec<&Nip05Address> = candidates
         .iter()
-        .flat_map(|(_, identities)| identities.iter().map(|identity| identity.nip05.as_str()))
+        .flat_map(|(_, identities)| identities.iter().map(Nip05Identity::address))
         .collect();
-    let mut ordered: Vec<String> = Vec::new();
+    let mut ordered: Vec<Nip05Address> = Vec::new();
     for domain in repository_domains {
-        let Some(root) = parse_nip05(domain) else {
+        let Some(root) = Nip05Identity::parse(domain) else {
             continue;
         };
-        if wanted.contains(&root.nip05.as_str()) && !ordered.contains(&root.nip05) {
-            ordered.push(root.nip05);
+        if wanted.contains(&root.address()) && !ordered.contains(root.address()) {
+            ordered.push(root.address().clone());
         }
     }
     for address in wanted {
-        if !ordered.iter().any(|existing| existing == address) {
-            ordered.push(address.to_owned());
+        if !ordered.contains(address) {
+            ordered.push(address.clone());
         }
     }
     ordered
@@ -601,11 +623,11 @@ fn lookup_order(
 async fn resolve_addresses<L: Nip05Lookup + ?Sized + Sync>(
     lookup: &L,
     cache: Option<&Nip05Cache>,
-    addresses: &[String],
+    addresses: &[Nip05Address],
     now: Timestamp,
-) -> HashMap<String, CachedLookup> {
-    let mut settled: HashMap<String, CachedLookup> = HashMap::new();
-    let mut wanted: Vec<&String> = Vec::new();
+) -> HashMap<Nip05Address, CachedLookup> {
+    let mut settled: HashMap<Nip05Address, CachedLookup> = HashMap::new();
+    let mut wanted: Vec<&Nip05Address> = Vec::new();
     for address in addresses {
         if let Some(cached) = cache.and_then(|cache| cache.get(address, now)) {
             settled.insert(address.clone(), cached);
@@ -699,9 +721,9 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl Nip05Lookup for StubNip05Lookup {
-        async fn lookup(&self, address: &str) -> Result<PublicKey> {
+        async fn lookup(&self, address: &Nip05Address) -> Result<PublicKey> {
             self.resolutions
-                .get(address)
+                .get(&address.to_string())
                 .copied()
                 .with_context(|| format!("no stubbed resolution for {address}"))
         }
@@ -734,8 +756,8 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl Nip05Lookup for CountingLookup {
-        async fn lookup(&self, address: &str) -> Result<PublicKey> {
-            self.looked_up.lock().unwrap().push(address.to_owned());
+        async fn lookup(&self, address: &Nip05Address) -> Result<PublicKey> {
+            self.looked_up.lock().unwrap().push(address.to_string());
             self.inner.lookup(address).await
         }
     }
@@ -753,7 +775,7 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl Nip05Lookup for StallingLookup {
-        async fn lookup(&self, address: &str) -> Result<PublicKey> {
+        async fn lookup(&self, address: &Nip05Address) -> Result<PublicKey> {
             self.started
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             match self.inner.lookup(address).await {
@@ -767,7 +789,12 @@ pub(crate) mod tests {
     }
 
     fn identity(nip05: &str) -> Nip05Identity {
-        parse_nip05(nip05).expect("a valid nip05")
+        Nip05Identity::parse(nip05).expect("a valid nip05")
+    }
+
+    /// The parsed address a cache test keys an entry by.
+    fn address(nip05: &str) -> Nip05Address {
+        identity(nip05).address().clone()
     }
 
     fn verified(nip05: &str) -> VerifiedIdentity {
@@ -880,16 +907,20 @@ pub(crate) mod tests {
     #[test]
     fn a_bare_domain_parses_as_the_root_identity_and_displays_as_the_domain() {
         let root = identity("Grasp.Example");
-        assert_eq!(root.nip05, "_@grasp.example");
-        assert_eq!(root.local_part, "_");
+        assert_eq!(root.address().to_string(), "_@grasp.example");
+        assert_eq!(root.local_part(), "_");
+        assert_eq!(root.domain(), "grasp.example");
         assert_eq!(root.display(), "grasp.example");
 
         let named = identity("act-1@grasp.example");
         assert_eq!(named.display(), "act-1@grasp.example");
 
-        assert_eq!(parse_nip05(""), None);
-        assert_eq!(parse_nip05("@grasp.example"), None);
-        assert_eq!(parse_nip05("act-1@"), None);
+        assert_eq!(Nip05Identity::parse(""), None);
+        assert_eq!(Nip05Identity::parse("@grasp.example"), None);
+        assert_eq!(Nip05Identity::parse("act-1@"), None);
+        // A domain no `.well-known` URL can be built from names no document,
+        // so it is not a candidate rather than a lookup that must fail.
+        assert_eq!(Nip05Identity::parse("act-1@not a domain"), None);
     }
 
     #[test]
@@ -901,7 +932,7 @@ pub(crate) mod tests {
         assert_eq!(
             candidates
                 .iter()
-                .map(|candidate| candidate.nip05.as_str())
+                .map(|candidate| candidate.address().to_string())
                 .collect::<Vec<_>>(),
             vec!["act-1@grasp.example", "_@grasp.example", "_@other.example"]
         );
@@ -1090,15 +1121,21 @@ pub(crate) mod tests {
         let signer = Keys::generate();
         let cache = Nip05Cache::in_dir(dir.path());
         cache
-            .put("_@grasp.example", CachedLookup::Failed, ts(100))
+            .put(&address("_@grasp.example"), CachedLookup::Failed, ts(100))
             .unwrap();
 
         assert_eq!(
-            cache.get("_@grasp.example", ts(100 + NIP05_FAILURE_TTL.as_secs())),
+            cache.get(
+                &address("_@grasp.example"),
+                ts(100 + NIP05_FAILURE_TTL.as_secs())
+            ),
             Some(CachedLookup::Failed)
         );
         assert_eq!(
-            cache.get("_@grasp.example", ts(100 + NIP05_FAILURE_TTL.as_secs() + 1)),
+            cache.get(
+                &address("_@grasp.example"),
+                ts(100 + NIP05_FAILURE_TTL.as_secs() + 1)
+            ),
             None,
             "a failure is re-tried well before a success would be"
         );
@@ -1124,7 +1161,7 @@ pub(crate) mod tests {
         let cache = Nip05Cache::in_dir(dir.path());
         cache
             .put(
-                "_@grasp.example",
+                &address("_@grasp.example"),
                 CachedLookup::Resolved(signer.public_key()),
                 ts(100),
             )
@@ -1134,7 +1171,7 @@ pub(crate) mod tests {
             .join(format!("{}.json", hex_encode("_@grasp.example")));
 
         fs::write(&path, "{not json").unwrap();
-        assert_eq!(cache.get("_@grasp.example", ts(100)), None);
+        assert_eq!(cache.get(&address("_@grasp.example"), ts(100)), None);
 
         // An entry recording a different address is not this address's.
         fs::write(
@@ -1147,7 +1184,7 @@ pub(crate) mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(cache.get("_@grasp.example", ts(100)), None);
+        assert_eq!(cache.get(&address("_@grasp.example"), ts(100)), None);
 
         // So is an entry with an unparsable pubkey.
         fs::write(
@@ -1160,17 +1197,17 @@ pub(crate) mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(cache.get("_@grasp.example", ts(100)), None);
+        assert_eq!(cache.get(&address("_@grasp.example"), ts(100)), None);
 
         // And so is one stamped in the future by a clock change.
         cache
             .put(
-                "_@grasp.example",
+                &address("_@grasp.example"),
                 CachedLookup::Resolved(signer.public_key()),
                 ts(500),
             )
             .unwrap();
-        assert_eq!(cache.get("_@grasp.example", ts(100)), None);
+        assert_eq!(cache.get(&address("_@grasp.example"), ts(100)), None);
     }
 
     #[test]
@@ -1178,9 +1215,10 @@ pub(crate) mod tests {
         let dir = TempDir::new().unwrap();
         let cache = Nip05Cache::in_dir(dir.path());
         let signer = Keys::generate();
+        // A local part is free-form, so a hostile one reaches the cache.
         cache
             .put(
-                "_@../../etc/passwd",
+                &address("../../etc/passwd@grasp.example"),
                 CachedLookup::Resolved(signer.public_key()),
                 ts(100),
             )
@@ -1294,7 +1332,7 @@ pub(crate) mod tests {
         // The declared identities past the cap were never tried, and are
         // reported as unsettled rather than as a negative claim.
         let last = identities[flooders.last().unwrap()][0].clone();
-        assert!(!looked_up.contains(&last.identity.nip05));
+        assert!(!looked_up.contains(&last.identity.address().to_string()));
         assert!(last.failed && !last.verified);
         assert!(any_lookup_failed(&identities));
     }

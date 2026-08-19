@@ -21,14 +21,15 @@ use bitcoin_hashes::sha256;
 use ngit::{
     ci::kinds::{
         KIND_CI_MANUAL_TRIGGER, KIND_CI_SERVICE_REQUEST, KIND_CI_SERVICE_STOP,
-        KIND_REPO_ANNOUNCEMENT, validate_manual_trigger, validate_service_control,
+        validate_manual_trigger, validate_service_control,
     },
     client::{Params, get_repo_ref_from_cache, get_state_from_cache, send_events, sign_event},
     login::user::get_user_details,
     repo_ref::RepoRef,
 };
 use nostr::prelude::{
-    Coordinate, Event, EventBuilder, PublicKey, Tag, ToBech32, nip19::Nip19Coordinate,
+    Coordinate, Event, EventBuilder, Kind, PublicKey, RelayUrl, Tag, ToBech32,
+    nip19::Nip19Coordinate,
 };
 
 use crate::{
@@ -87,7 +88,7 @@ async fn launch_service_control(
                 "",
             )
             .tags([
-                coordinate_tag(&perspective, prepared.relay_hint())?,
+                Tag::coordinate(perspective.clone(), prepared.relay_hint()),
                 Tag::public_key(coordinator),
             ]),
             if is_request {
@@ -183,7 +184,7 @@ pub async fn launch_trigger(
         // tags strictly drops a Manual Trigger whose `a` has a third
         // element. A hint here would buy nothing anyway — the coordinator
         // already watches the repository it serves.
-        tags.push(coordinate_tag(&coordinate, None)?);
+        tags.push(Tag::coordinate(coordinate, None));
     }
     for commit in &resolved.ids {
         tags.push(Tag::parse(["c", commit])?);
@@ -310,7 +311,7 @@ impl Prepared {
             })
             .then_some(self.user_pubkey);
         Coordinate {
-            kind: KIND_REPO_ANNOUNCEMENT,
+            kind: Kind::GitRepoAnnouncement,
             public_key: mine.unwrap_or(self.repo_ref.selected_maintainer),
             identifier: self.repo_ref.identifier.clone(),
         }
@@ -327,7 +328,7 @@ impl Prepared {
             });
             if has_announcement && maintainer != perspective.public_key {
                 coordinates.push(Coordinate {
-                    kind: KIND_REPO_ANNOUNCEMENT,
+                    kind: Kind::GitRepoAnnouncement,
                     public_key: maintainer,
                     identifier: self.repo_ref.identifier.clone(),
                 });
@@ -336,11 +337,8 @@ impl Prepared {
         coordinates
     }
 
-    fn relay_hint(&self) -> Option<String> {
-        self.repo_ref
-            .relays
-            .first()
-            .map(std::string::ToString::to_string)
+    fn relay_hint(&self) -> Option<RelayUrl> {
+        self.repo_ref.relays.first().cloned()
     }
 
     /// The caveat printed when the signer is not a confirmed maintainer of
@@ -584,21 +582,10 @@ fn parse_coordinator(raw: &str) -> Result<PublicKey> {
         .with_context(|| format!("`{raw}` is not a coordinator public key; pass an npub or hex"))
 }
 
-fn coordinate_tag(coordinate: &Coordinate, relay_hint: Option<String>) -> Result<Tag> {
-    let value = coordinate.to_string();
-    Ok(match relay_hint {
-        Some(relay) => Tag::parse(["a", &value, &relay])?,
-        None => Tag::parse(["a", &value])?,
-    })
-}
-
-fn naddr(coordinate: &Coordinate, relay_hint: Option<String>) -> String {
+fn naddr(coordinate: &Coordinate, relay_hint: Option<RelayUrl>) -> String {
     Nip19Coordinate {
         coordinate: coordinate.clone(),
-        relays: relay_hint
-            .and_then(|relay| nostr::prelude::RelayUrl::parse(&relay).ok())
-            .into_iter()
-            .collect(),
+        relays: relay_hint.into_iter().collect(),
     }
     .to_bech32()
     .unwrap_or_else(|_| coordinate.to_string())

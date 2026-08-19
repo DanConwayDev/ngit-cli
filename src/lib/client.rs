@@ -1705,8 +1705,18 @@ pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::prelude
 pub async fn nip05_query(nip05_addr: &str) -> Result<Nip05Profile> {
     let addr_deconstructed = Nip05Address::parse(nip05_addr)
         .context(format!("cannot parse nip05 address: {nip05_addr}"))?;
+    nip05_query_address(&addr_deconstructed).await
+}
+
+/// As [`nip05_query`], for an address a caller has already parsed.
+///
+/// # Errors
+///
+/// Returns an error when the `.well-known` document cannot be fetched, is
+/// not JSON, or names no public key for the address.
+pub async fn nip05_query_address(nip05_addr: &Nip05Address) -> Result<Nip05Profile> {
     let json_res: Value = reqwest::Client::new()
-        .get(addr_deconstructed.url().to_string())
+        .get(nip05_addr.url().to_string())
         .send()
         .await
         .context(format!(
@@ -1717,7 +1727,7 @@ pub async fn nip05_query(nip05_addr: &str) -> Result<Nip05Profile> {
         .context(format!(
             "nip05 server response did not respond with json when querying address: {nip05_addr}"
         ))?;
-    Nip05Profile::from_json(&addr_deconstructed, &json_res).context(format!(
+    Nip05Profile::from_json(nip05_addr, &json_res).context(format!(
         "cannot get public key for nip05 address: {nip05_addr}"
     ))
 }

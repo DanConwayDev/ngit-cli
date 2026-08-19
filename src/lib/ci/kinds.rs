@@ -25,8 +25,6 @@ pub const KIND_CI_SERVICE_REQUEST: Kind = Kind::Custom(9843);
 pub const KIND_CI_SERVICE_STOP: Kind = Kind::Custom(9844);
 /// Kind 39842 — Workflow Progress, an expiring addressable run marker.
 pub const KIND_CI_WORKFLOW_PROGRESS: Kind = Kind::Custom(39842);
-/// Kind 30617 — the NIP-34 repository announcement `a` tags point at.
-pub const KIND_REPO_ANNOUNCEMENT: Kind = Kind::Custom(30617);
 
 /// Every CI kind ngit consumes.
 pub const CONSUMED_CI_KINDS: [Kind; 6] = [
@@ -915,7 +913,7 @@ fn parse_repository(tag: &[String]) -> Result<RepoReference, ShapeReason> {
             tag: "a",
             value: raw.to_owned(),
         })?;
-    if coordinate.kind != KIND_REPO_ANNOUNCEMENT || coordinate.identifier.is_empty() {
+    if coordinate.kind != Kind::GitRepoAnnouncement || coordinate.identifier.is_empty() {
         return Err(ShapeReason::InvalidTagValue {
             tag: "a",
             value: raw.to_owned(),
@@ -1148,7 +1146,7 @@ pub(crate) mod test_events {
     pub fn repo_coordinate(owner: &Keys) -> String {
         format!(
             "{}:{}:ngit",
-            KIND_REPO_ANNOUNCEMENT.as_u16(),
+            Kind::GitRepoAnnouncement.as_u16(),
             owner.public_key().to_hex()
         )
     }
@@ -1779,7 +1777,7 @@ mod tests {
                 "a",
                 &format!(
                     "{}:{}:other",
-                    KIND_REPO_ANNOUNCEMENT.as_u16(),
+                    Kind::GitRepoAnnouncement.as_u16(),
                     Keys::generate().public_key().to_hex()
                 ),
             ]));

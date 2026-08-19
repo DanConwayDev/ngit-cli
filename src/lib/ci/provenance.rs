@@ -467,17 +467,14 @@ pub(crate) mod tests {
     use super::{
         super::{
             controls::{RunMaintainerLink, run_maintainer_link, tests::quoted_run},
-            kinds::{
-                KIND_REPO_ANNOUNCEMENT, MARKER_MANUAL_TRIGGER, MARKER_SERVICE_REQUEST,
-                test_events::*,
-            },
+            kinds::{MARKER_MANUAL_TRIGGER, MARKER_SERVICE_REQUEST, test_events::*},
         },
         *,
     };
 
     pub(crate) fn perspective(owner: &Keys) -> Coordinate {
         Coordinate {
-            kind: KIND_REPO_ANNOUNCEMENT,
+            kind: Kind::GitRepoAnnouncement,
             public_key: owner.public_key(),
             identifier: "ngit".to_owned(),
         }

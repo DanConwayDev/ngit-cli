@@ -371,14 +371,14 @@ pub fn coordinator_relationship(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use nostr::prelude::{EventId, Keys};
+    use nostr::prelude::{EventId, Keys, Kind};
 
     use super::{
         super::{
             events::group_workflow_runs,
             kinds::{
-                KIND_REPO_ANNOUNCEMENT, MARKER_MANUAL_TRIGGER, MARKER_SERVICE_REQUEST,
-                ProvenanceKind, RepoReference, test_events::*,
+                MARKER_MANUAL_TRIGGER, MARKER_SERVICE_REQUEST, ProvenanceKind, RepoReference,
+                test_events::*,
             },
         },
         *,
@@ -386,7 +386,7 @@ pub(crate) mod tests {
 
     fn perspective(owner: &Keys) -> Coordinate {
         Coordinate {
-            kind: KIND_REPO_ANNOUNCEMENT,
+            kind: Kind::GitRepoAnnouncement,
             public_key: owner.public_key(),
             identifier: "ngit".to_owned(),
         }
