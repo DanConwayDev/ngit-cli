@@ -1486,7 +1486,11 @@ async fn get_maintainers_yaml_update(
                                 // author's own statement: the consolidated
                                 // RepoRef carries the *selected* maintainer's,
                                 // so swap in the signer's own record (first
-                                // use of role tags when they have none)
+                                // use of role tags when they have none). A
+                                // prior announcement predating role tags is
+                                // materialized so a member this update drops
+                                // is closed with an end boundary rather than
+                                // silently unlisted.
                                 let author = signer.get_public_key().await?;
                                 let my_prior = repo_ref
                                     .events
@@ -1495,7 +1499,7 @@ async fn get_maintainers_yaml_update(
                                     .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
                                 repo_ref.role_tags = my_prior
                                     .as_ref()
-                                    .map_or_else(Vec::new, |r| r.role_tags.clone());
+                                    .map_or_else(Vec::new, RepoRef::role_history_for_republish);
                                 repo_ref.lead = my_prior
                                     .and_then(|r| r.lead)
                                     .filter(|lead| repo_ref.maintainers.contains(lead));

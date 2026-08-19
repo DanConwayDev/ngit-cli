@@ -663,6 +663,33 @@ impl RepoRef {
         tags
     }
 
+    /// Role-history records for a republish of this announcement (the
+    /// author's own prior announcement), feeding
+    /// [`RepoRef::generate_role_tags`].
+    ///
+    /// Returns the announcement's role tags verbatim. When the announcement
+    /// predates maintainer role tags — its members are listed only via the
+    /// deprecated `maintainers` tag or the author's implicit membership —
+    /// untimed entries are materialized from its maintainer listing so that
+    /// a member dropped by the republish is closed with an end boundary
+    /// rather than silently unlisted. Continuing members still emit the same
+    /// untimed entries a first use of role tags would produce; only a member
+    /// added in the same republish gains a start boundary, which is accurate
+    /// since the prior listing proves they were not a member before.
+    pub fn role_history_for_republish(&self) -> Vec<Tag> {
+        let mut tags = self.role_tags.clone();
+        let has_maintainer_entries = tags
+            .iter()
+            .any(|tag| matches!(tag.as_slice().first().map(String::as_str), Some("M" | "m")));
+        if !has_maintainer_entries {
+            for pk in &self.maintainers {
+                let letter = if self.lead == Some(*pk) { "M" } else { "m" };
+                tags.push(Tag::parse([letter, &pk.to_string()]).unwrap());
+            }
+        }
+        tags
+    }
+
     /// coordinates without relay hints
     pub fn coordinates(&self) -> HashSet<Nip19Coordinate> {
         let mut res = HashSet::new();
@@ -3296,6 +3323,114 @@ mod tests {
                         tag(&["M", &former_lead.to_string(), "0", &now()]),
                         tag(&["M", &former_both.to_string(), "0", "100"]),
                         tag(&["m", &former_both.to_string(), "100", &now()]),
+                    ],
+                );
+            }
+        }
+
+        /// [`RepoRef::role_history_for_republish`]: verbatim pass-through
+        /// once maintainer role tags exist, and materialization of untimed
+        /// entries from a deprecated-listing announcement so a member
+        /// dropped on republish closes with an end boundary instead of
+        /// silently vanishing.
+        mod republish_history {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            fn history_of(repo_ref: &RepoRef) -> Vec<Vec<String>> {
+                repo_ref
+                    .role_history_for_republish()
+                    .iter()
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            }
+
+            #[test]
+            fn existing_maintainer_role_tags_pass_through_verbatim() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let source = vec![
+                    tag(&["m", &author.to_string(), "100"]),
+                    tag(&["m", &former.to_string(), "0", "100"]),
+                    tag(&["o", &moderator.to_string()]),
+                ];
+                let parsed = RepoRef::try_from((role_event(&keys, source.clone()), None)).unwrap();
+                assert_eq!(history_of(&parsed), source);
+            }
+
+            #[test]
+            fn deprecated_listing_materializes_untimed_entries() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &author.to_string(),
+                        &other.to_string(),
+                    ])],
+                );
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+                assert_eq!(
+                    history_of(&parsed),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn moderator_only_role_tags_still_materialize_the_implicit_author() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(&keys, vec![tag(&["o", &moderator.to_string()])]);
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+                // an `o`-only announcement never asserted the author as a
+                // maintainer via role tags, but they are one implicitly
+                assert_eq!(
+                    history_of(&parsed),
+                    vec![
+                        tag(&["o", &moderator.to_string()]),
+                        tag(&["m", &author.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn dropping_a_deprecated_maintainer_closes_their_materialized_entry() {
+                // the init republish pipeline: source history from the prior
+                // deprecated-listing announcement, drop a member from the
+                // typed field, and the generated role tags record the
+                // removal instead of unlisting them
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let dropped = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &author.to_string(),
+                        &dropped.to_string(),
+                    ])],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                parsed.role_tags = parsed.role_history_for_republish();
+                parsed.maintainers = vec![author];
+                assert_eq!(
+                    parsed
+                        .generate_role_tags(&author, NOW)
+                        .iter()
+                        .map(|t| t.as_slice().to_vec())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &dropped.to_string(), "0", &NOW.to_string()]),
                     ],
                 );
             }

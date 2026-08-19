@@ -1285,10 +1285,13 @@ fn resolve_fields(
     // --- Role tags (my own announcement only, like `maintainers`) ---
     // Prior role tags supply the history boundaries and moderator entries
     // for the generated role tags; `--clean` leaves them alone (see
-    // [`ResolvedFields::role_tags`]).
+    // [`ResolvedFields::role_tags`]). When my announcement predates role
+    // tags, untimed entries are materialized from its maintainer listing so
+    // a member this republish drops is closed with an end boundary rather
+    // than silently unlisted.
     let role_tags = my_ref
         .as_ref()
-        .map_or_else(Vec::new, |mr| mr.role_tags.clone());
+        .map_or_else(Vec::new, RepoRef::role_history_for_republish);
 
     let private = if args.private {
         true
