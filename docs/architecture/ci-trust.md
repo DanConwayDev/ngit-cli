@@ -60,9 +60,12 @@ Port the gitworkshop model 1:1 unless noted. The load-bearing rules:
    `SociallyCorroborated` > `NoKnownContext`. Level 3 (social) is deferred —
    see phasing — but the enum includes it from the start.
 3. **Temporal correctness.** A *current* standing Service Request never
-   retroactively covers old runs. Per-run coverage is derived from either
-   (a) the run's frozen `service-request` / `manual-trigger` `q` quote,
-   validated (below), or (b) reduction of the immutable control history at the
+   retroactively covers old runs, and neither does a quoted one. Per-run
+   coverage is derived from either (a) the run's frozen `service-request` /
+   `manual-trigger` `q` quote, validated (below) *and* placed in time by the
+   same reduction — a quoted Request must have been open at the run's handoff,
+   a quoted Trigger must precede it — or (b) reduction of the immutable
+   control history at the
    run's `started_at` (fallback `queued_at`), using the NIP's total order:
    greater `created_at` is later; at equal timestamps the lexicographically
    lower event id is later. A Stop from a confirmed maintainer closes the whole
@@ -137,18 +140,36 @@ reference left open:
   `run_trust_resolution` take a caller-supplied `validated_provenance` set of
   verdicts that WP2 has fetched and checked, and report maintainer direction
   only for a verdict covering *this* run whose requester is a confirmed
-  maintainer. With an empty set — every caller until WP2 lands — an
+  maintainer and whose request the history places at or before the run (two
+  bullets down). With an empty set — every caller until WP2 lands — an
   unvalidated quote contributes nothing, and only the control-history
   reduction can establish maintainer direction.
 - **A verdict is scoped to the run it was reached for.** A validated quote is
-  a `ValidatedProvenance { coordinator, run_id, quote }`, not a bare event id,
-  and `covers(run)` requires all three to match the run's own frozen quote.
+  a `ValidatedProvenance { coordinator, run_id, request }`, not a bare event
+  id, and `covers(run)` requires the coordinator, the run id and the quoted
+  event id to match the run's own frozen quote.
   Keying by quoted id alone would let one run's valid quote legitimize every
   other run referencing it: a Manual Trigger authorizes one workflow, commit
   and pull-request context, so a coordinator could replay the id on a run the
   maintainer never authorized and satisfy `--require-ci-trust
   maintainer-directed`. A Service Request is likewise checked against the
   coordinator the quoting run names.
+- **A quote decides *which* request is cited, never *when* it applied.**
+  Freezing a `q` tag is the coordinator's act, so a validated quote passes the
+  same temporal evaluation an unquoted control does, at the run's handoff
+  (`coverage_time`, and no handoff time is indeterminate as everywhere else):
+  a quoted Service Request is reduced *with* the perspective's control history
+  by `run_maintainer_link`, so one signed after the run, or closed by a Stop
+  before it, covers nothing; a quoted Manual Trigger must precede the handoff.
+  Without this a coordinator could quote a withdrawn request, or one a
+  maintainer signed for later work, and present an old run as
+  maintainer-directed — which is exactly the retroactivity rule 3 forbids on
+  the control-history route. The verdict therefore carries the validated
+  request (`ValidatedRequest::ServiceRequest` with the control itself,
+  `ManualTrigger` with its signing time) rather than the bare fact that
+  validation held. The reduction reads the request's *own* perspective, which
+  provenance already placed inside the maintainer closure, so the check cannot
+  be dodged by naming a coordinate the caller did not ask about.
 - **Strict shapes, skipped with a reason.** `kinds.rs` rejects an event that
   breaks a NIP MUST rather than reinterpreting it: a Job Result quoting a
   Service Request; a *queued* Progress carrying the `service-request` quote
@@ -242,8 +263,9 @@ reference left open:
 - **A standing Service Request has no run context to match.** Its validation
   checks the id, kind, shape, author, repository closure, coordinator and the
   requester hint only. Temporal coverage of a *particular* run remains the
-  control-history reduction's job, which is where WP1 already enforces
-  non-retroactivity.
+  control-history reduction's job, which is where WP1 enforces
+  non-retroactivity — so validation hands the request itself back in the
+  verdict rather than answering a question it cannot see the history for.
 - **An unavailable quote is not a rejected quote.** `ProvenanceOutcome`
   separates `validated`, `rejected` and `unavailable`. An unavailable quote —
   one nothing could retrieve — yields no evidence *and* makes coverage

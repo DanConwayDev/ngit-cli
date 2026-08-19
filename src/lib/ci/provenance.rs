@@ -17,10 +17,15 @@
 //! same Manual Trigger authorizes one run's workflow and commit and says
 //! nothing about the next, so a verdict must never transfer by quoted id
 //! alone.
+//!
+//! Validation is not the whole of coverage. Nothing here asks *when* the
+//! request was signed or whether a Stop had already closed it, because that
+//! is the control history's question; the verdict therefore carries the
+//! validated request forward for [`crate::ci::controls`] to place in time.
 
 use std::{collections::HashMap, fmt};
 
-use nostr::prelude::{Coordinate, Event, EventId, Kind, PublicKey};
+use nostr::prelude::{Coordinate, Event, EventId, Kind, PublicKey, Timestamp};
 
 use super::{
     events::WorkflowRun,
@@ -136,18 +141,50 @@ impl fmt::Display for RejectedProvenance {
     }
 }
 
+/// The request a verdict was reached against, carrying what the temporal
+/// rules still have to decide.
+///
+/// Validation says the quoted event really is a maintainer's request for this
+/// repository and coordinator. It says nothing about *when*, and a request
+/// never retroactively covers a run that was already under way — so the
+/// verdict carries the request forward rather than the bare fact that it held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidatedRequest {
+    /// The quoted Service Request itself, so a run's coverage can be reduced
+    /// from the control history exactly as an unquoted request's is: a Stop
+    /// that closed it before the run started closes it here too.
+    ServiceRequest(Box<ServiceControl>),
+    /// A Manual Trigger authorizes one run and no Stop closes it, so the only
+    /// temporal question is whether it preceded the run it authorized.
+    ManualTrigger {
+        event_id: EventId,
+        created_at: Timestamp,
+    },
+}
+
+impl ValidatedRequest {
+    /// The quoted request's event id.
+    #[must_use]
+    pub fn event_id(&self) -> EventId {
+        match self {
+            Self::ServiceRequest(request) => request.event_id,
+            Self::ManualTrigger { event_id, .. } => *event_id,
+        }
+    }
+}
+
 /// A run whose frozen quote was checked against the quoted event and held.
 ///
 /// The verdict is scoped to the run it was reached for. A quoted id alone
 /// would not be: a Manual Trigger authorizes one workflow, commit and
 /// pull-request context, so a run that matches it legitimizes only itself,
 /// and a Service Request is checked against the coordinator each run names.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedProvenance {
     pub coordinator: PublicKey,
     pub run_id: String,
-    /// The quoted request's event id.
-    pub quote: EventId,
+    /// The request the quote names, as validated.
+    pub request: ValidatedRequest,
 }
 
 impl ValidatedProvenance {
@@ -156,12 +193,18 @@ impl ValidatedProvenance {
     /// Constructing one is how a run gains maintainer direction, so this stays
     /// inside `ci`: outside it, a verdict is only obtainable from
     /// [`validate_run_provenance`].
-    pub(super) fn for_run(run: &WorkflowRun, quote: EventId) -> Self {
+    pub(super) fn for_run(run: &WorkflowRun, request: ValidatedRequest) -> Self {
         Self {
             coordinator: run.coordinator,
             run_id: run.run_id.clone(),
-            quote,
+            request,
         }
+    }
+
+    /// The quoted request's event id.
+    #[must_use]
+    pub fn quote(&self) -> EventId {
+        self.request.event_id()
     }
 
     /// Whether this verdict was reached for `run`'s own frozen quote.
@@ -171,7 +214,7 @@ impl ValidatedProvenance {
             && self.run_id == run.run_id
             && run
                 .provenance()
-                .is_some_and(|quote| quote.event_id == self.quote)
+                .is_some_and(|quote| quote.event_id == self.quote())
     }
 }
 
@@ -279,20 +322,25 @@ pub fn validate_run_provenance(
         ));
     }
 
-    match quote.kind {
+    let request = match quote.kind {
         ProvenanceKind::ServiceRequest => {
             let request =
                 kinds::validate_service_control(quoted).map_err(ProvenanceRejection::Shape)?;
             validate_service_request(run, &request, closure_coordinates)?;
+            ValidatedRequest::ServiceRequest(Box::new(request))
         }
         ProvenanceKind::ManualTrigger => {
             let trigger =
                 kinds::validate_manual_trigger(quoted).map_err(ProvenanceRejection::Shape)?;
             validate_manual_trigger(run, &trigger, closure_coordinates)?;
+            ValidatedRequest::ManualTrigger {
+                event_id: trigger.event_id,
+                created_at: trigger.created_at,
+            }
         }
-    }
+    };
 
-    Ok(ValidatedProvenance::for_run(run, quote.event_id))
+    Ok(ValidatedProvenance::for_run(run, request))
 }
 
 /// Validate every run's quote against the supplied events.
@@ -359,7 +407,9 @@ fn validate_service_request(
         ));
     }
     // A standing Service Request authorizes the coordinator for the
-    // repository, not one run, so there is no run context to match.
+    // repository, not one run, so there is no run context to match here. When
+    // it covered a *particular* run is the control-history reduction's
+    // question, which is why the verdict carries the request itself.
     Ok(())
 }
 
@@ -496,15 +546,22 @@ pub(crate) mod tests {
         let maintainer = Keys::generate();
         let (request, run) = service_request_run(&coordinator, &owner, &maintainer);
 
-        assert_eq!(
-            validate_run_provenance(
-                &run,
-                &request,
-                &[maintainer.public_key()],
-                &[perspective(&owner)]
-            ),
-            Ok(ValidatedProvenance::for_run(&run, request.id))
-        );
+        let validated = validate_run_provenance(
+            &run,
+            &request,
+            &[maintainer.public_key()],
+            &[perspective(&owner)],
+        )
+        .expect("a maintainer's request for this coordinator validates");
+        assert!(validated.covers(&run));
+        assert_eq!(validated.quote(), request.id);
+        // The verdict carries the request itself: whether it was standing
+        // when this run started is the control history's question.
+        let ValidatedRequest::ServiceRequest(carried) = &validated.request else {
+            panic!("a service-request quote validates to the request");
+        };
+        assert_eq!(carried.author, maintainer.public_key());
+        assert_eq!(carried.created_at, request.created_at);
     }
 
     #[test]
@@ -514,14 +571,21 @@ pub(crate) mod tests {
         let maintainer = Keys::generate();
         let (trigger, run) = manual_trigger_run(&coordinator, &owner, &maintainer);
 
+        let validated = validate_run_provenance(
+            &run,
+            &trigger,
+            &[maintainer.public_key()],
+            &[perspective(&owner)],
+        )
+        .expect("a maintainer's trigger for this run's context validates");
+        assert!(validated.covers(&run));
         assert_eq!(
-            validate_run_provenance(
-                &run,
-                &trigger,
-                &[maintainer.public_key()],
-                &[perspective(&owner)]
-            ),
-            Ok(ValidatedProvenance::for_run(&run, trigger.id))
+            validated.request,
+            ValidatedRequest::ManualTrigger {
+                event_id: trigger.id,
+                created_at: trigger.created_at,
+            },
+            "the verdict carries when the trigger was signed",
         );
     }
 
@@ -1099,10 +1163,9 @@ pub(crate) mod tests {
             &[maintainer.public_key()],
             &[perspective(&owner)],
         );
-        assert_eq!(
-            outcome.validated,
-            vec![ValidatedProvenance::for_run(&runs[0], request.id)]
-        );
+        assert_eq!(outcome.validated.len(), 1);
+        assert!(outcome.validated[0].covers(&runs[0]));
+        assert_eq!(outcome.validated[0].quote(), request.id);
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].quote, strangers_request.id);
         assert!(outcome.unavailable.is_empty());
@@ -1150,22 +1213,23 @@ pub(crate) mod tests {
 
         let runs = [authorized, replayed];
         let outcome = validate_run_quotes(&runs, &quoted, &maintainers, &[perspective(&owner)]);
-        assert_eq!(
-            outcome.validated,
-            vec![ValidatedProvenance::for_run(&runs[0], trigger.id)],
+        assert_eq!(outcome.validated.len(), 1);
+        assert!(
+            outcome.validated[0].covers(&runs[0]),
             "the verdict names the run it was reached for"
         );
+        assert_eq!(outcome.validated[0].quote(), trigger.id);
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].run_id, "run-2");
 
         // The verdict covers only that run, so the mismatching one gains no
         // maintainer direction from its neighbour's quote.
         assert_eq!(
-            run_maintainer_link(&runs[0], &maintainers, &outcome.validated),
+            run_maintainer_link(&runs[0], &maintainers, &[], &outcome.validated),
             Some(RunMaintainerLink::Manual)
         );
         assert_eq!(
-            run_maintainer_link(&runs[1], &maintainers, &outcome.validated),
+            run_maintainer_link(&runs[1], &maintainers, &[], &outcome.validated),
             None
         );
     }

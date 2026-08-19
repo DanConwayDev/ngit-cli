@@ -13,7 +13,9 @@
 //! confirmed maintainer — remains unclosed there.
 //!
 //! A current standing Request therefore never retroactively covers a run that
-//! started before it.
+//! started before it. A Request a run *quotes* is reduced the same way: the
+//! coordinator chose when to freeze the quote, so the quote decides which
+//! request is being cited, never when it applied.
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,8 +23,8 @@ use nostr::prelude::{Coordinate, PublicKey, Timestamp};
 
 use super::{
     events::WorkflowRun,
-    kinds::{ProvenanceKind, ServiceControl},
-    provenance::ValidatedProvenance,
+    kinds::ServiceControl,
+    provenance::{ValidatedProvenance, ValidatedRequest},
     total_order_position,
 };
 
@@ -80,24 +82,73 @@ pub enum RunMaintainerLink {
 /// no validation available pass an empty slice and get `None`, which is the
 /// safe direction: the control-history reduction remains available as
 /// independent evidence.
+///
+/// A validated quote is then placed in time by the same rules an unquoted
+/// control obeys, evaluated at the run's handoff: a Service Request signed
+/// after the run, or closed by a Stop before it, covers nothing, and a Manual
+/// Trigger must precede the run it authorized. Freezing a `q` tag is the
+/// coordinator's act, so without this a coordinator could quote a request
+/// that had already been withdrawn — or one a maintainer signed for later
+/// work — and present an old run as maintainer-directed.
 #[must_use]
 pub fn run_maintainer_link(
     run: &WorkflowRun,
     confirmed_maintainers: &[PublicKey],
+    controls: &[ServiceControl],
     validated_provenance: &[ValidatedProvenance],
 ) -> Option<RunMaintainerLink> {
     let quote = run.provenance()?;
-    if !validated_provenance
+    let validated = validated_provenance
         .iter()
-        .any(|validated| validated.covers(run))
-        || !confirmed_maintainers.contains(&quote.requester)
-    {
+        .find(|validated| validated.covers(run))?;
+    if !confirmed_maintainers.contains(&quote.requester) {
         return None;
     }
-    Some(match quote.kind {
-        ProvenanceKind::ManualTrigger => RunMaintainerLink::Manual,
-        ProvenanceKind::ServiceRequest => RunMaintainerLink::Service,
-    })
+    // No handoff time means coverage is indeterminate, exactly as it is for
+    // the reduction: it is never assumed.
+    let handoff = run.coverage_time()?;
+    match &validated.request {
+        ValidatedRequest::ManualTrigger { created_at, .. } => {
+            (*created_at <= handoff).then_some(RunMaintainerLink::Manual)
+        }
+        ValidatedRequest::ServiceRequest(request) => {
+            was_quoted_request_open_at(request, controls, confirmed_maintainers, handoff)
+                .then_some(RunMaintainerLink::Service)
+        }
+    }
+}
+
+/// Whether the Service Request a run quotes was open at `at`.
+///
+/// The quoted request is reduced together with the rest of its perspective's
+/// control history, so it obeys the rules every other request obeys: one
+/// signed after `at` is not in the history yet, and one a Stop closed before
+/// `at` is no longer open. The perspective is the request's own — provenance
+/// validation has already placed it inside the maintainer closure — so a
+/// quote cannot escape the history by naming a coordinate the caller did not
+/// ask about.
+fn was_quoted_request_open_at(
+    request: &ServiceControl,
+    controls: &[ServiceControl],
+    confirmed_maintainers: &[PublicKey],
+    at: Timestamp,
+) -> bool {
+    let mut history: Vec<ServiceControl> = controls.to_vec();
+    if !history
+        .iter()
+        .any(|control| control.event_id == request.event_id)
+    {
+        history.push(request.clone());
+    }
+    open_requests(
+        &history,
+        &request.coordinator,
+        &request.repository.coordinate,
+        confirmed_maintainers,
+        at,
+    )
+    .iter()
+    .any(|open| open.event_id == request.event_id)
 }
 
 /// The pubkey the run's frozen quote names as the requester.
@@ -271,7 +322,9 @@ pub fn classify_coordinator_relationships(
 
     for run in runs {
         let entry = relationships.entry(run.coordinator).or_default();
-        if let Some(link) = run_maintainer_link(run, confirmed_maintainers, validated_provenance) {
+        if let Some(link) =
+            run_maintainer_link(run, confirmed_maintainers, controls, validated_provenance)
+        {
             entry.level = CoordinatorRelationshipLevel::PreviouslyRequested;
             match link {
                 RunMaintainerLink::Manual => entry.manual_run_count += 1,
@@ -325,7 +378,7 @@ pub(crate) mod tests {
             events::group_workflow_runs,
             kinds::{
                 KIND_REPO_ANNOUNCEMENT, MARKER_MANUAL_TRIGGER, MARKER_SERVICE_REQUEST,
-                RepoReference, test_events::*,
+                ProvenanceKind, RepoReference, test_events::*,
             },
         },
         *,
@@ -394,9 +447,39 @@ pub(crate) mod tests {
         EventId::from_slice(&[byte; 32]).unwrap()
     }
 
-    /// The verdict `validate_run_quotes` reaches for a run whose quote held.
+    /// The verdict `validate_run_quotes` reaches for a run whose quote held,
+    /// with the quoted request signed before the run was handed off.
     pub(crate) fn validated(run: &WorkflowRun) -> ValidatedProvenance {
-        ValidatedProvenance::for_run(run, run.provenance().expect("a quoted run").event_id)
+        let signed_before = run
+            .coverage_time()
+            .map_or(0, |handoff| handoff.as_secs().saturating_sub(50));
+        validated_at(run, signed_before)
+    }
+
+    /// The same verdict, with the quoted request signed at `created_at`.
+    pub(crate) fn validated_at(run: &WorkflowRun, created_at: u64) -> ValidatedProvenance {
+        let quote = run.provenance().expect("a quoted run");
+        let request = match quote.kind {
+            ProvenanceKind::ManualTrigger => ValidatedRequest::ManualTrigger {
+                event_id: quote.event_id,
+                created_at: ts(created_at),
+            },
+            ProvenanceKind::ServiceRequest => {
+                ValidatedRequest::ServiceRequest(Box::new(ServiceControl {
+                    event_id: quote.event_id,
+                    author: quote.requester,
+                    created_at: ts(created_at),
+                    coordinator: run.coordinator,
+                    repository: run
+                        .repositories
+                        .first()
+                        .expect("a run names its repository")
+                        .clone(),
+                    is_request: true,
+                }))
+            }
+        };
+        ValidatedProvenance::for_run(run, request)
     }
 
     #[test]
@@ -463,7 +546,7 @@ pub(crate) mod tests {
         )];
 
         assert_eq!(
-            run_maintainer_link(&runs[0], &[maintainer.public_key()], &[]),
+            run_maintainer_link(&runs[0], &[maintainer.public_key()], &[], &[]),
             None
         );
         let relationships = classify_coordinator_relationships(
@@ -512,11 +595,11 @@ pub(crate) mod tests {
         let validated_provenance = vec![validated(&runs[0])];
 
         assert_eq!(
-            run_maintainer_link(&runs[0], &maintainers, &validated_provenance),
+            run_maintainer_link(&runs[0], &maintainers, &[], &validated_provenance),
             Some(RunMaintainerLink::Manual)
         );
         assert_eq!(
-            run_maintainer_link(&runs[1], &maintainers, &validated_provenance),
+            run_maintainer_link(&runs[1], &maintainers, &[], &validated_provenance),
             None,
             "the quoted id alone is not the second run's evidence"
         );
@@ -533,6 +616,92 @@ pub(crate) mod tests {
             coordinator_relationship(&relationships, &coordinator.public_key()).manual_run_count,
             1,
             "only the validated run counts"
+        );
+    }
+
+    #[test]
+    fn a_quoted_request_signed_after_the_run_is_not_coverage() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        // The run was handed off at 100.
+        let run = quoted_run(
+            &coordinator,
+            &owner,
+            &maintainer,
+            "run-1",
+            quote_id(0xa1),
+            MARKER_SERVICE_REQUEST,
+        );
+        let maintainers = [maintainer.public_key()];
+
+        assert_eq!(
+            run_maintainer_link(&run, &maintainers, &[], &[validated_at(&run, 200)]),
+            None,
+            "a request signed after the run cannot have covered it"
+        );
+        assert_eq!(
+            run_maintainer_link(&run, &maintainers, &[], &[validated_at(&run, 100)]),
+            Some(RunMaintainerLink::Service),
+            "a request signed at the handoff is in the history there"
+        );
+    }
+
+    #[test]
+    fn a_quoted_request_stopped_before_the_run_is_not_coverage() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let run = quoted_run(
+            &coordinator,
+            &owner,
+            &maintainer,
+            "run-1",
+            quote_id(0xa1),
+            MARKER_SERVICE_REQUEST,
+        );
+        let maintainers = [maintainer.public_key()];
+        let validated_provenance = [validated_at(&run, 50)];
+
+        let stopped_first = vec![control(&maintainer, &coordinator, &owner, false, 80, 2)];
+        assert_eq!(
+            run_maintainer_link(&run, &maintainers, &stopped_first, &validated_provenance),
+            None,
+            "the quoted request was already closed when the run started"
+        );
+
+        // The same Stop after the handoff leaves the run as it was: the
+        // reduction is evaluated at the run, not now.
+        let stopped_later = vec![control(&maintainer, &coordinator, &owner, false, 150, 2)];
+        assert_eq!(
+            run_maintainer_link(&run, &maintainers, &stopped_later, &validated_provenance),
+            Some(RunMaintainerLink::Service)
+        );
+    }
+
+    #[test]
+    fn a_quoted_trigger_signed_after_the_run_is_not_coverage() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let run = quoted_run(
+            &coordinator,
+            &owner,
+            &maintainer,
+            "run-1",
+            quote_id(0xa1),
+            MARKER_MANUAL_TRIGGER,
+        );
+        let maintainers = [maintainer.public_key()];
+
+        assert_eq!(
+            run_maintainer_link(&run, &maintainers, &[], &[validated_at(&run, 200)]),
+            None,
+            "a trigger cannot authorize a run that was already under way"
+        );
+        assert_eq!(
+            run_maintainer_link(&run, &maintainers, &[], &[validated_at(&run, 60)]),
+            Some(RunMaintainerLink::Manual)
         );
     }
 

@@ -538,10 +538,9 @@ mod tests {
         assert!(context.is_incomplete());
         // The locally cached quote is still validated, so the run keeps its
         // maintainer direction.
-        assert_eq!(
-            context.validated_provenance(),
-            vec![ValidatedProvenance::for_run(&runs[0], request.id)]
-        );
+        assert_eq!(context.validated_provenance().len(), 1);
+        assert!(context.validated_provenance()[0].covers(&runs[0]));
+        assert_eq!(context.validated_provenance()[0].quote(), request.id);
         assert_eq!(
             context.run_resolution(&runs[0]).classification(),
             Some(TrustClassification::MaintainerDirected)
@@ -724,10 +723,9 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(
-            fetched.validated_provenance(),
-            vec![ValidatedProvenance::for_run(&runs[0], request.id)]
-        );
+        assert_eq!(fetched.validated_provenance().len(), 1);
+        assert!(fetched.validated_provenance()[0].covers(&runs[0]));
+        assert_eq!(fetched.validated_provenance()[0].quote(), request.id);
         assert_eq!(
             fetched.run_resolution(&runs[0]).classification(),
             Some(TrustClassification::MaintainerDirected)
@@ -808,10 +806,9 @@ mod tests {
             &profiles,
             ts(1_000),
         ));
-        assert_eq!(
-            context.validated_provenance(),
-            vec![ValidatedProvenance::for_run(&runs[0], trigger.id)]
-        );
+        assert_eq!(context.validated_provenance().len(), 1);
+        assert!(context.validated_provenance()[0].covers(&runs[0]));
+        assert_eq!(context.validated_provenance()[0].quote(), trigger.id);
         assert_eq!(
             context.run_resolution(&runs[0]).classification(),
             Some(TrustClassification::MaintainerDirected)

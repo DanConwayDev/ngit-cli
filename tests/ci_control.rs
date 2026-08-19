@@ -586,7 +586,9 @@ async fn a_run_quoting_a_published_trigger_is_maintainer_directed() -> Result<()
 
     // The coordinator replays exactly what the trigger authorized and freezes
     // it as the run's provenance quote. No Service Request exists here, so
-    // the control-history route cannot supply the classification.
+    // the control-history route cannot supply the classification. The run is
+    // handed off after the trigger was signed: a trigger authorizes the run
+    // that follows it, never one already under way.
     let spec = CiRunSpec::new(
         &arranged.published,
         "run-triggered",
@@ -595,6 +597,7 @@ async fn a_run_quoting_a_published_trigger_is_maintainer_directed() -> Result<()
         arranged.now,
     )
     .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .started_at(trigger.created_at.as_secs() + 60)
     .provenance(CiProvenance::manual_trigger(&trigger));
     arranged
         .harness

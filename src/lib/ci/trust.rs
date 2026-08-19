@@ -291,9 +291,14 @@ pub fn trust_resolution(state: Option<&TrustContextState>, pubkey: &PublicKey) -
 ///
 /// - a verdict in `validated_provenance` — the quoted requests already fetched
 ///   and checked, each scoped to the run it was checked against — covers this
-///   run and names a confirmed maintainer; or
+///   run, names a confirmed maintainer, and the request it names was standing
+///   when the run started; or
 /// - reducing the immutable control history shows a maintainer's Service
 ///   Request was active when the run started.
+///
+/// Both routes therefore answer the same temporal question, because a quote is
+/// the coordinator's choice of which request to cite and not a statement about
+/// when it applied.
 ///
 /// An unvalidated quote contributes nothing: it is a coordinator-authored tag
 /// naming a pubkey, not evidence that the maintainer asked for anything.
@@ -321,7 +326,12 @@ pub fn run_trust_resolution(
         })
         .collect();
 
-    let maintainer_link = run_maintainer_link(run, confirmed_maintainers, validated_provenance);
+    let maintainer_link = run_maintainer_link(
+        run,
+        confirmed_maintainers,
+        service_controls,
+        validated_provenance,
+    );
     let service_requested_at_run = was_service_requested_when_run_started(
         run,
         service_controls,
@@ -527,13 +537,14 @@ pub fn relationship_evidence(relationship: Option<&CoordinatorRelationship>) -> 
 
 #[cfg(test)]
 mod tests {
-    use nostr::prelude::{Event, EventId, Keys};
+    use nostr::prelude::{Event, EventId, Keys, Timestamp};
 
     use super::{
         super::{
-            controls::tests::{control, quoted_run, validated},
+            controls::tests::{control, quoted_run, validated, validated_at},
             events::group_workflow_runs,
             kinds::{KIND_REPO_ANNOUNCEMENT, test_events::*},
+            provenance::ValidatedRequest,
         },
         *,
     };
@@ -648,7 +659,10 @@ mod tests {
                 ValidatedProvenance {
                     coordinator: coordinator.public_key(),
                     run_id: run.run_id.clone(),
-                    quote: EventId::from_slice(&[0xcc; 32]).unwrap(),
+                    request: ValidatedRequest::ManualTrigger {
+                        event_id: EventId::from_slice(&[0xcc; 32]).unwrap(),
+                        created_at: Timestamp::from_secs(50),
+                    },
                 },
             ],
         );
@@ -792,6 +806,94 @@ mod tests {
             "A confirmed repository maintainer's service request was active when this workflow run started."
         );
         assert_eq!(item.authors, vec![maintainer.public_key()]);
+    }
+
+    #[test]
+    fn a_quoted_request_signed_after_the_run_is_not_maintainer_direction() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        // The run was handed off at 100; the request it quotes is signed at
+        // 200, so freezing the quote is the coordinator backdating a request
+        // the maintainer had not yet made.
+        let run = run_with_quote(&coordinator, &owner, &maintainer, "service-request");
+        let state = settled_state(Vec::new(), Coverage::Complete);
+
+        let resolution = run_trust_resolution(
+            Some(&state),
+            &run,
+            &[maintainer.public_key()],
+            &[],
+            &[perspective(&owner)],
+            &[validated_at(&run, 200)],
+        );
+        assert_eq!(
+            resolution.classification(),
+            Some(TrustClassification::NoKnownContext)
+        );
+        assert!(resolution.evidence().is_empty());
+    }
+
+    #[test]
+    fn a_quoted_request_stopped_before_the_run_is_not_maintainer_direction() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let run = run_with_quote(&coordinator, &owner, &maintainer, "service-request");
+        let state = settled_state(Vec::new(), Coverage::Complete);
+        // Requested at 50, stopped at 80, and the run started at 100.
+        let controls = vec![control(&maintainer, &coordinator, &owner, false, 80, 2)];
+
+        let resolution = run_trust_resolution(
+            Some(&state),
+            &run,
+            &[maintainer.public_key()],
+            &controls,
+            &[perspective(&owner)],
+            &[validated_at(&run, 50)],
+        );
+        assert_eq!(
+            resolution.classification(),
+            Some(TrustClassification::NoKnownContext),
+            "a quote cannot revive a request that was stopped before the run"
+        );
+
+        // The same request, with nothing closing it, still covers the run.
+        let resolution = run_trust_resolution(
+            Some(&state),
+            &run,
+            &[maintainer.public_key()],
+            &[],
+            &[perspective(&owner)],
+            &[validated_at(&run, 50)],
+        );
+        assert_eq!(
+            resolution.classification(),
+            Some(TrustClassification::MaintainerDirected)
+        );
+    }
+
+    #[test]
+    fn a_quoted_manual_trigger_signed_after_the_run_is_not_maintainer_direction() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let run = run_with_quote(&coordinator, &owner, &maintainer, "manual-trigger");
+        let state = settled_state(Vec::new(), Coverage::Complete);
+
+        let resolution = run_trust_resolution(
+            Some(&state),
+            &run,
+            &[maintainer.public_key()],
+            &[],
+            &[perspective(&owner)],
+            &[validated_at(&run, 200)],
+        );
+        assert_eq!(
+            resolution.classification(),
+            Some(TrustClassification::NoKnownContext),
+            "a trigger signed after the handoff authorized nothing here"
+        );
     }
 
     #[test]
