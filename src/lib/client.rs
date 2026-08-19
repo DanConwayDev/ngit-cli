@@ -1119,6 +1119,10 @@ impl Connect for Client {
         // cleared after first use so subsequent iterations don't re-request them.
         let mut fresh_non_proposal_event_ids = request.non_proposal_event_ids.clone();
 
+        // discovery expansion state: see expand_role_discovery
+        let mut maintainer_listed: HashSet<PublicKey> = request.maintainer_listed_authors.clone();
+        let mut session_announcements: Vec<AnnouncementListing> = Vec::new();
+
         let mut report = FetchReport::default();
 
         let relay_url = request
@@ -1236,6 +1240,8 @@ impl Connect for Client {
                 &mut fresh_proposal_roots,
                 &mut fresh_issue_roots,
                 &mut fresh_profiles,
+                &mut maintainer_listed,
+                &mut session_announcements,
                 &mut report,
             )
             .await?;
@@ -2549,6 +2555,16 @@ async fn create_relays_request(
                 .map(|c| (c.clone(), None))
                 .collect()
         },
+        maintainer_listed_authors: {
+            let mut authors: HashSet<PublicKey> = HashSet::new();
+            if let Some(coordinate) = selected_maintainer_coordinate {
+                authors.insert(coordinate.public_key);
+            }
+            if let Some(repo_ref) = &repo_ref {
+                authors.extend(repo_ref.maintainers.iter().copied());
+            }
+            authors
+        },
         state: if let Some(repo_ref) = &repo_ref {
             if let Ok(existing_state) = get_state_from_cache(git_repo_path, repo_ref).await {
                 Some((existing_state.event.created_at, existing_state.event.id))
@@ -2601,6 +2617,8 @@ async fn process_fetched_events(
     fresh_proposal_roots: &mut HashSet<EventId>,
     fresh_issue_roots: &mut HashSet<EventId>,
     fresh_profiles: &mut HashSet<PublicKey>,
+    maintainer_listed: &mut HashSet<PublicKey>,
+    session_announcements: &mut Vec<AnnouncementListing>,
     report: &mut FetchReport,
 ) -> Result<()> {
     for event in &events {
@@ -2655,49 +2673,15 @@ async fn process_fetched_events(
                 }
                 // if contains announcement
                 if let Ok(repo_ref) = &RepoRef::try_from((event.clone(), None)) {
-                    // per NIP-34 clients SHOULD recursively fetch
-                    // announcements from each pubkey assigned a role:
-                    // moderators' announcements carry their acknowledgement
-                    // or leave self-entries. Fetching grants nothing — which
-                    // assignments carry authority is decided when the cache
-                    // is consolidated (get_repo_ref_from_cache).
-                    for m in repo_ref
-                        .maintainers
-                        .iter()
-                        .chain(repo_ref.moderators.iter())
-                    {
-                        if !request
-                            .repo_coordinates_without_relays // prexisting maintainers
-                            .iter()
-                            .map(|(c, _)| c.clone())
-                            .collect::<HashSet<Nip19Coordinate>>()
-                            .union(&report.repo_coordinates_without_relays) // already added maintainers
-                            .any(|c| c.identifier.eq(&repo_ref.identifier) && m.eq(&c.public_key))
-                        {
-                            let c = Nip19Coordinate {
-                                coordinate: Coordinate {
-                                    kind: event.kind,
-                                    public_key: *m,
-                                    identifier: repo_ref.identifier.clone(),
-                                },
-                                relays: vec![],
-                            };
-                            fresh_coordinates.insert(c.clone());
-                            report.repo_coordinates_without_relays.insert(c);
-
-                            if !request.contributors.contains(m)
-                                && !request
-                                    .profiles_to_fetch_from_user_relays
-                                    .clone()
-                                    .into_keys()
-                                    .collect::<HashSet<PublicKey>>()
-                                    .contains(m)
-                                && !fresh_profiles.contains(m)
-                            {
-                                fresh_profiles.insert(m.to_owned());
-                            }
-                        }
-                    }
+                    // recorded for the whole session; whether this
+                    // announcement's listings expand discovery is decided in
+                    // expand_role_discovery once the batch is complete
+                    session_announcements.push(AnnouncementListing {
+                        author: event.pubkey,
+                        identifier: repo_ref.identifier.clone(),
+                        maintainers: repo_ref.maintainers.clone(),
+                        moderators: repo_ref.moderators.clone(),
+                    });
                 }
             } else if event.kind.eq(&STATE_KIND) {
                 if version_check::is_ngit_repo_state_event(event) {
@@ -2807,7 +2791,105 @@ async fn process_fetched_events(
             }
         }
     }
+    expand_role_discovery(
+        session_announcements,
+        maintainer_listed,
+        request,
+        report,
+        fresh_coordinates,
+        fresh_profiles,
+    );
     Ok(())
+}
+
+/// A fetched announcement's role listings, retained for the whole relay
+/// fetch session so discovery expansion does not depend on the order in
+/// which announcements arrive.
+struct AnnouncementListing {
+    author: PublicKey,
+    identifier: String,
+    maintainers: Vec<PublicKey>,
+    moderators: Vec<PublicKey>,
+}
+
+/// Expand announcement discovery from fetched role listings.
+///
+/// Per NIP-34 clients SHOULD recursively fetch announcements from each
+/// pubkey assigned a role, and only `M`/`m` members can assign: an
+/// announcement expands discovery only when its author is themselves
+/// maintainer-listed. A role-fetched announcement (e.g. a moderator's) is
+/// consulted solely for its author's own self-entries during consolidation,
+/// so its listings must not add coordinates or profiles — otherwise any
+/// `o`-assigned pubkey could direct the client to fetch arbitrary
+/// announcements. Fetching grants nothing — which assignments carry
+/// authority is decided when the cache is consolidated
+/// (`get_repo_ref_from_cache`).
+///
+/// Runs to a fixpoint over every announcement seen this session, so a
+/// pubkey that joins the maintainer listing only after their own
+/// announcement was processed still has that announcement's listings
+/// expanded.
+fn expand_role_discovery(
+    announcements: &[AnnouncementListing],
+    maintainer_listed: &mut HashSet<PublicKey>,
+    request: &FetchRequest,
+    report: &mut FetchReport,
+    fresh_coordinates: &mut HashSet<Nip19Coordinate>,
+    fresh_profiles: &mut HashSet<PublicKey>,
+) {
+    loop {
+        let mut changed = false;
+        for announcement in announcements {
+            if !maintainer_listed.contains(&announcement.author) {
+                continue;
+            }
+            for m in &announcement.maintainers {
+                if maintainer_listed.insert(*m) {
+                    changed = true;
+                }
+            }
+            for m in announcement
+                .maintainers
+                .iter()
+                .chain(announcement.moderators.iter())
+            {
+                if !request
+                    .repo_coordinates_without_relays // prexisting members
+                    .iter()
+                    .map(|(c, _)| c.clone())
+                    .collect::<HashSet<Nip19Coordinate>>()
+                    .union(&report.repo_coordinates_without_relays) // already added members
+                    .any(|c| c.identifier.eq(&announcement.identifier) && m.eq(&c.public_key))
+                {
+                    let c = Nip19Coordinate {
+                        coordinate: Coordinate {
+                            kind: Kind::GitRepoAnnouncement,
+                            public_key: *m,
+                            identifier: announcement.identifier.clone(),
+                        },
+                        relays: vec![],
+                    };
+                    fresh_coordinates.insert(c.clone());
+                    report.repo_coordinates_without_relays.insert(c);
+
+                    if !request.contributors.contains(m)
+                        && !request
+                            .profiles_to_fetch_from_user_relays
+                            .clone()
+                            .into_keys()
+                            .collect::<HashSet<PublicKey>>()
+                            .contains(m)
+                        && !fresh_profiles.contains(m)
+                    {
+                        fresh_profiles.insert(m.to_owned());
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 fn request_includes_ngit_repo(request: &FetchRequest) -> bool {
@@ -3369,6 +3451,12 @@ pub struct FetchRequest {
     repo_auth_mode: RelayAuthMode,
     relay_column_width: usize,
     repo_coordinates_without_relays: Vec<(Nip19Coordinate, Option<Timestamp>)>,
+    /// Authors whose announcements expand discovery: the selected
+    /// maintainer plus every pubkey a maintainer-listed announcement lists
+    /// as `M`/`m`. Per NIP-34 only members can assign roles, so a
+    /// role-fetched (e.g. moderator-only) author's listings never expand
+    /// discovery; grown per fetch session by `expand_role_discovery`.
+    maintainer_listed_authors: HashSet<PublicKey>,
     state: Option<(Timestamp, EventId)>,
     proposals: HashSet<EventId>,
     /// Known issue event IDs, used to fetch their status events.
@@ -5080,5 +5168,130 @@ mod moderator_discovery_tests {
         assert_eq!(repo_ref.maintainers, vec![owner]);
         assert_eq!(repo_ref.moderators, vec![moderator]);
         assert!(!repo_ref.is_authorized_member(&crony));
+    }
+}
+
+#[cfg(test)]
+mod role_discovery_expansion_tests {
+    use super::*;
+
+    fn pk() -> PublicKey {
+        nostr::prelude::Keys::generate().public_key()
+    }
+
+    fn listing(
+        author: PublicKey,
+        maintainers: Vec<PublicKey>,
+        moderators: Vec<PublicKey>,
+    ) -> AnnouncementListing {
+        AnnouncementListing {
+            author,
+            identifier: "repo".to_string(),
+            maintainers,
+            moderators,
+        }
+    }
+
+    fn added_pubkeys(report: &FetchReport) -> HashSet<PublicKey> {
+        report
+            .repo_coordinates_without_relays
+            .iter()
+            .map(|c| c.public_key)
+            .collect()
+    }
+
+    fn expand(
+        announcements: &[AnnouncementListing],
+        maintainer_listed: &mut HashSet<PublicKey>,
+    ) -> (FetchReport, HashSet<Nip19Coordinate>, HashSet<PublicKey>) {
+        let request = FetchRequest::default();
+        let mut report = FetchReport::default();
+        let mut fresh_coordinates = HashSet::new();
+        let mut fresh_profiles = HashSet::new();
+        expand_role_discovery(
+            announcements,
+            maintainer_listed,
+            &request,
+            &mut report,
+            &mut fresh_coordinates,
+            &mut fresh_profiles,
+        );
+        (report, fresh_coordinates, fresh_profiles)
+    }
+
+    /// A maintainer-listed author's announcement adds coordinates and
+    /// profile fetches for both its maintainer and moderator listings, and
+    /// its `m` listings grow the maintainer-listed set — while an `o`
+    /// listing never does.
+    #[test]
+    fn maintainer_listed_author_expands_maintainers_and_moderators() {
+        let owner = pk();
+        let co = pk();
+        let moderator = pk();
+        let mut maintainer_listed = HashSet::from([owner]);
+
+        let (report, fresh_coordinates, fresh_profiles) = expand(
+            &[listing(owner, vec![owner, co], vec![moderator])],
+            &mut maintainer_listed,
+        );
+
+        assert_eq!(
+            added_pubkeys(&report),
+            HashSet::from([owner, co, moderator])
+        );
+        assert_eq!(
+            fresh_coordinates
+                .iter()
+                .map(|c| c.public_key)
+                .collect::<HashSet<PublicKey>>(),
+            HashSet::from([owner, co, moderator])
+        );
+        assert_eq!(fresh_profiles, HashSet::from([owner, co, moderator]));
+        assert!(maintainer_listed.contains(&co));
+        assert!(!maintainer_listed.contains(&moderator));
+    }
+
+    /// A role-fetched author who is not maintainer-listed (e.g. an
+    /// `o`-assigned moderator) cannot expand discovery: their listings add
+    /// no coordinates, no profiles and no maintainer-listed authors, so a
+    /// moderator cannot direct the client to fetch arbitrary announcements.
+    #[test]
+    fn announcement_from_an_unlisted_author_expands_nothing() {
+        let owner = pk();
+        let moderator = pk();
+        let crony = pk();
+        let mut maintainer_listed = HashSet::from([owner]);
+
+        let (report, fresh_coordinates, fresh_profiles) = expand(
+            &[listing(moderator, vec![owner, crony], vec![crony])],
+            &mut maintainer_listed,
+        );
+
+        assert!(report.repo_coordinates_without_relays.is_empty());
+        assert!(fresh_coordinates.is_empty());
+        assert!(fresh_profiles.is_empty());
+        assert_eq!(maintainer_listed, HashSet::from([owner]));
+    }
+
+    /// The fixpoint makes expansion independent of arrival order: the
+    /// co-maintainer's announcement is recorded before the owner's
+    /// announcement that lists them, and its listings still expand.
+    #[test]
+    fn expansion_is_independent_of_announcement_order() {
+        let owner = pk();
+        let co = pk();
+        let moderator = pk();
+        let mut maintainer_listed = HashSet::from([owner]);
+
+        let (report, _, _) = expand(
+            &[
+                listing(co, vec![co, owner], vec![moderator]),
+                listing(owner, vec![owner, co], vec![]),
+            ],
+            &mut maintainer_listed,
+        );
+
+        assert!(added_pubkeys(&report).contains(&moderator));
+        assert!(maintainer_listed.contains(&co));
     }
 }
