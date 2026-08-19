@@ -132,30 +132,35 @@ fn is_role_tag_name(name: &str) -> bool {
     matches!(name, "M" | "m" | "o")
 }
 
-/// Whether `event`'s author has left the repository: at least one role tag
-/// names the author but none of their entries is active. Per NIP-34 a member
-/// may leave by ending their self-role, which takes precedence over
-/// assignments in other announcements. An author absent from all role tags
-/// has *not* left — they are implicitly a maintainer for the repository's
-/// entire history.
-pub fn announcement_author_has_left(event: &nostr::prelude::Event) -> bool {
+/// Whether `event`'s author does not assert maintainership: at least one
+/// role tag names the author but none of them is an active maintainer
+/// (`M`/`m`) entry — the author left by ending their self-role, or their
+/// announcement
+/// acknowledges only moderatorship (`o`). Per NIP-34 the self-role takes
+/// precedence over assignments in other announcements, so such an author
+/// must not be consolidated as a maintainer — in particular a moderator's
+/// acknowledgement announcement must not turn another member's maintainer
+/// assignment into authoritative state. An author absent from all role tags
+/// has *not* declined — they are implicitly a maintainer for the
+/// repository's entire history.
+pub fn announcement_author_declines_maintainership(event: &nostr::prelude::Event) -> bool {
     let author = event.pubkey.to_string();
     let mut author_has_entry = false;
-    let mut author_has_active_entry = false;
+    let mut author_has_active_maintainer_entry = false;
     for tag in event.tags.iter() {
         let slice = tag.as_slice();
-        if !slice.first().is_some_and(|name| is_role_tag_name(name)) {
+        let Some(name) = slice.first().filter(|name| is_role_tag_name(name)) else {
             continue;
-        }
+        };
         if slice.get(1) != Some(&author) {
             continue;
         }
         author_has_entry = true;
-        if role_entry_is_active(slice) {
-            author_has_active_entry = true;
+        if name != "o" && role_entry_is_active(slice) {
+            author_has_active_maintainer_entry = true;
         }
     }
-    author_has_entry && !author_has_active_entry
+    author_has_entry && !author_has_active_maintainer_entry
 }
 
 impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
@@ -587,11 +592,24 @@ impl RepoRef {
     /// having acknowledged a confirmed member, so none is confirmed.
     pub fn confirmed_maintainers(&self) -> Vec<PublicKey> {
         let edges = self.maintainer_edges();
-        let mut confirmed: HashSet<PublicKey> = HashSet::from([self.selected_maintainer]);
+        // A member's own announcement takes precedence over assignments in
+        // other announcements: no active `M`/`m` self-entry (they left, or
+        // acknowledge only moderatorship) removes them from the candidate
+        // set even when another member still lists them as a maintainer.
+        let declined: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_maintainership(event))
+            .map(|event| event.pubkey)
+            .collect();
+        let mut confirmed: HashSet<PublicKey> = HashSet::new();
+        if !declined.contains(&self.selected_maintainer) {
+            confirmed.insert(self.selected_maintainer);
+        }
         loop {
             let mut changed = false;
             for candidate in &self.maintainers {
-                if confirmed.contains(candidate) {
+                if confirmed.contains(candidate) || declined.contains(candidate) {
                     continue;
                 }
                 let listed_by_member = edges
@@ -2415,7 +2433,7 @@ mod tests {
             let event = role_event(&keys, vec![tag(&["m", &other.to_string()])]);
             let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
             assert_eq!(parsed.maintainers, vec![author, other]);
-            assert!(!announcement_author_has_left(&event));
+            assert!(!announcement_author_declines_maintainership(&event));
         }
 
         #[test]
@@ -2433,15 +2451,15 @@ mod tests {
             );
             let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
             assert_eq!(parsed.maintainers, vec![lead]);
-            assert!(announcement_author_has_left(&event));
+            assert!(announcement_author_declines_maintainership(&event));
 
             // an active self-entry means the author has not left
             let active = role_event(&keys, vec![tag(&["M", &author.to_string()])]);
-            assert!(!announcement_author_has_left(&active));
+            assert!(!announcement_author_declines_maintainership(&active));
 
             // the deprecated format never records leaving
             let legacy = role_event(&keys, vec![tag(&["maintainers", &lead.to_string()])]);
-            assert!(!announcement_author_has_left(&legacy));
+            assert!(!announcement_author_declines_maintainership(&legacy));
         }
 
         #[test]
@@ -2550,8 +2568,57 @@ mod tests {
             let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
             assert_eq!(parsed.maintainers, vec![lead]);
             assert_eq!(parsed.moderators, vec![author]);
-            // an active `o` self-entry is a held role, not leaving
-            assert!(!announcement_author_has_left(&event));
+            // an `o` self-entry acknowledges only moderatorship, which takes
+            // precedence over maintainer assignments in other announcements
+            assert!(announcement_author_declines_maintainership(&event));
+        }
+
+        #[test]
+        fn moderator_acknowledgement_does_not_confirm_maintainership() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+
+            // the owner assigns `m` to the moderator's pubkey, but the
+            // moderator's own announcement acknowledges only moderatorship:
+            // the self-role takes precedence, so the acknowledgement edge
+            // back to the owner must not confirm them as a maintainer with
+            // authoritative state
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &moderator.to_string()]),
+                ],
+            );
+            let moderator_event = role_event(
+                &moderator_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: moderator,
+                        identifier: "test-repo".to_string(),
+                    },
+                    relays: vec![],
+                },
+                moderator_event,
+            );
+            // as consolidated by get_repo_ref_from_cache before its
+            // declines-maintainership retain
+            repo_ref.maintainers = vec![owner, moderator];
+
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![owner]);
+            assert!(repo_ref.is_authorized_maintainer(&owner));
+            assert!(!repo_ref.is_authorized_maintainer(&moderator));
         }
 
         #[test]
