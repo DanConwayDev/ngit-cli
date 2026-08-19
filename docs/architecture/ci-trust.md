@@ -186,11 +186,12 @@ reference left open:
   Everything the NIP does not forbid is tolerated: unmarked or unrecognised
   `q` entries, extra `p` tags on result-like events (the first NIP-22 `p` is
   the parent author), and a non-`refs/` `r` on a Progress marker are ignored,
-  not rejected. The exception is a non-PR Manual Trigger with more than one
-  `p`: the NIP has coordinators require exactly one `p` for themselves, and
-  the trigger's coordinator is later checked by membership, so tolerating a
-  second `p` would let a coordinator the maintainer never addressed pass
-  provenance validation.
+  not rejected. The exception is a Manual Trigger with more than one `p`: on a
+  9840 the `p` slot is the coordinator address, and the NIP has coordinators
+  require exactly one `p` naming themselves. That holds for a PR-context
+  trigger too — the NIP-22 context it carries excludes the participant `p` —
+  so a second `p` is never a parent author, and tolerating one would let a
+  coordinator the maintainer never addressed pass provenance validation.
 - **Run identity is the workflow-run id.** Grouping keys on
   `(coordinator, run id)` only. gitworkshop's `queued_at`-plus-context
   fallback for publishers that predate the `r` run id is not carried over;
@@ -704,8 +705,9 @@ own — and its cost is one extra filter per repository relay.
   the full spelling suggested, because the reading side treats a non-`refs/`
   `r` as something else entirely.
 - **PR-context Manual Triggers are deferred.** A `pr_root`-carrying 9840
-  needs the anchor's and the supplying revision's authors and kinds, and a
-  commit ngit may not hold locally to hash the workflow at — neither falls
+  needs the anchor's author and both kinds — not the supplying revision's
+  author, whose participant `p` the NIP excludes from a trigger — and a
+  commit ngit may not hold locally to hash the workflow at; neither falls
   out of the WP3/WP4 target machinery, which resolves ids rather than the
   NIP-22 tag set. Push/ref-context triggers are the whole of WP6; the PR
   variant is listed with the other deferred work.

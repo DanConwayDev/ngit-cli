@@ -520,8 +520,16 @@ pub fn build_manual_trigger(
     }
     tags.push(tag(&["w", &spec.workflow_path, &spec.workflow_hash]));
     // A Manual Trigger carries the common tags except `o`; it is always
-    // normalized as `manual`.
-    tags.extend(spec.trigger.context_tags());
+    // normalized as `manual`. A pull-request context contributes its NIP-22
+    // tags except the participant `p`: on a 9840 the `p` slot is the
+    // coordinator address, and a coordinator rejects a request naming anyone
+    // else.
+    tags.extend(
+        spec.trigger
+            .context_tags()
+            .into_iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) != Some("p")),
+    );
     sign(maintainer, KIND_CI_MANUAL_TRIGGER, created_at, tags)
 }
 

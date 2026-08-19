@@ -598,6 +598,23 @@ async fn require_ci_trust_allows_a_merge_backed_by_maintainer_direction() -> Res
         &triggered_spec,
         arranged.now - 600,
     )?;
+    // A pull-request Manual Trigger addresses the coordinator and nobody
+    // else: the NIP-22 context it carries excludes the participant `p`, and a
+    // coordinator rejects a request naming a further party. Pinned on the
+    // fixture because the maintainer-directed row below is only evidence that
+    // ngit accepts a *conformant* trigger if the trigger is one.
+    let p_tags: Vec<&[String]> = trigger
+        .tags
+        .iter()
+        .map(nostr::prelude::Tag::as_slice)
+        .filter(|tag| tag.first().map(String::as_str) == Some("p"))
+        .collect();
+    assert_eq!(
+        p_tags.len(),
+        1,
+        "the only `p` is the coordinator: {p_tags:?}"
+    );
+    assert_eq!(p_tags[0][1], trigger_coordinator.public_key().to_hex());
     arranged
         .harness
         .publish_ci_events(&arranged.ci_relay, std::slice::from_ref(&trigger))

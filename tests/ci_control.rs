@@ -315,7 +315,7 @@ async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Resu
 
     let trigger = validate_manual_trigger(&event)
         .map_err(|reason| anyhow::anyhow!("published 9840 is malformed: {reason}"))?;
-    assert_eq!(trigger.addressed, vec![arranged.coordinator.public_key()]);
+    assert_eq!(trigger.coordinator, arranged.coordinator.public_key());
     assert_eq!(trigger.common.commits, vec![head.clone()]);
     assert_eq!(trigger.common.workflow.path, "ci.yml");
     // Computed here from the file's content, independently of ngit's read of
@@ -346,9 +346,18 @@ async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Resu
         c_tags.iter().all(|tag| tag.len() == 2),
         "`c` is the bare object id: {c_tags:?}",
     );
+    // The `p` slot on a Manual Trigger is the coordinator address, and the
+    // NIP requires exactly one naming the coordinator: a coordinator rejects
+    // a request carrying any other participant tag, so ngit never addresses
+    // a second party here.
     let p_tags = tag_slices(&event, "p");
-    assert_eq!(p_tags.len(), 1);
+    assert_eq!(
+        p_tags.len(),
+        1,
+        "the only `p` is the coordinator: {p_tags:?}"
+    );
     assert_eq!(p_tags[0].len(), 2, "`p` is the bare coordinator pubkey");
+    assert_eq!(p_tags[0][1], arranged.coordinator.public_key().to_hex());
     let w_tags = tag_slices(&event, "w");
     assert_eq!(w_tags.len(), 1);
     assert_eq!(w_tags[0].len(), 3, "`w` is path plus content hash");

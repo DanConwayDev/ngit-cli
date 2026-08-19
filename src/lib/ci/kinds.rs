@@ -302,10 +302,9 @@ pub struct ManualTrigger {
     pub event_id: EventId,
     pub author: PublicKey,
     pub created_at: Timestamp,
-    /// `p` tags. A PR-context trigger also tags the PR author, and nothing in
-    /// the event distinguishes the two, so the coordinator is identified by
-    /// membership rather than position.
-    pub addressed: Vec<PublicKey>,
+    /// The `p` tagged coordinator. On a Manual Trigger the single `p` slot is
+    /// the coordinator address, on a PR-context trigger as much as any other.
+    pub coordinator: PublicKey,
     pub common: CommonTags,
 }
 
@@ -511,24 +510,18 @@ pub fn validate_manual_trigger(event: &Event) -> Result<ManualTrigger, ShapeReas
     let view = TagView::new(event);
 
     let common = parse_common_tags(&view, CommonProfile::ManualTrigger)?;
-    // A pull-request trigger carries the NIP-22 parent author as a further
-    // `p`, so its coordinator is identified by membership. A non-PR trigger
-    // addresses exactly one coordinator; tolerating more would let a second
-    // coordinator satisfy a provenance membership check with a request that
-    // never addressed it.
-    let addressed = parse_public_keys(&view, "p")?;
-    if addressed.is_empty() {
-        return Err(ShapeReason::MissingTag("p"));
-    }
-    if common.pr_root().is_none() && addressed.len() > 1 {
-        return Err(ShapeReason::RepeatedTag("p"));
-    }
+    // `required_tag` enforces the NIP's "exactly one `p`, which MUST name the
+    // coordinator". A PR-context trigger is no exception: the NIP-22 context
+    // it carries excludes the participant `p`, so a second `p` cannot be a
+    // parent author and tolerating one would let a coordinator the maintainer
+    // never addressed pass provenance validation.
+    let coordinator = parse_public_key("p", view.required_value("p")?)?;
 
     Ok(ManualTrigger {
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
-        addressed,
+        coordinator,
         common,
     })
 }
@@ -889,12 +882,6 @@ fn parse_public_key(tag: &'static str, raw: &str) -> Result<PublicKey, ShapeReas
     })
 }
 
-fn parse_public_keys(view: &TagView<'_>, tag: &'static str) -> Result<Vec<PublicKey>, ShapeReason> {
-    view.matching(tag)
-        .map(|slice| parse_public_key(tag, value(tag, slice)?))
-        .collect()
-}
-
 fn parse_event_id(tag: &'static str, raw: &str) -> Result<EventId, ShapeReason> {
     EventId::parse(raw).map_err(|_| ShapeReason::InvalidTagValue {
         tag,
@@ -1025,11 +1012,10 @@ fn parse_trigger_context(
         return Ok(None);
     };
 
-    // A Manual Trigger's `p` names the coordinator; a PR-context trigger adds
-    // the NIP-22 parent author as a further `p`. Which is which cannot be
-    // determined from the event, so the author is only read from result-like
-    // events, whose `p` tags are exclusively NIP-22. The first is used: the
-    // NIP places no upper bound on `p`.
+    // A Manual Trigger's single `p` names the coordinator: the NIP-22 context
+    // it carries excludes the participant `p`, so a PR-context trigger states
+    // no supplying author. Result-like events carry exclusively NIP-22 `p`
+    // tags, and the first is used: the NIP places no upper bound on them.
     let supplying_author = match profile {
         CommonProfile::ManualTrigger => None,
         CommonProfile::ResultLike => view
@@ -1728,11 +1714,16 @@ mod tests {
     }
 
     #[test]
-    fn manual_trigger_rejects_a_second_coordinator_without_pr_context() {
+    fn manual_trigger_addresses_exactly_one_coordinator() {
         let maintainer = Keys::generate();
         let coordinator = Keys::generate();
         let owner = Keys::generate();
         let base = manual_trigger(&maintainer, &coordinator, &owner, 10);
+        assert_eq!(
+            validate_manual_trigger(&base).unwrap().coordinator,
+            coordinator.public_key()
+        );
+
         let event = with_tags(&maintainer, &base, |tags| {
             tags.push(tag(&["p", &Keys::generate().public_key().to_hex()]));
         });
@@ -1743,18 +1734,28 @@ mod tests {
     }
 
     #[test]
-    fn manual_trigger_accepts_the_pr_parent_author_as_a_second_p() {
+    fn pr_context_manual_trigger_rejects_a_second_p() {
         let maintainer = Keys::generate();
         let coordinator = Keys::generate();
         let owner = Keys::generate();
         let base = manual_trigger(&maintainer, &coordinator, &owner, 10);
-        let event = with_tags(&maintainer, &base, |tags| {
+        // The NIP-22 context a PR-context trigger carries excludes the
+        // participant `p`, so its sole `p` remains the coordinator.
+        let pr_context = with_tags(&maintainer, &base, |tags| {
             tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("r"));
             tags.push(tag(&["E", &Keys::generate().public_key().to_hex()]));
+        });
+        let parsed = validate_manual_trigger(&pr_context).unwrap();
+        assert_eq!(parsed.coordinator, coordinator.public_key());
+        assert!(parsed.common.pr_root().is_some());
+
+        let event = with_tags(&maintainer, &pr_context, |tags| {
             tags.push(tag(&["p", &Keys::generate().public_key().to_hex()]));
         });
-        let parsed = validate_manual_trigger(&event).unwrap();
-        assert_eq!(parsed.addressed.len(), 2);
+        assert_eq!(
+            validate_manual_trigger(&event),
+            Err(ShapeReason::RepeatedTag("p"))
+        );
     }
 
     #[test]

@@ -426,10 +426,9 @@ fn validate_manual_trigger(
     {
         return Err(ProvenanceRejection::RepositoryOutsideClosure);
     }
-    // A pull-request trigger also `p` tags the PR author, so the coordinator
-    // is identified by membership; shape validation caps a non-PR trigger at
-    // one `p` so a second coordinator cannot ride along.
-    if !trigger.addressed.contains(&run.coordinator) {
+    // Shape validation caps every trigger at one `p`, so the addressee is a
+    // single coordinator and a second cannot ride along.
+    if trigger.coordinator != run.coordinator {
         return Err(ProvenanceRejection::CoordinatorNotAddressed(
             run.coordinator,
         ));
@@ -1097,6 +1096,52 @@ pub(crate) mod tests {
                 expected: Some(other),
                 found: Some(authorized),
             })
+        );
+    }
+
+    #[test]
+    fn a_pull_request_manual_trigger_addresses_only_the_coordinator() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let pr_root = EventId::from_slice(&[0x5a; 32]).unwrap();
+        let base = manual_trigger(&maintainer, &coordinator, &owner, 50);
+        // The NIP-22 context a PR-context trigger carries excludes the
+        // participant `p`, so the coordinator remains its sole addressee.
+        let trigger = with_tags(&maintainer, &base, |tags| {
+            tags.retain(|tag| tag.as_slice().get(1).map(String::as_str) != Some("refs/heads/main"));
+            tags.push(tag(&["E", &pr_root.to_hex()]));
+        });
+        let run = pull_request_run(&coordinator, &owner, &maintainer, pr_root, trigger.id);
+        let validated = validate_run_provenance(
+            &run,
+            &trigger,
+            &[maintainer.public_key()],
+            &[perspective(&owner)],
+        )
+        .expect("a coordinator-addressed pull-request trigger validates");
+        assert!(validated.covers(&run));
+
+        // One that names a further party — the PR author a Workflow Result
+        // tags — is malformed, which is what the coordinator concludes too.
+        let with_participant = with_tags(&maintainer, &trigger, |tags| {
+            tags.push(tag(&["p", &owner.public_key().to_hex()]));
+        });
+        let run = pull_request_run(
+            &coordinator,
+            &owner,
+            &maintainer,
+            pr_root,
+            with_participant.id,
+        );
+        assert_eq!(
+            validate_run_provenance(
+                &run,
+                &with_participant,
+                &[maintainer.public_key()],
+                &[perspective(&owner)]
+            ),
+            Err(ProvenanceRejection::Shape(ShapeReason::RepeatedTag("p"))),
         );
     }
 
