@@ -1,5 +1,7 @@
 //! `ngit repo accept` — accepting co-maintainership publishes the accepter's
-//! own kind-30617 announcement, and nothing else locally.
+//! own kind-30617 announcement, and nothing else locally. The accept-then-
+//! leave flow of `ngit repo leave` is also driven here, reusing the invited
+//! clone arrangement.
 //!
 //! The coordinate the repo resolves from is the root of trust. If accepting
 //! re-rooted resolution on the accepter's own announcement — which always
@@ -307,6 +309,29 @@ async fn leave_after_accept_ends_the_self_role_with_a_boundary() -> Result<()> {
     assert!(
         !again.status.success(),
         "a second leave must fail: the announcement already records the role as ended",
+    );
+    // the refused leave must not have published anything: the NIP-01
+    // winner on the relay is still the first leave's announcement
+    let announcements_after = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    let winner_after = announcements_after
+        .iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("co-maintainer announcement vanished after refused second leave")?;
+    assert_eq!(
+        winner_after.id, announcement.id,
+        "a refused leave must not publish a new announcement",
     );
 
     Ok(())
