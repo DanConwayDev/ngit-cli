@@ -18,7 +18,9 @@
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
-use test_harness::{Harness, KIND_REPO_STATE, PublishPrOpts, tag_values_multiple};
+use test_harness::{
+    Harness, KIND_PULL_REQUEST, KIND_REPO_STATE, PublishPrOpts, tag_values_multiple,
+};
 
 /// NIP-32 label events (`src/bin/ngit/sub_commands/label.rs`).
 const KIND_LABEL: Kind = Kind::Custom(1985);
@@ -247,6 +249,119 @@ async fn moderator_cannot_push_state() -> Result<()> {
         state_events.is_empty(),
         "a moderator must never produce an authoritative state event: {state_events:?}",
     );
+
+    Ok(())
+}
+
+/// A moderator pushing a protected branch *alongside* a proposal branch:
+/// the branch refspec is rejected by the maintainer-listing check — git
+/// exits non-zero, no state event exists and the rejected refspec must not
+/// re-enter the state transaction or be reported to git a second time —
+/// while the `pr/` refspec still lands its proposal events.
+#[tokio::test]
+async fn moderator_mixed_push_rejects_branch_but_delivers_proposal() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_lead_repo, graph) = harness
+        .publish_repo_with_role_graph("moderator-mixed-push")
+        .await?;
+    let moderator_pubkey = graph.moderator_keys.public_key();
+
+    let moderator_clone = harness
+        .clone_published_repo_as(&graph.published, &graph.moderator_keys)
+        .await?;
+
+    // Proposal branch: one commit ahead of the published main.
+    moderator_clone
+        .git_ok(
+            ["checkout", "-b", "pr/moderator-suggestion"],
+            "git checkout -b pr/moderator-suggestion",
+        )
+        .await?;
+    std::fs::write(
+        moderator_clone.dir().join("suggestion.md"),
+        "a change offered as a proposal\n",
+    )?;
+    moderator_clone
+        .git_ok(["add", "suggestion.md"], "git add suggestion.md")
+        .await?;
+    moderator_clone
+        .git_ok(
+            ["commit", "-m", "moderator suggestion", "--no-gpg-sign"],
+            "git commit (proposal branch)",
+        )
+        .await?;
+
+    // Direct-to-main commit the moderator may not land.
+    moderator_clone
+        .git_ok(["checkout", "main"], "git checkout main")
+        .await?;
+    std::fs::write(
+        moderator_clone.dir().join("moderator.md"),
+        "a change the moderator may not land directly\n",
+    )?;
+    moderator_clone
+        .git_ok(["add", "moderator.md"], "git add moderator.md")
+        .await?;
+    moderator_clone
+        .git_ok(
+            ["commit", "-m", "moderator commit", "--no-gpg-sign"],
+            "git commit (main)",
+        )
+        .await?;
+
+    let out = moderator_clone
+        .nostr_push_expecting_failure(["origin", "main", "pr/moderator-suggestion"])
+        .await?;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    )
+    .to_lowercase();
+    assert!(
+        combined.contains("isn't listed as a maintainer"),
+        "the branch refspec should be rejected by the maintainer-listing check, got: {combined}",
+    );
+
+    // The proposal refspec pushed alongside the rejected branch still
+    // landed its events on the repository relays.
+    let proposal_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(moderator_pubkey)
+                .kinds(vec![Kind::GitPatch, KIND_PULL_REQUEST]),
+        )
+        .await?;
+    assert!(
+        !proposal_events.is_empty(),
+        "the pr/ refspec pushed alongside the rejected branch must still produce its proposal events",
+    );
+
+    // The rejected branch produced no authoritative state anywhere.
+    for events in [
+        harness
+            .grasp("repo")
+            .events(Filter::new().author(moderator_pubkey).kind(KIND_REPO_STATE))
+            .await?,
+        harness
+            .relay("default")
+            .events(Filter::new().author(moderator_pubkey).kind(KIND_REPO_STATE))
+            .await?,
+    ] {
+        assert!(
+            events.is_empty(),
+            "a moderator must never produce an authoritative state event: {events:?}",
+        );
+    }
 
     Ok(())
 }

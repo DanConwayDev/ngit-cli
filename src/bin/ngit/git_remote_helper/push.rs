@@ -158,6 +158,7 @@ pub(super) async fn run_push(
     if !(git_state_refspecs.is_empty() && proposal_refspecs.is_empty()) {
         let PushEventsPlan {
             rejected_proposal_refspecs,
+            rejected_git_server_refspecs,
             rejected,
             state,
             other_events,
@@ -178,6 +179,11 @@ pub(super) async fn run_push(
             command_signer,
         )
         .await?;
+
+        // Like the out-of-sync and stale-lease rejections above, refspecs
+        // refused by the maintainer-listing check have received their
+        // `error` responses and must not reach the state transaction.
+        git_state_refspecs.retain(|refspec| !rejected_git_server_refspecs.contains(refspec));
 
         if !rejected {
             let decoded_nostr_url = repo_ref.to_nostr_git_url(&None);
@@ -335,6 +341,12 @@ fn apply_force_with_lease(
 
 struct PushEventsPlan {
     rejected_proposal_refspecs: Vec<String>,
+    /// refs/heads and refs/tags refspecs refused by the maintainer-listing
+    /// check. Their `error` responses have already been written, so the
+    /// caller must drop them before the state transaction — otherwise their
+    /// git data would still be pushed and the same refs reported a second
+    /// time.
+    rejected_git_server_refspecs: Vec<String>,
     rejected: bool,
     /// the candidate replacement repository state (`None` under
     /// `nostr.nostate` or when no state refspecs are being pushed)
@@ -428,7 +440,8 @@ async fn create_events_and_proposals(
         "authentication required; run 'ngit account login' or 'ngit account create', then try again",
     )?;
 
-    if !repo_ref.maintainers.contains(&user_ref.public_key) {
+    let listed_maintainer = repo_ref.maintainers.contains(&user_ref.public_key);
+    if !listed_maintainer {
         for refspec in git_server_refspecs {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
             // `error <dst> <why>` is the remote-helper protocol response on
@@ -443,6 +456,7 @@ async fn create_events_and_proposals(
         if proposal_refspecs.is_empty() {
             return Ok(PushEventsPlan {
                 rejected_proposal_refspecs: vec![],
+                rejected_git_server_refspecs: git_server_refspecs.clone(),
                 rejected: true,
                 state: None,
                 other_events: vec![],
@@ -473,7 +487,10 @@ async fn create_events_and_proposals(
     // should auto-resolve issues and when scoping proposal fork points.
     let declared_default_branch = repo_state::default_branch_from_state(&existing_state);
 
-    if !git_server_refspecs.is_empty() {
+    // A rejected pusher's branch refspecs produce no state candidate, no
+    // merge/issue status events and no maintainers.yaml update; only their
+    // proposal refspecs are processed below.
+    if listed_maintainer && !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, git_server_refspecs)?;
 
         let store_state =
@@ -611,6 +628,11 @@ async fn create_events_and_proposals(
 
     Ok(PushEventsPlan {
         rejected_proposal_refspecs,
+        rejected_git_server_refspecs: if listed_maintainer {
+            vec![]
+        } else {
+            git_server_refspecs.clone()
+        },
         rejected: false,
         state,
         other_events: events,
