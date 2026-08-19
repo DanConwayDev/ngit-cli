@@ -176,8 +176,8 @@ struct ResolvedFields {
 /// Specifying yourself keeps the full listing and emits you as `M`.
 /// Specifying someone else follows NIP-34's SHOULD — the announcement then
 /// lists only the author and the lead. When that collapse would drop a
-/// pubkey the author's current announcement lists and the lead's own
-/// announcement does not keep listed, the pubkey would lose
+/// pubkey the author's current announcement lists without authoritative
+/// cover from the lead's own announcement, the pubkey would lose
 /// authorized-maintainer status, so `--force` is required.
 fn apply_lead_to_maintainers(
     lead_arg: Option<PublicKey>,
@@ -199,7 +199,7 @@ fn apply_lead_to_maintainers(
     let listing = vec![*my_pubkey, lead];
     if !force {
         let dropped: Vec<String> =
-            drops_losing_authorized_status(&listing, &lead, my_ref, consolidated)
+            drops_losing_authorized_status(&listing, &lead, my_pubkey, my_ref, consolidated)
                 .iter()
                 .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
                 .collect();
@@ -220,17 +220,31 @@ fn apply_lead_to_maintainers(
 
 /// Pubkeys my current announcement lists that collapsing the listing to
 /// `[me, lead]` would drop, excluding those the lead's own announcement
-/// keeps listed (and therefore authorized).
+/// keeps listed *with authority*: per NIP-34 only members' events are
+/// authoritative, so the lead's listing counts as cover only when the lead
+/// is already a confirmed member, or their announcement acknowledges me —
+/// making the relationship reciprocal the moment my collapsed listing is
+/// published. An unconfirmed, non-reciprocal lead's announcement covers
+/// nobody.
+///
+/// Conservative over-approximation: a drop kept listed by another remaining
+/// member's announcement still gates even though that listing may keep the
+/// pubkey confirmed. Under a lead, non-lead members SHOULD list only
+/// themselves and the lead, so such cover is transitional at best.
 fn drops_losing_authorized_status(
     listing: &[PublicKey],
     lead: &PublicKey,
+    my_pubkey: &PublicKey,
     my_ref: Option<&RepoRef>,
     consolidated: Option<&RepoRef>,
 ) -> Vec<PublicKey> {
     let lead_lists: Vec<PublicKey> = consolidated
-        .and_then(|rr| rr.events.values().find(|e| e.pubkey == *lead))
-        .and_then(|e| RepoRef::try_from((e.clone(), None)).ok())
-        .map(|lr| lr.maintainers)
+        .and_then(|rr| {
+            let event = rr.events.values().find(|e| e.pubkey == *lead)?;
+            let lead_ref = RepoRef::try_from((event.clone(), None)).ok()?;
+            (rr.is_authorized_maintainer(lead) || lead_ref.maintainers.contains(my_pubkey))
+                .then_some(lead_ref.maintainers)
+        })
         .unwrap_or_default();
     my_ref
         .map(|mr| mr.maintainers.clone())
@@ -2643,30 +2657,46 @@ mod apply_lead_to_maintainers_tests {
         }
     }
 
-    /// A consolidated `RepoRef` carrying `announcer`'s announcement, whose
-    /// `maintainers` tag lists `listed`.
-    fn consolidated_with_announcement(announcer: &Keys, listed: &[PublicKey]) -> RepoRef {
-        let mut maintainers_tag = vec!["maintainers".to_string()];
-        maintainers_tag.extend(listed.iter().map(ToString::to_string));
-        let event = nostr::prelude::EventBuilder::new(Kind::GitRepoAnnouncement, "")
-            .tags(vec![
-                Tag::identifier("test-repo"),
-                Tag::parse(maintainers_tag).unwrap(),
-            ])
-            .finalize(announcer)
-            .unwrap();
-        let mut repo_ref = test_repo_ref(vec![announcer.public_key()], None);
-        repo_ref.events.insert(
-            Nip19Coordinate {
-                coordinate: Coordinate {
-                    kind: Kind::GitRepoAnnouncement,
-                    public_key: event.pubkey,
-                    identifier: "test-repo".to_string(),
+    /// A consolidated `RepoRef` anchored on `selected`, carrying one
+    /// announcement per `(announcer, listed)` pair — each listing `listed`
+    /// via the deprecated `maintainers` tag — with `maintainers` set to the
+    /// recursive union, the way `get_repo_ref_from_cache` consolidates.
+    fn consolidated_with_announcements(
+        selected: PublicKey,
+        announcements: &[(&Keys, &[PublicKey])],
+    ) -> RepoRef {
+        let mut maintainers = vec![selected];
+        for (announcer, listed) in announcements {
+            for pk in std::iter::once(announcer.public_key()).chain(listed.iter().copied()) {
+                if !maintainers.contains(&pk) {
+                    maintainers.push(pk);
+                }
+            }
+        }
+        let mut repo_ref = test_repo_ref(maintainers, None);
+        repo_ref.selected_maintainer = selected;
+        for (announcer, listed) in announcements {
+            let mut maintainers_tag = vec!["maintainers".to_string()];
+            maintainers_tag.extend(listed.iter().map(ToString::to_string));
+            let event = nostr::prelude::EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(vec![
+                    Tag::identifier("test-repo"),
+                    Tag::parse(maintainers_tag).unwrap(),
+                ])
+                .finalize(*announcer)
+                .unwrap();
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: event.pubkey,
+                        identifier: "test-repo".to_string(),
+                    },
+                    relays: vec![],
                 },
-                relays: vec![],
-            },
-            event,
-        );
+                event,
+            );
+        }
         repo_ref
     }
 
@@ -2724,12 +2754,20 @@ mod apply_lead_to_maintainers_tests {
         let lead = lead_keys.public_key();
         let dropped = Keys::generate().public_key();
         let my_ref = test_repo_ref(vec![me, dropped], None);
-        let consolidated = consolidated_with_announcement(&lead_keys, &[]);
+        // the lead acknowledges me (their listing counts as cover) but does
+        // not keep the dropped pubkey listed
+        let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[me])]);
 
         // the pubkey losing authorized-maintainer status is identified
         // (and named in the cli_error printed to stderr)
         assert_eq!(
-            drops_losing_authorized_status(&[me, lead], &lead, Some(&my_ref), Some(&consolidated)),
+            drops_losing_authorized_status(
+                &[me, lead],
+                &lead,
+                &me,
+                Some(&my_ref),
+                Some(&consolidated)
+            ),
             vec![dropped]
         );
         assert!(
@@ -2758,19 +2796,92 @@ mod apply_lead_to_maintainers_tests {
     }
 
     #[test]
-    fn drop_kept_authorized_by_the_leads_announcement_needs_no_force() {
+    fn drop_kept_listed_by_a_reciprocal_leads_announcement_needs_no_force() {
         let me = Keys::generate().public_key();
         let lead_keys = Keys::generate();
         let lead = lead_keys.public_key();
         let dropped = Keys::generate().public_key();
         let my_ref = test_repo_ref(vec![me, dropped], None);
-        let consolidated = consolidated_with_announcement(&lead_keys, &[dropped]);
+        // the lead keeps the dropped pubkey listed and acknowledges me, so
+        // their announcement is reciprocal (authoritative) the moment my
+        // collapsed listing is published
+        let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[dropped, me])]);
 
         let (maintainers, resolved) = apply_lead_to_maintainers(
             Some(lead),
             false,
             &me,
             vec![me, dropped],
+            Some(&my_ref),
+            Some(&consolidated),
+        )
+        .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+    }
+
+    #[test]
+    fn an_unauthoritative_leads_listing_covers_no_drops() {
+        let me = Keys::generate().public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, dropped], None);
+        // the lead keeps the dropped pubkey listed but is neither confirmed
+        // nor acknowledging me: per NIP-34 their announcement is not
+        // authoritative, so the dropped pubkey still loses authorized status
+        let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[dropped])]);
+
+        assert_eq!(
+            drops_losing_authorized_status(
+                &[me, lead],
+                &lead,
+                &me,
+                Some(&my_ref),
+                Some(&consolidated)
+            ),
+            vec![dropped]
+        );
+        assert!(
+            apply_lead_to_maintainers(
+                Some(lead),
+                false,
+                &me,
+                vec![me, dropped],
+                Some(&my_ref),
+                Some(&consolidated),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_confirmed_leads_listing_covers_drops_without_acknowledging_me() {
+        let me_keys = Keys::generate();
+        let me = me_keys.public_key();
+        let third_keys = Keys::generate();
+        let third = third_keys.public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, third, lead, dropped], None);
+        // the lead is confirmed through `third` (listed by me, acknowledging
+        // a confirmed member) without listing me directly; their listing is
+        // authoritative and keeps the dropped pubkey covered
+        let consolidated = consolidated_with_announcements(
+            me,
+            &[
+                (&me_keys, &[third, lead, dropped]),
+                (&third_keys, &[me]),
+                (&lead_keys, &[third, dropped]),
+            ],
+        );
+
+        let (maintainers, resolved) = apply_lead_to_maintainers(
+            Some(lead),
+            false,
+            &me,
+            vec![me, third, lead, dropped],
             Some(&my_ref),
             Some(&consolidated),
         )
