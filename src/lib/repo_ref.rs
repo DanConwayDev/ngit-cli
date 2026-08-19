@@ -89,25 +89,6 @@ pub struct MaintainerEdge {
     pub to: PublicKey,
 }
 
-fn graph_reaches(from: PublicKey, target: PublicKey, edges: &[MaintainerEdge]) -> bool {
-    let mut pending = vec![from];
-    let mut seen = HashSet::new();
-    while let Some(current) = pending.pop() {
-        if !seen.insert(current) {
-            continue;
-        }
-        if current == target {
-            return true;
-        }
-        pending.extend(
-            edges
-                .iter()
-                .filter_map(|edge| (edge.from == current).then_some(edge.to)),
-        );
-    }
-    false
-}
-
 /// Names of tags ngit itself parses on `kind:30617` (`GitRepoAnnouncement`)
 /// events. Used by [`RepoRef::try_from`] to decide whether a tag is "ours"
 /// (consumed by a typed field, with duplicates collapsed on re-emission) or
@@ -596,15 +577,42 @@ impl RepoRef {
     /// makes the relationship reciprocal, and an invited pubkey's events MUST
     /// NOT be treated as authoritative. Confirmed maintainers are therefore
     /// the authoritative set: see [`RepoRef::is_authorized_maintainer`].
+    ///
+    /// Membership grows as a fixpoint from the selected maintainer: a
+    /// candidate is confirmed only when an already-confirmed member's
+    /// announcement lists them *and* their own announcement lists an
+    /// already-confirmed member. Mere reachability is not enough: in a cycle
+    /// of unconfirmed invitees (A lists B, B lists C, C lists A) every
+    /// invitee can reach the selected maintainer without any of them ever
+    /// having acknowledged a confirmed member, so none is confirmed.
     pub fn confirmed_maintainers(&self) -> Vec<PublicKey> {
         let edges = self.maintainer_edges();
+        let mut confirmed: HashSet<PublicKey> = HashSet::from([self.selected_maintainer]);
+        loop {
+            let mut changed = false;
+            for candidate in &self.maintainers {
+                if confirmed.contains(candidate) {
+                    continue;
+                }
+                let listed_by_member = edges
+                    .iter()
+                    .any(|edge| edge.to == *candidate && confirmed.contains(&edge.from));
+                let acknowledges_member = edges
+                    .iter()
+                    .any(|edge| edge.from == *candidate && confirmed.contains(&edge.to));
+                if listed_by_member && acknowledges_member {
+                    confirmed.insert(*candidate);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         self.maintainers
             .iter()
             .copied()
-            .filter(|maintainer| {
-                *maintainer == self.selected_maintainer
-                    || graph_reaches(*maintainer, self.selected_maintainer, &edges)
-            })
+            .filter(|maintainer| confirmed.contains(maintainer))
             .collect()
     }
 
@@ -1971,6 +1979,68 @@ mod tests {
 
             assert_eq!(repo_ref.confirmed_maintainers(), vec![selected]);
             assert_eq!(repo_ref.invited_maintainers(), vec![invited]);
+        }
+
+        #[tokio::test]
+        async fn cycle_of_unreciprocated_invitees_confirms_no_one() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let invitee_b_keys = &*TEST_KEY_2_KEYS;
+            let invitee_b = invitee_b_keys.public_key();
+            let invitee_c_keys = nostr::prelude::Keys::generate();
+            let invitee_c = invitee_c_keys.public_key();
+
+            // A lists B, B lists C, C lists A: both invitees can *reach* the
+            // selected maintainer through the cycle, but B never acknowledged
+            // an already-confirmed member and C was never listed by one, so
+            // neither is confirmed.
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, invitee_b, invitee_c], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, invitee_b]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(invitee_b_keys, vec![invitee_b, invitee_c]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&invitee_c_keys, vec![invitee_c, selected]).await,
+            );
+
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![selected]);
+            assert_eq!(repo_ref.invited_maintainers(), vec![invitee_b, invitee_c]);
+            assert!(!repo_ref.is_authorized_maintainer(&invitee_b));
+            assert!(!repo_ref.is_authorized_maintainer(&invitee_c));
+        }
+
+        #[tokio::test]
+        async fn acceptance_toward_any_confirmed_member_confirms_recursively() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let co_keys = &*TEST_KEY_2_KEYS;
+            let co = co_keys.public_key();
+            let third_keys = nostr::prelude::Keys::generate();
+            let third = third_keys.public_key();
+
+            // A and B are reciprocal; B lists C and C acknowledges B: C is
+            // listed by a confirmed member and acknowledges one, so
+            // confirmation grows through B without C ever listing A.
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, co, third], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, co]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(co_keys, vec![co, selected, third]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&third_keys, vec![third, co]).await,
+            );
+
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![selected, co, third]);
         }
 
         #[tokio::test]
