@@ -311,7 +311,9 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
                 hashtags: None,
             })?;
         } else {
-            println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
+            println!(
+                "subcommands: init, edit, accept  (run `ngit repo --help` for details)"
+            );
             println!();
             println!("no nostr repository found");
             println!();
@@ -371,7 +373,9 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
                 hashtags: None,
             })?;
         } else {
-            println!("subcommands: init, edit, accept  (run `ngit repo --help` for details)");
+            println!(
+                "subcommands: init, edit, accept  (run `ngit repo --help` for details)"
+            );
             println!();
             println!(
                 "coordinate found ({}) but no announcement on relays",
@@ -580,10 +584,13 @@ async fn print_repo_info(
     let confirmed = repo_ref.confirmed_maintainers();
     let edges = repo_ref.maintainer_edges();
     let lead = repo_ref.lead_maintainer();
+    let members = member_entries(repo_ref);
     // a lone maintainer without a lead assertion needs no role badge; once
-    // there is a second member or a lead the roles disambiguate
+    // there is a second member or a lead the roles disambiguate. Counting
+    // deduplicated member entries keeps a pubkey holding both a maintainer
+    // listing and a moderator assignment from faking a second member.
     let show_role_badges = lead.is_some()
-        || repo_ref.maintainers.len() + repo_ref.moderators.len() > 1
+        || members.len() > 1
         || repo_ref
             .maintainers_without_annoucnement
             .as_ref()
@@ -666,12 +673,18 @@ async fn print_repo_info(
     println!();
 
     // --- Moderators ---
-    if !repo_ref.moderators.is_empty() {
+    // derived from member_entries so this section agrees with the --json
+    // members field: a pubkey also holding a maintainer listing already
+    // appeared above as a maintainer and is not repeated here
+    let moderator_members: Vec<&MemberEntry> = members
+        .iter()
+        .filter(|entry| entry.role == MemberRole::Moderator)
+        .collect();
+    if !moderator_members.is_empty() {
         println!("{}", heading.apply_to("Moderators"));
-        let confirmed_moderators = repo_ref.confirmed_moderators();
-        for moderator in &repo_ref.moderators {
-            let name = display_name_for(moderator, my_pubkey, git_repo_path).await;
-            if confirmed_moderators.contains(moderator) {
+        for entry in moderator_members {
+            let name = display_name_for(&entry.pubkey, my_pubkey, git_repo_path).await;
+            if entry.status == MemberStatus::Confirmed {
                 println!("  {name} [moderator]");
             } else {
                 println!(
