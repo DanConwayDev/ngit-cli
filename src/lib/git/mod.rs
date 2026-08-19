@@ -1190,49 +1190,35 @@ impl RepoActions for Repo {
     /// setting global to None will suppliment local config with global items
     /// not in local
     fn get_git_config_item(&self, item: &str, global: Option<bool>) -> Result<Option<String>> {
-        let just_global = global.unwrap_or(false);
-        match if just_global {
-            self.git_repo
-                .config()
-                .context("failed to open git config")?
-                .open_global()
-                .context("failed to open global git config")?
-        } else {
-            self.git_repo
-                .config()
-                .context("failed to open git config")?
-        }
-        .get_entry(item)
-        {
-            Ok(item) => {
-                if let Some(global) = global {
-                    if item.level().eq(&git2::ConfigLevel::Local) {
-                        if global {
-                            // bail!("only local repository login available")
-                            return Ok(None);
-                        }
-                    } else if !global {
-                        // bail!("only global repository login available")
-                        return Ok(None);
-                    }
+        match global {
+            Some(true) => Ok(config_entry_value(&open_global_config()?, item)),
+            Some(false) => local_config_item(&self.git_repo, item),
+            None => {
+                if let Some(value) = local_config_item(&self.git_repo, item)? {
+                    return Ok(Some(value));
                 }
-                Ok(Some(
-                    item.value()
-                        .context("failed to find git config item")?
-                        .to_string(),
+                if global_config_override().is_some() {
+                    // `GIT_CONFIG_GLOBAL` replaces the global scope, and the
+                    // repository's own config chain carries the $HOME / XDG
+                    // files regardless, so the wider scopes have to be
+                    // consulted individually rather than through that chain.
+                    return Ok(config_entry_value(&open_global_config()?, item)
+                        .or(get_git_config_item_system(item)?));
+                }
+                Ok(config_entry_value(
+                    &self
+                        .git_repo
+                        .config()
+                        .context("failed to open git config")?,
+                    item,
                 ))
             }
-            Err(_) => Ok(None),
         }
     }
 
     fn save_git_config_item(&self, item: &str, value: &str, global: bool) -> Result<()> {
         if global {
-            self.git_repo
-                .config()
-                .context("failed to open git config")?
-                .open_global()
-                .context("failed to open global git config")?
+            open_global_config()?
         } else {
             self.git_repo
                 .config()
@@ -1253,11 +1239,7 @@ impl RepoActions for Repo {
             Ok(false)
         } else {
             if global {
-                self.git_repo
-                    .config()
-                    .context("failed to open git config")?
-                    .open_global()
-                    .context("failed to open global git config")?
+                open_global_config()?
             } else {
                 self.git_repo
                     .config()
@@ -1515,18 +1497,19 @@ pub fn get_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<Optio
     if let Some(git_repo) = git_repo {
         git_repo.get_git_config_item(item, Some(false))
     } else {
-        Ok(
-            match git2::Config::open_default()?.open_global()?.get_entry(item) {
-                Ok(item) => item.value().ok().map(str::to_string),
-                Err(_) => None,
-            },
-        )
+        Ok(config_entry_value(&open_global_config()?, item))
     }
 }
 
 /// Read a config item from the system-level git config only (e.g.
 /// /etc/gitconfig).
 pub fn get_git_config_item_system(item: &str) -> Result<Option<String>> {
+    if system_config_suppressed() {
+        return Ok(None);
+    }
+    if let Some(path) = config_env_path(SYSTEM_CONFIG_ENV) {
+        return Ok(config_entry_value(&open_config_file(&path)?, item));
+    }
     let config = git2::Config::open_default().context("failed to open git config")?;
     // Try system level first, then ProgramData (Windows equivalent)
     for level in [git2::ConfigLevel::System, git2::ConfigLevel::ProgramData] {
@@ -1544,8 +1527,7 @@ pub fn save_git_config_item(git_repo: &Option<&Repo>, item: &str, value: &str) -
     if let Some(git_repo) = git_repo {
         git_repo.save_git_config_item(item, value, false)
     } else {
-        git2::Config::open_default()?
-            .open_global()?
+        open_global_config()?
             .set_str(item, value)
             .context(format!("failed to set global git config item {item}"))
     }
@@ -1557,12 +1539,90 @@ pub fn remove_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<bo
     } else if get_git_config_item(&None, item)?.is_none() {
         Ok(false)
     } else {
-        git2::Config::open_default()?
-            .open_global()?
+        open_global_config()?
             .remove(item)
             .context(format!("failed to remove existing git config item {item}"))?;
         Ok(true)
     }
+}
+
+/// Git's overrides for the config scopes outside the repository, honoured
+/// since git 2.32.
+const GLOBAL_CONFIG_ENV: &str = "GIT_CONFIG_GLOBAL";
+const SYSTEM_CONFIG_ENV: &str = "GIT_CONFIG_SYSTEM";
+const NO_SYSTEM_CONFIG_ENV: &str = "GIT_CONFIG_NOSYSTEM";
+
+/// libgit2 applies those overrides only to repositories opened with
+/// `GIT_REPOSITORY_OPEN_FROM_ENV` — which `git2::Repository::discover`, and
+/// therefore [`Repo::discover`], does not use — and
+/// `git_config_open_default()` ignores them outright. ngit resolves them
+/// itself so that redirecting the global config actually redirects it:
+/// otherwise a caller who sets `GIT_CONFIG_GLOBAL` (a test harness, a
+/// sandbox, a scripted environment) still has their real `~/.gitconfig`
+/// read, rewritten, and logged out of.
+fn config_env_path(variable: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn global_config_override() -> Option<PathBuf> {
+    config_env_path(GLOBAL_CONFIG_ENV)
+}
+
+fn system_config_suppressed() -> bool {
+    no_system_config(std::env::var(NO_SYSTEM_CONFIG_ENV).ok().as_deref())
+}
+
+/// `GIT_CONFIG_NOSYSTEM` uses git's boolean spellings; anything git would
+/// reject as a boolean is treated as unset, matching `git_config_parse_bool`
+/// leniency for the values users actually write.
+fn no_system_config(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// Open the global config scope for reading or writing, honouring
+/// `GIT_CONFIG_GLOBAL`.
+pub fn open_global_config() -> Result<git2::Config> {
+    match global_config_override() {
+        Some(path) => open_config_file(&path),
+        None => git2::Config::open_default()
+            .context("failed to open git config")?
+            .open_global()
+            .context("failed to open global git config"),
+    }
+}
+
+/// A config instance backed by exactly one file. A missing file is not an
+/// error — it is created on the first write, as git does.
+fn open_config_file(path: &Path) -> Result<git2::Config> {
+    git2::Config::open(path)
+        .with_context(|| format!("failed to open git config file {}", path.display()))
+}
+
+fn config_entry_value(config: &git2::Config, item: &str) -> Option<String> {
+    config
+        .get_entry(item)
+        .ok()
+        .and_then(|entry| entry.value().ok().map(str::to_string))
+}
+
+/// Value of `item` as set in the repository's own config file, ignoring every
+/// wider scope the repository config chain also carries.
+fn local_config_item(git_repo: &git2::Repository, item: &str) -> Result<Option<String>> {
+    let config = git_repo.config().context("failed to open git config")?;
+    let value = match config.get_entry(item) {
+        Ok(entry) if entry.level() == git2::ConfigLevel::Local => {
+            entry.value().ok().map(str::to_string)
+        }
+        _ => None,
+    };
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -1777,6 +1837,75 @@ index ce01362..a21e91c 100644\n\
             let git_repo = Repo::from_path(&test_repo.dir)?;
             assert!(!(git_repo.remove_git_config_item("test.item", false)?));
             Ok(())
+        }
+    }
+
+    /// The scopes outside the repository. ngit resolves git's
+    /// `GIT_CONFIG_*` overrides itself because libgit2 does not apply them
+    /// to `git_config_open_default()` or to repositories opened without
+    /// `GIT_REPOSITORY_OPEN_FROM_ENV`. The env-driven selection is covered
+    /// end-to-end by `tests/account_global_config_scope.rs`; these cover
+    /// the pieces that can be exercised without mutating the test
+    /// process's environment.
+    mod git_config_wider_scopes {
+        use super::*;
+
+        #[test]
+        fn single_file_config_round_trips_and_tolerates_a_missing_file() -> Result<()> {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("gitconfig");
+
+            // A redirected global config that has never been written to is
+            // an empty scope, not an error — git creates it on first write.
+            assert_eq!(
+                config_entry_value(&open_config_file(&path)?, "test.item"),
+                None
+            );
+
+            open_config_file(&path)?.set_str("test.item", "testvalue")?;
+            assert_eq!(
+                config_entry_value(&open_config_file(&path)?, "test.item"),
+                Some("testvalue".to_string()),
+            );
+            assert!(path.exists(), "the write created the file");
+            Ok(())
+        }
+
+        #[test]
+        fn local_scope_lookup_ignores_an_entry_from_a_wider_scope() -> Result<()> {
+            let dir = tempfile::tempdir()?;
+            let wider = dir.path().join("gitconfig");
+            open_config_file(&wider)?.set_str("test.item", "from-wider-scope")?;
+
+            let test_repo = GitTestRepo::default();
+            let git_repo = Repo::from_path(&test_repo.dir)?;
+            // `force` replaces whatever the invoking user happens to have at
+            // the global level, so the assertion below does not depend on
+            // the machine running the test.
+            git_repo
+                .git_repo
+                .config()?
+                .add_file(&wider, git2::ConfigLevel::Global, true)?;
+
+            assert_eq!(
+                git_repo.get_git_config_item("test.item", Some(false))?,
+                None
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn no_system_config_accepts_gits_boolean_spellings() {
+            for value in ["1", "true", "TRUE", "yes", "on", " true "] {
+                assert!(no_system_config(Some(value)), "{value} should suppress");
+            }
+            for value in ["0", "false", "no", "off", ""] {
+                assert!(
+                    !no_system_config(Some(value)),
+                    "{value} should not suppress"
+                );
+            }
+            assert!(!no_system_config(None));
         }
     }
 

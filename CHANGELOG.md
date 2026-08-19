@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ngit now honours `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` when resolving Git config scopes outside the repository. libgit2 does not apply these to the config ngit opens, so a login stored, read or removed with `--global` (or any global-scope read, such as the secret-storage policy) previously went to `~/.gitconfig` regardless of the redirect, silently overwriting the real global login of anyone who sandboxes ngit with the documented variables.
 - Keep `--json` output parseable by sending relay-fetch summaries such as `no updates` and `updates: ...` to stderr instead of stdout.
 - `git push --force-with-lease` now works with `nostr://` remotes: matching leases authorize guarded non-fast-forward updates, while stale leases reject the push before a conflicting repository state can be published.
 - `git push` of a `pr/` branch alongside branch or tag changes now reports the proposal ref as failed when no git server accepts the pushed git data, matching the branch/tag refs. Proposal events are broadcast to the repository and user relays only after a git server accepts the pushed data; previously the helper told git `ok` and recorded a `refs/remotes/<remote>/pr/<branch>` tracking ref in that total-failure case even though the proposal events were never broadcast.

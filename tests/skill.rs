@@ -249,9 +249,13 @@ async fn global_opt_out_works_without_a_git_worktree() -> Result<()> {
     let outside = repo.dir().join("outside");
     fs::create_dir(&outside)?;
 
+    // Point every global-config resolution ngit could use at the same file:
+    // the `GIT_CONFIG_GLOBAL` override, and libgit2's `$HOME` / XDG search
+    // for when the override is absent.
     let mut command = repo.ngit(["skill", "opt-out", "--global"]);
     let output = command
         .current_dir(outside)
+        .env("GIT_CONFIG_GLOBAL", &global_config)
         .env("HOME", repo.dir())
         .env_remove("XDG_CONFIG_HOME")
         .output()
