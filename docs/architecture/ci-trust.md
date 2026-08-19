@@ -988,13 +988,17 @@ secrets provisioning (29846), NIP-11 strengthening, courtesy CI lines in
 `pr checkout`/`pr apply`, and PR-context Manual Triggers (see the WP6
 decisions).
 
-Also deferred, and to be done *before* more CI functionality is added:
-consolidating the parallel implementations of signer collection, commit
-resolution and check rendering. Each exists in more than one place today and
-can drift; the typed rust-nostr replacements (`Nip05Address`,
-`Tag::coordinate`, `Kind::GitRepoAnnouncement`) have already been made, but
-this internal consolidation is a behaviour-preserving refactor of its own and
-was kept out of the CI work packages.
+Also deferred at WP6 — consolidating the parallel implementations of signer
+collection, commit resolution and check rendering, each of which existed in
+more than one place and could drift — and since done in this PR as the
+behaviour-preserving refactor it was kept out of the CI work packages to be:
+every signer set is built by `ci::resolve::collect_signers`, whose
+`ControlScope` states the maintainer-authored NIP-05 bounding rule once; the
+CI `c`-value rule lives in the `ci_commit` module with explicit strict
+(publisher) and tolerant (consumer) modes; and the check lines every surface
+shares are printed by `CiReport::print_result_lines`. The typed rust-nostr
+replacements (`Nip05Address`, `Tag::coordinate`, `Kind::GitRepoAnnouncement`)
+had already been made.
 
 ## Test-harness constraints (mandatory)
 
