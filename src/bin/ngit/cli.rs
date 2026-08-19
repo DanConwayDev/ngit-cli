@@ -817,6 +817,15 @@ pub enum RepoCommands {
             to a specific repository coordinate chain, preventing scammers from attributing your\n\
             commits to a fake repository. See `ngit repo info` for details on the maintainer model.")]
     Accept(sub_commands::repo::accept::SubCommandArgs),
+    /// end your own role in a repository you co-maintain or moderate
+    #[command(
+        long_about = "end your own role in a repository you co-maintain or moderate\n\n\
+            republishes your repository announcement with your self-role ended (per NIP-34 a\n\
+            member may leave by ending their self-role). Your own record takes precedence over\n\
+            maintainer assignments in other members' announcements, so this removes you from\n\
+            the repository's authorized member set even while others still list you."
+    )]
+    Leave(sub_commands::repo::leave::SubCommandArgs),
 }
 
 #[cfg(test)]

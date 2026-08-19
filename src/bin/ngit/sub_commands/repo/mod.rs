@@ -1,4 +1,5 @@
 pub mod accept;
+pub mod leave;
 
 use std::path::Path;
 
@@ -36,6 +37,7 @@ pub async fn launch(
             init::launch(cli_args, args, signer).await
         }
         Some(RepoCommands::Accept(args)) => accept::launch(args, signer).await,
+        Some(RepoCommands::Leave(args)) => leave::launch(args, signer).await,
         None => show_info(offline, json, signer).await,
     }
 }

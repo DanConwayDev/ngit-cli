@@ -229,6 +229,89 @@ async fn accept_with_defaults_publishes_announcement_without_rerooting_resolutio
     Ok(())
 }
 
+/// After accepting, `ngit repo leave` republishes the leaver's announcement
+/// with the self-role ended per NIP-34's role-history grammar: the `m` entry
+/// gains an end boundary instead of vanishing from the event, and the
+/// deprecated `maintainers` degradation tag drops the leaver. A second leave
+/// has no active self-role left to end and must fail cleanly.
+#[tokio::test]
+async fn leave_after_accept_ends_the_self_role_with_a_boundary() -> Result<()> {
+    let (harness, published, clone, co_maintainer_pubkey) =
+        arrange_invited_clone("repo-leave-after-accept").await?;
+
+    accept_and_assert_resolution_untouched(&clone, &[]).await?;
+    assert_announcement_published(&harness, &published, co_maintainer_pubkey).await?;
+
+    let out = clone
+        .ngit(["repo", "leave"])
+        .output()
+        .await
+        .context("failed to spawn ngit repo leave")?;
+    assert!(
+        out.status.success(),
+        "ngit repo leave exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let announcements = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    // the NIP-01 winner in case the relay retained the pre-leave version
+    let announcement = announcements
+        .iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("no co-maintainer announcement found after repo leave")?;
+
+    let maintainers = tag_values(announcement, "maintainers");
+    assert!(
+        !maintainers.contains(&co_maintainer_pubkey.to_string()),
+        "the deprecated maintainers tag must drop the leaver; got {maintainers:?}",
+    );
+    let self_entries: Vec<Vec<String>> = announcement
+        .tags
+        .iter()
+        .map(|t| t.as_slice().to_vec())
+        .filter(|s| {
+            matches!(s.first().map(String::as_str), Some("M" | "m"))
+                && s.get(1) == Some(&co_maintainer_pubkey.to_string())
+        })
+        .collect();
+    assert_eq!(
+        self_entries.len(),
+        1,
+        "leaving must keep exactly one closed self role entry; got {self_entries:?}",
+    );
+    let entry = &self_entries[0];
+    assert!(
+        entry.len() >= 4 && entry.len().is_multiple_of(2),
+        "the self role entry must be ended (even element count of at least four): {entry:?}",
+    );
+
+    let again = clone
+        .ngit(["repo", "leave"])
+        .output()
+        .await
+        .context("failed to spawn second ngit repo leave")?;
+    assert!(
+        !again.status.success(),
+        "a second leave must fail: the announcement already records the role as ended",
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn accept_with_grasp_server_flag_publishes_announcement_without_rerooting_resolution()
 -> Result<()> {

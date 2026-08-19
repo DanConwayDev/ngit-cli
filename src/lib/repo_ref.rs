@@ -690,6 +690,60 @@ impl RepoRef {
         tags
     }
 
+    /// End the author's own self-role in this announcement, per NIP-34's "a
+    /// member MAY leave by ending their self-role": every active role entry
+    /// naming `author` — `M`, `m` and `o` alike — is closed with `now` as an
+    /// end boundary, and the author is removed from the typed membership
+    /// fields so a republish emits the closed records instead of an active
+    /// listing. The self-declaration takes precedence over maintainer
+    /// assignments in other members' announcements.
+    ///
+    /// History is first materialized via
+    /// [`RepoRef::role_history_for_republish`], and an author who was only
+    /// implicitly a member next to existing role tags gains an untimed `m`
+    /// entry to close — without a closed self-entry the republished event
+    /// would carry no record of the author and NIP-34 would make them an
+    /// implicit maintainer again.
+    ///
+    /// Returns whether an active role was ended; `false` means the author
+    /// held no active role in this announcement (nothing to leave), and the
+    /// announcement is left unchanged apart from the history
+    /// materialization.
+    pub fn end_self_role(&mut self, author: &PublicKey, now: u64) -> bool {
+        self.role_tags = self.role_history_for_republish();
+        let author_hex = author.to_string();
+        if self.maintainers.contains(author)
+            && !self.role_tags.iter().any(|tag| {
+                let slice = tag.as_slice();
+                matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && slice.get(1) == Some(&author_hex)
+            })
+        {
+            // implicitly a member while role tags are already in use:
+            // materialize the untimed self-entry the closure below ends
+            self.role_tags.push(Tag::parse(["m", &author_hex]).unwrap());
+        }
+        let mut ended = false;
+        for tag in &mut self.role_tags {
+            let slice = tag.as_slice();
+            if slice.get(1) == Some(&author_hex) && role_entry_is_active(slice) {
+                let mut parts = slice.to_vec();
+                close_role_entry(&mut parts, now);
+                *tag = Tag::parse(parts).unwrap();
+                ended = true;
+            }
+        }
+        if !ended {
+            return false;
+        }
+        self.maintainers.retain(|pk| pk != author);
+        self.moderators.retain(|pk| pk != author);
+        if self.lead == Some(*author) {
+            self.lead = None;
+        }
+        true
+    }
+
     /// coordinates without relay hints
     pub fn coordinates(&self) -> HashSet<Nip19Coordinate> {
         let mut res = HashSet::new();
@@ -3433,6 +3487,140 @@ mod tests {
                         tag(&["m", &dropped.to_string(), "0", &NOW.to_string()]),
                     ],
                 );
+            }
+        }
+
+        /// [`RepoRef::end_self_role`]: leaving closes every active self
+        /// entry with an end boundary, removes the author from the typed
+        /// membership, and the republished role tags carry the closed
+        /// record instead of an active listing.
+        mod end_self_role {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            fn generated(repo_ref: &RepoRef, author: &PublicKey) -> Vec<Vec<String>> {
+                repo_ref
+                    .generate_role_tags(author, NOW)
+                    .iter()
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            }
+
+            #[test]
+            fn implicit_author_from_deprecated_listing_gains_a_closed_entry() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &author.to_string(),
+                        &other.to_string(),
+                    ])],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.maintainers, vec![other]);
+                // without the closed self-entry the author would fall back
+                // to being an implicit maintainer on the republished event
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["m", &other.to_string()]),
+                        tag(&["m", &author.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn active_self_entry_is_closed_with_history_preserved() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["m", &author.to_string(), "100"]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.maintainers, vec![other]);
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["m", &other.to_string()]),
+                        tag(&["m", &author.to_string(), "100", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn leaving_lead_closes_the_m_uppercase_entry_and_clears_the_lead() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["M", &author.to_string()]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.lead, None);
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["m", &other.to_string()]),
+                        tag(&["M", &author.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn moderator_self_entry_is_closed_and_moderatorship_removed() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["M", &lead.to_string()]),
+                        tag(&["o", &author.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert!(parsed.moderators.is_empty());
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["M", &lead.to_string()]),
+                        tag(&["o", &author.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn returns_false_when_the_author_holds_no_active_role() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["m", &author.to_string(), "0", "100"]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(!parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.maintainers, vec![other]);
             }
         }
     }
